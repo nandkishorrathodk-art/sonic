@@ -556,3 +556,41 @@ Key learnings:
 - `PlannedAction` requires a `risk` field (ToolRisk) — construction without it
   raises a pydantic ValidationError.
 - Suite as of Phase 7.9: 407 passed, 48 skipped, 0 failures.
+
+## Phase 8 — evolution memory production wiring (audit "Persistent Mind" gap closed)
+
+The audit's #1 FATAL item ("ephemeral Mind") was largely **stale**: by Phase 7.9
+the graph (`SqliteGraph`), vector (`VectorMemory`), and evolution
+(`EvolutionMemoryStore`) stores were already SQLite-backed and restart-surviving
+(`test_phase1_persistent_memory.py` proves it). The remaining *real* gap was
+narrower: `EvolutionMemoryStore` was persistent but **never written in
+production** — `PromotionEngine.evaluate_gates` was a stateless classmethod that
+recorded nothing — and `EvolutionMemoryItem` lacked `compute_fingerprint()` so
+`is_duplicate` dedup was inert.
+
+### What changed
+- `EvolutionMemoryItem.compute_fingerprint()` (models.py): deterministic SHA-256
+  over problem + hypothesis_id + candidate_version + parent_version + decision +
+  rounded baseline/candidate f1 + candidate safety_violations. The random
+  per-run `candidate_id`, the free-text `decision_reason`/`lesson`, and noisy
+  metrics are deliberately excluded so two logically-identical experiments
+  collapse to one identity (dedup works).
+- `PromotionEngine.evaluate_gates(..., memory=None, problem="")`: optional
+  persistent store. When wired, each promote/reject outcome is recorded via a
+  best-effort `_record_outcome` (never raises — a persistence failure must NOT
+  alter the safety/correctness verdict). `memory=None` preserves the old
+  stateless contract (backward compatible).
+- `get_evolution_memory()` (memory.py): process-wide SQLite-backed singleton so
+  production callers share one connection; lazy-constructed so importing the
+  module never opens a DB.
+
+### Key learnings
+- A persistent store that nothing writes to is still "ephemeral" in effect —
+  the audit's red flag was right about the *outcome* (the being forgot), wrong
+  about the *mechanism* (the store existed). When an audit says "X is missing,"
+  verify whether X truly doesn't exist vs. exists-but-isn't-wired.
+- Dedup fingerprints must exclude per-run random ids (candidate_id is a uuid)
+  and rounded float metrics; otherwise identical experiments fragment.
+- Best-effort recording around a safety gate must swallow all exceptions — the
+  gate decision is authoritative, persistence is secondary.
+- Suite as of Phase 8: 412 passed, 48 skipped, 0 failures.

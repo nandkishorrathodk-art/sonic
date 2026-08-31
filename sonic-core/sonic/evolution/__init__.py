@@ -20,7 +20,7 @@ from sonic.evolution.candidate_generator import CandidateGenerator
 from sonic.evolution.lab import EvolutionLab, TestPipelineResult
 from sonic.evolution.comparator import BaselineComparator, ComparisonReport
 from sonic.evolution.promotion import PromotionEngine, CanaryManager, RollbackManager
-from sonic.evolution.memory import EvolutionMemoryStore
+from sonic.evolution.memory import EvolutionMemoryStore, get_evolution_memory
 from sonic.evolution.domain_skills import DomainSkill, DomainSkillManager, ModelRoutingPolicy
 from sonic.evolution.benchmark import (
     GenerationSnapshot,
@@ -47,6 +47,7 @@ __all__ = [
     "CanaryManager",
     "RollbackManager",
     "EvolutionMemoryStore",
+    "get_evolution_memory",
     "DomainSkill",
     "DomainSkillManager",
     "ModelRoutingPolicy",

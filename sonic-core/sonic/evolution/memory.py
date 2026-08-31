@@ -102,3 +102,22 @@ class EvolutionMemoryStore:
     def get_all_history(self) -> list[EvolutionMemoryItem]:
         """Return full evolution timeline."""
         return list(self._items)
+
+
+# Module-level singleton so production callers (and tests that want the real
+# persisted store) share one connection to the on-disk SQLite DB. The store is
+# constructed lazily on first access so importing this module never opens a DB.
+_evolution_memory_singleton: Optional[EvolutionMemoryStore] = None
+
+
+def get_evolution_memory() -> EvolutionMemoryStore:
+    """Return the process-wide persistent evolution memory store (SQLite-backed).
+
+    Survives restart: promotion/rejection outcomes recorded via
+    :meth:`PromotionEngine.evaluate_gates(memory=...)` are reloaded from disk on
+    the next start, so the being remembers which experiments it already tried.
+    """
+    global _evolution_memory_singleton
+    if _evolution_memory_singleton is None:
+        _evolution_memory_singleton = EvolutionMemoryStore(persist=True)
+    return _evolution_memory_singleton

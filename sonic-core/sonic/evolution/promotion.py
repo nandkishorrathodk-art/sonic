@@ -11,8 +11,10 @@ import asyncio
 from typing import Any, Optional
 
 from sonic.evolution.comparator import ComparisonReport
+from sonic.evolution.memory import EvolutionMemoryStore
 from sonic.evolution.models import (
     EvolutionCandidate,
+    EvolutionMemoryItem,
     EvolutionPolicy,
     EvolutionState,
 )
@@ -48,9 +50,17 @@ class PromotionEngine:
         candidate: EvolutionCandidate,
         comparison: ComparisonReport,
         policy: Optional[EvolutionPolicy] = None,
+        memory: Optional["EvolutionMemoryStore"] = None,
+        problem: str = "",
     ) -> tuple[bool, str, EvolutionState]:
         """
         Evaluate all gates before allowing canary or production promotion.
+
+        When a persistent ``memory`` store is supplied, the outcome (promoted or
+        rejected) is recorded as an :class:`EvolutionMemoryItem` so the being
+        remembers past experiments across restarts and can avoid re-running a
+        duplicate experiment. Recording is best-effort: a failure to persist
+        never changes the gate decision (safety/correctness stay authoritative).
         """
         pol = policy or EvolutionPolicy()
         rejection_reasons = []
@@ -79,12 +89,54 @@ class PromotionEngine:
             reason_str = " | ".join(rejection_reasons)
             candidate.transition_to(EvolutionState.REJECTED)
             logger.warning("candidate_promotion_rejected", candidate_id=candidate.id, reasons=reason_str)
+            cls._record_outcome(
+                memory, candidate, comparison, problem,
+                decision="rejected", reason=reason_str,
+            )
             return False, reason_str, EvolutionState.REJECTED
 
         # Passed all automated gates
         candidate.transition_to(EvolutionState.CANARY)
         logger.info("candidate_promotion_approved_for_canary", candidate_id=candidate.id)
+        cls._record_outcome(
+            memory, candidate, comparison, problem,
+            decision="promoted",
+            reason="Passed all automated promotion gates. Ready for Canary deployment.",
+        )
         return True, "Passed all automated promotion gates. Ready for Canary deployment.", EvolutionState.CANARY
+
+    @staticmethod
+    def _record_outcome(
+        memory: Optional["EvolutionMemoryStore"],
+        candidate: EvolutionCandidate,
+        comparison: ComparisonReport,
+        problem: str,
+        decision: str,
+        reason: str,
+    ) -> None:
+        """Persist a promotion/rejection experiment (best-effort, never raises)."""
+        if memory is None:
+            return
+        try:
+            item = EvolutionMemoryItem(
+                problem=problem or candidate.rationale or "unspecified",
+                hypothesis_id=candidate.hypothesis_id,
+                candidate_id=candidate.id,
+                candidate_version=candidate.candidate_version,
+                parent_version=candidate.parent_version,
+                baseline_metrics=comparison.baseline,
+                candidate_metrics=comparison.candidate,
+                decision=decision,
+                decision_reason=reason,
+            )
+            item.fingerprint = item.compute_fingerprint()
+            if memory.is_duplicate(item.fingerprint):
+                logger.info("evolution_experiment_duplicate_skipped", fingerprint=item.fingerprint)
+                return
+            memory.record_experiment(item)
+            logger.info("evolution_experiment_recorded", candidate_id=candidate.id, decision=decision)
+        except Exception as exc:  # recording must never alter the gate verdict
+            logger.warning("evolution_memory_record_failed", error=str(exc))
 
 
 class CanaryManager:

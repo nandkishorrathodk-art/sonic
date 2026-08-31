@@ -215,3 +215,26 @@ class EvolutionMemoryItem(BaseModel):
     lesson: str = ""
     fingerprint: str = ""
     timestamp: str = Field(default_factory=_now)
+
+    def compute_fingerprint(self) -> str:
+        """Deterministic identity for dedup (same experiment → same fingerprint).
+
+        Two experiments are duplicates iff they target the same problem under
+        the same hypothesis and candidate lineage (versions, not the random
+        per-run candidate id) and reached the same decision with the same
+        headline metrics. Metrics are rounded so floating-point noise (e.g.
+        latency variance across runs) does not fragment what is logically one
+        experiment. The lesson/free-text reason and the random candidate id are
+        deliberately excluded — they are outputs, not identity.
+        """
+        payload = "|".join([
+            self.problem.strip().lower(),
+            self.hypothesis_id,
+            self.candidate_version,
+            self.parent_version,
+            self.decision,
+            f"{round(self.baseline_metrics.f1_score, 4)}",
+            f"{round(self.candidate_metrics.f1_score, 4)}",
+            f"{self.candidate_metrics.safety_violations}",
+        ])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
