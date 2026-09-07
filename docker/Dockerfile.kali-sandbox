@@ -1,18 +1,22 @@
 # ==============================================================================
-# SONIC-REDA — Isolated Kali Linux Sandbox (Security Tool Plane)
+# SONIC-REDA - Isolated Kali Linux Sandbox (Mission Computer Plane)
 # ==============================================================================
 # Build:  docker build -t sonic-kali-linux:v1.3.0 -f docker/Dockerfile.kali-sandbox .
 #
 # The control plane requests `sonic-kali-linux:v1.3.0` for KALI_SECURITY
-# profiles (see sonic/computer/provider.py); build with THIS tag so
-# provisioning actually succeeds instead of `docker pull access denied`.
-
+# profiles; build with THIS tag so provisioning succeeds instead of
+# `docker pull access denied`.
+#
+# This image also serves as the Mission Computer used bye the desktop/GUI
+# tests: Xvfb :99 1920x1080, fluxbox WM,, xterm,, xdotool/wmctrl,
+# imagemagick (screenshot capture), chromium,, code-server,, ffuf,, and
+# a seeded git worktree at /home/sonic/workspace. It runs as root so
+# runtime `install_application` (apt) and `service xvfb` work inside.
 
 FROM kalilinux/kali-rolling
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install core security toolchain
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -26,14 +30,74 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     iptables \
     procps \
+    xvfb \
+    fluxbox \
+    xterm \
+    x11-utils \
+    xdotool \
+    wmctrl \
+    dbus-x11 \
+    imagemagick \
+    chromium \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root sonic operator user
+# code-server IDE (official release .deb — not in Kali repos。
+RUN set -eux; \
+    CODER_VER=4.135.0; \
+    curl -fsSL -o /tmp/code-server.deb \
+      "https://github.com/coder/code-server/releases/download/v${CODER_VER}/code-server_${CODER_VER}_amd64.deb"; \
+    dpkg -i /tmp/code-server.deb || apt-get install -y -f; \
+    rm -f /tmp/code-server.deb
+
 RUN useradd -m -s /bin/bash -u 1000 sonic \
-    && mkdir -p /workspace \
-    && chown -R sonic:sonic /workspace
+    && mkdir -p /home/sonic/workspace \
+    && chown -R sonic:sonic /home/sonic
 
-WORKDIR /workspace
-USER sonic
+# xvfb init-style service wrapper: `service xvfb restart|stop` works.
+# (service( looks in /etc/init.d/, so the wrapper must live there.)
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'PIDFILE=/run/xvfb.pid' \
+    'case "$1" in' \
+    '  start)' \
+    '    if [ ! -f "$PIDFILE" ]; then' \
+    '      Xvfb :99 -screen  0 1920x1080x24 -nolisten tcp >/tmp/xvfb-service.log 2>&1 &' \
+    '      echo $! > "$PIDFILE";' \
+    '    fi ;;' \
+    '  stop)' \
+    '    if [ -f "$PIDFILE" ]; then kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; fi ;;' \
+    '  restart)' \
+    '    "$0" stop; sleep  1; "$0" start ;;' \
+    '  *) exit  2 ;;' \
+    'esac' \
+    > /etc/init.d/xvfb \
+    && chmod +x /etc/init.d/xvfb \
+    && ln -sf /etc/init.d/xvfb /usr/local/sbin/xvfb
 
-CMD ["tail", "-f", "/dev/null"]
+# Entrypoint: seed workspace repo, start Xvfb+fluxbox, stay alive.
+COPY --chown=root:root <<'EOF' /usr/local/sbin/sonic-entry.sh
+#!/bin/sh
+set -e
+mkdir -p /run /home/sonic
+chown -R sonic:sonic /home/sonic 2>/dev/null || true
+su -s /bin/sh -c 'export HOME=/home/sonic
+cd /home/sonic/workspace
+if [ ! -d .git ]; then
+  git init -q -b main
+  git config user.email sonic@local
+  git config user.name SONIC-Operator
+  printf "def auth_check(token):\n    return token == \"ok\"\n" > auth.py
+  git add -A
+  git commit -qm "seed mission workspace"
+fi' sonic
+su -s /bin/sh sonic -c "Xvfb :99 -screen  0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &" 2>/dev/null || true
+sleep  1
+/usr/local/sbin/xvfb start 2>/dev/null || true
+su -s /bin/sh sonic -c "DISPLAY=:99 fluxbox >/tmp/fluxbox.log 2>&1 &" 2>/dev/null || true
+exec tail -f /dev/null
+EOF
+
+USER root
+RUN chmod +x /usr/local/sbin/sonic-entry.sh /usr/local/sbin/xvfb
+WORKDIR /home/sonic/workspace
+CMD ["/usr/local/sbin/sonic-entry.sh"]

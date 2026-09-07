@@ -7,6 +7,7 @@ Manages isolated Docker container sandboxes for Kali/Debian execution.
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import shutil
 import signal
@@ -199,6 +200,64 @@ class DockerProvider(ComputeProvider):
             return proc.returncode == 0
         except Exception:
             return False
+
+    async def get_screen(self, workspace_id: str) -> tuple[bytes, str, str]:
+        """Capture the X11 root window as PNG (real desktop,, fail-closed)..
+
+        Returns (png_bytes,, active_window_name, display_probe)."""
+        res = await self.execute(
+            workspace_id,
+            "for i in 1 2 3 4 5; do "
+            "DISPLAY=:99 import -window root /tmp/sonic_screen.png 2>/dev/null "
+            "&& [ -s /tmp/sonic_screen.png ] && break; sleep 1; done; "
+            "if [ -s /tmp/sonic_screen.png ]; then base64 -w0 /tmp/sonic_screen.png; "
+            "echo; echo; echo '___WIN___'; "
+            "DISPLAY=:99 xdotool getactivewindow getwindowname 2>/dev/null; fi",
+            timeout=15,
+        )
+        if res.exit_code != 0 or not res.stdout.strip():
+            return b"", "", "NO_DISPLAY"
+        body, _, win = res.stdout.partition("___WIN___")
+        b64 = body.strip().replace("\n", "")
+        if not b64:
+            return b"", "", "NO_DISPLAY"
+        try:
+            png = _b64.b64decode(b64)
+        except Exception:
+            return b"", "", "NO_DISPLAY"
+        return png, win.strip() or "Desktop", "INTERACTIVE"
+
+    async def gui_action(
+        self,
+        workspace_id: str,
+        action_type: str,  # "open", "close", "type", "click"
+        app_name: str = "",
+        text: str = "",
+        x: int = 0,
+        y: int = 0,
+    ) -> bool:
+        """Drive a real X11 session via xdotool (fail-closed: no display -> False)."""
+        display = "DISPLAY=:99"
+        if action_type == "open":
+            cmd = f"{display} {app_name} >/tmp/sonic-app.log 2>&1 &"
+        elif action_type == "close":
+            cmd = f"{display} wmctrl -c '{app_name}' 2>/dev/null || {display} pkill -f -- '{app_name}'"
+        elif action_type == "type":
+            safe = text.replace("'", "'\\''")
+            cmd = f"{display} xdotool type --delay 2 -- '{safe}'"
+        elif action_type == "click":
+            cmd = f"{display} xdotool mousemove {int(x)} {int(y)} click 1"
+        else:
+            return False
+        res = await self.execute(workspace_id, cmd, timeout=15)
+        return res.exit_code == 0
+
+    async def service_action(
+        self, workspace_id: str, service_name: str, action: str
+    ) -> str:
+        """Run an init-style service wrapper inside the container."""
+        res = await self.execute(workspace_id, f"service '{service_name}' '{action}' 2>&1 || true; echo; echo rc=$?", timeout=30)
+        return (res.stdout + res.stderr).strip() or ""
 
     async def destroy_workspace(self, workspace_id: str) -> bool:
         """Remove container workspace."""

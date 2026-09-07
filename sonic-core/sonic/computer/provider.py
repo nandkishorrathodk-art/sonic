@@ -11,6 +11,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+import base64
+
 from sonic.computer.models import (
     ApplicationPolicy,
     ComputerAuditEvent,
@@ -293,16 +295,38 @@ class UnifiedComputerProvider(ComputerProvider):
     # -------------------------------------------------------------
     async def screenshot(self, workspace_id: str) -> ScreenObservation:
         self._require_workspace(workspace_id)
-        # A generic ComputeProvider has no screen-capture contract. Never
-        # manufacture a screenshot; use DaytonaComputerProvider for GUI work.
+        backend = getattr(self.compute, "get_screen", None)
+        if not callable(backend):
+            # A generic ComputeProvider has no screen-capture contract. Never
+            # manufacture a screenshot; use a desktop-capable provider for GUI work.
+            return ScreenObservation(
+                screenshot_base64="",
+                width=0,
+                height=0,
+                active_window="",
+                visible_text="",
+                detected_controls=[],
+                desktop_state="NO_DISPLAY",
+            )
+        png, win, state = await backend(workspace_id)
+        if not png:
+            return ScreenObservation(
+                screenshot_base64="",
+                width=0,
+                height=0,
+                active_window="",
+                visible_text="",
+                detected_controls=[],
+                desktop_state=state,
+            )
         return ScreenObservation(
-            screenshot_base64="",
-            width=0,
-            height=0,
-            active_window="",
-            visible_text="",
+            screenshot_base64=base64.b64encode(png).decode("ascii"),
+            width=1920,
+            height=1080,
+            active_window=win,
+            visible_text=f"Active Window: {win}" if win not in ("", "Desktop") else "",
             detected_controls=[],
-            desktop_state="NO_DISPLAY",
+            desktop_state=state,
         )
 
     async def gui_action(
@@ -312,17 +336,57 @@ class UnifiedComputerProvider(ComputerProvider):
         actor: str = "operator",
     ) -> ScreenObservation:
         ws = self._require_workspace(workspace_id)
-        self._record_audit(
-            session_id=actor,
-            workspace_id=workspace_id,
-            tenant_id=ws.tenant_id,
-            actor=actor,
-            action=f"GUI_{action.action.value}",
-            application=action.app_name,
-            resource=f"x={action.x}, y={action.y}, text={action.text}",
-            result="DENIED",
+        backend = getattr(self.compute, "gui_action", None)
+        if not callable(backend):
+            self._record_audit(
+                session_id=actor,
+                workspace_id=workspace_id,
+                tenant_id=ws.tenant_id,
+                actor=actor,
+                action=f"GUI_{action.action.value}",
+                application=action.app_name,
+                resource=f"x={action.x}, y={action.y}, text={action.text}",
+                result="DENIED",
+            )
+            raise RuntimeError("GUI actions require a provider with a real desktop backend")
+
+        ok = await backend(
+            workspace_id,
+            action.action.value,
+            app_name=action.app_name,
+            text=action.text,
+            x=action.x or 0,
+            y=action.y or 0,
         )
-        raise RuntimeError("GUI actions require a provider with a real desktop backend")
+        obs = await self.screenshot(workspace_id)
+        if ok:
+            self._record_audit(
+                session_id=actor,
+                workspace_id=workspace_id,
+                tenant_id=ws.tenant_id,
+                actor=actor,
+                action=f"GUI_{action.action.value}",
+                application=action.app_name,
+                resource=f"x={action.x}, y={action.y}, text={action.text}",
+                result="SUCCESS",
+            )
+            self._active_window[workspace_id] = obs.active_window
+            if action.action == GUIActionType.OPEN_APP and action.app_name:
+                self._running_apps.setdefault(workspace_id, set()).add(action.app_name)
+            if action.action == GUIActionType.CLOSE_APP:
+                self._running_apps.get(workspace_id, set()).discard(action.app_name)
+        else:
+            self._record_audit(
+                session_id=actor,
+                workspace_id=workspace_id,
+                tenant_id=ws.tenant_id,
+                actor=actor,
+                action=f"GUI_{action.action.value}",
+                application=action.app_name,
+                resource=f"x={action.x}, y={action.y}, text={action.text}",
+                result="FAILED",
+            )
+        return obs
 
     # -------------------------------------------------------------
     # 3. Terminal & Processes
