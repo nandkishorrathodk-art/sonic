@@ -1,5 +1,13 @@
 # AGENTS.md — SONIC-REDA repository memory
 
+## Mandatory agent policy
+
+All contributors and coding agents must follow the repository operating
+contract in [agent.md](./agent.md) and the complete non-negotiable rules in
+[strict_rule.md](./strict_rule.md). These documents are normative: they
+override convenience-oriented defaults and prohibit scripted, mocked,
+fabricated, or tool-forced production behavior.
+
 ## Project overview
 SONIC is an **Autonomous Self-Evolving Penetration Architect (A-SEA)**: an
 AI-driven self-developing offensive-security being that operates its own
@@ -2100,7 +2108,6 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
 ### 4. Verification Baseline (100% Green)
 - `sonic-core/tests/test_advanced_evolution.py` (9 tests) — **9 passed in 3.00s**.
 - Full regression suite across Evolution, Kernel, Safety, and Broker (42 tests) — **42 passed in 4.56s**.
-
 
 
 

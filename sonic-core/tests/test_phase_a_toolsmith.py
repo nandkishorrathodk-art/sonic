@@ -156,10 +156,23 @@ def test_blocked_run_not_registered(craft, registry):
     tool = _run(ts.author_tool_for_gap("gap"))
     assert tool is not None
     provider = _StubProvider(exit_code=126, stdout="")   # blocked
-    _run(ts.confirm_and_register(tool, provider, "ws"))
+    _run(ts.confirm_and_register(tool, provider, "ws", target="target"))
     assert tool.reproduced is False
     assert tool.run_exit_code == 126
     assert "probe_x" not in registry.names()
+
+
+def test_authored_tool_requires_explicit_target(craft, registry):
+    """Tool confirmation must not invent a localhost target."""
+    llm = _StubLLM(_proposal("needs_target", "import sys\nprint(sys.argv)\n"))
+    ts = ToolsmithLoop(craft=craft, llm=llm, registry=registry)
+    tool = _run(ts.author_tool_for_gap("gap"))
+    assert tool is not None
+    provider = _StubProvider(exit_code=0, stdout='{"ok": true}')
+    _run(ts.confirm_and_register(tool, provider, "ws"))
+    assert tool.reproduced is False
+    assert tool.run_exit_code is None
+    assert "needs_target" not in registry.names()
 
 
 def test_empty_output_not_registered(craft, registry):
@@ -169,7 +182,7 @@ def test_empty_output_not_registered(craft, registry):
     tool = _run(ts.author_tool_for_gap("gap"))
     assert tool is not None
     provider = _StubProvider(exit_code=0, stdout="   \n")  # whitespace-only
-    _run(ts.confirm_and_register(tool, provider, "ws"))
+    _run(ts.confirm_and_register(tool, provider, "ws", target="target"))
     assert tool.reproduced is False
     assert "probe_empty" not in registry.names()
 
@@ -185,7 +198,7 @@ def test_successful_run_registers_and_callable(craft, registry):
     tool = _run(ts.author_tool_for_gap("need a custom header probe"))
     assert tool is not None
     provider = _StubProvider(exit_code=0, stdout='{"host": "10.0.0.5", "header": "x-powered-by"}')
-    _run(ts.confirm_and_register(tool, provider, "ws"))
+    _run(ts.confirm_and_register(tool, provider, "ws", target="target"))
     assert tool.reproduced is True
     assert "header_scan" in registry.names()
     # The registered adapter is callable through the ToolRequest path.
@@ -246,7 +259,7 @@ def test_confirmed_tool_runs_via_security_tool_path(craft, registry):
     tool = _run(ts.author_tool_for_gap("need a grep-based port finder"))
     assert tool is not None
     provider = _StubProvider(exit_code=0, stdout='{"port": 22, "open": true}')
-    _run(ts.confirm_and_register(tool, provider, "ws"))
+    _run(ts.confirm_and_register(tool, provider, "ws", target="target"))
     # Now call it like nmap: a real ToolRequest through the adapter.
     adapter = registry.get("port_grep")
     assert adapter is not None
@@ -277,7 +290,7 @@ def test_toolsmith_rejects_failure_markers_even_on_exit_0(craft, registry, bad_s
     tool = _run(ts.author_tool_for_gap("testing failure markers"))
     assert tool is not None
     provider = _StubProvider(exit_code=0, stdout=bad_stdout)
-    _run(ts.confirm_and_register(tool, provider, "ws"))
+    _run(ts.confirm_and_register(tool, provider, "ws", target="target"))
     assert tool.reproduced is False
     assert "flaky_tool" not in registry.names()
 
@@ -312,7 +325,7 @@ def test_agent_tool_run_without_toolsmith_registry(craft):
         workspace_id="ws",
         action_type=ComputerActionType.TOOL_RUN,
         target_resource="custom_scanner",
-        payload={"tool": "custom_scanner"},
+        payload={"tool": "custom_scanner", "target": "authorized-target"},
         predicted_outcome="tool confirmed",
     ))
     assert tool.name in agent.security_tools
@@ -366,6 +379,7 @@ def test_agent_author_tool_programmatic(craft, registry):
         name="api_scanner",
         source="import sys, json\nprint(json.dumps({'finding': 'direct_verified'}))\n",
         auto_verify=True,
+        target="authorized-target",
     ))
     assert success is True
     assert "api_scanner" in agent.security_tools
@@ -392,6 +406,7 @@ def test_agent_tool_author_auto_verify_action(craft, registry):
             "name": "auto_probe",
             "source": "import sys, json\nprint(json.dumps({'finding': 'auto_verified'}))\n",
             "auto_verify": True,
+            "target": "authorized-target",
         },
         predicted_outcome="tool confirmed",
     ))
@@ -456,5 +471,3 @@ def test_reasoning_context_contains_autonomous_tool_authoring_prompt():
     )
     required_prompt = "You have the ability to author your own custom tools, scripts, and probes tailored specifically to this target."
     assert required_prompt in user_prompt or required_prompt in sys_prompt
-
-

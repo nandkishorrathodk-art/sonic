@@ -122,8 +122,11 @@ class DynamicExecutionAgent(BaseAgent):
                 await self._generate_test_cases(target, test_type, hypotheses, assets)
             )
             if not test_queue:
-                # Seed a minimal probe from known endpoints so the agent can still act.
-                test_queue = self._seed_tests_from_assets(target, assets)
+                logger.info(
+                    "dynamic_testing_no_evidence_driven_tests",
+                    target=target,
+                    reason="no operator-supplied tests or LLM-generated tests",
+                )
 
         findings: list[dict[str, Any]] = []
         failed_attempts: list[dict[str, Any]] = []
@@ -202,25 +205,6 @@ class DynamicExecutionAgent(BaseAgent):
     # ============================================
     # Probe helpers
     # ============================================
-
-    def _seed_tests_from_assets(self, target: str, assets: list[dict]) -> list[dict]:
-        """If the LLM produced no plan, seed minimal probes from discovered URLs."""
-        urls = [a.get("value") for a in assets if a.get("type") in ("url", "endpoint") and a.get("value")]
-        if not urls and target:
-            urls = [target]
-        seeded = []
-        for u in urls[:5]:
-            if not u.startswith("http"):
-                u = "https://" + u.lstrip("/")
-            seeded.append({
-                "test_name": f"baseline_probe_{u}",
-                "vulnerability_class": "INFO",
-                "method": "GET",
-                "url": u,
-                "expected_if_vulnerable": "",
-                "severity_if_confirmed": "info",
-            })
-        return seeded
 
     def _observation_to_dict(self, test: ProbeTest, result: ProbeResult, iteration: int) -> dict:
         return {
@@ -445,7 +429,8 @@ For each test case, provide:
     "severity_if_confirmed": "critical/high/medium/low"
 }}
 
-Return a JSON array of 5-10 targeted test cases. Be specific and realistic.
+Return only the smallest number of targeted test cases justified by the
+evidence. Do not invent tests for unknown assets. Be specific and realistic.
 Use safe, non-destructive payloads only. The probe will fire these for real."""
 
         if self.router is None:

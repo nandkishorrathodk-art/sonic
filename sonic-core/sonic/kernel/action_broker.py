@@ -33,6 +33,10 @@ class BrokerResult:
     authorization: SafetyAuthorization | None = None
     timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     duration_ms: float = 0.0
+    action_type: str = ""
+    target: str = ""
+    decision_id: str = ""
+    budget_remaining: int | None = None
 
     @property
     def is_success(self) -> bool:
@@ -43,6 +47,31 @@ class BrokerResult:
         )
 
 
+@dataclass
+class ActionBudget:
+    """Bound the number of actions an autonomous execution context may issue.
+
+    Safety policy answers whether an action is permitted. This budget answers
+    whether the current mission can afford another action, preventing runaway
+    loops even when every individual action is valid.
+    """
+
+    maximum: int
+    used: int = 0
+
+    def reserve(self) -> bool:
+        if self.maximum < 0:
+            raise ValueError("Action budget maximum must be non-negative")
+        if self.used >= self.maximum:
+            return False
+        self.used += 1
+        return True
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.maximum - self.used)
+
+
 class ActionBroker:
     """Mediates and governs all execution requests across the system."""
 
@@ -51,6 +80,7 @@ class ActionBroker:
         safety_kernel: SafetyKernel | None = None,
         tenant_id: str = "default",
         native_kernel_client: NativeKernelClient | None = None,
+        action_budget: ActionBudget | None = None,
     ):
         self.tenant_id = tenant_id
         self.safety_kernel = safety_kernel or SafetyKernel(tenant_id=tenant_id)
@@ -59,6 +89,7 @@ class ActionBroker:
             if native_kernel_client is not None
             else NativeKernelClient()
         )
+        self.action_budget = action_budget
         self._history: list[BrokerResult] = []
 
     def _extract_target(self, action_type: str, parameters: dict[str, Any]) -> str:
@@ -87,12 +118,34 @@ class ActionBroker:
         Fail-closed: Returns status=BLOCKED with exit_code=126 on any authorization failure.
         """
         import time
+        import uuid
 
         start_time = time.monotonic()
+        decision_id = f"decision-{uuid.uuid4().hex[:12]}"
+        target = self._extract_target(action_type, parameters)
+
+        if self.action_budget is not None and not self.action_budget.reserve():
+            result = BrokerResult(
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+                stderr="Execution action budget exhausted",
+                action_type=action_type,
+                target=target,
+                decision_id=decision_id,
+                budget_remaining=self.action_budget.remaining,
+                duration_ms=(time.monotonic() - start_time) * 1000.0,
+            )
+            self._history.append(result)
+            logger.warning(
+                "action_broker_budget_exhausted",
+                action_type=action_type,
+                tenant_id=self.tenant_id,
+                decision_id=decision_id,
+            )
+            return result
 
         # 0. Hardware/Native-speed pre-screening via NativeKernelClient (if available)
         if self.native_kernel_client:
-            target = self._extract_target(action_type, parameters)
             canonical_action = _ACTION_MAP.get(action_type, action_type)
             try:
                 native_verdict = self.native_kernel_client.authorize(
@@ -123,6 +176,10 @@ class ActionBroker:
                         exit_code=126,
                         stderr=auth.reason,
                         authorization=auth,
+                        action_type=action_type,
+                        target=target,
+                        decision_id=decision_id,
+                        budget_remaining=self.action_budget.remaining if self.action_budget else None,
                         duration_ms=(time.monotonic() - start_time) * 1000.0,
                     )
                     self._history.append(result)
@@ -147,6 +204,10 @@ class ActionBroker:
                         exit_code=126,
                         stderr=auth.reason,
                         authorization=auth,
+                        action_type=action_type,
+                        target=target,
+                        decision_id=decision_id,
+                        budget_remaining=self.action_budget.remaining if self.action_budget else None,
                         duration_ms=(time.monotonic() - start_time) * 1000.0,
                     )
                     self._history.append(result)
@@ -171,6 +232,10 @@ class ActionBroker:
                         exit_code=126,
                         stderr=auth.reason,
                         authorization=auth,
+                        action_type=action_type,
+                        target=target,
+                        decision_id=decision_id,
+                        budget_remaining=self.action_budget.remaining if self.action_budget else None,
                         duration_ms=(time.monotonic() - start_time) * 1000.0,
                     )
                     self._history.append(result)
@@ -195,6 +260,10 @@ class ActionBroker:
                 exit_code=126,
                 stderr=auth.reason,
                 authorization=auth,
+                action_type=action_type,
+                target=target,
+                decision_id=decision_id,
+                budget_remaining=self.action_budget.remaining if self.action_budget else None,
                 duration_ms=(time.monotonic() - start_time) * 1000.0,
             )
             self._history.append(result)
@@ -212,6 +281,10 @@ class ActionBroker:
                 exit_code=126,
                 stderr=auth.reason,
                 authorization=auth,
+                action_type=action_type,
+                target=target,
+                decision_id=decision_id,
+                budget_remaining=self.action_budget.remaining if self.action_budget else None,
                 duration_ms=(time.monotonic() - start_time) * 1000.0,
             )
             self._history.append(result)
@@ -230,6 +303,10 @@ class ActionBroker:
                     stdout=getattr(exec_res, "stdout", "") or "",
                     stderr=getattr(exec_res, "stderr", "") or "",
                     authorization=auth,
+                    action_type=action_type,
+                    target=target,
+                    decision_id=decision_id,
+                    budget_remaining=self.action_budget.remaining if self.action_budget else None,
                     duration_ms=(time.monotonic() - start_time) * 1000.0,
                 )
             elif action_type in ("FILE_WRITE", "WRITE_FILE"):
@@ -241,6 +318,10 @@ class ActionBroker:
                     exit_code=0,
                     stdout=f"Wrote {len(content)} bytes to {path}",
                     authorization=auth,
+                    action_type=action_type,
+                    target=target,
+                    decision_id=decision_id,
+                    budget_remaining=self.action_budget.remaining if self.action_budget else None,
                     duration_ms=(time.monotonic() - start_time) * 1000.0,
                 )
             elif action_type in ("FILE_READ", "READ_FILE"):
@@ -251,6 +332,10 @@ class ActionBroker:
                     exit_code=0,
                     stdout=content if isinstance(content, str) else str(content),
                     authorization=auth,
+                    action_type=action_type,
+                    target=target,
+                    decision_id=decision_id,
+                    budget_remaining=self.action_budget.remaining if self.action_budget else None,
                     duration_ms=(time.monotonic() - start_time) * 1000.0,
                 )
             elif action_type == "SECURITY_TOOL":
@@ -265,6 +350,10 @@ class ActionBroker:
                         exit_code=0 if status == ActionExecutionStatus.SUCCEEDED else 1,
                         stdout=str(getattr(tool_res, "findings", [])) if hasattr(tool_res, "findings") else "",
                         authorization=auth,
+                        action_type=action_type,
+                        target=target,
+                        decision_id=decision_id,
+                        budget_remaining=self.action_budget.remaining if self.action_budget else None,
                         duration_ms=(time.monotonic() - start_time) * 1000.0,
                     )
                 else:
@@ -273,6 +362,10 @@ class ActionBroker:
                         exit_code=1,
                         stderr="SecurityTool instance missing or invalid in parameters.",
                         authorization=auth,
+                        action_type=action_type,
+                        target=target,
+                        decision_id=decision_id,
+                        budget_remaining=self.action_budget.remaining if self.action_budget else None,
                         duration_ms=(time.monotonic() - start_time) * 1000.0,
                     )
             else:

@@ -2034,15 +2034,9 @@ async def _run_parallel_research_swarm(
     prompt: str,
 ) -> None:
     """
-    Executes the 6+1 Parallel Specialists Swarm via AsyncResearchOrchestrator:
-      - NetworkSpecialist
-      - WebSpecialist
-      - ApiSpecialist
-      - AuthSpecialist
-      - BusinessLogicSpecialist
-      - CloudSpecialist
-      - FalsificationSpecialist
-    Live streams entries into state["worklog"] with exact prefixes.
+    Executes an evidence-driven research swarm via AsyncResearchOrchestrator.
+    Only a specialist justified by the supplied target is seeded initially;
+    downstream specialists are spawned from observed events.
     Updates state["graph"] with AttackGraph nodes & transitions.
     Records execution metrics: parallel_wall_time, sum_of_task_times, parallelism_factor.
     """
@@ -2061,23 +2055,15 @@ async def _run_parallel_research_swarm(
         AsyncResearchOrchestrator,
         ResearchBlackboard,
     )
-    from sonic.research.specialist import (
-        ApiSpecialist,
-        AuthSpecialist,
-        BusinessLogicSpecialist,
-        CloudSpecialist,
-        FalsificationSpecialist,
-        NetworkSpecialist,
-        WebSpecialist,
-    )
+    from sonic.research.specialist import NetworkSpecialist, WebSpecialist
 
     state["status"] = "RESEARCHING"
-    state["current_action"] = "Parallel Research Swarm Active (6+1 Specialists)"
+    state["current_action"] = "Evidence-Driven Research Swarm Active"
     _append_worklog(
         state,
         "action",
         "Parallel Swarm Activated",
-        f"Initializing 6+1 Parallel Specialists swarm for: {prompt[:120]}",
+        f"Initializing target-driven research for: {prompt[:120]}",
     )
 
     # Extract target if present
@@ -2085,8 +2071,8 @@ async def _run_parallel_research_swarm(
         r'(https?://[^\s]+|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}|(?:\d{1,3}\.){3}\d{1,3})',
         prompt,
     )
-    target_raw = target_match.group(1).rstrip("/;,.") if target_match else "127.0.0.1"
-    target_url = target_raw if target_raw.startswith("http") else f"http://{target_raw}"
+    target_raw = target_match.group(1).rstrip("/;,.") if target_match else ""
+    target_url = target_raw if target_raw.startswith("http") else f"http://{target_raw}" if target_raw else ""
     target_host = target_raw.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
 
     event_bus = ResearchEventBus()
@@ -2108,27 +2094,14 @@ async def _run_parallel_research_swarm(
     async def _on_state_change(event: ResearchStateChangedEvent) -> None:
         if event.new_state == "researching":
             name = event.agent_name
-            if name == "NetworkSpecialist" and name not in logged_starts:
+            if name not in logged_starts:
                 logged_starts.add(name)
-                _append_worklog(state, "action", "NetworkSpecialist", "[NetworkSpecialist] Scanning ports...")
-            elif name == "WebSpecialist" and name not in logged_starts:
-                logged_starts.add(name)
-                _append_worklog(state, "action", "WebSpecialist", "[WebSpecialist] Crawling endpoints...")
-            elif name == "ApiSpecialist" and name not in logged_starts:
-                logged_starts.add(name)
-                _append_worklog(state, "action", "ApiSpecialist", "[ApiSpecialist] Analyzing parameters...")
-            elif name == "AuthSpecialist" and name not in logged_starts:
-                logged_starts.add(name)
-                _append_worklog(state, "action", "AuthSpecialist", "[AuthSpecialist] Inspecting tokens...")
-            elif name == "FalsificationSpecialist" and name not in logged_starts:
-                logged_starts.add(name)
-                _append_worklog(state, "action", "FalsificationSpecialist", "[FalsificationSpecialist] Testing hypothesis...")
-            elif name == "BusinessLogicSpecialist" and name not in logged_starts:
-                logged_starts.add(name)
-                _append_worklog(state, "action", "BusinessLogicSpecialist", "[BusinessLogicSpecialist] Analyzing business workflows...")
-            elif name == "CloudSpecialist" and name not in logged_starts:
-                logged_starts.add(name)
-                _append_worklog(state, "action", "CloudSpecialist", "[CloudSpecialist] Evaluating cloud metadata...")
+                _append_worklog(
+                    state,
+                    "action",
+                    name,
+                    f"[{name}] Investigating evidence from the target observation",
+                )
             _persist_workstation_state()
 
     async def _on_target_discovered(event: TargetDiscoveredEvent) -> None:
@@ -2195,47 +2168,33 @@ async def _run_parallel_research_swarm(
     event_bus.subscribe(HypothesisProposedEvent, _on_hypothesis_proposed)
     event_bus.subscribe(VulnerabilityVerifiedEvent, _on_vuln_verified)
 
-    # Initialize the 6+1 Specialists
-    specialists = [
-        NetworkSpecialist(name="NetworkSpecialist", target=target_host, objective=f"Scanning ports and services on {target_host}"),
-        WebSpecialist(name="WebSpecialist", target_url=target_url, objective=f"Crawling endpoints and attack surface on {target_url}"),
-        ApiSpecialist(name="ApiSpecialist", target_url=f"{target_url}/api", objective=f"Analyzing parameters and schemas on {target_url}"),
-        AuthSpecialist(name="AuthSpecialist", target_url=f"{target_url}/auth", objective=f"Inspecting tokens and authentication boundaries on {target_url}"),
-        BusinessLogicSpecialist(name="BusinessLogicSpecialist", target_url=target_url, objective=f"Analyzing workflow state machines on {target_url}"),
-        CloudSpecialist(name="CloudSpecialist", target_host=target_host, objective=f"Evaluating cloud metadata and storage for {target_host}"),
-        FalsificationSpecialist(name="FalsificationSpecialist", objective="Testing hypotheses and adversarial falsification"),
-    ]
+    # Seed only the modality justified by the operator's supplied target.
+    # API/auth/business/cloud/falsification specialists are event-driven and
+    # are created only after live evidence makes them relevant.
+    specialists = []
+    if target_raw:
+        if target_raw.startswith(("http://", "https://")):
+            specialists.append(
+                WebSpecialist(
+                    name="TargetWebObservation",
+                    target_url=target_url,
+                    objective=f"Observe the supplied target and report only live evidence: {target_url}",
+                )
+            )
+        else:
+            specialists.append(
+                NetworkSpecialist(
+                    name="TargetNetworkObservation",
+                    target=target_host,
+                    objective=f"Observe the supplied target and report only live evidence: {target_host}",
+                )
+            )
 
     orchestrator = AsyncResearchOrchestrator(
         event_bus=event_bus,
         blackboard=blackboard,
         max_concurrent_specialists=10,
     )
-
-    # Pre-seed initial streaming entries into state["worklog"]
-    for spec in specialists:
-        name = spec.name
-        if name == "NetworkSpecialist" and name not in logged_starts:
-            logged_starts.add(name)
-            _append_worklog(state, "action", "NetworkSpecialist", "[NetworkSpecialist] Scanning ports...")
-        elif name == "WebSpecialist" and name not in logged_starts:
-            logged_starts.add(name)
-            _append_worklog(state, "action", "WebSpecialist", "[WebSpecialist] Crawling endpoints...")
-        elif name == "ApiSpecialist" and name not in logged_starts:
-            logged_starts.add(name)
-            _append_worklog(state, "action", "ApiSpecialist", "[ApiSpecialist] Analyzing parameters...")
-        elif name == "AuthSpecialist" and name not in logged_starts:
-            logged_starts.add(name)
-            _append_worklog(state, "action", "AuthSpecialist", "[AuthSpecialist] Inspecting tokens...")
-        elif name == "FalsificationSpecialist" and name not in logged_starts:
-            logged_starts.add(name)
-            _append_worklog(state, "action", "FalsificationSpecialist", "[FalsificationSpecialist] Testing hypothesis...")
-        elif name == "BusinessLogicSpecialist" and name not in logged_starts:
-            logged_starts.add(name)
-            _append_worklog(state, "action", "BusinessLogicSpecialist", "[BusinessLogicSpecialist] Analyzing business workflows...")
-        elif name == "CloudSpecialist" and name not in logged_starts:
-            logged_starts.add(name)
-            _append_worklog(state, "action", "CloudSpecialist", "[CloudSpecialist] Evaluating cloud metadata...")
 
     # Resolve execution provider via CapabilityRouter
     from sonic.execution.capability_router import CapabilityRouter
@@ -2280,7 +2239,7 @@ async def _run_parallel_research_swarm(
     state["current_action"] = "Ready when you are."
 
     summary = (
-        f"Autonomous research completed via 6+1 Parallel Specialists swarm in {parallel_wall_time:.2f}s "
+        f"Evidence-driven research completed in {parallel_wall_time:.2f}s "
         f"(Sum of tasks: {sum_of_task_times:.2f}s, Concurrency Factor: {parallelism_factor}x). "
         f"Specialists: {result.completed_specialists}/{result.total_specialists} completed. "
         f"Attack Graph: {len(attack_graph.nodes)} nodes, {len(attack_graph.edges)} transitions. "

@@ -29,6 +29,7 @@ SECURITY INVARIANT:
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -296,9 +297,16 @@ class ToolsmithLoop:
             logger.warning("toolsmith_write_failed", name=tool.name, error=str(e))
             return tool
 
-        target_arg = target or getattr(tool, "target", None) or "127.0.0.1"
+        target_arg = target or getattr(tool, "target", None)
+        if not target_arg:
+            logger.warning("toolsmith_run_missing_target", name=tool.name)
+            return tool
         try:
-            res = await provider.execute(workspace_id, f"python {path} {target_arg}", timeout=timeout)
+            res = await provider.execute(
+                workspace_id,
+                f"python {path} {shlex.quote(str(target_arg))}",
+                timeout=timeout,
+            )
         except Exception as e:
             logger.warning("toolsmith_run_failed", name=tool.name, error=str(e))
             return tool
@@ -367,8 +375,10 @@ class AuthoredToolAdapter:
         # The authored source is already on disk in the sandbox; just run it.
         # Pass the target as argv[1] so the authored tool can read it.
         target = getattr(request, "target", "") or ""
-        safe_target = str(target).replace("'", "")
-        return f"python /home/sonic/workspace/toolsmith/{self._tool.name}.py '{safe_target}'"
+        return (
+            f"python /home/sonic/workspace/toolsmith/{self._tool.name}.py "
+            f"{shlex.quote(str(target))}"
+        )
 
     def parse_output(self, raw_stdout: str, raw_stderr: str) -> list[dict[str, Any]]:
         """Parse each non-empty stdout line as a finding (the authored tool's

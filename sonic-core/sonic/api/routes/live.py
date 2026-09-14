@@ -391,11 +391,11 @@ class SettingsUpdate(BaseModel):
 
 _runtime_config = {
     "llm_base_url": "",
-    "llm_model": "Claude 3.5 Sonnet",
+    "llm_model": "",
     "llm_api_key_set": False,
     "daytona_url": "http://localhost:3986",
     "proxy_url": "",
-    "allowed_domains": ["*.example.com", "localhost", "127.0.0.1"],
+    "allowed_domains": [],
 }
 
 

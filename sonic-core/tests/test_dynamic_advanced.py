@@ -115,6 +115,14 @@ def test_agent_does_not_return_blocked_when_probe_available():
                 "target": "example.com",
                 "engagement_id": "eng-1",
                 "task": "general_testing",
+                "tests": [{
+                    "test_name": "operator_supplied_observation",
+                    "vulnerability_class": "INFO",
+                    "method": "GET",
+                    "url": "https://example.com",
+                    "expected_if_vulnerable": "",
+                    "severity_if_confirmed": "info",
+                }],
                 "scope_config": {"targets": {"domains": ["*"], "ips": []},
                                 "exclusions": {"domains": []}},
             })

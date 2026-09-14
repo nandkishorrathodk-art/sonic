@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from sonic.computer_use.models import ActionExecutionStatus
-from sonic.kernel.action_broker import ActionBroker
+from sonic.kernel.action_broker import ActionBroker, ActionBudget
 from sonic.safety.kernel import KernelVerdict, SafetyKernel
 from sonic.safety.sealed import SealedActionPolicy
 
@@ -129,3 +129,41 @@ def test_action_broker_dispatches_permitted_action():
     assert "src/main.py" in res.stdout
     assert res.duration_ms >= 0.0
     mock_provider.execute.assert_called_once()
+
+
+@pytest.mark.no_live_infra
+def test_action_broker_enforces_per_mission_budget_and_emits_provenance():
+    kernel = SafetyKernel(tenant_id="test-tenant")
+    budget = ActionBudget(maximum=1)
+    broker = ActionBroker(
+        safety_kernel=kernel,
+        tenant_id="test-tenant",
+        action_budget=budget,
+    )
+
+    provider = MagicMock()
+    execution = MagicMock()
+    execution.exit_code = 0
+    execution.stdout = "observed"
+    execution.stderr = ""
+    provider.execute.return_value = execution
+
+    first = broker.execute(
+        action_type="TERMINAL_COMMAND",
+        parameters={"command": "printf observed"},
+        provider=provider,
+    )
+    second = broker.execute(
+        action_type="TERMINAL_COMMAND",
+        parameters={"command": "printf should-not-run"},
+        provider=provider,
+    )
+
+    assert first.is_success
+    assert first.decision_id.startswith("decision-")
+    assert first.action_type == "TERMINAL_COMMAND"
+    assert first.target == "printf observed"
+    assert first.budget_remaining == 0
+    assert second.status == ActionExecutionStatus.BLOCKED
+    assert "budget exhausted" in second.stderr.lower()
+    provider.execute.assert_called_once()
