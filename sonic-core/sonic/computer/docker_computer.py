@@ -210,7 +210,8 @@ class DockerComputerProvider(ComputerProvider):
             return 126, "", "docker daemon is unreachable; command execution failed-closed"
         async with self._exec_semaphore:
             try:
-                exec_args = [docker, "exec", self.container_name, "bash", "-c", cmd]
+                disp = self._get_display("") if hasattr(self, "_get_display") else ":99"
+                exec_args = [docker, "exec", "-e", f"DISPLAY={disp}", self.container_name, "bash", "-c", cmd]
                 proc = await asyncio.create_subprocess_exec(
                     *exec_args,
                     stdout=asyncio.subprocess.PIPE,
@@ -445,25 +446,41 @@ class DockerComputerProvider(ComputerProvider):
             f"DISPLAY={disp} import -window root /tmp/sonic_screen.png 2>/dev/null; "
             f"base64 -w0 /tmp/sonic_screen.png 2>/dev/null && "
             f"echo '___ACTIVE_WINDOW___' && "
-            f"DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null || true"
+            f"DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null && "
+            f"echo '___OPEN_WINDOWS___' && "
+            f"DISPLAY={disp} wmctrl -l 2>/dev/null || true"
         )
         code, out, _ = await self._docker_exec(scr_cmd, timeout=15)
         b64 = ""
         active_win = "Desktop"
+        open_wins: list[str] = []
         if code == 0 and out:
-            if "___ACTIVE_WINDOW___" in out:
-                parts = out.split("___ACTIVE_WINDOW___", 1)
-                b64 = parts[0].strip()
-                active_win = parts[1].strip() or "Desktop"
+            parts = out.split("___ACTIVE_WINDOW___", 1)
+            b64 = parts[0].strip()
+            rest = parts[1] if len(parts) > 1 else ""
+            if "___OPEN_WINDOWS___" in rest:
+                win_parts = rest.split("___OPEN_WINDOWS___", 1)
+                active_win = win_parts[0].strip() or "Desktop"
+                for line in win_parts[1].splitlines():
+                    lp = line.strip().split(maxsplit=3)
+                    if len(lp) >= 4 and lp[3] not in ("xfce4-panel", "Desktop", "desktop"):
+                        open_wins.append(lp[3])
             else:
-                b64 = out.strip()
+                active_win = rest.strip() or "Desktop"
+
+        vis_lines = []
+        if active_win and active_win != "Desktop":
+            vis_lines.append(f"Active Window: {active_win}")
+        if open_wins:
+            vis_lines.append(f"Open Windows: {', '.join(open_wins)}")
+        visible_text = "\n".join(vis_lines)
 
         obs = ScreenObservation(
             screenshot_base64=b64,
             width=1280,
             height=800,
             active_window=active_win,
-            visible_text=f"Active Window: {active_win}" if active_win != "Desktop" else "",
+            visible_text=visible_text,
             detected_controls=[],
             desktop_state="INTERACTIVE" if b64 else "NO_DISPLAY",
         )
@@ -825,6 +842,8 @@ class DockerComputerProvider(ComputerProvider):
         disp = self._get_display(workspace_id)
         spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 &"
         self._active_windows[workspace_id] = parts[0]
+        self._last_screenshot = None
+        self._last_screenshot_time = 0.0
         code, _, _ = await self._docker_exec(spawn)
         return code == 0
 
