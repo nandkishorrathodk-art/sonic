@@ -83,11 +83,15 @@ export function ComputerSurface({
   };
 
   useEffect(() => {
-    // VNC Stream is already live and must not trigger screenshot capture.
-    // Snapshot mode performs one explicit capture; refresh is operator-driven.
-    if (useStream) return;
+    // Always fetch a baseline screenshot on session change or mount so the desktop renders immediately
     fetchScreenshot();
-  }, [sessionId, useStream]);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!useStream) {
+      fetchScreenshot();
+    }
+  }, [useStream]);
 
   // Follow new command output only while the operator is at the tail.
   useEffect(() => {
@@ -204,7 +208,8 @@ export function ComputerSurface({
   };
 
   const hasScreenshot = Boolean(screenshotBase64 && screenshotBase64.length > 100);
-  const isLive = Boolean(hasScreenshot || (desktopState?.status === "LIVE" && streamUrl));
+  const isDesktopOnline = ["LIVE", "RUNNING", "READY"].includes(desktopState?.status || "");
+  const isLive = Boolean(hasScreenshot || (isDesktopOnline && streamUrl));
   const resolution = desktopState?.resolution;
   const displayLabel = [
     desktopState?.display,

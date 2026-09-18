@@ -1484,7 +1484,16 @@ class ComputerUseAgent:
         norm = cls._normalize_app_name(target)
         if not norm:
             return ""
-        # Strip all whitespace to form standard Linux binary name (e.g. "burp suite" -> "burpsuite")
+        # If target includes arguments, URLs, flags, or file paths (e.g. "thunar /workspace" or "google-chrome https://en.wikipedia.org"):
+        parts = shlex.split(norm) if norm else []
+        if len(parts) > 1 and any(
+            p.startswith(("-", "--", "/", "~", "http://", "https://", "about:", "file://"))
+            or "." in p
+            for p in parts[1:]
+        ):
+            bin_clean = re.sub(r'[^a-zA-Z0-9_\-\.]', '', parts[0])
+            return f"{bin_clean} {' '.join(parts[1:])}".strip()
+        # Single app name: strip all whitespace to form standard Linux binary name (e.g. "burp suite" -> "burpsuite")
         no_spaces = re.sub(r'\s+', '', norm)
         clean = re.sub(r'[^a-zA-Z0-9_\-\.]', '', no_spaces)
         return clean or norm.split()[0]
@@ -1519,31 +1528,70 @@ class ComputerUseAgent:
                 _GOAL_COMPLETE_SENTINEL,
             )
 
-        # Check if entire response is a JSON document
+        # Check if response contains a JSON action document
+        data: dict[str, Any] | None = None
         stripped = text.strip()
         if stripped.startswith("```json") and stripped.endswith("```"):
-            stripped = stripped[7:-3].strip()
-        elif stripped.startswith("```") and stripped.endswith("```"):
-            stripped = stripped[3:-3].strip()
-
-        if stripped.startswith("{") and stripped.endswith("}"):
             try:
-                data = json.loads(stripped)
-                if isinstance(data, dict):
-                    act_raw = str(data.get("action") or data.get("ACTION") or "").strip().upper()
-                    tgt_raw = str(data.get("target") or data.get("TARGET") or default_file).strip()
-                    payload_raw = data.get("payload") or data.get("PAYLOAD") or {}
-                    expected_raw = str(data.get("expected") or data.get("EXPECTED") or "Completed").strip()
-                    if not isinstance(payload_raw, dict):
-                        if isinstance(payload_raw, str) and payload_raw.strip().startswith("{"):
-                            try:
-                                payload_raw = json.loads(payload_raw)
-                            except Exception:
-                                payload_raw = {"command": payload_raw} if "TERMINAL" in act_raw else {}
-                        else:
-                            payload_raw = {"command": str(payload_raw)} if "TERMINAL" in act_raw else {}
-                    if act_raw in ComputerActionType._value2member_map_:
-                        return ComputerActionType(act_raw), tgt_raw, payload_raw, expected_raw
+                data = json.loads(stripped[7:-3].strip())
+            except Exception:
+                pass
+        elif stripped.startswith("```") and stripped.endswith("```"):
+            try:
+                data = json.loads(stripped[3:-3].strip())
+            except Exception:
+                pass
+        elif "{" in stripped and "}" in stripped:
+            from sonic.llm.providers.custom import _extract_json_object
+            data = _extract_json_object(stripped)
+
+        if isinstance(data, dict):
+            try:
+                act_raw = str(data.get("action") or data.get("ACTION") or "").strip().upper()
+                tgt_raw = str(data.get("target") or data.get("TARGET") or "").strip()
+                payload_raw = data.get("payload") or data.get("PAYLOAD") or {}
+                expected_raw = str(data.get("expected") or data.get("EXPECTED") or "Completed").strip()
+                if not isinstance(payload_raw, dict):
+                    if isinstance(payload_raw, str) and payload_raw.strip().startswith("{"):
+                        try:
+                            payload_raw = json.loads(payload_raw)
+                        except Exception:
+                            payload_raw = {"command": payload_raw} if "TERMINAL" in act_raw else {}
+                    else:
+                        payload_raw = {"command": str(payload_raw)} if "TERMINAL" in act_raw else {}
+                if not isinstance(payload_raw, dict):
+                    payload_raw = {}
+                # Extract flat JSON fields into payload/target if not already nested
+                if "url" in data and "url" not in payload_raw:
+                    payload_raw["url"] = str(data["url"]).strip()
+                    if not tgt_raw:
+                        tgt_raw = payload_raw["url"]
+                if "command" in data and "command" not in payload_raw:
+                    payload_raw["command"] = str(data["command"]).strip()
+                    if not tgt_raw:
+                        tgt_raw = payload_raw["command"]
+                if "path" in data and "path" not in payload_raw:
+                    payload_raw["path"] = str(data["path"]).strip()
+                    if not tgt_raw:
+                        tgt_raw = payload_raw["path"]
+                if "content" in data and "content" not in payload_raw:
+                    payload_raw["content"] = str(data["content"])
+                if "app_name" in data and "app_name" not in payload_raw:
+                    payload_raw["app_name"] = str(data["app_name"]).strip()
+                    if not tgt_raw:
+                        tgt_raw = payload_raw["app_name"]
+                if not tgt_raw:
+                    tgt_raw = default_file if act_raw in (ComputerActionType.FILE_READ.value, ComputerActionType.FILE_WRITE.value) else ""
+
+                if act_raw in ("GOAL_COMPLETE", "COMPLETE", "DONE", "FINISHED"):
+                    return (
+                        ComputerActionType.TERMINAL_EXEC,
+                        "goal-complete",
+                        {"command": "true"},
+                        _GOAL_COMPLETE_SENTINEL,
+                    )
+                if act_raw in ComputerActionType._value2member_map_:
+                    return ComputerActionType(act_raw), tgt_raw, payload_raw, expected_raw
             except Exception:
                 pass
 
@@ -1650,8 +1698,13 @@ class ComputerUseAgent:
             completion_phrases = (
                 "goal is complete", "goal has been achieved", "task is complete",
                 "task has been completed", "objective has been achieved",
+                "all requested information has been successfully gathered",
+                "all requested information has been gathered",
+                "information has been successfully gathered",
+                "successfully gathered",
             )
-            if any(cp in text_lower for cp in completion_phrases) and ("```" not in parse_target_text and "terminal_exec" not in text_lower):
+            has_action_directive = bool(re.search(r'\b(?:action|run|execute)\s*:\s*(?:terminal_exec|gui_|browser_|file_|git_|app_|tool_|security_tool)', text_lower))
+            if any(cp in text_lower for cp in completion_phrases) and not has_action_directive and "terminal_exec" not in text_lower:
                 return (
                     ComputerActionType.TERMINAL_EXEC,
                     "goal-complete",
@@ -1827,8 +1880,10 @@ class ComputerUseAgent:
             if payload.get("command"):
                 cmd_str = str(payload["command"]).strip()
                 cmd_str = re.sub(r'^(?:[a-zA-Z0-9_\-\.]+(?:-terminal)?,?\s*)?(?:command|cmd)\s*=\s*', '', cmd_str)
-                # Remove parenthesized comments e.g. "netstat -tuln (or ss)" -> "netstat -tuln"
-                cmd_str = re.sub(r'\(.*?\)', '', cmd_str).strip()
+                # Only remove conversational parenthesized comments e.g. "netstat -tuln (or ss)" -> "netstat -tuln",
+                # without destroying parentheses inside quotes, code, or URLs like Wikipedia articles.
+                if not any(k in cmd_str for k in ("http://", "https://", "python", "perl", "awk", "sed", "$(")):
+                    cmd_str = re.sub(r'\s*\((?:or|and|note|comment|alias|e\.g\.)[^)]*\)$', '', cmd_str, flags=re.IGNORECASE).strip()
                 # Filter out UI text and navigation elements that are not commands
                 if any(pattern in cmd_str for pattern in ("localhost:12001", "[Missions]", "[Computer]", "[Research]", "[Experiments]", "[Graph Memory]", "[Evidence Board]", "[Agents]", "[Security Lab]", "[Settings]", "LIVE", "FAIL-CLOSED", "SONICA-SEA", "Copy", "Autonomous execution paused")):
                     cmd_str = "echo 'ERROR: UI navigation text is not an executable command' >&2; exit 1"
@@ -2324,18 +2379,16 @@ class ComputerUseAgent:
             return trace
 
         # ----- Consecutive Action Loop Detector & Circuit Breaker -----
-        # Detect if the agent is repeating the exact same GUI action signature consecutively.
-        # Terminal and Security Tool actions are governed by FailureBudgetTracker and strategy budgets.
+        # Detect if the agent is repeating the exact same action signature consecutively.
+        # Exclude wait actions (GUI_WAIT, BROWSER_WAIT) from consecutive repetition blocking.
         action_sig = (action_type.value, str(target_resource).strip().lower(), str(payload).strip())
         if not hasattr(self, "_recent_action_signatures"):
             self._recent_action_signatures = []
         self._recent_action_signatures.append(action_sig)
 
-        if action_type in {
-            ComputerActionType.GUI_CLICK,
-            ComputerActionType.GUI_DOUBLE_CLICK,
-            ComputerActionType.GUI_RIGHT_CLICK,
-            ComputerActionType.GUI_MOVE,
+        if action_type not in {
+            ComputerActionType.GUI_WAIT,
+            ComputerActionType.BROWSER_WAIT,
         } and len(self._recent_action_signatures) >= 3 and all(
             s == action_sig for s in self._recent_action_signatures[-3:]
         ):
@@ -2713,6 +2766,9 @@ class ComputerUseAgent:
                     if "\n" in app_name:
                         app_name = app_name.split("\n")[0].strip(" *_\n\r\t`\"'")
                     app_bin = self._resolve_app_binary(app_name)
+                    extra_arg = payload.get("url") or payload.get("args") or payload.get("arguments") or payload.get("path") or payload.get("file") or ""
+                    if extra_arg and str(extra_arg).strip() not in app_bin:
+                        app_bin = f"{app_bin} {str(extra_arg).strip()}"
                     await self.computer.gui_action(workspace_id, GUIAction(action=GUIActionType.OPEN_APP, app_name=app_bin))
                     import asyncio as _asyncio
                     await _asyncio.sleep(1.0)
@@ -2920,38 +2976,44 @@ class ComputerUseAgent:
                     is_same_url = getattr(self, "_last_navigated_url", "") == url
                     self._last_navigated_url = url
                     disp = os.environ.get("DISPLAY", ":99" if hasattr(self.computer, "_docker_exec") or getattr(self.computer, "name", "") == "DockerComputerProvider" else ":0")
-                    # Dynamically discover installed browser binary without hardcoding specific application names
-                    b_probe = await self.computer.terminal(workspace_id, "which x-www-browser sensible-browser xdg-open 2>/dev/null | head -n 1")
-                    browser_bin = b_probe.stdout.strip() if (b_probe and b_probe.stdout.strip()) else "x-www-browser"
-                    b_base = os.path.basename(browser_bin).lower()
-                    browser_class = b_base.replace("-browser", "").replace("-stable", "")
-                    if is_same_url:
+                    # Dynamically discover any active browser window via wmctrl -lx without hardcoding
+                    win_probe = await self.computer.terminal(workspace_id, f"DISPLAY={disp} wmctrl -lx 2>/dev/null || true")
+                    browser_win_id = ""
+                    if win_probe and win_probe.stdout:
+                        for line in win_probe.stdout.splitlines():
+                            line_l = line.lower()
+                            if any(b in line_l for b in ("chrome", "chromium", "firefox", "browser", "web", "brave", "edge", "opera")):
+                                parts = line.split()
+                                if parts and parts[0].startswith("0x"):
+                                    browser_win_id = parts[0]
+                                    break
+
+                    if is_same_url and browser_win_id:
                         # Re-focus existing browser without spawning duplicate tabs
-                        focus_cmd = f"DISPLAY={disp} xdotool search --onlyvisible --class {shlex.quote(browser_class)} windowactivate 2>/dev/null || DISPLAY={disp} xdotool search --onlyvisible --class browser windowactivate 2>/dev/null || true"
+                        focus_cmd = f"DISPLAY={disp} (wmctrl -i -a {browser_win_id} 2>/dev/null || xdotool windowactivate {browser_win_id} 2>/dev/null || true)"
                         await self.computer.terminal(workspace_id, focus_cmd)
                         actual_obs_str = (
                             f"Browser is already active on {url}. Existing tab focused (duplicate tab prevented). "
                             "Proceed to interact with the webpage via GUI_CLICK on buttons, search bar, or scroll."
                         )
+                    elif browser_win_id:
+                        # Reuse existing browser window: focus, focus address bar via ctrl+l, type URL and press Return
+                        nav_cmd = (
+                            f"DISPLAY={disp} (xdotool windowactivate --sync {browser_win_id} 2>/dev/null || wmctrl -i -a {browser_win_id} 2>/dev/null || true) && "
+                            f"DISPLAY={disp} xdotool key --clearmodifiers ctrl+l sleep 0.1 type --delay 15 {shlex.quote(url)} key Return 2>/dev/null || true"
+                        )
+                        await self.computer.terminal(workspace_id, nav_cmd)
+                        if hasattr(self, "motor") and self.motor:
+                            await self.motor.enforce_tab_budget(workspace_id, max_tabs=3)
+                        actual_obs_str = f"Navigated active browser tab to {url} (tab reused via address bar)"
                     else:
-                        # Check if browser is already running in the desktop session
-                        chk = await self.computer.terminal(workspace_id, f"pgrep -f {shlex.quote(browser_class)} 2>/dev/null || pgrep -i browser 2>/dev/null || true")
-                        browser_running = bool(chk.stdout.strip())
-                        if browser_running:
-                            # Reuse existing browser window: focus, focus address bar via ctrl+l, type URL and press Return
-                            nav_cmd = (
-                                f"DISPLAY={disp} xdotool search --onlyvisible --class {shlex.quote(browser_class)} windowactivate --sync "
-                                f"key --clearmodifiers ctrl+l sleep 0.1 type --delay 15 {shlex.quote(url)} key Return 2>/dev/null || true"
-                            )
-                            await self.computer.terminal(workspace_id, nav_cmd)
-                            if hasattr(self, "motor") and self.motor:
-                                await self.motor.enforce_tab_budget(workspace_id, max_tabs=3)
-                            actual_obs_str = f"Navigated active browser tab to {url} (tab reused via address bar)"
-                        else:
-                            clean_flags = "--no-sandbox --disable-dev-shm-usage --disable-session-crashed-bubble --no-first-run --no-default-browser-check"
-                            cmd = f"DISPLAY={disp} nohup {browser_bin} {clean_flags} {shlex.quote(url)} >/dev/null 2>&1 &"
-                            await self.computer.terminal(workspace_id, cmd)
-                            actual_obs_str = f"Launched browser and navigated to {url}"
+                        # Dynamically discover installed browser binary without hardcoding specific application names
+                        b_probe = await self.computer.terminal(workspace_id, "which x-www-browser sensible-browser xdg-open google-chrome chromium 2>/dev/null | head -n 1")
+                        browser_bin = b_probe.stdout.strip() if (b_probe and b_probe.stdout.strip()) else "x-www-browser"
+                        clean_flags = "--no-sandbox --disable-dev-shm-usage --disable-session-crashed-bubble --no-first-run --no-default-browser-check"
+                        cmd = f"DISPLAY={disp} nohup {browser_bin} {clean_flags} {shlex.quote(url)} >/tmp/sonic_app_launch.log 2>&1 &"
+                        await self.computer.terminal(workspace_id, cmd)
+                        actual_obs_str = f"Launched browser and navigated to {url}"
 
                 if hasattr(self, "scratchpad") and self.scratchpad:
                     self.scratchpad.extract_from_text(url, source="url")
@@ -3728,7 +3790,16 @@ class ComputerUseAgent:
 
         # Block repeat of recent actions (within the last 4 actions)
         if self._recent_action_signatures:
-            cmd_val = str(payload.get("command") or payload.get("tool") or payload.get("text") or payload.get("url") or target).strip().lower()
+            cmd_val = str(
+                payload.get("command")
+                or payload.get("tool")
+                or payload.get("text")
+                or payload.get("url")
+                or payload.get("path")
+                or payload.get("file_path")
+                or payload.get("content")
+                or target
+            ).strip().lower()
             new_sig = (
                 action_type.value,
                 str(target).strip().lower(),
@@ -3885,18 +3956,29 @@ class ComputerUseAgent:
             pkg = m.group(1) if m else ""
             if pkg:
                 verify_cmd = f"which {pkg} 2>/dev/null || dpkg -l {pkg} 2>/dev/null | grep ^ii"
-        elif any(k in g for k in ("run", "start", "serve", "launch")):
+        elif any(k in g for k in ("run", "start", "serve", "launch", "open")):
             obs = await self.observe(workspace_id)
-            # Find the specific target mentioned in the goal
-            m_target = re.search(r"(?:run|start|serve|launch)\s+(?:the\s+)?([a-zA-Z0-9_\-\.]+)", g)
+            m_target = re.search(r"(?:run|start|serve|launch|open)\s+(?:the\s+)?([a-zA-Z0-9_\-\.]+)", g)
             target_prog = m_target.group(1).lower() if m_target else ""
             procs = " ".join(obs.processes) if obs.processes else ""
-            evidence = f"Running processes: {procs or 'none detected'}"
+            open_windows = " ".join(getattr(obs, "windows", []))
+            evidence = f"Running processes: {procs or 'none detected'} | Active window: {obs.active_application} | Open windows: {open_windows}"
             if target_prog:
-                verified = target_prog in procs.lower() or target_prog in obs.active_application.lower()
+                verified = (
+                    target_prog in procs.lower()
+                    or target_prog in obs.active_application.lower()
+                    or target_prog in open_windows.lower()
+                )
             else:
                 verified = len(obs.processes) > 0 and obs.active_application != ""
             return verified, evidence
+        elif any(k in g for k in ("file", "create", "write", "save", "generate", "report")):
+            m_file = re.search(r'([a-zA-Z0-9_\-\./]+\.(?:txt|md|py|json|sh|csv|html|log))', goal)
+            if m_file:
+                target_file = m_file.group(1)
+                if not target_file.startswith("/"):
+                    target_file = f"/home/sonic/workspace/{target_file}"
+                verify_cmd = f"test -f {shlex.quote(target_file)} && [ -s {shlex.quote(target_file)} ] && echo 'FILE_VERIFIED: {target_file}' && head -n 5 {shlex.quote(target_file)}"
 
         evidence = ""
         has_independent_probe = bool(verify_cmd)

@@ -20,6 +20,10 @@ fi
 # Ensure the generic Python command name exists
 ln -sf /usr/bin/python3 /usr/local/bin/python 2>/dev/null || true
 
+# Ensure workspace and /home/sonic/workspace exist and link together
+mkdir -p /workspace /home/sonic
+ln -sfn /workspace /home/sonic/workspace 2>/dev/null || true
+
 # Start full XFCE4 desktop session
 echo "[*] Starting XFCE4 desktop session..."
 startxfce4 &
@@ -35,7 +39,11 @@ fi
 mkdir -p /run/sonic
 x11vnc -storepasswd "$SONIC_VNC_PASSWORD" /run/sonic/vnc.pass >/dev/null
 chmod 600 /run/sonic/vnc.pass
-x11vnc -display :99 -forever -rfbauth /run/sonic/vnc.pass -shared -rfbport 5900 -bg
+# -cursor arrow: render the X cursor into the VNC framebuffer
+# -xfixes: use XFIXES extension for cursor shape tracking
+export XCURSOR_THEME="${XCURSOR_THEME:-DMZ-White}"
+export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+x11vnc -display :99 -forever -rfbauth /run/sonic/vnc.pass -shared -rfbport 5900 -bg -cursor arrow -xfixes
 
 # Start noVNC websockify bridge on port 6080
 echo "[*] Starting noVNC websockify bridge on port 6080..."

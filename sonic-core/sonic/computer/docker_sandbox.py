@@ -52,8 +52,16 @@ class DockerContainerProcess:
                 error=stderr_data.decode("utf-8", errors="replace"),
             )
         except TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
             return DockerProcessResult(exit_code=124, result="", error="Command timed out")
         except Exception as e:
+            try:
+                proc.kill()
+            except Exception:
+                pass
             return DockerProcessResult(exit_code=1, result="", error=str(e))
 
 
@@ -91,9 +99,24 @@ class DockerContainerSandbox:
 
     def __init__(self, container_name: str = "sonic-desktop-workstation"):
         self.id = container_name
-        self.state = "started"
         self.process = DockerContainerProcess(container_name)
         self.fs = DockerContainerFs(container_name)
+
+    @property
+    def state(self) -> str:
+        docker = shutil.which("docker")
+        if not docker:
+            return "stopped"
+        try:
+            probe = subprocess.run(
+                [docker, "inspect", "-f", "{{.State.Running}}", self.id],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+            return "started" if probe.stdout.decode("utf-8", errors="ignore").strip() == "true" else "stopped"
+        except Exception:
+            return "stopped"
 
     async def get_preview_link(self, port: int = 6080) -> DockerContainerPreview:
         return DockerContainerPreview(port)

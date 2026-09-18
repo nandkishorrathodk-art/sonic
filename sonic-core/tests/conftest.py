@@ -96,5 +96,57 @@ def _gate_live_compute(request):
         pytest.skip("Live Daytona integration test (set SONIC_RUN_LIVE_DAYTONA=1 to run)")
 
 
+@pytest.fixture(autouse=True)
+def isolate_all_sonic_test_state(tmp_path, monkeypatch):
+    """Automatically isolate all test state (workstations, memory, being, craft)
+    to a unique temporary directory for every single test in the test suite.
+    Prevents any test from polluting production data or other tests.
+    """
+    tmp_data_dir = tmp_path / "sonic_data"
+    tmp_data_dir.mkdir(parents=True, exist_ok=True)
+    state_file = str(tmp_data_dir / "workstations.json")
+    db_file = str(tmp_data_dir / "sonic_test.db")
+
+    monkeypatch.setenv("SONIC_DATA_DIR", str(tmp_data_dir))
+    monkeypatch.setenv("SONIC_WORKSTATION_STATE_FILE", state_file)
+    monkeypatch.setenv("SONIC_WORKSTATION_STATE_PATH", state_file)
+    monkeypatch.setenv("SONIC_MEMORY_DB_PATH", db_file)
+    monkeypatch.setenv("SONIC_BEING_DB_PATH", db_file)
+
+    def _reset_all_singletons():
+        try:
+            from sonic.api.routes.workstation import reset_workstation_state
+            reset_workstation_state()
+        except Exception:
+            pass
+        try:
+            from sonic.memory.router import reset_memory_singleton
+            reset_memory_singleton()
+        except Exception:
+            pass
+        try:
+            from sonic.memory.vector import reset_vector_memory_singleton
+            reset_vector_memory_singleton()
+        except Exception:
+            pass
+        try:
+            from sonic.being.identity import reset_being_singleton
+            reset_being_singleton()
+        except Exception:
+            pass
+        try:
+            from sonic.config import get_settings
+            get_settings.cache_clear()
+        except Exception:
+            pass
+
+    _reset_all_singletons()
+    try:
+        yield
+    finally:
+        _reset_all_singletons()
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "no_live_infra: provider state/safety logic only, no live sandbox")
+

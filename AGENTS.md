@@ -1,7 +1,7 @@
 # AGENTS.md — SONIC-REDA repository memory
 
 ## Project overview
-SONIC is an **Autonomous Self-Evolving Penetration Architect (A-SEA)**: an
+SONIC is an **Autonomous Self-Evolving Penetration Architect (ASI)**: an
 AI-driven self-developing offensive-security being that operates its own
 sandboxed computer environment, autonomously performs authorized security
 assessments, discovers and tests new attack hypotheses, analyzes results,
@@ -11,7 +11,7 @@ strategies, tools, and workflows over time — all within a sealed, tamper-evide
 safety envelope, with every "confirmed" / "working" claim backed by real
 in-sandbox reproduction (no success-by-decree).
 
-Formerly "SONIC-REDA (autonomous AI red-team system)". The identity was
+Formerly "SONIC (autonomous AI red-team system)". The identity was
 renamed to A-SEA to match the actual capability surface (researcher +
 architect, not just operator). All LLM prompts now use the A-SEA identity.
 

@@ -226,6 +226,8 @@ class ComputerActionType(StrEnum):
     # technique (a new method, not just a new tool) from observation + failure +
     # the known-technique ledger. Confirmed only on real in-sandbox reproduction.
     METHOD_INVENT = "METHOD_INVENT"
+    # Sentinel action indicating mission objective completion
+    GOAL_COMPLETE = "GOAL_COMPLETE"
 
 
 # ============================================
@@ -242,7 +244,7 @@ class ComputerWorldObservation(BaseModel):
     installed_applications: list[str] = Field(default_factory=list)
     processes: list[str] = Field(default_factory=list)
     terminal_output: str = ""
-    working_directory: str = "/home/daytona"
+    working_directory: str = "/home/sonic/workspace"
     browser_state: dict[str, Any] = Field(default_factory=lambda: {"url": "about:blank", "title": "New Tab"})
     ide_state: dict[str, Any] = Field(default_factory=lambda: {"active_file": "None", "cursor_line": 1})
     git_branch: str = "main"

@@ -287,11 +287,12 @@ class DockerSandbox(VirtualComputer):
 
     async def get_or_create_home(self, tenant_id: str) -> Any:
         safe = tenant_id.replace("/", "_").replace("\\", "_")
-        marker = f"/root/{self._home_marker_prefix}{safe}.json"
-        await self.execute(f"mkdir -p /root && touch {marker}")
+        root = os.environ.get("SONIC_WORKSPACE_ROOT", "/home/sonic/workspace")
+        marker = f"{root}/{self._home_marker_prefix}{safe}.json"
+        await self.execute(f"mkdir -p {root} && touch {marker}")
         return HomeWorkspace(
             id=f"docker-{safe}",
-            workspace_root="/root",
+            workspace_root=root,
             provider_type="docker",
             marker_path=marker,
         )
@@ -400,10 +401,11 @@ class DaytonaSandbox(VirtualComputer):
 
     async def get_or_create_home(self, tenant_id: str) -> Any:
         safe = tenant_id.replace("/", "_").replace("\\", "_")
-        marker = f"/root/{self._home_marker_prefix}{safe}.json"
-        await self.execute(f"mkdir -p /root && touch {marker}")
+        root = os.environ.get("SONIC_WORKSPACE_ROOT", "/home/sonic/workspace")
+        marker = f"{root}/{self._home_marker_prefix}{safe}.json"
+        await self.execute(f"mkdir -p {root} && touch {marker}")
         return HomeWorkspace(
-            id=f"daytona-{safe}", workspace_root="/root", provider_type="daytona", marker_path=marker,
+            id=f"daytona-{safe}", workspace_root=root, provider_type="daytona", marker_path=marker,
         )
 
 

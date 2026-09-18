@@ -169,7 +169,13 @@ class ActionPolicy:
         # /home/sonic/workspace/toolsmith/<name>.py), so confinement is
         # structural ??? it does not need a payload path to validate.
         if action_type_name in ("FILE_READ", "FILE_WRITE"):
-            path = payload.get("path") or target
+            path = (
+                payload.get("path")
+                or payload.get("file_path")
+                or payload.get("filepath")
+                or payload.get("filename")
+                or target
+            )
             verdict = self._check_path(path, action_type_name)
             if not verdict.allowed:
                 return verdict
@@ -206,9 +212,13 @@ class ActionPolicy:
     # ------------------------------------------------------------------
     def _check_path(self, path: str, action_name: str) -> PolicyVerdict:
         try:
-            resolved = Path(path).expanduser()
+            clean_path = str(path or "").strip().replace("\\", "/")
+            if not clean_path:
+                return PolicyVerdict(False, f"{action_name} empty path")
+            resolved = Path(clean_path).expanduser()
             # Resolve strictly=False so a not-yet-written path still confines.
-            if not resolved.is_absolute():
+            # On Windows, POSIX paths starting with / return is_absolute() == False.
+            if not resolved.is_absolute() and not clean_path.startswith("/"):
                 resolved = (self.workspace_root / resolved)
             resolved = resolved.resolve(strict=False)
         except Exception as e:
@@ -219,10 +229,6 @@ class ActionPolicy:
         except ValueError:
             return PolicyVerdict(
                 False, f"{action_name} escapes workspace: {path} -> {resolved}")
-        if action_name == "FILE_WRITE":
-            # Deny writes to workspace-root-traversal or device paths.
-            if any(part == ".." for part in Path(path).parts):
-                return PolicyVerdict(False, f"traversal in path: {path}")
         return PolicyVerdict(True, "path confined")
 
     _CLOUD_METADATA_RE = re.compile(

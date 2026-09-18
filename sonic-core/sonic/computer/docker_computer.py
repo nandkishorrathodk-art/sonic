@@ -264,18 +264,28 @@ class DockerComputerProvider(ComputerProvider):
             provisioned = await self._provision_workstation()
             if not provisioned:
                 # Try to start existing container if it exists but is stopped
+                docker = _docker_binary()
+                if not docker:
+                    ws.status = ComputerWorkspaceStatus.FAILED
+                    return ws
                 try:
-                    await asyncio.to_thread(
+                    start_proc = await asyncio.to_thread(
                         subprocess.run,
-                        ["docker", "start", self.container_name],
+                        [docker, "start", self.container_name],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL,
                         timeout=10,
                     )
-                    # Give container time to start
-                    await asyncio.sleep(2)
-                    self._container_running_cache = True
+                    if start_proc.returncode != 0:
+                        ws.status = ComputerWorkspaceStatus.STOPPED
+                        return ws
+                    # Give container time to start and verify liveness
+                    await asyncio.sleep(1.5)
+                    self._container_running_cache = await self._container_is_running()
                     self._container_checked_at = asyncio.get_event_loop().time()
+                    if not self._container_running_cache:
+                        ws.status = ComputerWorkspaceStatus.STOPPED
+                        return ws
                 except Exception:
                     # Fail-closed: never report a desktop that was not actually provisioned.
                     ws.status = ComputerWorkspaceStatus.STOPPED if _docker_binary() else ComputerWorkspaceStatus.FAILED
@@ -317,9 +327,12 @@ class DockerComputerProvider(ComputerProvider):
 
     async def destroy(self, workspace_id: str) -> bool:
         if workspace_id in self.workspaces:
-
             del self.workspaces[workspace_id]
-        if workspace_id == self._default_workspace_id:
+        if (
+            workspace_id == self._default_workspace_id
+            or workspace_id.startswith("home-")
+            or not self.workspaces
+        ):
             self._workspace_owner = None
         return True
 
@@ -363,7 +376,7 @@ class DockerComputerProvider(ComputerProvider):
                 active_application="",
                 open_applications=[],
                 active_window="",
-                working_directory="/root",
+                working_directory="/home/sonic/workspace",
                 running_processes=[],
                 installed_applications=[],
                 current_project="",
@@ -409,7 +422,7 @@ class DockerComputerProvider(ComputerProvider):
             active_application=active_window,
             open_applications=open_windows,
             active_window=active_window,
-            working_directory="/root",
+            working_directory="/home/sonic/workspace",
             running_processes=proc_names,
             installed_applications=installed,
             current_project="sonic-repo",
@@ -517,7 +530,12 @@ class DockerComputerProvider(ComputerProvider):
                 clean_app = action.app_name.strip()
                 parts = shlex.split(clean_app) if clean_app else []
                 if parts:
-                    spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/dev/null 2>&1 &"
+                    bin_base = os.path.basename(parts[0]).lower()
+                    if any(b in bin_base for b in ("chrome", "chromium", "brave", "edge", "electron", "browser")):
+                        safe_flags = [f for f in ("--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu") if f not in parts]
+                        if safe_flags:
+                            parts = [parts[0]] + safe_flags + parts[1:]
+                    spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 &"
                     await exec_gui(spawn)
                     self._active_windows[workspace_id] = parts[0]
 
@@ -529,8 +547,10 @@ class DockerComputerProvider(ComputerProvider):
                 if target:
                     await self._docker_exec(
                         f"DISPLAY={disp} (wmctrl -i -a {shlex.quote(target)} 2>/dev/null || "
+                        f"wmctrl -x -a {shlex.quote(target)} 2>/dev/null || "
                         f"wmctrl -a {shlex.quote(target)} 2>/dev/null || "
-                        f"xdotool search --name {shlex.quote(target)} windowactivate 2>/dev/null) || true"
+                        f"xdotool search --onlyvisible --class {shlex.quote(target)} windowactivate 2>/dev/null || "
+                        f"xdotool search --onlyvisible --name {shlex.quote(target)} windowactivate 2>/dev/null) || true"
                     )
 
             # Invalidate 2-second cache so fresh post-action screen is captured
@@ -651,6 +671,9 @@ class DockerComputerProvider(ComputerProvider):
         return out if code == 0 else ""
 
     async def write_file(self, workspace_id: str, path: str, content: str, actor: str = "operator") -> bool:
+        parent_dir = os.path.dirname(path)
+        if parent_dir:
+            await self._docker_exec(f"mkdir -p {shlex.quote(parent_dir)}")
         proc = await asyncio.create_subprocess_exec(
             "docker", "exec", "-i", self.container_name, "sh", "-c", f"cat > {shlex.quote(path)}",
             stdin=asyncio.subprocess.PIPE,
@@ -687,8 +710,8 @@ class DockerComputerProvider(ComputerProvider):
         **kwargs: Any,
     ) -> Any:
         if action == "status":
-            code, out, _ = await self._docker_exec("git -C /root/workspace status --porcelain 2>/dev/null", timeout=15)
-            bcode, bout, _ = await self._docker_exec("git -C /root/workspace branch --show-current 2>/dev/null", timeout=15)
+            code, out, _ = await self._docker_exec("git -C /home/sonic/workspace status --porcelain 2>/dev/null", timeout=15)
+            bcode, bout, _ = await self._docker_exec("git -C /home/sonic/workspace branch --show-current 2>/dev/null", timeout=15)
             branch = bout.strip() if bcode == 0 and bout.strip() else "main"
             clean = len(out.strip()) == 0
             untracked = [line[3:] for line in out.splitlines() if line.startswith("??")]
@@ -703,20 +726,20 @@ class DockerComputerProvider(ComputerProvider):
         elif action == "commit":
             msg = kwargs.get("message", "chore: automated commit")
             safe_msg = msg.replace("'", "'\\''")
-            code, _, _ = await self._docker_exec(f"git -C /root/workspace add -A && git -C /root/workspace commit -m '{safe_msg}'", timeout=15)
+            code, _, _ = await self._docker_exec(f"git -C /home/sonic/workspace add -A && git -C /home/sonic/workspace commit -m '{safe_msg}'", timeout=15)
             return code == 0
         elif action in ["branch", "checkout"]:
             branch_name = kwargs.get("branch_name") or kwargs.get("branch") or "main"
             safe_branch = branch_name.replace("'", "")
-            code, _, _ = await self._docker_exec(f"git -C /root/workspace checkout -B '{safe_branch}'", timeout=15)
+            code, _, _ = await self._docker_exec(f"git -C /home/sonic/workspace checkout -B '{safe_branch}'", timeout=15)
             return code == 0
         elif action == "diff":
-            bcode, bout, _ = await self._docker_exec("git -C /root/workspace branch --show-current 2>/dev/null", timeout=15)
+            bcode, bout, _ = await self._docker_exec("git -C /home/sonic/workspace branch --show-current 2>/dev/null", timeout=15)
             branch = bout.strip() if bcode == 0 and bout.strip() else "HEAD"
-            code, out, _ = await self._docker_exec(f"git -C /root/workspace diff {branch}", timeout=15)
+            code, out, _ = await self._docker_exec(f"git -C /home/sonic/workspace diff {branch}", timeout=15)
             return out or "Working tree clean."
         args = kwargs.get("args") or []
-        cmd = f"git -C /root/workspace {action} " + " ".join(shlex.quote(str(a)) for a in args)
+        cmd = f"git -C /home/sonic/workspace {action} " + " ".join(shlex.quote(str(a)) for a in args)
         code, out, _ = await self._docker_exec(cmd, timeout=15)
         clean = "nothing to commit" in out.lower()
         branch = "main"
@@ -794,8 +817,13 @@ class DockerComputerProvider(ComputerProvider):
             allowed, _ = self.app_policy.is_package_allowed(parts[0])
             if not allowed:
                 return False
+        bin_base = os.path.basename(parts[0]).lower()
+        if any(b in bin_base for b in ("chrome", "chromium", "brave", "edge", "electron", "browser")):
+            safe_flags = [f for f in ("--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu") if f not in parts]
+            if safe_flags:
+                parts = [parts[0]] + safe_flags + parts[1:]
         disp = self._get_display(workspace_id)
-        spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/dev/null 2>&1 &"
+        spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 &"
         self._active_windows[workspace_id] = parts[0]
         code, _, _ = await self._docker_exec(spawn)
         return code == 0

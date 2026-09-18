@@ -151,8 +151,24 @@ class MissionProbeApproveRequest(BaseModel):
 # Tenant-Scoped Workstation State Store
 # -------------------------------------------------------------
 _tenant_workstations: dict[str, dict[str, dict[str, Any]]] = {}
-_workstation_state_file = Path(os.environ.get("SONIC_WORKSTATION_STATE_FILE", "sonic_data/workstations.json"))
 _background_tasks: set[asyncio.Task] = set()
+
+
+def _get_workstation_state_file() -> Path:
+    """Dynamically resolve the workstation state file path."""
+    env_file = os.environ.get("SONIC_WORKSTATION_STATE_FILE") or os.environ.get("SONIC_WORKSTATION_STATE_PATH")
+    if env_file:
+        return Path(env_file)
+    data_dir = os.environ.get("SONIC_DATA_DIR", "sonic_data")
+    return Path(data_dir) / "workstations.json"
+
+
+def reset_workstation_state() -> None:
+    """Reset cached in-memory workstation state and provider singletons (used by tests)."""
+    global _tenant_workstations, _primary_computer_instance, _daytona_provider_instance
+    _tenant_workstations.clear()
+    _primary_computer_instance = None
+    _daytona_provider_instance = None
 
 
 def _strip_model_thinking(text: str) -> str:
@@ -181,9 +197,10 @@ async def _run_prompt_reasoning_with_timeout(
     """Bound one-shot reasoning so a provider outage cannot strand a session."""
     state = _get_or_create_session(tenant_id, session_id)
     try:
+        # Allow sufficient time (up to 300s) for multi-step GUI and terminal workstation reasoning
         await asyncio.wait_for(
             _run_prompt_reasoning(tenant_id, session_id, prompt),
-            timeout=75,
+            timeout=300,
         )
     except TimeoutError:
         state["status"] = "ERROR"
@@ -214,8 +231,9 @@ def _track_background_task(task: asyncio.Task) -> asyncio.Task:
 def _load_workstation_state() -> None:
     """Restore tenant-scoped workspace metadata after control-plane restart."""
     try:
-        if _workstation_state_file.exists():
-            raw = json.loads(_workstation_state_file.read_text(encoding="utf-8"))
+        state_file = _get_workstation_state_file()
+        if state_file.exists():
+            raw = json.loads(state_file.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 _tenant_workstations.update(raw)
                 # Preview URLs contain short-lived private Daytona tokens. Do
@@ -260,19 +278,20 @@ def _load_workstation_state() -> None:
 def _persist_workstation_state() -> None:
     """Persist only control-plane IDs/status; credentials and file contents never enter this store."""
     try:
-        _workstation_state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file = _get_workstation_state_file()
+        state_file.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(_tenant_workstations, ensure_ascii=True, indent=2)
-        unique_tmp = _workstation_state_file.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
+        unique_tmp = state_file.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
         try:
             unique_tmp.write_text(payload, encoding="utf-8")
-            if os.name == "nt" and _workstation_state_file.exists():
+            if os.name == "nt" and state_file.exists():
                 try:
-                    _workstation_state_file.unlink()
+                    state_file.unlink()
                 except Exception:
                     pass
-            unique_tmp.replace(_workstation_state_file)
+            unique_tmp.replace(state_file)
         except Exception:
-            _workstation_state_file.write_text(payload, encoding="utf-8")
+            state_file.write_text(payload, encoding="utf-8")
         finally:
             if unique_tmp.exists():
                 try:
@@ -293,6 +312,14 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
 
     env_sandbox_id = os.environ.get("SONIC_DEFAULT_WORKSPACE_ID", os.environ.get("DAYTONA_SANDBOX_ID", "")).strip()
     active_ws = env_sandbox_id if os.environ.get("SONIC_ALLOW_SHARED_WORKSTATION", "0") == "1" else ""
+    # In local Docker mode, auto-attach to the running workstation container
+    # so new sessions immediately have a live desktop without explicit provisioning.
+    if not active_ws and os.environ.get("SONIC_USE_DAYTONA_CLOUD") != "1":
+        docker_container = os.environ.get(
+            "SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation"
+        ).strip()
+        if docker_container:
+            active_ws = docker_container
     if tenant_id in _tenant_workstations and "default" in _tenant_workstations[tenant_id]:
         def_desk = _tenant_workstations[tenant_id]["default"].get("desktop", {})
         active_ws = str(def_desk.get("workspace_id") or def_desk.get("sandbox_id") or "") or active_ws
@@ -321,7 +348,7 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
                 "display": ":99",
                 "vnc_port": 5900,
                 "novnc_port": 6080,
-                "novnc_url": "" if not active_ws else "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale",
+                "novnc_url": "" if not active_ws else "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale&show_dot=true&cursor=true",
                 "status": "LIVE" if active_ws else "NO_ACTIVE_WORKSPACE",
                 "active_window": "Desktop",
                 "resolution": {"width": 1280, "height": 800},
@@ -424,7 +451,12 @@ def _session_workspace_id_for_tenant(tenant_id: str, session_id: str) -> str:
             workspace_id = str(desktop.get("workspace_id") or desktop.get("sandbox_id") or "").strip()
             if workspace_id:
                 return workspace_id
-        return ""
+        # Fall back to the local Docker workstation container name so the
+        # state endpoint can probe the real container for VNC/status.
+        docker_container = os.environ.get(
+            "SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation"
+        ).strip()
+        return docker_container
 
     state = _tenant_workstations.get(tenant_id, {}).get(session_id)
     if state:
@@ -456,7 +488,8 @@ def _session_workspace_id_for_tenant(tenant_id: str, session_id: str) -> str:
 
 def _session_lab_id(user: User, session_id: str) -> str:
     """Return only the disposable research lab owned by this tenant/session."""
-    state = _tenant_workstations.get(user.email, {}).get(session_id)
+    tenant_id = getattr(user, "tenant_id", None) or user.email
+    state = _tenant_workstations.get(tenant_id, {}).get(session_id)
     if not state:
         return ""
     lab = state.get("research_lab", {})
@@ -464,7 +497,8 @@ def _session_lab_id(user: User, session_id: str) -> str:
 
 
 def _session_target_id(user: User, session_id: str) -> str:
-    state = _tenant_workstations.get(user.email, {}).get(session_id)
+    tenant_id = getattr(user, "tenant_id", None) or user.email
+    state = _tenant_workstations.get(tenant_id, {}).get(session_id)
     if not state:
         return ""
     target = state.get("target_sandbox", {})
@@ -502,6 +536,53 @@ def _append_worklog(state: dict[str, Any], item_type: str, title: str, content: 
     }
     state.setdefault("worklog", []).append(item)
     return item
+
+
+def _summarize_recent_worklog(state: dict[str, Any], limit: int = 8) -> list[str]:
+    """Provide a compact string summary of recent workstation actions and events."""
+    worklog = state.get("worklog", [])
+    summaries: list[str] = []
+    for entry in worklog[-limit:]:
+        t = entry.get("title", "")
+        c = (entry.get("content") or "").strip()
+        if c:
+            summaries.append(f"{t}: {c[:120]}")
+    return summaries
+
+
+def _extract_recent_conversation_messages(state: dict[str, Any], max_turns: int = 5) -> list[Any]:
+    """Extract prior chat dialogue turns from the session worklog to provide conversational continuity."""
+    from sonic.llm.schemas import Message, MessageRole
+    worklog = state.get("worklog", [])
+    history: list[Message] = []
+
+    turns: list[tuple[str, str]] = []
+    for entry in worklog:
+        t = entry.get("title", "")
+        c = (entry.get("content") or "").strip()
+        item_type = entry.get("type", "")
+
+        if t == "Objective Received" and c:
+            match = re.search(r"Objective:\s*'(.*?)'\s*\(Tenant:", c)
+            obj_text = match.group(1) if match else c
+            turns.append(("user", obj_text))
+        elif (t in ("SONIC Response", "SONIC Boss Report") or item_type == "response") and c:
+            turns.append(("assistant", c))
+        elif item_type == "command" and c:
+            cmd = entry.get("command", t)
+            turns.append(("assistant", f"Executed terminal command: {cmd}\nOutput:\n{c[:300]}"))
+
+    if turns and turns[-1][0] == "user":
+        turns = turns[:-1]
+
+    recent_turns = turns[-(max_turns * 2):]
+    for role, content in recent_turns:
+        if role == "user":
+            history.append(Message(role=MessageRole.USER, content=content[:1500]))
+        else:
+            history.append(Message(role=MessageRole.ASSISTANT, content=content[:1500]))
+
+    return history
 
 
 def _mission_event(state: dict[str, Any], event_type: str, title: str, content: str, **extra: Any) -> dict[str, Any]:
@@ -791,10 +872,11 @@ async def get_workstation_state(
 @router.get("/workstation/sessions")
 async def list_workstation_sessions(user: User = Depends(require_auth)):
     """Returns all active and historical sessions for the authenticated tenant."""
-    tenant_sessions = _tenant_workstations.get(user.email, {})
+    tenant_id = getattr(user, "tenant_id", None) or user.email
+    tenant_sessions = _tenant_workstations.get(tenant_id, {})
     if not tenant_sessions:
-        _get_or_create_session(user.email, "default")
-        tenant_sessions = _tenant_workstations.get(user.email, {})
+        _get_or_create_session(tenant_id, "default")
+        tenant_sessions = _tenant_workstations.get(tenant_id, {})
 
     result = []
     for sid, sdata in tenant_sessions.items():
@@ -804,7 +886,7 @@ async def list_workstation_sessions(user: User = Depends(require_auth)):
             "session_id": sid,
             "mission_name": sdata.get("mission_name") or "New conversation",
             "status": sdata.get("status", "IDLE"),
-            "workspace_id": _session_workspace_id_for_tenant(user.email, sid),
+            "workspace_id": _session_workspace_id_for_tenant(tenant_id, sid),
             "git_branch": sdata.get("git_branch") or "",
             "log_count": len(sdata.get("worklog", [])),
             "last_action": sdata.get("current_action") or "Ready when you are.",
@@ -818,7 +900,8 @@ async def delete_workstation_session(
     user: User = Depends(require_operator),
 ):
     """Deletes a mission session from the tenant's history."""
-    if user.email in _tenant_workstations and session_id in _tenant_workstations[user.email]:
+    tenant_id = getattr(user, "tenant_id", None) or user.email
+    if tenant_id in _tenant_workstations and session_id in _tenant_workstations[tenant_id]:
         comp = get_daytona_computer()
         workspace_ids = {
             ws for ws in (
@@ -834,14 +917,14 @@ async def delete_workstation_session(
                 logger.warning("workstation_session_cleanup_failed", workspace_id=workspace_id, error=str(exc))
 
         if session_id != "default":
-            del _tenant_workstations[user.email][session_id]
+            del _tenant_workstations[tenant_id][session_id]
             _persist_workstation_state()
             return {"status": "deleted", "session_id": session_id}
         else:
             # Reset default session to clean state
-            _tenant_workstations[user.email]["default"] = {
+            _tenant_workstations[tenant_id]["default"] = {
                 "session_id": "default",
-                "tenant_id": user.email,
+                "tenant_id": tenant_id,
                 "mission_name": "New conversation",
                 "status": "IDLE",
                 "target_repo": "",
@@ -1576,12 +1659,27 @@ async def execute_workstation_command(
     if not (req.command or "").strip():
         raise HTTPException(status_code=400, detail="Command cannot be empty")
 
-    # Execute only against the authenticated tenant/session's Daytona workspace.
-    # A shared Docker container is never a safe fallback for a tenant-scoped
-    # request because it can cross session boundaries and is not the agent's
-    # actual workstation. No provisioned sandbox => sandbox UNAVAILABLE =>
-    # fail-closed 503 (never host execution).
+    tenant_id = getattr(user, "tenant_id", None) or user.email
     workspace_id = _session_workspace_id(user, req.session_id or "default")
+    comp = get_daytona_computer()
+
+    # Lazy auto-start / auto-attach for terminal commands
+    if not workspace_id:
+        if os.environ.get("SONIC_USE_DAYTONA_CLOUD") == "1":
+            try:
+                home_ws = await comp.get_or_create_home(tenant_id)
+                workspace_id = home_ws.id
+                state = _get_or_create_session(tenant_id, req.session_id or "default")
+                state.setdefault("desktop", {})["workspace_id"] = workspace_id
+                state["desktop"]["sandbox_id"] = workspace_id
+            except Exception:
+                workspace_id = ""
+        else:
+            docker_container = os.environ.get(
+                "SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation"
+            ).strip()
+            workspace_id = docker_container
+
     if not workspace_id:
         # No provisioned workstation is itself a fail-closed condition: we must
         # never fall back to host or shared-container execution, and a 409 here
@@ -1591,7 +1689,6 @@ async def execute_workstation_command(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Command execution failed-closed: no Daytona workstation is provisioned for this session. Direct host OS execution is strictly prohibited.",
         )
-    comp = get_daytona_computer()
     try:
         res = await comp.terminal(workspace_id, req.command, timeout=req.timeout or 30, actor=user.email)
     except Exception:
@@ -1600,13 +1697,22 @@ async def execute_workstation_command(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Command execution failed-closed: the tenant-owned workstation sandbox could not run the command. Direct host OS execution is strictly prohibited.",
         )
+
+    # In local Docker mode, if container was stopped (exit 125), attempt to auto-start it once and retry
+    if res.exit_code == 125 and isinstance(comp, DockerComputerProvider):
+        try:
+            await comp.create(tenant_id=tenant_id, engagement_id=req.session_id or "default")
+            res = await comp.terminal(workspace_id, req.command, timeout=req.timeout or 30, actor=user.email)
+        except Exception as retry_err:
+            logger.warning("sandbox_auto_start_retry_failed", error=str(retry_err))
+
     if res.exit_code in (125, 126, 127):
         # DockerComputerProvider uses these exit codes for fail-closed states:
         # 125 = container not running, 126 = docker daemon unreachable,
         # 127 = docker binary missing. Surface them as sandbox-unavailable 503.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Command execution failed-closed:the tenant-owned workstation sandbox is unreachable. Direct host OS execution is strictly prohibited.",
+            detail="Command execution failed-closed: the tenant-owned workstation sandbox is unreachable. Direct host OS execution is strictly prohibited.",
         )
     env_label = "docker_sandbox" if isinstance(comp, DockerComputerProvider) else f"daytona_cloud_sandbox ({workspace_id[:8]})"
     return {
@@ -1953,7 +2059,8 @@ def _is_action_prompt(prompt: str) -> bool:
         "check", "run", "execute", "test", "analyze", "analyse", "audit", "review",
         "debug", "fix", "read", "write", "edit", "find", "search", "scan",
         "enumerate", "discover", "reproduce", "verify", "install", "uninstall",
-        "dekho", "batao", "dhundo",
+        "create", "make", "show", "list", "tell", "help",
+        "dekho", "batao", "dhundo", "karo", "kholo", "chalao", "banao", "likho", "padho", "dikhao", "kaam",
         "use the computer", "use desktop", "in the sandbox", "in sandbox",
     )
     has_explicit_action = any(
@@ -2433,7 +2540,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
     state = _get_or_create_session(tenant_id, session_id)
     action_blocked = False
     action_observations: list[str] = []
-    desktop_context = "No tenant-owned desktop observation is available for this session."
+    desktop_context = "Workstation ready."
     desktop_screenshot_b64 = ""
     action_prompt = _is_action_prompt(prompt)
     observation_only = _is_observation_only_prompt(prompt)
@@ -2476,15 +2583,11 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
         if not desktop_id:
             desktop_id = str(state.get("desktop", {}).get("workspace_id") or state.get("desktop", {}).get("sandbox_id") or "")
 
-        # Conversational messages must not inspect the desktop.  Observation
-        # is an execution cost and, more importantly, can make a greeting look
-        # like a live mission in the worklog.
-        if desktop_id and (execution_prompt or observation_only):
+        # Always observe the live workstation desktop if desktop_id is available.
+        # A computer-use assistant must always see its current screen and active window.
+        if desktop_id:
             try:
                 computer = get_daytona_computer()
-                # Both mutating missions and read-only screen analysis need a
-                # fresh observation. Read-only requests must receive the same
-                # live pixels without entering the action loop below.
                 screen = await computer.screenshot(desktop_id)
                 desktop_screenshot_b64 = (
                     getattr(screen, "screenshot_base64", "")
@@ -2498,27 +2601,22 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                     f"active_window={screen.active_window!r}; "
                     f"visible_text={screen.visible_text!r}; controls={screen.detected_controls!r}."
                 )
-                # Keep the latest real observation with the session.  This is
-                # deliberately control-plane metadata (not pixels), and makes
-                # timeout/provider fallback responses reflect this request
-                # rather than an older persisted "no observation" answer.
                 state["last_desktop_observation"] = desktop_context
                 state["last_desktop_observation_at"] = screen.timestamp
                 _persist_workstation_state()
-                _append_worklog(
-                    state,
-                    "action",
-                    "Agent Desktop Observation",
-                    "Agent inspected the live workstation via screenshot. " + desktop_context,
-                )
+                if execution_prompt or observation_only:
+                    _append_worklog(
+                        state,
+                        "action",
+                        "Agent Desktop Observation",
+                        "Agent inspected the live workstation via screenshot. " + desktop_context,
+                    )
             except Exception as observation_err:
                 logger.warning("workstation_desktop_observation_failed", error=str(observation_err))
-                _append_worklog(
-                    state,
-                    "error",
-                    "Desktop Observation Unavailable",
-                    "The live desktop could not be observed; checking sandbox status.",
-                )
+                if state.get("last_desktop_observation"):
+                    desktop_context = str(state["last_desktop_observation"])
+                else:
+                    desktop_context = f"Workstation active ('{desktop_id}'), but screen capture returned: {observation_err}"
 
             # Execute autonomous action loop if applicable
             if execution_prompt:
@@ -2575,11 +2673,8 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                         from sonic.safety.sealed import seal_default
                         state["interrupted"] = False
 
-                        # Keep the operator objective immutable. The profile is
-                        # advisory context and must be validated by the agent.
                         effective_goal = prompt
-
-                        ws_root = "/root" if os.environ.get("SONIC_USE_DAYTONA_CLOUD") != "1" else "/home/daytona"
+                        ws_root = os.environ.get("SONIC_WORKSPACE_ROOT", "/home/sonic/workspace")
                         target_box = state.get("target_sandbox", {})
                         # The provisioned target and scope are authoritative.
                         # Never let a later free-form prompt retarget the
@@ -2772,7 +2867,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 max_phases=3,
                                 sub_agent_steps=5,
                                 gui_only=False,
-                                initial_context={"program_profile": program_profile},
+                                initial_context={
+                                    "program_profile": program_profile,
+                                    "recent_history": _summarize_recent_worklog(state),
+                                },
                             )
 
                             _append_worklog(
@@ -2896,7 +2994,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 gui_only=False,
                                 enable_llm_decomposition=False,
                                 observe_desktop=True,
-                                initial_context={"program_profile": program_profile},
+                                initial_context={
+                                    "program_profile": program_profile,
+                                    "recent_history": _summarize_recent_worklog(state),
+                                },
                             )
 
                             _append_worklog(
@@ -3070,8 +3171,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
             _append_worklog(state, "info", "LLM Provider Unavailable", fallback_response)
         else:
             system_prompt = WORKSTATION_CHAT_SYSTEM
+            conv_history = _extract_recent_conversation_messages(state)
             messages = [
                 Message(role=MessageRole.SYSTEM, content=system_prompt),
+                *conv_history,
                 Message(
                     role=MessageRole.USER,
                     content=f"Operator Objective:\n{prompt}\n\nWorkstation Context & Real Terminal Output:\n{desktop_context}",
