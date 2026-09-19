@@ -94,19 +94,19 @@ class TestGUIActionDispatch:
         provider.gui_action.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_gui_only_rejected_close_tabs_proposal_uses_visible_keypress(self):
+    async def test_gui_only_rejected_close_tabs_proposal_reobserves_visible_desktop(self):
         action_type, target, payload, expected = ComputerUseAgent._gui_only_recovery_action(
             "hi sonic, close browser and close all tabs",
             "Non-GUI proposal discarded",
         )
 
-        assert action_type == ComputerActionType.GUI_KEYPRESS
-        assert target == "visible-active-window"
-        assert payload == {"key": "ctrl+w"}
-        assert "Ctrl+W" in expected
+        assert action_type == ComputerActionType.GUI_SCREENSHOT
+        assert target == "visible-desktop"
+        assert payload == {}
+        assert "visible desktop" in expected
 
     @pytest.mark.asyncio
-    async def test_gui_only_close_tabs_intent_bypasses_vision_grounding(self):
+    async def test_gui_only_close_tabs_intent_reobserves_when_reasoning_fails(self):
         provider = _mock_provider()
         router = MagicMock()
         agent = ComputerUseAgent(
@@ -120,10 +120,9 @@ class TestGUIActionDispatch:
             ComputerWorldObservation(),
         )
 
-        assert action_type == ComputerActionType.GUI_KEYPRESS
-        assert target == "visible-active-window"
-        assert payload == {"key": "ctrl+w"}
-        router.complete.assert_not_called()
+        assert action_type == ComputerActionType.GUI_SCREENSHOT
+        assert target == "visible-desktop"
+        assert payload == {}
 
     @pytest.mark.asyncio
     async def test_gui_only_observation_does_not_probe_files_git_or_terminal(self):
@@ -137,7 +136,7 @@ class TestGUIActionDispatch:
         provider.git_action.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_gui_only_browser_navigation_uses_visible_keyboard_actions(self):
+    async def test_gui_only_browser_navigation_requires_live_screen_verification(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
 
@@ -149,12 +148,12 @@ class TestGUIActionDispatch:
             "Open the visible browser",
         )
 
-        assert trace.status == "SUCCESS"
-        assert "visible browser" in trace.actual_observation.lower()
+        assert trace.status == "RECOVERED"
+        assert "could not be verified from a live screen" in trace.actual_observation.lower()
         assert provider.terminal.await_count == 0
-        assert provider.gui_action.await_count == 3
+        assert provider.gui_action.await_count == 4
         actions = [call.args[1].action for call in provider.gui_action.call_args_list]
-        assert [action.value for action in actions] == ["KEYPRESS", "TYPE", "KEYPRESS"]
+        assert [action.value for action in actions[:3]] == ["KEYPRESS", "TYPE", "KEYPRESS"]
 
     @pytest.mark.asyncio
     async def test_gui_only_modal_recovery_does_not_use_motor_backtrack(self):

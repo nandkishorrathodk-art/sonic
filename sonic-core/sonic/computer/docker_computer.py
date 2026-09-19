@@ -580,11 +580,6 @@ class DockerComputerProvider(ComputerProvider):
                 resolved_bin = await self._resolve_app_binary(app_query)
                 if resolved_bin:
                     parts = shlex.split(resolved_bin) + args_list
-                    bin_base = os.path.basename(parts[0]).lower()
-                    if any(b in bin_base for b in ("chrome", "chromium", "brave", "edge", "electron", "browser")):
-                        safe_flags = [f for f in ("--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu") if f not in parts]
-                        if safe_flags:
-                            parts = [parts[0]] + safe_flags + parts[1:]
                     spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 &"
                     await exec_gui(spawn)
                     self._active_windows[workspace_id] = parts[0]
@@ -595,13 +590,17 @@ class DockerComputerProvider(ComputerProvider):
             elif atype == GUIActionType.SELECT_WINDOW:
                 target = action.window_id or action.app_name
                 if target:
-                    await self._docker_exec(
+                    focus_code, _, focus_err = await self._docker_exec(
                         f"DISPLAY={disp} (wmctrl -i -a {shlex.quote(target)} 2>/dev/null || "
                         f"wmctrl -x -a {shlex.quote(target)} 2>/dev/null || "
                         f"wmctrl -a {shlex.quote(target)} 2>/dev/null || "
                         f"xdotool search --onlyvisible --class {shlex.quote(target)} windowactivate 2>/dev/null || "
-                        f"xdotool search --onlyvisible --name {shlex.quote(target)} windowactivate 2>/dev/null) || true"
+                        f"xdotool search --onlyvisible --name {shlex.quote(target)} windowactivate 2>/dev/null)"
                     )
+                    if focus_code != 0:
+                        raise RuntimeError(
+                            f"window focus failed for '{target}': {focus_err.strip()}"
+                        )
 
             # Invalidate 2-second cache so fresh post-action screen is captured
             self._last_screenshot_time = 0.0
@@ -963,12 +962,6 @@ class DockerComputerProvider(ComputerProvider):
                 return False
 
         parts = [resolved_bin] + args
-        bin_base = os.path.basename(resolved_bin).lower()
-        if any(b in bin_base for b in ("chrome", "chromium", "brave", "edge", "electron", "browser")):
-            safe_flags = [f for f in ("--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu") if f not in parts]
-            if safe_flags:
-                parts = [parts[0]] + safe_flags + parts[1:]
-
         disp = self._get_display(workspace_id)
         spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 &"
         self._active_windows[workspace_id] = os.path.basename(resolved_bin)
