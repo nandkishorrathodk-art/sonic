@@ -14,9 +14,8 @@
 
 ## 📑 Table of Contents
 - [Overview](#-overview)
-- [Core Architecture: The AI Being & Workstation](#-core-architecture-the-ai-being--workstation)
+- [Core Architecture & Operational Model](#-core-architecture--operational-model)
 - [Key Capabilities & Subsystems](#-key-capabilities--subsystems)
-- [Deep AI / ML Architecture](#-deep-ai--ml-architecture)
 - [Repository Structure](#-repository-structure)
 - [Quick Start Guide](#-quick-start-guide)
 - [The Strict Core Invariants](#-the-strict-core-invariants)
@@ -38,7 +37,7 @@ It autonomously:
 
 ---
 
-## 🖥️ Core Architecture: The AI Being & Workstation
+## 🖥️ Core Architecture & Operational Model
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -102,29 +101,6 @@ SONIC does not silo itself into a terminal-only script or a sluggish GUI-only re
 | **Evidence Engine** | `sonic/evidence/` | Verifies and cryptographically hashes reproduction receipts for all findings. |
 | **Research Swarm** | `sonic/researcher/` | 6+1 concurrent specialist agents auditing attack surfaces in parallel. |
 | **Graph & Vector Memory** | `sonic/memory/` | Dual Neo4j / SQLite property graph and embedding vector storage. |
-
----
-
-## 🧠 Deep AI / ML Architecture
-
-SONIC is designed from the ground up as an **AI/ML-Native system**, eliminating rigid heuristics in favor of probabilistic reasoning and learned representations:
-
-1. **Multimodal Perception & Computer Vision:**
-   - Screenshots of Display `:99` are captured via `scrot -p` and processed directly by Vision-Language Models (VLMs) like Claude 3.5 Sonnet, GPT-4o, Gemini 1.5 Pro, or local Qwen2-VL.
-   - Grounding algorithms convert bounding-box tokens (`<|box_start|>ymin,xmin,ymax,xmax<|box_end|>`) into sub-pixel click targets.
-
-2. **Cognitive ReAct Decision Loop:**
-   - Every step follows `Observation -> Multimodal LLM Chain-of-Thought -> Structured Action -> Environment Feedback`.
-   - Stderr reflection: Execution failures prompt self-correction, syntax adjustments, and dynamic pivoting.
-
-3. **High-Dimensional Vector Memory (RAG):**
-   - Past penetration testing outcomes, CVE insights, and payloads are embedded via dense vector models (`text-embedding-3`, `BGE-m3`, `SentenceTransformers`) and retrieved using cosine similarity.
-
-4. **Curiosity & Novelty Engine:**
-   - Quantifies the information gain of new server responses, UI states, and files using vector distance. High novelty states incentivize deeper autonomous probing during idle curiosity loops.
-
-5. **Clustering & Anomaly Detection:**
-   - Analyzes response latency, status codes, and DOM trees using clustering algorithms (DBSCAN / K-Means) to surface blind vulnerabilities without pre-canned regexes.
 
 ---
 
