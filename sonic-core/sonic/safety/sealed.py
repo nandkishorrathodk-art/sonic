@@ -101,6 +101,8 @@ class SealedActionPolicy(ActionPolicy):
         scope_config: dict | None = None,
         allow_private_networks: bool = False,
         tenant_id: str = "default",
+        _seal_secret: str | None = None,
+        auto_seal: bool = True,
     ):
         super().__init__(
             workspace_root=workspace_root,
@@ -127,10 +129,11 @@ class SealedActionPolicy(ActionPolicy):
                 self._scope_checker_methods = [id(getattr(self.scope_checker, "classify_command_risk", None))]
             except Exception:
                 pass
-        self._seal_secret: str = os.environ.get("SONIC_SEAL_SECRET", os.urandom(32).hex())
+        self._seal_secret: str = _seal_secret or os.environ.get("SONIC_SEAL_SECRET", os.urandom(32).hex())
         self._seal_hash: str = ""
         self._sealed: bool = False
-        self.seal()
+        if auto_seal:
+            self.seal()
 
     # ------------------------------------------------------------------
     # Sealing
@@ -167,11 +170,12 @@ class SealedActionPolicy(ActionPolicy):
             scope_config=self.scope_config,
             allow_private_networks=self.allow_private_networks,
             tenant_id=self.tenant_id,
+            _seal_secret=self._seal_secret,
+            auto_seal=False,
         )
-        # Restore the original seal state
-        cloned._seal_secret = self._seal_secret
-        cloned._seal_hash = self._seal_hash
-        cloned._sealed = self._sealed
+        object.__setattr__(cloned, "_seal_secret", self._seal_secret)
+        object.__setattr__(cloned, "_seal_hash", self._seal_hash)
+        object.__setattr__(cloned, "_sealed", self._sealed)
         return cloned
 
     def _compute_seal_hash(self) -> str:
@@ -242,18 +246,8 @@ class SealedActionPolicy(ActionPolicy):
         return super().evaluate(action_type, target_resource, payload)
 
     def _clone(self) -> SealedActionPolicy:
-        """Create an unsealed clone suitable for per-agent rate window isolation."""
-        cloned = SealedActionPolicy(
-            workspace_root=self.workspace_root,
-            max_actions_per_minute=self.max_actions_per_minute,
-            require_approval_for_intrusive=self.require_approval_for_intrusive,
-            allowed_types=set(self.allowed_types),
-            allow_security_tool_targets=set(self.security_tool_targets),
-            allow_private_networks=self.allow_private_networks,
-        )
-        if self._sealed:
-            cloned.seal()
-        return cloned
+        """Create a clone suitable for per-agent rate window isolation."""
+        return self.clone_for_agent()
 
     # ------------------------------------------------------------------
     # Egress uses the FROZEN blocked-networks snapshot, not the live module list.
