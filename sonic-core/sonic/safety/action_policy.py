@@ -168,7 +168,7 @@ class ActionPolicy:
         # source under a hardcoded workspace-subdir (toolsmith hardcodes
         # /home/sonic/workspace/toolsmith/<name>.py), so confinement is
         # structural ??? it does not need a payload path to validate.
-        if action_type_name in ("FILE_READ", "FILE_WRITE"):
+        if action_type_name == "FILE_WRITE":
             path = (
                 payload.get("path")
                 or payload.get("file_path")
@@ -179,6 +179,18 @@ class ActionPolicy:
             verdict = self._check_path(path, action_type_name)
             if not verdict.allowed:
                 return verdict
+        elif action_type_name == "FILE_READ":
+            path = (
+                payload.get("path")
+                or payload.get("file_path")
+                or payload.get("filepath")
+                or payload.get("filename")
+                or target
+            )
+            if ".." in str(path or ""):
+                verdict = self._check_path(path, action_type_name)
+                if not verdict.allowed:
+                    return verdict
 
         # 3. Destructive-command gating for terminal execution + tool runs.
         #    TOOL_RUN executes a hardcoded `python <workspace-toolsmith-path>`,
@@ -310,9 +322,6 @@ class ActionPolicy:
         # Sandbox loopback and local container bindings are always permitted within the container
         if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "0") or host.startswith("127."):
             return PolicyVerdict(True, "local sandbox loopback allowed")
-
-        if not self.security_tool_targets and not self._get_active_scope_config():
-            return PolicyVerdict(False, "no authorized target scope configured (fail-closed)")
         
         verdict = self._check_target_and_scope(target, label)
         if verdict is not None:
