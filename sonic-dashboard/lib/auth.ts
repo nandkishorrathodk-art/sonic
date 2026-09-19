@@ -46,9 +46,12 @@ export function getUserSession(): UserSession | null {
  * Ensures a valid JWT token is stored in localStorage.
  * If absent, fetches a signed JWT from /auth/dev-token.
  */
-export async function ensureAuthToken(apiBase: string): Promise<string> {
-  const existing = getAuthToken();
-  if (existing) return existing;
+export async function ensureAuthToken(apiBase: string, force: boolean = false): Promise<string> {
+  if (!force) {
+    const existing = getAuthToken();
+    if (existing) return existing;
+  }
+  clearAuth();
 
   try {
     const res = await fetch(`${apiBase}/auth/dev-token`, { method: "POST" });

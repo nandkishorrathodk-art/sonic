@@ -51,8 +51,9 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
 
     if (res.status === 401) {
       // Re-provision token if expired and retry once
-      const newToken = await ensureAuthToken(API_BASE);
-      if (newToken && newToken !== token) {
+      clearAuth();
+      const newToken = await ensureAuthToken(API_BASE, true);
+      if (newToken) {
         requestHeaders.Authorization = `Bearer ${newToken}`;
         const retryRes = await fetch(url, { ...rest, headers: requestHeaders });
         if (retryRes.ok) return (await retryRes.json()) as T;

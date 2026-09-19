@@ -3359,39 +3359,33 @@ async def send_workstation_prompt(
     )
     _persist_workstation_state()
 
-    # Autonomous mode means a mission, not a one-shot chat completion. It can
-    # start only after the operator has explicitly provisioned a scoped target
-    # sandbox; otherwise no external action is inferred from free-form text.
+    # Autonomous mode against an external target sandbox runs mission preflight.
+    # If no external target sandbox is provisioned, the objective executes directly
+    # on the workstation environment via the Boss multi-phase orchestrator.
     if (req.mode or "").lower() == "autonomous":
         target_id = _session_target_id(user, session_id)
         target_box = state.get("target_sandbox", {})
-        if not target_id or not target_box.get("scope_verified", False):
-            state["status"] = "BLOCKED"
-            state["current_action"] = "Autonomous mission blocked — provision and scope-verify a target sandbox first."
-            message = "Autonomous mode needs an explicitly scoped target sandbox. Open the Mission tab, provision the authorized target, then resend this objective."
-            _append_worklog(state, "response", "SONIC Response", message)
-            _persist_workstation_state()
-            return {"status": "blocked", "reason": "scoped_target_required", "message": message, "state": state}
-        if state.get("mission", {}).get("status") == "RUNNING":
-            raise HTTPException(status_code=409, detail="A mission is already running for this session")
+        if target_id and target_box.get("scope_verified", False):
+            if state.get("mission", {}).get("status") == "RUNNING":
+                raise HTTPException(status_code=409, detail="A mission is already running for this session")
 
-        mission_id = f"mission-{uuid.uuid4().hex[:10]}"
-        state["mission"].update({
-            "mission_id": mission_id,
-            "objective": prompt_text,
-            "status": "QUEUED",
-            "target_sandbox_id": target_id,
-            "started_at": _timestamp(),
-            "completed_at": "",
-            "events": [],
-        })
-        state["status"] = "RUNNING"
-        state["current_action"] = "Executing autonomous mission for evidence-based discovery..."
-        _mission_event(state, "mission", "Autonomous mission accepted", prompt_text, mission_id=mission_id, workspace_id=target_id)
-        _track_background_task(tenant_id, session_id, asyncio.create_task(_run_foreground_operator_task(
-            _run_mission_preflight(tenant_id, session_id, mission_id)
-        )))
-        return {"status": "accepted", "reasoning": "mission_started", "message": "Autonomous mission accepted for the scoped target.", "state": state}
+            mission_id = f"mission-{uuid.uuid4().hex[:10]}"
+            state["mission"].update({
+                "mission_id": mission_id,
+                "objective": prompt_text,
+                "status": "QUEUED",
+                "target_sandbox_id": target_id,
+                "started_at": _timestamp(),
+                "completed_at": "",
+                "events": [],
+            })
+            state["status"] = "RUNNING"
+            state["current_action"] = "Executing autonomous mission for evidence-based discovery..."
+            _mission_event(state, "mission", "Autonomous mission accepted", prompt_text, mission_id=mission_id, workspace_id=target_id)
+            _track_background_task(tenant_id, session_id, asyncio.create_task(_run_foreground_operator_task(
+                _run_mission_preflight(tenant_id, session_id, mission_id)
+            )))
+            return {"status": "accepted", "reasoning": "mission_started", "message": "Autonomous mission accepted for the scoped target.", "state": state}
 
     # Never hold the HTTP request open on an external LLM.  The dashboard can
     # refresh workstation state while this task records the real result.

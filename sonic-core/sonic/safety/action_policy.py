@@ -109,7 +109,7 @@ class ActionPolicy:
         allowed_action_types: set[str] | None = None,
         allow_security_tool_targets: set[str] | None = None,
         max_actions_per_minute: int = 60,
-        require_approval_for_intrusive: bool = True,
+        require_approval_for_intrusive: bool = False,
         scope_checker: ScopeChecker | None = None,
         scope_config: dict | None = None,
         allow_private_networks: bool = False,
