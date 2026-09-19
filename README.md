@@ -212,5 +212,6 @@ python -m pytest sonic-core/tests/test_phase_plan6_safety_envelope.py \
 
 ## 📄 License
 
-Proprietary — All rights reserved.  
-Unauthorized copying, modification, distribution, or commercial deployment is strictly prohibited.
+**Copyright (c) 2026 Nandkishor Rathod. All Rights Reserved.**
+
+This project is proprietary software. No entity or individual may copy, clone, distribute, modify, or commercially exploit this software without express prior written permission. See [LICENSE](LICENSE) for full legal terms.
