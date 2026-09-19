@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   MessageSquare,
   Settings,
@@ -10,6 +10,7 @@ import {
   FileCheck2,
   Dna,
   Trash2,
+  Loader2,
   ShieldCheck,
   Monitor,
   BrainCircuit,
@@ -53,6 +54,8 @@ export function WorkstationSidebar({
   onNewSession,
   onDeleteSession,
 }: WorkstationSidebarProps) {
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
   return (
     <aside
       className={`${
@@ -135,14 +138,27 @@ export function WorkstationSidebar({
                         </div>
                         {onDeleteSession && sessId !== "default" && (
                           <button
-                            onClick={(e) => {
+                            onClick={async (e) => {
                               e.stopPropagation();
-                              onDeleteSession(sessId);
+                              if (deletingId) return;
+                              setDeletingId(sessId);
+                              try {
+                                await onDeleteSession(sessId);
+                              } finally {
+                                setDeletingId(null);
+                              }
                             }}
-                            className="opacity-0 group-hover:opacity-100 text-muted-dim hover:text-danger p-0.5 rounded transition"
+                            disabled={deletingId === sessId}
+                            className={`${
+                              deletingId === sessId ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                            } text-muted-dim hover:text-danger p-0.5 rounded transition`}
                             title="Delete Session"
                           >
-                            <Trash2 className="w-3 h-3" />
+                            {deletingId === sessId ? (
+                              <Loader2 className="w-3 h-3 animate-spin text-danger" />
+                            ) : (
+                              <Trash2 className="w-3 h-3" />
+                            )}
                           </button>
                         )}
                       </div>

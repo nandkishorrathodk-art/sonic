@@ -317,6 +317,7 @@ class ComputerUseAgent:
         self._interrupted: bool = False
         self.goal_reached: bool = False
         self._consecutive_failures: int = 0
+        self._consecutive_unchanged_screens: int = 0
         self._goal_complete_declared: bool = False
         self._replan_count: int = 0
         self._last_navigated_url: str = ""
@@ -986,6 +987,10 @@ class ComputerUseAgent:
             raw_facts.append(f"Workspace files: {files_str}")
         if active_app != "UNKNOWN":
             raw_facts.append(f"Active app: {active_app}")
+        if getattr(observation, "installed_applications", None):
+            raw_facts.append(f"Installed/Desktop apps: {', '.join(observation.installed_applications[:15])}")
+        if windows_str != "UNKNOWN":
+            raw_facts.append(f"Open desktop windows: {windows_str}")
         if git_branch_str != "UNKNOWN":
             raw_facts.append(f"Git: {git_branch_str} (clean={observation.git_clean})")
         if terminal_text != "UNKNOWN":
@@ -2606,7 +2611,18 @@ class ComputerUseAgent:
                     else:
                         actual_obs_str = f"Clicked at ({x}, {y})"
                     if pre_screen_b64 and post_screen_b64 and pre_screen_b64 == post_screen_b64:
-                        actual_obs_str = f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after click — target element may be occluded, missing, or page is loading."
+                        self._consecutive_unchanged_screens += 1
+                        if self._consecutive_unchanged_screens >= 2:
+                            status = ActionExecutionStatus.FAILED
+                            recovery_needed = True
+                            actual_obs_str = (
+                                f"{actual_obs_str} | [ANTI-STALL ALERT]: Consecutive clicks produced zero screen change (display unchanged). "
+                                f"Coordinate ({x}, {y}) did not trigger UI response. Marked as FAILED to trigger strategy pivot."
+                            )
+                        else:
+                            actual_obs_str = f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after click — target element may be occluded, missing, or page is loading."
+                    elif post_screen_b64:
+                        self._consecutive_unchanged_screens = 0
 
             elif action_type == ComputerActionType.GUI_DOUBLE_CLICK:
                 if payload.get("x") is None or payload.get("y") is None:
@@ -2634,7 +2650,18 @@ class ComputerUseAgent:
                     else:
                         actual_obs_str = f"Double-clicked at ({x}, {y})"
                     if pre_screen_b64 and post_screen_b64 and pre_screen_b64 == post_screen_b64:
-                        actual_obs_str = f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after double-click."
+                        self._consecutive_unchanged_screens += 1
+                        if self._consecutive_unchanged_screens >= 2:
+                            status = ActionExecutionStatus.FAILED
+                            recovery_needed = True
+                            actual_obs_str = (
+                                f"{actual_obs_str} | [ANTI-STALL ALERT]: Consecutive double-clicks produced zero screen change (display unchanged). "
+                                f"Coordinate ({x}, {y}) did not trigger UI response. Marked as FAILED to trigger strategy pivot."
+                            )
+                        else:
+                            actual_obs_str = f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after double-click."
+                    elif post_screen_b64:
+                        self._consecutive_unchanged_screens = 0
 
             elif action_type == ComputerActionType.GUI_RIGHT_CLICK:
                 if payload.get("x") is None or payload.get("y") is None:
@@ -4279,7 +4306,9 @@ class ComputerUseAgent:
                 "SUCCESS",
                 "VERIFIED",
             ):
-                self._consecutive_failures = 0
+                obs_txt = str(getattr(trace, "actual_observation", "") or "")
+                if "[VISUAL VERIFICATION]: Screen state unchanged" not in obs_txt:
+                    self._consecutive_failures = 0
                 self._consecutive_unverified_declarations = 0
                 if getattr(self, "checklist", None) is not None:
                     active_sg = self.checklist.active_sub_goal()

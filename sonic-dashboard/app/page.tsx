@@ -113,15 +113,27 @@ export default function SonicDevinWorkstation() {
 
   const handleDeleteSession = async (delSessionId: string) => {
     try {
+      // Optimistically remove from session list immediately
+      setSessionList((prev) => prev.filter((s) => s.session_id !== delSessionId));
+
       await api.deleteSession(delSessionId);
+
       if (sessionId === delSessionId) {
-        setSessionId("fresh");
-        await fetchWorkstationData("fresh");
+        // Switch cleanly to the next available session or default
+        const remaining = sessionList.filter((s) => s.session_id !== delSessionId);
+        const nextSessionId = remaining.length > 0 ? remaining[0].session_id : "default";
+        setSessionId(nextSessionId);
+        setActiveFile("");
+        setFileContent([]);
+        setGitDiff("");
+        setCommandLogs([]);
+        await fetchWorkstationData(nextSessionId);
       } else {
         await fetchWorkstationData(sessionId);
       }
     } catch {
-      // ignore
+      // Refresh to restore truthful server state on error
+      await fetchWorkstationData(sessionId);
     }
   };
 

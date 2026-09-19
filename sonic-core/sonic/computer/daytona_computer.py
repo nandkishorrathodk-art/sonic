@@ -288,6 +288,8 @@ class DaytonaComputerProvider(ComputerProvider):
                         or "404" in err_msg
                         or "not found" in err_msg
                         or "does not exist" in err_msg
+                        or "expired" in err_msg
+                        or "deleted" in err_msg
                     )
                     if not is_not_found:
                         return None

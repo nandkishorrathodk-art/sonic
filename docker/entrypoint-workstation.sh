@@ -39,11 +39,11 @@ fi
 mkdir -p /run/sonic
 x11vnc -storepasswd "$SONIC_VNC_PASSWORD" /run/sonic/vnc.pass >/dev/null
 chmod 600 /run/sonic/vnc.pass
-# -cursor arrow: render the X cursor into the VNC framebuffer
-# -xfixes: use XFIXES extension for cursor shape tracking
+# -cursor arrow -nocursorshape: render the X cursor directly into the VNC framebuffer
+# so server-side programmatic mouse moves (e.g. xdotool) are visible live in noVNC.
 export XCURSOR_THEME="${XCURSOR_THEME:-DMZ-White}"
 export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
-x11vnc -display :99 -forever -rfbauth /run/sonic/vnc.pass -shared -rfbport 5900 -bg -cursor arrow -xfixes
+x11vnc -display :99 -forever -rfbauth /run/sonic/vnc.pass -shared -rfbport 5900 -bg -cursor arrow -nocursorshape
 
 # Start noVNC websockify bridge on port 6080
 echo "[*] Starting noVNC websockify bridge on port 6080..."

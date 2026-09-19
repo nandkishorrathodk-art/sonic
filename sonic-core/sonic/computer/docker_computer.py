@@ -442,7 +442,7 @@ class DockerComputerProvider(ComputerProvider):
 
         disp = self._get_display(workspace_id)
         scr_cmd = (
-            f"DISPLAY={disp} scrot -o /tmp/sonic_screen.png 2>/dev/null || "
+            f"DISPLAY={disp} scrot -p -o /tmp/sonic_screen.png 2>/dev/null || "
             f"DISPLAY={disp} import -window root /tmp/sonic_screen.png 2>/dev/null; "
             f"base64 -w0 /tmp/sonic_screen.png 2>/dev/null && "
             f"echo '___ACTIVE_WINDOW___' && "
@@ -823,29 +823,139 @@ class DockerComputerProvider(ComputerProvider):
                     apps.append(app)
         return apps
 
+    @staticmethod
+    def _split_app_and_args(clean_app: str) -> tuple[str, list[str]]:
+        """Separates an application command string into application query and arguments.
+        Handles flags, URLs, and multi-word application names safely."""
+        try:
+            parts = shlex.split(clean_app)
+        except Exception:
+            parts = clean_app.split()
+        if not parts:
+            return "", []
+
+        # Find the index of the first argument (flag, URL, or option)
+        arg_idx = None
+        for idx, part in enumerate(parts):
+            if part.startswith("-") or "://" in part or part.startswith("www."):
+                arg_idx = idx
+                break
+
+        if arg_idx is not None and arg_idx > 0:
+            app_part = " ".join(parts[:arg_idx])
+            args_part = parts[arg_idx:]
+            return app_part, args_part
+        elif arg_idx == 0:
+            return parts[0], parts[1:]
+        else:
+            # If no flags or URLs, if multiple words, return the entire string as the query
+            return clean_app, []
+
+
+    async def _resolve_app_binary(self, app_query: str) -> str:
+        """Dynamically resolve an application query to its executable binary on the system.
+        Follows AGENTS.md Rule 1: Zero hardcoding. Resolves via PATH, POSIX alternatives,
+        and .desktop entries discovered dynamically from the OS."""
+        app_clean = app_query.strip()
+        if not app_clean:
+            return ""
+
+        # 1. If it's a direct executable on PATH or full path
+        code, out, _ = await self._docker_exec(f"which {shlex.quote(app_clean)} 2>/dev/null")
+        if code == 0 and out.strip():
+            return out.strip().splitlines()[0]
+
+        # 2. Try hyphenated version (e.g. 'google chrome' -> 'google-chrome')
+        if " " in app_clean:
+            hyphenated = app_clean.replace(" ", "-").lower()
+            code, out, _ = await self._docker_exec(f"which {shlex.quote(hyphenated)} 2>/dev/null")
+            if code == 0 and out.strip():
+                return out.strip().splitlines()[0]
+
+        # 3. Dynamic lookup in .desktop files (/root/Desktop, /usr/share/applications, ~/.local/share/applications)
+        search_esc = app_clean.replace('"', '\\"').lower()
+        desktop_lookup_cmd = (
+            f"for d in /root/Desktop/*.desktop /usr/share/applications/*.desktop ~/.local/share/applications/*.desktop; do "
+            f"  [ -f \"$d\" ] || continue; "
+            f"  name=$(grep -i '^Name=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
+            f"  gname=$(grep -i '^GenericName=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
+            f"  base=$(basename \"$d\" .desktop 2>/dev/null | tr '[:upper:]' '[:lower:]'); "
+            f"  if echo \"$name $gname $base\" | grep -q \"{search_esc}\"; then "
+            f"    exec_line=$(grep '^Exec=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2-); "
+            f"    bin=$(echo \"$exec_line\" | awk '{{print $1}}'); "
+            f"    if which \"$bin\" >/dev/null 2>&1; then which \"$bin\"; exit 0; fi; "
+            f"  fi; "
+            f"done; "
+            f"exit 1"
+        )
+        code, out, _ = await self._docker_exec(desktop_lookup_cmd)
+        if code == 0 and out.strip():
+            return out.strip().splitlines()[0]
+
+        # 4. Fallback to POSIX standard alternatives if querying a generic role (browser, editor, terminal)
+        if any(role in app_clean.lower() for role in ("browser", "web")):
+            for alt in ("x-www-browser", "sensible-browser", "xdg-open"):
+                code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
+                if code == 0 and out.strip():
+                    return out.strip().splitlines()[0]
+
+        # 5. Default fallback: hyphenated if multi-word, else first token
+        try:
+            parts = shlex.split(app_clean)
+            if len(parts) > 1:
+                return "-".join(parts)
+            return parts[0] if parts else app_clean
+        except Exception:
+            parts = app_clean.split()
+            if len(parts) > 1:
+                return "-".join(parts)
+            return parts[0] if parts else app_clean
+
     async def launch_application(self, workspace_id: str, app_name: str, actor: str = "operator") -> bool:
         clean_app = (app_name or "").strip()
         if not clean_app:
             return False
-        parts = shlex.split(clean_app)
-        if not parts:
-            return False
+
+        app_query, args = self._split_app_and_args(clean_app)
+        resolved_bin = await self._resolve_app_binary(app_query)
+        if not resolved_bin:
+            try:
+                resolved_bin = shlex.split(clean_app)[0]
+            except Exception:
+                resolved_bin = clean_app.split()[0]
+
         if hasattr(self, "app_policy") and self.app_policy:
-            allowed, _ = self.app_policy.is_package_allowed(parts[0])
+            allowed, _ = self.app_policy.is_package_allowed(resolved_bin)
             if not allowed:
                 return False
-        bin_base = os.path.basename(parts[0]).lower()
+
+        parts = [resolved_bin] + args
+        bin_base = os.path.basename(resolved_bin).lower()
         if any(b in bin_base for b in ("chrome", "chromium", "brave", "edge", "electron", "browser")):
             safe_flags = [f for f in ("--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu") if f not in parts]
             if safe_flags:
                 parts = [parts[0]] + safe_flags + parts[1:]
+
         disp = self._get_display(workspace_id)
         spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 &"
-        self._active_windows[workspace_id] = parts[0]
+        self._active_windows[workspace_id] = os.path.basename(resolved_bin)
         self._last_screenshot = None
         self._last_screenshot_time = 0.0
         code, _, _ = await self._docker_exec(spawn)
         return code == 0
+
+    async def cleanup_desktop_windows(self, workspace_id: str) -> None:
+        """Closes open application windows to restore desktop hygiene without killing panels or desktop."""
+        disp = self._get_display(workspace_id)
+        clean_cmd = (
+            f"for wid in $(DISPLAY={disp} wmctrl -l 2>/dev/null | grep -v ' -1 ' | cut -d' ' -f1); do "
+            f"  DISPLAY={disp} wmctrl -ic \"$wid\" 2>/dev/null || true; "
+            f"done"
+        )
+        await self._docker_exec(clean_cmd)
+        self._active_windows[workspace_id] = "Desktop"
+        self._last_screenshot = None
+        self._last_screenshot_time = 0.0
 
     async def close_application(self, workspace_id: str, app_name: str, actor: str = "operator") -> bool:
         action = GUIAction(action=GUIActionType.CLOSE_APP, app_name=app_name)

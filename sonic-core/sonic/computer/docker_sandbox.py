@@ -13,6 +13,7 @@ import asyncio
 import base64
 import shlex
 import shutil
+import subprocess
 
 from sonic.logger import get_logger
 
@@ -126,7 +127,7 @@ class DockerContainerSandbox:
         if not shutil.which("docker"):
             return ""
         command = (
-            "DISPLAY=${DISPLAY:-:99} scrot -o /tmp/sonic_adapter_screen.png 2>/dev/null || "
+            "DISPLAY=${DISPLAY:-:99} scrot -p -o /tmp/sonic_adapter_screen.png 2>/dev/null || "
             "DISPLAY=${DISPLAY:-:99} import -window root /tmp/sonic_adapter_screen.png 2>/dev/null; "
             "base64 -w0 /tmp/sonic_adapter_screen.png 2>/dev/null"
         )

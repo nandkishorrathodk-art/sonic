@@ -130,9 +130,8 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
 
     success = await provider.launch_application("ws-1", "chromium https://target.local")
     assert success is True
-    provider._docker_exec.assert_called_once()
     called_cmd = provider._docker_exec.call_args[0][0]
-    expected_spawn = "DISPLAY=:99 nohup chromium https://target.local >/dev/null 2>&1 &"
+    expected_spawn = "DISPLAY=:99 nohup chromium --no-sandbox --disable-dev-shm-usage --disable-gpu https://target.local >/tmp/sonic_app_launch.log 2>&1 &"
     assert called_cmd == expected_spawn
 
     # Also test an argument with spaces / special characters that requires escaping
@@ -140,8 +139,17 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
     success2 = await provider.launch_application("ws-1", "chromium 'https://target.local/path with spaces'")
     assert success2 is True
     called_cmd2 = provider._docker_exec.call_args[0][0]
-    expected_spawn2 = "DISPLAY=:99 nohup chromium 'https://target.local/path with spaces' >/dev/null 2>&1 &"
+    expected_spawn2 = "DISPLAY=:99 nohup chromium --no-sandbox --disable-dev-shm-usage --disable-gpu 'https://target.local/path with spaces' >/tmp/sonic_app_launch.log 2>&1 &"
     assert called_cmd2 == expected_spawn2
+
+    # Also test multi-word application query (e.g. 'google chrome')
+    provider._docker_exec.reset_mock()
+    success3 = await provider.launch_application("ws-1", "google chrome https://target.local")
+    assert success3 is True
+    called_cmd3 = provider._docker_exec.call_args[0][0]
+    assert "DISPLAY=:99 nohup" in called_cmd3
+    assert "https://target.local" in called_cmd3
+    assert "--no-sandbox" in called_cmd3
 
 
 @pytest.mark.no_live_infra
