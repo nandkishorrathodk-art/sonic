@@ -491,7 +491,10 @@ class BossAgent:
                             content=trigger_msg,
                         ))
 
-            current_phase.status = "COMPLETED"
+            if any(r.success for r in current_phase.results):
+                current_phase.status = "COMPLETED"
+            else:
+                current_phase.status = "FAILED"
             current_phase.completed_at = self._now()
 
             await self._emit(phase_callback, "phase_complete", {

@@ -437,8 +437,8 @@ class DockerComputerProvider(ComputerProvider):
 
     async def screenshot(self, workspace_id: str) -> ScreenObservation:
         now = asyncio.get_event_loop().time()
-        if self._last_screenshot is not None and (now - self._last_screenshot_time) < 2.0:
-            return self._last_screenshot
+        # if self._last_screenshot is not None and (now - self._last_screenshot_time) < 2.0:
+        #     return self._last_screenshot
 
         disp = self._get_display(workspace_id)
         scr_cmd = (
@@ -493,6 +493,37 @@ class DockerComputerProvider(ComputerProvider):
     # Graphical Actions (Human Takeover & Agent GUI Actions)
     # -------------------------------------------------------------
 
+    def _split_app_and_args(self, app_name: str) -> tuple[str, list[str]]:
+        parts = shlex.split(app_name)
+        if not parts:
+            return "", []
+        for i, part in enumerate(parts):
+            if part.startswith("http://") or part.startswith("https://") or part.startswith("-"):
+                return " ".join(parts[:i]), parts[i:]
+        return " ".join(parts), []
+
+    async def _resolve_app_binary(self, app_query: str) -> str | None:
+        if not app_query:
+            return None
+        safe_query = shlex.quote(app_query)
+        script = f'''
+        for d in /usr/share/applications/*.desktop ~/.local/share/applications/*.desktop; do
+            [ -f "$d" ] || continue
+            NAME=$(grep -E "^Name=" "$d" | head -n 1 | cut -d'=' -f2)
+            if [ "$NAME" = {safe_query} ] || [ "$(echo "$NAME" | tr '[:upper:]' '[:lower:]')" = "$(echo {safe_query} | tr '[:upper:]' '[:lower:]')" ]; then
+                EXEC_LINE=$(grep -E "^Exec=" "$d" | head -n 1 | cut -d'=' -f2-)
+                echo "$EXEC_LINE" | sed -E 's/%[a-zA-Z]//g' | xargs
+                exit 0
+            fi
+        done
+        which {safe_query} 2>/dev/null
+        '''
+        code, out, _ = await self._docker_exec(script, timeout=5)
+        out = out.strip()
+        if out:
+            return out
+        return None
+
     async def gui_action(
         self,
         workspace_id: str,
@@ -545,8 +576,10 @@ class DockerComputerProvider(ComputerProvider):
 
             elif atype == GUIActionType.OPEN_APP and action.app_name:
                 clean_app = action.app_name.strip()
-                parts = shlex.split(clean_app) if clean_app else []
-                if parts:
+                app_query, args_list = self._split_app_and_args(clean_app)
+                resolved_bin = await self._resolve_app_binary(app_query)
+                if resolved_bin:
+                    parts = shlex.split(resolved_bin) + args_list
                     bin_base = os.path.basename(parts[0]).lower()
                     if any(b in bin_base for b in ("chrome", "chromium", "brave", "edge", "electron", "browser")):
                         safe_flags = [f for f in ("--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu") if f not in parts]

@@ -130,6 +130,7 @@ class SealedActionPolicy(ActionPolicy):
         self._seal_secret: str = os.environ.get("SONIC_SEAL_SECRET", os.urandom(32).hex())
         self._seal_hash: str = ""
         self._sealed: bool = False
+        self.seal()
 
     # ------------------------------------------------------------------
     # Sealing
@@ -153,6 +154,25 @@ class SealedActionPolicy(ActionPolicy):
     @property
     def seal_hash(self) -> str:
         return self._seal_hash
+
+    def clone_for_agent(self, agent_id: str = "") -> "SealedActionPolicy":
+        """Clone policy with an independent rate window for a concurrent subagent."""
+        cloned = SealedActionPolicy(
+            workspace_root=str(self.workspace_root),
+            allowed_action_types=set(self.allowed_types),
+            allow_security_tool_targets=set(self.security_tool_targets),
+            max_actions_per_minute=self.max_actions_per_minute,
+            require_approval_for_intrusive=self.require_approval_for_intrusive,
+            scope_checker=self.scope_checker,
+            scope_config=self.scope_config,
+            allow_private_networks=self.allow_private_networks,
+            tenant_id=self.tenant_id,
+        )
+        # Restore the original seal state
+        cloned._seal_secret = self._seal_secret
+        cloned._seal_hash = self._seal_hash
+        cloned._sealed = self._sealed
+        return cloned
 
     def _compute_seal_hash(self) -> str:
         """SHA-256 over the canonical serialization of the safety-relevant config."""

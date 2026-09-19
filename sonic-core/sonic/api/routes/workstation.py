@@ -151,7 +151,7 @@ class MissionProbeApproveRequest(BaseModel):
 # Tenant-Scoped Workstation State Store
 # -------------------------------------------------------------
 _tenant_workstations: dict[str, dict[str, dict[str, Any]]] = {}
-_background_tasks: set[asyncio.Task] = set()
+_background_tasks: dict[tuple[str, str], asyncio.Task] = {}
 
 
 def _resolve_tenant_id(user: Any) -> str:
@@ -229,10 +229,16 @@ async def _run_prompt_reasoning_with_timeout(
         _persist_workstation_state()
 
 
-def _track_background_task(task: asyncio.Task) -> asyncio.Task:
+def _track_background_task(tenant_id: str, session_id: str, task: asyncio.Task) -> asyncio.Task:
     """Retain strong reference to background task until completion to prevent GC."""
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+    key = (tenant_id, session_id)
+    if key in _background_tasks:
+        _background_tasks[key].cancel()
+    _background_tasks[key] = task
+    def _cleanup(t):
+        if _background_tasks.get(key) == t:
+            del _background_tasks[key]
+    task.add_done_callback(_cleanup)
     return task
 
 
@@ -243,13 +249,13 @@ def _load_workstation_state() -> None:
         if state_file.exists():
             raw = json.loads(state_file.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
-                # Migrate any legacy email-partitioned keys to canonical 'default' (or matching tenant)
+                # Migrate any legacy email-partitioned keys to their proper tenant_id
                 migrated_any = False
-                canonical_tenant = "default"
                 legacy_keys = [k for k in list(raw.keys()) if "@" in k]
                 for leg_k in legacy_keys:
                     sessions = raw.pop(leg_k)
                     if isinstance(sessions, dict):
+                        canonical_tenant = leg_k
                         if canonical_tenant not in raw:
                             raw[canonical_tenant] = {}
                         for sid, sdata in sessions.items():
@@ -943,6 +949,11 @@ async def delete_workstation_session(
                 await comp.destroy(workspace_id)
             except Exception as exc:
                 logger.warning("workstation_session_cleanup_failed", workspace_id=workspace_id, error=str(exc))
+
+        task_key = (tenant_id, session_id)
+        task = _background_tasks.pop(task_key, None)
+        if task:
+            task.cancel()
 
         if session_id != "default":
             del _tenant_workstations[tenant_id][session_id]
@@ -1796,7 +1807,7 @@ async def start_workstation_mission(
     state["status"] = "RUNNING"
     state["current_action"] = "Starting mission target-sandbox preflight..."
     _mission_event(state, "mission", "Mission accepted", req.objective.strip(), mission_id=mission_id, workspace_id=target_id)
-    _track_background_task(asyncio.create_task(_run_mission_preflight(tenant_id, session_id, mission_id)))
+    _track_background_task(tenant_id, session_id, asyncio.create_task(_run_mission_preflight(tenant_id, session_id, mission_id)))
     return {"status": "queued", "mission": mission}
 
 
@@ -3071,6 +3082,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             finally:
                                 if browser_agent is not None:
                                     await browser_agent.close()
+                                await computer.cleanup_desktop_windows(desktop_id)
 
                             # Final summary
                             succeeded = sum(1 for t in traces if t.status in ("SUCCESS", "RECOVERED"))
@@ -3375,14 +3387,14 @@ async def send_workstation_prompt(
         state["status"] = "RUNNING"
         state["current_action"] = "Executing autonomous mission for evidence-based discovery..."
         _mission_event(state, "mission", "Autonomous mission accepted", prompt_text, mission_id=mission_id, workspace_id=target_id)
-        _track_background_task(asyncio.create_task(_run_foreground_operator_task(
+        _track_background_task(tenant_id, session_id, asyncio.create_task(_run_foreground_operator_task(
             _run_mission_preflight(tenant_id, session_id, mission_id)
         )))
         return {"status": "accepted", "reasoning": "mission_started", "message": "Autonomous mission accepted for the scoped target.", "state": state}
 
     # Never hold the HTTP request open on an external LLM.  The dashboard can
     # refresh workstation state while this task records the real result.
-    _track_background_task(asyncio.create_task(_run_foreground_operator_task(
+    _track_background_task(tenant_id, session_id, asyncio.create_task(_run_foreground_operator_task(
         _run_prompt_reasoning_with_timeout(tenant_id, session_id, prompt_text)
     )))
     return {

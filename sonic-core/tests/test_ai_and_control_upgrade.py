@@ -26,7 +26,7 @@ from sonic.computer.models import (
 )
 from sonic.computer.provider import ComputerProvider
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ComputerActionType, ComputerWorldObservation
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType, ComputerWorldObservation
 from sonic.llm.providers.custom import (
     CustomLLMProvider,
     _extract_json_object,
@@ -591,8 +591,9 @@ def test_llm_choose_action_recovers_from_refusal_with_target():
         )
     )
     assert agent._last_thought == "LLM safety refusal detected; recording refusal for replanning."
-    assert action_type == ComputerActionType.TERMINAL_EXEC
-    assert payload["command"] == "echo 'LLM_SAFETY_REFUSAL'"
+    # Rule 2: refusal is now recorded as BLOCKED status (no canned shell command)
+    assert action_type == ActionExecutionStatus.BLOCKED
+    assert target == "refusal-recorded"
 
 
 def test_llm_choose_action_recovers_from_refusal_without_target():
@@ -612,6 +613,7 @@ def test_llm_choose_action_recovers_from_refusal_without_target():
         )
     )
     assert agent._last_thought == "LLM safety refusal detected; recording refusal for replanning."
-    assert action_type == ComputerActionType.TERMINAL_EXEC
-    assert payload == {"command": "echo 'LLM_SAFETY_REFUSAL'"}
+    # Rule 2: refusal is now recorded as BLOCKED status (no canned shell command)
+    assert action_type == ActionExecutionStatus.BLOCKED
+    assert payload == {}
     assert expected == "Record model refusal and trigger replan"

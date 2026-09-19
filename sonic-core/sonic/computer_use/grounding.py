@@ -47,6 +47,26 @@ def extract_bbox_midpoint(
     if not bbox_response:
         return None
 
+    if isinstance(bbox_response, str):
+        upper_resp = bbox_response.upper()
+        if "NOT_FOUND" in upper_resp or "NOT FOUND" in upper_resp:
+            return None
+
+    pt = _extract_bbox_midpoint_impl(bbox_response, width, height, is_normalized_1000)
+    if pt == (0, 0):
+        return None
+    return pt
+
+
+def _extract_bbox_midpoint_impl(
+    bbox_response: Any,
+    width: int = 1280,
+    height: int = 800,
+    is_normalized_1000: bool | None = None,
+) -> tuple[int, int] | None:
+    if not bbox_response:
+        return None
+
     if isinstance(bbox_response, (tuple, list)):
         try:
             if len(bbox_response) >= 4:

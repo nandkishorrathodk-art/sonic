@@ -317,6 +317,9 @@ class ActionPolicy:
         return cfg if has_rules else None
 
     def _check_egress(self, target: str, label: str) -> PolicyVerdict:
+        if not self.security_tool_targets and not self._get_active_scope_config():
+            return PolicyVerdict(False, "no authorized target scope configured (fail-closed)")
+        
         verdict = self._check_target_and_scope(target, label)
         if verdict is not None:
             return verdict

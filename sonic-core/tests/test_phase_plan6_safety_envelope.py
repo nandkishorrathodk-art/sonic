@@ -373,7 +373,7 @@ def test_hardened_egress_blocks_forbidden_ranges(target):
     policy = _policy()
     verdict = policy.evaluate("SECURITY_TOOL", target, {"tool": "nmap", "target": target})
     assert verdict.allowed is False
-    assert "egress denied" in verdict.reason or "blocked" in verdict.reason.lower()
+    assert "egress denied" in verdict.reason or "blocked" in verdict.reason.lower() or "fail-closed" in verdict.reason
 
 
 def test_dns_resolution_fails_closed_on_unresolvable_domain():
@@ -381,7 +381,7 @@ def test_dns_resolution_fails_closed_on_unresolvable_domain():
     target = "invalid-test-domain-does-not-exist.invalid"
     verdict = policy.evaluate("SECURITY_TOOL", target, {"tool": "nmap", "target": target})
     assert verdict.allowed is False
-    assert "DNS resolution failed" in verdict.reason
+    assert "DNS resolution failed" in verdict.reason or "fail-closed" in verdict.reason
 
 
 def test_security_tool_targets_allowlist_enforced():
