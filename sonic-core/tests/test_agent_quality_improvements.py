@@ -148,7 +148,7 @@ def test_parse_llm_action_reclassifies_navigate_to_browser():
     assert payload.get("url") == "https://example.com/api"
 
 
-def test_parse_llm_action_intercepts_invalid_which_verb():
+def test_parse_llm_action_preserves_dynamic_which_query():
     text = (
         "THOUGHT: Check which launch exists\n"
         "ACTION: TERMINAL_EXEC\n"
@@ -158,8 +158,9 @@ def test_parse_llm_action_intercepts_invalid_which_verb():
     )
     act_type, target, payload, _ = ComputerUseAgent._parse_llm_action(text, "README.md")
     assert act_type == ComputerActionType.TERMINAL_EXEC
-    # Must NOT run 'which Launch'
-    assert payload.get("command") == "pwd"
+    # Application resolution is dynamic; do not rewrite the model's query
+    # through a hardcoded verb list or substitute a canned command.
+    assert payload.get("command") == "which Launch"
 
 
 def test_parse_llm_action_normalizes_which_app():
