@@ -2043,11 +2043,8 @@ class ComputerUseAgent:
         if s.lower() in ("diagnostic probe", "diagnostic.sh", "diagnostic probe.", "address"):
             return "true"
 
-        # 1. Unpack JSON or dict embedded anywhere in text
-        cmd_match = re.search(r'["\']command["\']\s*:\s*["\']([^"\']+)["\']', s)
-        if cmd_match:
-            s = cmd_match.group(1).strip()
-        elif s.startswith("{"):
+        # 1. Unpack JSON or dict only if payload is formatted as a JSON object
+        if s.startswith("{"):
             try:
                 import json
                 p = json.loads(s)
@@ -2060,7 +2057,9 @@ class ComputerUseAgent:
                     if isinstance(p, dict) and "command" in p:
                         s = str(p["command"]).strip()
                 except Exception:
-                    pass
+                    cmd_match = re.search(r'["\']command["\']\s*:\s*["\']((?:\\.|[^"\\])+)["\']', s)
+                    if cmd_match:
+                        s = cmd_match.group(1).replace(r'\"', '"').replace(r"\'", "'").strip()
 
         # 2. Strip bash/terminal wrapper prefixes & markdown fences
         s = re.sub(r'^(?:[a-zA-Z0-9_\-\.]+(?:-terminal)?,?\s*)?(?:command|cmd)\s*=\s*', '', s)
@@ -2842,7 +2841,7 @@ class ComputerUseAgent:
 
             elif action_type == ComputerActionType.FILE_WRITE:
                 path = payload.get("path") or target_resource or "/home/sonic/workspace/auth.py"
-                content = payload.get("content", "")
+                content = payload.get("content") or payload.get("code") or payload.get("file_content") or payload.get("text") or payload.get("data") or ""
                 await self.computer.write_file(workspace_id, path, content)
                 actual_obs_str = f"Wrote patch ({len(content)} bytes) to {path}"
 
@@ -2871,7 +2870,7 @@ class ComputerUseAgent:
                             apps = await self.computer.application_list(workspace_id)
                             cached = set(a.lower() for a in apps)
                             setattr(self.computer, "_cached_desktop_apps", cached)
-                        if base_bin.lower() in cached or any(base_bin.lower() == a or base_bin.lower() in a for a in cached):
+                        if base_bin.lower() in cached or any(base_bin.lower() == a for a in cached):
                             is_desktop_app = True
                     except Exception:
                         pass

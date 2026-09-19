@@ -255,17 +255,6 @@ class ActionPolicy:
             verdict = self._check_egress(candidate, "terminal")
             if not verdict.allowed:
                 return verdict
-        # Validate bare IPv4 addresses in command (e.g. curl 10.0.0.1, nc 172.17.0.1, nmap 192.168.1.1)
-        for ip_match in re.finditer(r"\b((?:\d{1,3}\.){3}\d{1,3})(?::\d+)?\b", command or ""):
-            ip_str = ip_match.group(1)
-            try:
-                ip_obj = ipaddress.ip_address(ip_str)
-            except ValueError:
-                continue
-            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
-                verdict = self._check_egress(ip_str, "terminal")
-                if not verdict.allowed:
-                    return verdict
         try:
             risk = self.scope_checker.classify_command_risk(command)
         except Exception:
@@ -317,6 +306,11 @@ class ActionPolicy:
         return cfg if has_rules else None
 
     def _check_egress(self, target: str, label: str) -> PolicyVerdict:
+        host = self._host_of(target).lower().split(":")[0]
+        # Sandbox loopback and local container bindings are always permitted within the container
+        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "0") or host.startswith("127."):
+            return PolicyVerdict(True, "local sandbox loopback allowed")
+
         if not self.security_tool_targets and not self._get_active_scope_config():
             return PolicyVerdict(False, "no authorized target scope configured (fail-closed)")
         

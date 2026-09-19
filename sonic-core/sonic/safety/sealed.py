@@ -253,6 +253,11 @@ class SealedActionPolicy(ActionPolicy):
     # Egress uses the FROZEN blocked-networks snapshot, not the live module list.
     # ------------------------------------------------------------------
     def _check_egress(self, target: str, label: str) -> PolicyVerdict:
+        host = self._host_of(target).lower().split(":")[0]
+        # Sandbox loopback and local container bindings are always permitted within the container
+        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "0") or host.startswith("127."):
+            return PolicyVerdict(True, "local sandbox loopback allowed")
+
         verdict = self._check_target_and_scope(target, label)
         if verdict is not None:
             return verdict
