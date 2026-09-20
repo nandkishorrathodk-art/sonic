@@ -14,6 +14,7 @@
 
 ## 📑 Table of Contents
 - [Overview](#-overview)
+- [Documentation Index](docs/README.md)
 - [Core Architecture & Operational Model](#-core-architecture--operational-model)
 - [Key Capabilities & Subsystems](#-key-capabilities--subsystems)
 - [Repository Structure](#-repository-structure)
@@ -129,8 +130,15 @@ SONIC does not silo itself into a terminal-only script or a sluggish GUI-only re
 ├── sonic-cli/                          # Command-Line Interface (Typer + Rich)
 ├── docker/                             # Workstation Container Configs & Entrypoints
 ├── configs/                            # System Safety Rules & Model Routing YAMLs
+├── docs/                               # 📚 System Documentation, Architecture, Rules, & Blueprint
+│   ├── ARCHITECTURE.md                 # Six-Layer Architecture, Perception, & Cognitive Engine
+│   ├── BLUEPRINT.md                    # Master Blueprint & Subsystem Interactions
+│   ├── AI_AGENT_GUIDE.md               # Agent Onboarding & Codebase Orientation
+│   ├── RULES.md                        # Absolute Invariants (Aisa Karna Mana Hai)
+│   ├── LICENSE                         # Proprietary License & Terms of Use
+│   └── README.md                       # Documentation Directory Index
 ├── AGENTS.md                           # Core Repository Memory & Operational Rules
-└── README.md                           # This Documentation
+└── README.md                           # Master Project Readme
 ```
 
 ---
@@ -214,4 +222,4 @@ python -m pytest sonic-core/tests/test_phase_plan6_safety_envelope.py \
 
 **Copyright (c) 2026 Nandkishor Rathod. All Rights Reserved.**
 
-This project is proprietary software. No entity or individual may copy, clone, distribute, modify, or commercially exploit this software without express prior written permission. See [LICENSE](LICENSE) for full legal terms.
+This project is proprietary software. No entity or individual may copy, clone, distribute, modify, or commercially exploit this software without express prior written permission. See [LICENSE](docs/LICENSE) for full legal terms.

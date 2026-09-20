@@ -52,13 +52,17 @@ c:\Users\nandk\_society/
 │       └── ComputerSurface.tsx         # Live VNC container (port 6080) & takeover controls
 ├── scripts/                            # 🚀 Operational Scripts
 │   └── launch_agent.py                 # Standalone script to launch autonomous agent
-├── docker/
-│   └── entrypoint-workstation.sh       # Container entrypoint (Xvfb :99, x11vnc, noVNC, Chrome wrapper)
-├── configs/
-│   └── models.yaml                     # LLM Model Routing table
+├── docker/                             # Workstation Container Configs & Entrypoints
+├── configs/                            # System Safety Rules & Model Routing YAMLs
 ├── AGENTS.md                           # Comprehensive historical memory (Phases 1-22)
-├── BLUEPRINT.md                        # Master architectural blueprint & glossary
-└── SYSTEM_CHANGES_SUMMARY.md           # Detailed changelog & operational guide
+├── docs/                               # 📚 System Documentation & Reference
+│   ├── ARCHITECTURE.md                 # Six-Layer Architecture, Perception, & Cognitive Engine
+│   ├── BLUEPRINT.md                    # Master architectural blueprint & glossary
+│   ├── AI_AGENT_GUIDE.md               # Agent Onboarding & Codebase Orientation
+│   ├── RULES.md                        # Absolute Invariants (Aisa Karna Mana Hai)
+│   ├── LICENSE                         # Proprietary License & Terms of Use
+│   └── README.md                       # Documentation Index
+└── README.md                           # Master Project Readme
 ```
 
 ---
