@@ -142,7 +142,11 @@ async def _maybe_start_being_life_loop(settings):
         # Lessons Ledger (Phase C, AIOSR): the being learns from experience
         # and adapts testing strategies across missions.
         from sonic.being.lessons import LessonsLedger
-        lessons_ledger = LessonsLedger(tenant_id=tenant_id)
+        lessons_ledger = LessonsLedger(
+            tenant_id=tenant_id,
+            agent_id=being.being_id,
+            semantic_memory=get_vector_memory(),
+        )
         # Self-Evolution Engine: Dynamic strategy adaptation and codebase upgrades.
         from sonic.evolution.engine import EvolutionEngine
         from sonic.evolution.strategy import DynamicStrategyEngine

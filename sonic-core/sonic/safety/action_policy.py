@@ -203,7 +203,9 @@ class ActionPolicy:
 
         # 4. Egress + target-allowlist for security tools, tool runs, method invent, and browser navigation.
         if action_type_name in ("SECURITY_TOOL", "TOOL_RUN", "METHOD_INVENT"):
-            scan_target = payload.get("target") or payload.get("target_url") or target
+            scan_target = payload.get("target") or payload.get("target_url")
+            if action_type_name == "SECURITY_TOOL" and not scan_target:
+                scan_target = target
             if scan_target:
                 verdict = self._check_egress(scan_target, action_type_name.lower())
                 if not verdict.allowed:

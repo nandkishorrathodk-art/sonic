@@ -171,9 +171,15 @@ class LessonsLedger:
     just within one.
     """
 
-    def __init__(self, tenant_id: str = "default", agent_id: str = "computer-use-agent"):
+    def __init__(
+        self,
+        tenant_id: str = "default",
+        agent_id: str = "computer-use-agent",
+        semantic_memory: Any | None = None,
+    ):
         self.tenant_id = tenant_id
         self.agent_id = agent_id
+        self.semantic_memory = semantic_memory
         self._lessons: list[Lesson] = []
         self._load()
 
@@ -197,8 +203,24 @@ class LessonsLedger:
                 )
                 for d in data
             ]
+            for lesson in self._lessons:
+                self._index_semantic(lesson)
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             self._lessons = []
+
+    def _index_semantic(self, lesson: Lesson) -> None:
+        if self.semantic_memory is None:
+            return
+        self.semantic_memory.index_document(
+            f"lesson:{self.tenant_id}:{self.agent_id}:{lesson.lesson_id}",
+            f"{lesson.kind.value} {lesson.goal} {lesson.approach} {lesson.evidence}",
+            metadata={
+                "kind": lesson.kind.value,
+                "lesson_id": lesson.lesson_id,
+                "agent_id": self.agent_id,
+            },
+            tenant_id=self.tenant_id,
+        )
 
     def _save(self) -> None:
         path = self._path()
@@ -226,6 +248,7 @@ class LessonsLedger:
             self._lessons.append(l)
             existing.add(key)
             added += 1
+            self._index_semantic(l)
         if added:
             self._save()
             logger.info("lessons_recorded", added=added, total=len(self._lessons))
@@ -236,10 +259,32 @@ class LessonsLedger:
         giant dump that drowns the live observation."""
         if not self._lessons:
             return []
-        scored = sorted(self._lessons, key=lambda l: _relevance(goal, l), reverse=True)
+        semantic_scores: dict[str, float] = {}
+        if self.semantic_memory is not None:
+            for result in self.semantic_memory.search(
+                goal,
+                top_k=max(k * 3, 10),
+                score_threshold=0.12,
+                tenant_id=self.tenant_id,
+            ):
+                lesson_id = result.get("metadata", {}).get("lesson_id")
+                if lesson_id:
+                    semantic_scores[str(lesson_id)] = float(result.get("score", 0.0))
+
+        def score(lesson: Lesson) -> tuple[float, float, str]:
+            keyword_score = float(_relevance(goal, lesson))
+            semantic_score = semantic_scores.get(lesson.lesson_id, 0.0)
+            # Semantic similarity resolves paraphrases; keyword overlap keeps
+            # exact target/tool matches dominant and remains the safe fallback.
+            return (keyword_score + semantic_score * 3.0, semantic_score, lesson.created_at)
+
+        scored = sorted(self._lessons, key=score, reverse=True)
         # Filter zero-relevance lessons out unless the ledger is small — a brand
         # new goal with no overlap still benefits from the most-recent lessons.
-        hits = [l for l in scored if _relevance(goal, l) > 0]
+        hits = [
+            l for l in scored
+            if _relevance(goal, l) > 0 or l.lesson_id in semantic_scores
+        ]
         if not hits and len(self._lessons) <= k:
             return self._lessons[:k]
         return hits[:k]

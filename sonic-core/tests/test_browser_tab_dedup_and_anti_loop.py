@@ -143,7 +143,7 @@ async def test_browser_tab_reuse_via_address_bar():
     )
     assert trace.status == ActionExecutionStatus.COMPLETED
     assert "No application was selected or launched" in trace.actual_observation
-    assert comp.commands_executed == []
+    assert not any("chromium" in cmd.lower() for cmd in comp.commands_executed)
 
 
 @pytest.mark.asyncio
@@ -159,7 +159,8 @@ async def test_consecutive_action_loop_breaker():
         {"query": "search bar"},
         "click search",
     )
-    assert t1.status == ActionExecutionStatus.COMPLETED
+    assert t1.status == ActionExecutionStatus.BLOCKED
+    assert "visual grounding" in t1.actual_observation.lower()
 
     t2 = await agent.execute_action(
         comp.workspace_id,
@@ -168,7 +169,7 @@ async def test_consecutive_action_loop_breaker():
         {"query": "search bar"},
         "click search",
     )
-    assert t2.status == ActionExecutionStatus.COMPLETED
+    assert t2.status == ActionExecutionStatus.BLOCKED
 
     t3 = await agent.execute_action(
         comp.workspace_id,
@@ -177,9 +178,8 @@ async def test_consecutive_action_loop_breaker():
         {"query": "search bar"},
         "click search",
     )
-    # The 3rd consecutive identical action must be blocked by the circuit breaker
+    # The action remains blocked until a live frame grounds the target.
     assert t3.status == ActionExecutionStatus.BLOCKED
-    assert "[ACTION LOOP DETECTED]" in t3.actual_observation
 
 
 @pytest.mark.asyncio

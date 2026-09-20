@@ -2,8 +2,8 @@
 SONIC A-SEA — Computer-Use Visual Grounding Engine
 ===================================================
 Adapted and enhanced from open-computer-use (OS-Atlas & ShowUI).
-Translates natural language UI queries ("click the chrome address bar",
-"submit button", "terminal window") into precise pixel coordinates (x, y)
+Translates natural language UI queries (for example, a visible address bar,
+a submit control, or a terminal window) into precise pixel coordinates (x, y)
 on the active desktop screen, avoiding coordinate guessing or hallucination.
 """
 

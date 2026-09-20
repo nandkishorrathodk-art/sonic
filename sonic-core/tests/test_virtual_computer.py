@@ -31,9 +31,10 @@ def test_local_sandbox_host_execution_lock():
     asyncio.run(_run())
 
 
-def test_local_sandbox_file_operations(tmp_path):
+def test_local_sandbox_file_operations(tmp_path, monkeypatch):
     """Test LocalSandbox file read, write, and listing."""
     async def _run():
+        monkeypatch.setenv("SONIC_LOCAL_SANDBOX_DIR", str(tmp_path))
         sandbox = LocalSandbox(allow_host_execution=True)
         test_file = str(tmp_path / "sandbox_test.txt")
 

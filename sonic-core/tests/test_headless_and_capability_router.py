@@ -117,8 +117,16 @@ async def test_headless_gui_unsupported_graceful():
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
-async def test_headless_http_probe():
+async def test_headless_http_probe(monkeypatch):
     provider = HeadlessComputeProvider()
+    monkeypatch.setattr(
+        "sonic.computer.headless.is_target_allowed",
+        lambda _target: (True, ""),
+    )
+    monkeypatch.setattr(
+        "sonic.sandbox.egress.is_target_allowed",
+        lambda _target: (True, ""),
+    )
 
     # Start a lightweight local HTTP server for testing
     body_data = b'{"status": "reachable"}'
@@ -154,8 +162,16 @@ async def test_headless_http_probe():
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
-async def test_async_tcp_port_scanning():
+async def test_async_tcp_port_scanning(monkeypatch):
     provider = HeadlessComputeProvider()
+    monkeypatch.setattr(
+        "sonic.computer.headless.is_target_allowed",
+        lambda _target: (True, ""),
+    )
+    monkeypatch.setattr(
+        "sonic.sandbox.egress.is_target_allowed",
+        lambda _target: (True, ""),
+    )
 
     # Start an ephemeral TCP server to represent an active listening port (e.g. 12000 or ephemeral)
     server = None

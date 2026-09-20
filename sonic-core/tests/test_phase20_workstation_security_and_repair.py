@@ -22,6 +22,11 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def no_implicit_workstation(monkeypatch):
+    monkeypatch.setenv("SONIC_DOCKER_WORKSTATION_CONTAINER", "")
+
+
 @pytest.fixture
 def auth_headers():
     user = User(
@@ -182,5 +187,5 @@ def test_workstation_desktop_action_no_workspace_degrades(client, auth_headers):
     )
     assert res.status_code == 200
     data = res.json()
-    assert data["status"] == "success"
+    assert data["status"] == "BLOCKED"
     assert data["observation"]["desktop_state"] == "NO_DISPLAY"

@@ -115,6 +115,41 @@ class DualProcessController:
     # returns True when the node's goal has a prior resolution.
     known_pattern_fn: callable = field(default=lambda goal: False)
 
+    @staticmethod
+    def decide_from_observation(
+        *,
+        prediction_error: float,
+        graph_changed: bool,
+        known_skill_available: bool,
+        unresolved_unknowns: int = 0,
+    ) -> ModeDecision:
+        """Choose a reasoning depth from measured computer-use signals.
+
+        This adapter lets the desktop loop use the same FAST/DEEP policy as
+        hypothesis work without manufacturing a CognitiveHypothesis. It is
+        advisory only; action authorization remains deterministic elsewhere.
+        """
+        error = max(0.0, min(1.0, float(prediction_error)))
+        if error >= 0.4 or unresolved_unknowns > _FEW_UNKNOWNS:
+            return ModeDecision(
+                mode=ProcessMode.DEEP,
+                reason=f"prediction error {error:.1f} or unresolved graph uncertainty",
+            )
+        if not graph_changed and not known_skill_available:
+            return ModeDecision(
+                mode=ProcessMode.DEEP,
+                reason="no observed transition and no verified skill matches the live graph",
+            )
+        if known_skill_available and error < 0.4:
+            return ModeDecision(
+                mode=ProcessMode.FAST,
+                reason="verified skill matches the live graph with low prediction error",
+            )
+        return ModeDecision(
+            mode=ProcessMode.DEEP,
+            reason="live state is not sufficiently familiar for fast reasoning",
+        )
+
     def decide(
         self,
         hypothesis: CognitiveHypothesis,

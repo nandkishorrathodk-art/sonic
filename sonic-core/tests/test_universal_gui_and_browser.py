@@ -78,15 +78,13 @@ async def test_verify_goal_file_creation_probe():
 
 @pytest.mark.asyncio
 async def test_docker_computer_injects_root_sandbox_flags():
-    """Ensure launch_application in DockerComputerProvider injects container-safe root flags for browser apps."""
+    """Ensure launch_application preserves the discovered app and target arguments."""
     provider = DockerComputerProvider(container_name="test-container")
     provider._docker_exec = AsyncMock(return_value=(0, "", ""))
 
-    success = await provider.launch_application("ws-1", "google-chrome https://en.wikipedia.org")
+    success = await provider.launch_application("ws-1", "google-chrome https://198.51.100.10")
     assert success is True
-    provider._docker_exec.assert_called_once()
-    called_spawn = provider._docker_exec.call_args[0][0]
-    assert "--no-sandbox" in called_spawn
-    assert "--disable-dev-shm-usage" in called_spawn
-    assert "https://en.wikipedia.org" in called_spawn
-
+    called_spawn = provider._docker_exec.call_args_list[-1][0][0]
+    assert "google-chrome" in called_spawn
+    assert "https://198.51.100.10" in called_spawn
+    assert "--no-sandbox" not in called_spawn

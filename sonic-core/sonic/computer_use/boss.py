@@ -44,6 +44,8 @@ from sonic.computer_use.models_boss import (
     SubMission,
     SubMissionResult,
 )
+from sonic.orchestration.dual_process import DualProcessController
+from sonic.computer_use.replay import evaluate_traces
 
 logger = structlog.get_logger(__name__)
 
@@ -176,7 +178,12 @@ class BossAgent:
                 id=sub.id,
                 name=sub.goal[:60],
                 agent_type="dynamic",
-                task_payload={"goal": sub.goal, "max_steps": sub.max_steps},
+                task_payload={
+                    "goal": sub.goal,
+                    "max_steps": sub.max_steps,
+                    "process_mode": sub.process_mode,
+                    "evidence_context": sub.evidence_context,
+                },
                 depends_on=valid_deps,
                 priority=priority,
                 engagement_id=self.task_graph.engagement_id,
@@ -677,10 +684,16 @@ Rules:
                 requested_steps = int(requested_steps)
             except (TypeError, ValueError):
                 requested_steps = self.sub_agent_steps
+            evidence_context = dict(sm.get("evidence_context") or {})
+            process_mode = str(sm.get("process_mode") or "").lower()
+            if process_mode not in {"fast", "deep"}:
+                process_mode = self._select_process_mode(evidence_context)
             sub_missions.append(SubMission(
                 goal=goal,
                 max_steps=max(1, min(requested_steps, 8)),
                 priority=max(0, int(sm.get("priority", 1) or 1)),
+                process_mode=process_mode,
+                evidence_context=evidence_context,
             ))
 
         # Record thinking
@@ -725,6 +738,10 @@ Rules:
                 ),
                 max_steps=budget,
                 priority=1,
+                process_mode="deep",
+                evidence_context={
+                    "reason": "strategic decomposition unavailable; live evidence required",
+                },
             ),
         ]
 
@@ -747,6 +764,17 @@ Rules:
             thinking=thinking_text,
             sub_missions=sub_missions,
         )
+
+    @staticmethod
+    def _select_process_mode(evidence_context: dict[str, Any]) -> str:
+        """Derive worker depth from measured signals, never from app names."""
+        decision = DualProcessController.decide_from_observation(
+            prediction_error=float(evidence_context.get("prediction_error", 0.0) or 0.0),
+            graph_changed=bool(evidence_context.get("graph_changed", False)),
+            known_skill_available=bool(evidence_context.get("known_skill_available", False)),
+            unresolved_unknowns=int(evidence_context.get("unresolved_unknowns", 0) or 0),
+        )
+        return decision.mode.value
 
     # ------------------------------------------------------------------
     # SubAgent Dispatch
@@ -781,6 +809,10 @@ Rules:
             )
 
             sub_agent_id = f"sub-agent-{sub_agent_num}"
+            scoped_context = dict(self.initial_context)
+            scoped_context.update(sub_mission.evidence_context)
+            scoped_context["delegated_process_mode"] = sub_mission.process_mode
+            scoped_context["delegated_goal"] = sub_mission.goal
             agent = ComputerUseAgent(
                 computer_provider=self.computer,
                 autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
@@ -801,7 +833,7 @@ Rules:
                 evolution_engine=self.evolution_engine,
                 gui_only=False,
                 observe_desktop=True,
-                initial_context=self.initial_context,
+                initial_context=scoped_context,
             )
 
             # Step callback to stream SubAgent actions to UI
@@ -1367,6 +1399,7 @@ If the objective is complete or no more work is needed, return:
         ))
 
         # Determine status
+        replay_metrics = evaluate_traces(self.all_traces)
         any_success = any(
             r.success for p in self.phases for r in p.results
         )
@@ -1397,6 +1430,24 @@ If the objective is complete or no more work is needed, return:
             total_phases=len(self.phases),
             findings_summary=final_summary,
             duration_seconds=round(time.perf_counter() - t_start, 2),
+            replay_metrics={
+                "total_actions": replay_metrics.total_actions,
+                "verified_actions": replay_metrics.verified_actions,
+                "successful_actions": replay_metrics.successful_actions,
+                "failed_actions": replay_metrics.failed_actions,
+                "safety_blocks": replay_metrics.safety_blocks,
+                "evidence_completeness": replay_metrics.evidence_completeness,
+                "prediction_accuracy": replay_metrics.prediction_accuracy,
+                "verification_rate": replay_metrics.verification_rate,
+                "repeated_action_rate": replay_metrics.repeated_action_rate,
+                "composite_score": replay_metrics.composite_score,
+            },
+            replay_quality_gate_passed=(
+                replay_metrics.total_actions > 0
+                and replay_metrics.safety_blocks == 0
+                and replay_metrics.evidence_completeness >= 0.5
+                and replay_metrics.verification_rate > 0.0
+            ),
         )
 
     # ------------------------------------------------------------------
