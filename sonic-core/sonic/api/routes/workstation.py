@@ -586,8 +586,10 @@ def _extract_recent_conversation_messages(state: dict[str, Any], max_turns: int 
         item_type = entry.get("type", "")
 
         if t == "Objective Received" and c:
-            match = re.search(r"Objective:\s*'(.*?)'\s*\(Tenant:", c)
-            obj_text = match.group(1) if match else c
+            obj_text = str(entry.get("prompt") or "").strip()
+            if not obj_text:
+                match = re.search(r"Objective:\s*'(.*?)'\s*\(Tenant:", c)
+                obj_text = match.group(1) if match else c
             turns.append(("user", obj_text))
         elif (t in ("SONIC Response", "SONIC Boss Report") or item_type == "response") and c:
             turns.append(("assistant", c))
@@ -3345,9 +3347,11 @@ async def send_workstation_prompt(
     state["current_action"] = "Thinking..."
     _append_worklog(
         state,
-        "action",
+        "event",
         "Objective Received",
-        f"Objective: '{prompt_text}' (Tenant: {tenant_id})",
+        prompt_text,
+        role="user",
+        prompt=prompt_text,
     )
     _persist_workstation_state()
 
