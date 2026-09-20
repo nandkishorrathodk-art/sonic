@@ -529,9 +529,12 @@ class EvolutionGoalDirector:
         self._update_goal(goal)
 
         # 3. Evolution cycle via CodebaseEvolver.
-        # A synthesized LLM patch may legitimately touch several target files;
-        # apply them all atomically so a multi-file change is rolled back as one.
-        apply_files = synth_files if len(synth_files) > 1 else [primary_target]
+        # A synthesized LLM patch may legitimately touch several files. When it
+        # does (or when the target is the signal target rather than a single
+        # primary), snapshot + apply ALL touched files so a report-only rollback
+        # can restore every one of them — not just the primary target.
+        touched = list(dict.fromkeys([*(synth_files or []), primary_target]))
+        apply_files = touched if len(touched) > 1 else [primary_target]
         if len(apply_files) > 1:
             preflight = self.evolver.apply_patch_multi(apply_files, code_diff)
             if not preflight[0]:

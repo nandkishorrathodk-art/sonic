@@ -491,6 +491,69 @@ def test_coding_agent_write_stages_in_overlay(tmp_path: Path):
     assert (repo / "pkg" / "a.py").read_text() == "old\n"
 
 
+def test_report_only_rollback_restores_cross_file_patch(tmp_path: Path):
+    """Regression: report-only must restore a file the patch touched even when it
+    is not the signal's target. Root cause was clear_snapshots() running during
+    the cycle, leaving nothing to roll back from."""
+    repo = tmp_path / "repo"
+    (repo / "sonic-core" / "sonic" / "agents").mkdir(parents=True)
+    (repo / "sonic-core" / "tests").mkdir(parents=True)
+    (repo / "sonic-core" / "sonic" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "sonic-core" / "sonic" / "agents" / "__init__.py").write_text("", encoding="utf-8")
+    orig = "def total(items):\n    # TODO: ignore None entries\n    return sum(items)\n"
+    (repo / "sonic-core" / "sonic" / "agents" / "widget.py").write_text(orig, encoding="utf-8")
+    (repo / "sonic-core" / "tests" / "test_widget.py").write_text(
+        "from sonic.agents.widget import total\n\ndef test_total_ignores_none():\n    assert total([1,None,2])==3\n",
+        encoding="utf-8",
+    )
+    (repo / "sonic-core" / "tests" / "test_p0_security_hardening.py").write_text(
+        "def test_s(): assert True\n", encoding="utf-8")
+    (repo / "conftest.py").write_text(
+        "import sys\nfrom pathlib import Path\nsys.path.insert(0,str(Path(__file__).parent/'sonic-core'))\n",
+        encoding="utf-8")
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t.t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "init")
+
+    from sonic.evolution.evolution_journal import EvolutionJournal
+    from sonic.evolution.goal_director import EvolutionGoalDirector
+    from sonic.evolution.version_tracker import VersionTracker
+
+    db = str(tmp_path / "evo.db")
+    vtracker = VersionTracker(db_path=db, repo_root=repo)
+    journal = EvolutionJournal(db_path=db, repo_root=repo)
+    evolver = CodebaseEvolver(repo_root=repo)
+    director = EvolutionGoalDirector(
+        repo_root=repo, db_path=db, evolver=evolver,
+        version_tracker=vtracker, journal=journal,
+        test_paths=["sonic-core/tests/test_widget.py"],
+    )
+    patch = (
+        "diff --git a/sonic-core/sonic/agents/widget.py b/sonic-core/sonic/agents/widget.py\n"
+        "--- a/sonic-core/sonic/agents/widget.py\n+++ b/sonic-core/sonic/agents/widget.py\n"
+        "@@\n def total(items):\n-    # TODO: ignore None entries\n-    return sum(items)\n"
+        "+    return sum(i for i in items if i is not None)\n"
+    )
+
+    class _L:
+        async def complete(self, req, task_type=None, provider_name=None):
+            return type("R", (), {"content": f"```diff\n{patch}```", "model": "s", "provider": "s"})()
+
+    coder = SelfCoder(repo_root=repo, llm=_L(), evolver=evolver, director=director, agentic=False)
+    # Signal targets the TEST file, but the patch edits widget.py.
+    cycle = asyncio.run(coder.run_cycle(
+        "Repair the failing test test_widget.py::test_total_ignores_none",
+        "sonic-core/tests/test_widget.py", "bug_fix",
+    ))
+    assert cycle.tree_action == "rolled_back"
+    assert (repo / "sonic-core" / "sonic" / "agents" / "widget.py").read_text() == orig
+    # git must report a clean tree (no stray modification).
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
+    assert "widget.py" not in status
+
+
 def test_auditor_is_read_only_and_finds_defects(tmp_path: Path):
     repo = tmp_path / "repo"
     (repo / "sonic-core" / "sonic" / "x").mkdir(parents=True)

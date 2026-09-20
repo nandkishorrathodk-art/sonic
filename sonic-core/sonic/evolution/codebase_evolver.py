@@ -266,6 +266,26 @@ class CodebaseEvolver:
     # ------------------------------------------------------------------
     # 4. Patch / Code Application
     # ------------------------------------------------------------------
+    @staticmethod
+    def _diff_files(code_diff: str) -> list[str]:
+        """Return the repo-relative paths a unified diff modifies (best-effort)."""
+        import re
+
+        files: list[str] = []
+        if not code_diff:
+            return files
+        for m in re.finditer(r"^diff --git a/(\S+) b/(\S+)", code_diff, re.MULTILINE):
+            files.append(m.group(2))
+        if not files:
+            for line in code_diff.splitlines():
+                if line.startswith("+++ "):
+                    p = line[4:].strip()
+                    if p.startswith("b/"):
+                        p = p[2:]
+                    if p and p != "/dev/null" and p not in files:
+                        files.append(p)
+        return files
+
     def apply_patch_multi(self, target_files: list[str], code_diff: str) -> tuple[bool, str]:
         """Atomically apply a diff that may touch several files.
 
@@ -634,8 +654,14 @@ class CodebaseEvolver:
             push=push,
             test_paths=test_paths,
             pre_applied_files=pre_applied_files,
+            report_only=report_only,
         )
-        if not report_only:
+        if report_only:
+            # Report-only contract: restore every file the patch touched so the
+            # caller's tree is byte-identical. Snapshot-based (never git
+            # checkout), so uncommitted operator work is never destroyed.
+            self.rollback_snapshots()
+        else:
             self._log_to_evolution_md(report)
         return report
 
@@ -676,6 +702,7 @@ class CodebaseEvolver:
         push: bool = False,
         test_paths: list[str] | None = None,
         pre_applied_files: list[str] | None = None,
+        report_only: bool = False,
     ) -> EvolutionSummaryReport:
         proposal, reason = self.pipeline.submit_proposal(
             target_component=target_component,
@@ -710,6 +737,15 @@ class CodebaseEvolver:
             report.ast_validated = True
             report.lines_added, report.lines_removed = self.pending_line_stats()
         else:
+            # Snapshot EVERY file the diff names, not just the primary target, so
+            # a report-only rollback can restore all of them (a patch that edits
+            # the test file while the goal targets the source, or vice versa,
+            # otherwise leaves part of the change behind).
+            try:
+                for rel in self._diff_files(code_diff):
+                    self._record_snapshot((self.repo_root / rel).resolve())
+            except Exception:
+                pass
             try:
                 ok, msg, added, removed = self.apply_patch(target_component, code_diff)
                 report.lines_added = added
@@ -794,7 +830,11 @@ class CodebaseEvolver:
         self.pipeline.advance_stage(proposal.proposal_id, EvolutionStage.SECURITY_REGRESSION_PASSING, "Zero safety regressions")
 
         # Gate 5: Promotion & Git Automation
-        self.clear_snapshots()  # Changes are verified and retained
+        # Keep the snapshots when the caller asked for report-only — it rolls
+        # back from them right after we return. For a real promotion the change
+        # is kept, so the snapshots are no longer needed.
+        if not report_only:
+            self.clear_snapshots()  # Changes are verified and retained
 
         if auto_promote:
             committed, chash, pushed, pmsg = self.commit_and_push(

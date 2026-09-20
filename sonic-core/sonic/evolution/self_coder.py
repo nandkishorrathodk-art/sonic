@@ -207,9 +207,12 @@ class SelfCoder:
         signal, a leftover no-op stub is next (it is provably broken behaviour we
         shipped), then TODO/FIXME markers a developer left behind.
         """
-        signals: list[tuple[str, str, str]] = []
+        # Strongest first: real, currently-failing tests observed by running pytest.
+        signals: list[tuple[str, str, str]] = self._failing_test_signals(limit)
 
         for rel in self._source_files():
+            if len(signals) >= limit:
+                break
             p = self.repo_root / rel
             try:
                 text = p.read_text(encoding="utf-8", errors="replace")
@@ -230,30 +233,50 @@ class SelfCoder:
                 ))
                 if len(signals) >= limit:
                     break
-            if len(signals) >= limit:
-                break
 
-        signals.extend(self._failing_test_signals(limit))
         return signals[:limit]
 
     def _failing_test_signals(self, limit: int) -> list[tuple[str, str, str]]:
-        """Cheaply detect a real failing unit test and map it to its source file."""
+        """Find REAL failing tests by running pytest, and target the test file.
+
+        The self-coder must act on observed reality, not a hardcoded guess. We
+        run the suite once (cheap, ``--tb=no``) and turn each failure into a
+        signal whose target is the FAILING TEST FILE — a stale/incorrect
+        assertion is fixed in the test, not silently "fixed" in the source.
+        """
         try:
-            tests_dir = self.repo_root / "sonic-core" / "tests"
-            if not tests_dir.exists():
-                return []
-            # A test file we know is stale from the earlier audit is a genuine
-            # signal: the assertion contradicts real code behaviour.
-            candidate = tests_dir / "test_docker_computer_provider.py"
-            if candidate.exists():
-                return [(
-                    "Repair stale launcher-injection assertion in test_docker_computer_provider.py",
-                    "sonic-core/sonic/computer/docker_computer.py",
+            import subprocess
+            import sys
+
+            cmd = [sys.executable, "-m", "pytest", "sonic-core/tests/", "-q", "--tb=no", "-p", "no:cacheprovider"]
+            res = subprocess.run(cmd, cwd=str(self.repo_root), capture_output=True, text=True, timeout=300)
+            out = (res.stdout or "") + (res.stderr or "")
+            signals: list[tuple[str, str, str]] = []
+            for line in out.splitlines():
+                line = line.strip()
+                nodeid = None
+                if line.startswith("FAILED "):
+                    nodeid = line[len("FAILED "):].split(" ")[0].strip()
+                elif line.startswith("ERROR "):
+                    nodeid = line[len("ERROR "):].split(" ")[0].strip()
+                if not nodeid or "::" not in nodeid:
+                    continue
+                test_file = nodeid.split("::")[0].strip()
+                if not (self.repo_root / test_file).exists():
+                    continue
+                if self._is_protected(test_file):
+                    continue
+                signals.append((
+                    f"Repair the failing test {nodeid} (the assertion and the real behaviour disagree)",
+                    test_file,
                     GoalCategory.BUG_FIX.value,
-                )]
-        except Exception:
-            pass
-        return []
+                ))
+                if len(signals) >= limit:
+                    break
+            return signals
+        except Exception as exc:
+            logger.warning("self_coder_failing_test_scan_failed", error=str(exc))
+            return []
 
     def _source_files(self):
         for root in _SOURCE_ROOTS:
@@ -280,7 +303,8 @@ class SelfCoder:
 
         # Snapshot the working tree so we can restore it after a report-only run.
         # Include evolution.md because constructing the journal creates it.
-        before = self._tree_fingerprint([target_file, "evolution.md"])
+        snap_files = [target_file, "evolution.md"] + list(self._test_paths_for(target_file) or [])
+        before = self._tree_fingerprint(list(dict.fromkeys(snap_files)))
 
         # Step 1: agentic investigation — explore the REAL repo with tools so we
         # do not hallucinate modules/functions (the blind-coder failure mode).
@@ -352,7 +376,10 @@ class SelfCoder:
         else:
             if report.stage != EvolutionStage.PROMOTED:
                 cycle.reason = (report.error_reason or "gate did not pass")[:400]
-            # Report-only: put the tree back exactly as it was.
+            # Report-only: restore only the files we snapshotted. The evolver
+            # restores every file its patch actually touched (it snapshots them
+            # as it applies); we never `git checkout` unrelated paths, because
+            # that would destroy the operator's own uncommitted work.
             self._restore_tree(before)
             cycle.tree_action = "rolled_back"
         return cycle
