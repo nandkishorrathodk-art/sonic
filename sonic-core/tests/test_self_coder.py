@@ -310,6 +310,104 @@ def test_self_coder_allow_writes_commits(repo: Path, tmp_path: Path):
     assert "is not None" in (repo / "sonic-core" / "sonic" / "agents" / "widget.py").read_text()
 
 
+def test_normalize_bare_hunks_fills_line_numbers(repo: Path):
+    """Models often emit a bare '@@' header; we must derive the real line numbers."""
+    from sonic.evolution.patch_synthesizer import _normalize_hunks
+
+    bare = (
+        "diff --git a/sonic-core/sonic/agents/widget.py b/sonic-core/sonic/agents/widget.py\n"
+        "--- a/sonic-core/sonic/agents/widget.py\n"
+        "+++ b/sonic-core/sonic/agents/widget.py\n"
+        "@@\n"
+        " def total(items):\n"
+        "-    return sum(items)\n"
+        "+    return sum(i for i in items if i is not None)\n"
+    )
+
+    def reader(rel: str) -> str:
+        return (repo / rel).read_text(encoding="utf-8")
+
+    norm, err = _normalize_hunks(bare, reader)
+    assert err == ""
+    assert "@@ -1,2 +1,2 @@" in norm
+
+
+def test_synthesizer_accepts_bare_hunk_diff(repo: Path):
+    """An otherwise-correct patch with bare '@@' must not be thrown away."""
+    bare = (
+        "```diff\n"
+        "diff --git a/sonic-core/sonic/agents/widget.py b/sonic-core/sonic/agents/widget.py\n"
+        "--- a/sonic-core/sonic/agents/widget.py\n"
+        "+++ b/sonic-core/sonic/agents/widget.py\n"
+        "@@\n"
+        " def total(items):\n"
+        "-    return sum(items)\n"
+        "+    return sum(i for i in items if i is not None)\n"
+        "```"
+    )
+    llm = _StubLLM([bare])
+    synth = PatchSynthesizer(llm=llm, repo_root=repo, is_protected=lambda _p: False)
+    res = asyncio.run(synth.synthesize(_Goal(), ["sonic-core/sonic/agents/widget.py"]))
+    assert res.proposal is not None
+    assert "@@ -1,2 +1,2 @@" in res.proposal.diff
+
+
+def test_import_integrity_gate_blocks_broken_import(repo: Path):
+    """A patch adding a top-level import of a missing module must be blocked,
+    even when the test subset never imports the changed file."""
+    evolver = CodebaseEvolver(repo_root=repo)
+    target = repo / "sonic-core" / "sonic" / "agents" / "widget.py"
+    target.write_text(
+        "from sonic.agents.nonexistent_helper import guard\n\n"
+        "def total(items):\n    return guard(items)\n",
+        encoding="utf-8",
+    )
+    ok, msg = evolver.run_import_checks(["sonic-core/sonic/agents/widget.py"])
+    assert ok is False
+    assert "nonexistent_helper" in msg
+
+
+def test_import_integrity_gate_passes_clean_file(repo: Path):
+    evolver = CodebaseEvolver(repo_root=repo)
+    ok, msg = evolver.run_import_checks(["sonic-core/sonic/agents/widget.py"])
+    assert ok is True
+
+
+def test_report_only_run_writes_no_side_effects(repo: Path, tmp_path: Path):
+    """report_only must leave the tree (and evolution.md) untouched."""
+    db = str(tmp_path / "evo.db")
+    from sonic.evolution.evolution_journal import EvolutionJournal
+    from sonic.evolution.goal_director import EvolutionGoalDirector
+    from sonic.evolution.version_tracker import VersionTracker
+
+    (repo / "sonic-core" / "sonic" / "agents" / "widget.py").write_text(
+        "def total(items):\n    # TODO: handle None\n    return sum(items)\n", encoding="utf-8"
+    )
+
+    vtracker = VersionTracker(db_path=db, repo_root=repo)
+    journal = EvolutionJournal(db_path=db, repo_root=repo)
+    evolver = CodebaseEvolver(repo_root=repo)
+    director = EvolutionGoalDirector(
+        repo_root=repo, db_path=db, evolver=evolver,
+        version_tracker=vtracker, journal=journal,
+    )
+    # Capture the baseline *after* constructing the journal (constructing it
+    # writes the evolution.md header).
+    evo_md = repo / "evolution.md"
+    before = evo_md.read_text(encoding="utf-8") if evo_md.exists() else None
+    target = "sonic-core/sonic/agents/widget.py"
+    goal = director.submit_goal(title="t", description="d", target_files=[target])
+    # a patch that fails verification, in report-only mode
+    asyncio.run(director.execute_goal(
+        goal.goal_id, custom_patch="def total(items):\n    return 'nonsense'\n",
+        test_paths=["sonic-core/tests/test_does_not_exist.py"], report_only=True,
+    ))
+    src_now = (repo / target).read_text(encoding="utf-8")
+    assert "return sum(items)" in src_now  # rolled back
+    after = evo_md.read_text(encoding="utf-8") if evo_md.exists() else None
+    assert after == before  # no journal side-effect
+
+
 def test_auditor_is_read_only_and_finds_defects(tmp_path: Path):
     repo = tmp_path / "repo"
     (repo / "sonic-core" / "sonic" / "x").mkdir(parents=True)

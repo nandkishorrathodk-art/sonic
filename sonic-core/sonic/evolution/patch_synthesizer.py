@@ -42,6 +42,74 @@ logger = get_logger(__name__)
 _FENCE_RE = re.compile(r"```(?:diff|patch|git)?\s*\n(.*?)```", re.DOTALL)
 _DIFF_FILE_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)", re.MULTILINE)
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.MULTILINE)
+_BARE_HUNK_RE = re.compile(r"^@@\s*$", re.MULTILINE)
+
+
+def _normalize_hunks(diff: str, read_file: Any) -> tuple[str, str]:
+    """Fill in hunk headers that lack line numbers (models love bare `@@`).
+
+    git apply rejects a hunk header without ``-a,b +c,d`` outright, which causes
+    perfectly good model patches to be thrown away. Here we derive the real line
+    numbers from the target file (position of the first hunk line) and count the
+    old/new lines, turning a bare ``@@`` into a valid header. Returns
+    (normalized_diff, error) — error is "" on success.
+    """
+    if not _BARE_HUNK_RE.search(diff):
+        return diff, ""
+
+    lines = diff.splitlines()
+    out: list[str] = []
+    i = 0
+    current_file: str | None = None
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("+++ "):
+            p = line[4:].strip()
+            current_file = p[2:] if p.startswith("b/") else p
+            out.append(line)
+            i += 1
+            continue
+        if not _BARE_HUNK_RE.match(line):
+            out.append(line)
+            i += 1
+            continue
+
+        # Collect this hunk's body until the next header/hunk/file boundary.
+        j = i + 1
+        body: list[str] = []
+        while j < len(lines):
+            nxt = lines[j]
+            if nxt.startswith(("@@", "diff --git ", "--- ", "+++ ")):
+                break
+            body.append(nxt)
+            j += 1
+        if not body:
+            return diff, "bare hunk header with no body"
+
+        old_count = sum(1 for b in body if b[:1] in (" ", "-", "") and not b.startswith("\\"))
+        new_count = sum(1 for b in body if b[:1] in (" ", "+", "") and not b.startswith("\\"))
+
+        # Locate the first real (context/removed) line in the target file to get
+        # the old start line; fall back to line 1 if we cannot read the file.
+        first = next((b[1:] for b in body if b[:1] in (" ", "-")), None)
+        start = 1
+        if current_file and first is not None:
+            content = read_file(current_file)
+            if content is None:
+                return diff, f"cannot read target file for bare hunk: {current_file}"
+            hay = content.splitlines()
+            found = None
+            for idx, hl in enumerate(hay):
+                if hl.rstrip() == first.rstrip():
+                    found = idx + 1
+                    break
+            if found is None:
+                return diff, f"bare hunk context not found in {current_file}"
+            start = found
+        out.append(f"@@ -{start},{old_count} +{start},{new_count} @@")
+        out.extend(body)
+        i = j
+    return "\n".join(out) + "\n", ""
 
 
 @dataclass
@@ -164,6 +232,11 @@ class PatchSynthesizer:
                 continue
 
             diff = _extract_diff(diff_text)
+            diff, norm_err = _normalize_hunks(diff, self._read_target)
+            if norm_err:
+                last_reason = f"could not normalize hunk headers: {norm_err}"
+                result.notes.append(f"attempt {attempt}: {last_reason}")
+                continue
             ok, reason, proposal = self._validate_and_measure(goal, diff)
             if ok and proposal is not None:
                 result.proposal = proposal
@@ -219,6 +292,16 @@ class PatchSynthesizer:
             change_lines=change,
         )
         return True, "ok", proposal
+
+    def _read_target(self, rel: str) -> str | None:
+        """Read a repo file for hunk normalization (None if it does not exist)."""
+        try:
+            p = (self.repo_root / rel).resolve()
+            if p.exists() and p.is_file():
+                return p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        return None
 
     def _applies_cleanly(self, diff: str) -> tuple[bool, str]:
         import tempfile

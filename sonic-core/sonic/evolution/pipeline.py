@@ -41,6 +41,7 @@ class EvolutionStage(StrEnum):
     PROPOSED = "proposed"
     ISOLATED_BRANCH = "isolated_branch"
     TESTS_PASSING = "tests_passing"
+    IMPORTS_VERIFIED = "imports_verified"
     SECURITY_REGRESSION_PASSING = "security_regression_passing"
     BENCHMARK_VALIDATED = "benchmark_validated"
     CANARY_ACTIVE = "canary_active"

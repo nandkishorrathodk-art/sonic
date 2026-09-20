@@ -79,6 +79,7 @@ class EvolutionSummaryReport:
     lines_added: int = 0
     lines_removed: int = 0
     ast_validated: bool = False
+    import_integrity_passed: bool = False
     test_result: TestExecutionResult = field(default_factory=lambda: TestExecutionResult(passed=False))
     security_regression_passed: bool = False
     git_committed: bool = False
@@ -118,6 +119,7 @@ class EvolutionSummaryReport:
             f"  - Passed: `{self.test_result.passed_tests}` / `{self.test_result.total_tests}`",
             f"  - Failed: `{self.test_result.failed_tests}`",
             f"  - Duration: `{self.test_result.duration_seconds:.2f}s`",
+            f"- **Import Integrity:** {'✅ All changed modules import' if self.import_integrity_passed else '❌ FAILED (a changed module does not import)'}",
             f"- **Security Regression Suite:** {'✅ 100% PASSED (Zero Safety Breaches)' if self.security_regression_passed else '❌ FAILED/SKIPPED'}",
             "",
             "## 4. Git Provenance & Automation",
@@ -440,6 +442,86 @@ class CodebaseEvolver:
                 duration_seconds=time.time() - start_time,
             )
 
+    def run_import_checks(self, files: list[str]) -> tuple[bool, str]:
+        """Verify each changed .py file still imports in the real environment.
+
+        A focused test subset can pass without ever importing the file we changed,
+        so a patch that adds a broken import (e.g. `from pkg.missing import x`)
+        would otherwise be promoted. Here we byte-compile and then actually import
+        each changed module. Fail-closed: any import error blocks promotion.
+
+        Missing third-party *optional* dependencies (typer, playwright, ...) are
+        treated as inconclusive (skipped), never as a pass for the changed file's
+        own correctness — only a name/import error triggered by the change is a
+        failure.
+        """
+        checked: list[str] = []
+        for rel in files:
+            p = (self.repo_root / rel).resolve()
+            if not p.exists() or p.suffix != ".py":
+                continue
+            checked.append(rel)
+            # 1. Compile check (catches syntax errors without importing).
+            try:
+                compile(p.read_text(encoding="utf-8", errors="replace"), str(p), "exec")
+            except SyntaxError as e:
+                return False, f"{rel}: SyntaxError: {e.msg}"
+            except Exception as e:
+                return False, f"{rel}: compile error: {e}"
+
+            # 2. Import the module by dotted path under its package root.
+            mod = self._module_name(rel)
+            if not mod:
+                continue
+            cwd = str(self._package_root(rel) or self.repo_root)
+            code = (
+                "import importlib, sys;"
+                f"sys.path.insert(0, {cwd!r});"
+                f"importlib.import_module({mod!r})"
+            )
+            try:
+                res = subprocess.run(
+                    [sys.executable, "-c", code],
+                    cwd=cwd, capture_output=True, text=True, timeout=120,
+                )
+            except Exception as e:
+                return False, f"{rel}: import runner error: {e}"
+            if res.returncode == 0:
+                continue
+            err = (res.stderr or "") + (res.stdout or "")
+            # Optional third-party dep isn't installed here -> inconclusive, skip.
+            if "ModuleNotFoundError" in err and "No module named" in err:
+                missing = err.split("No module named")[-1].strip().strip("'\"")
+                top = missing.split(".")[0]
+                if not top.startswith(self._package_top(rel)):
+                    logger.info("evolution_import_check_skipped", file=rel, missing_dep=top)
+                    continue
+            last = err.strip().splitlines()[-1] if err.strip() else "import failed"
+            return False, f"{rel}: {last[:300]}"
+        return True, f"imports verified for {len(checked)} module(s)"
+
+    def _package_root(self, rel: str) -> Path | None:
+        for root in ("sonic-core", "sonic-cli"):
+            if rel.startswith(root + "/"):
+                return self.repo_root / root
+        return None
+
+    @staticmethod
+    def _package_top(rel: str) -> str:
+        parts = rel.replace("\\", "/").split("/")
+        for i, seg in enumerate(parts):
+            if seg in ("sonic", "sonic_cli"):
+                return seg
+        return parts[-2] if len(parts) >= 2 else ""
+
+    def _module_name(self, rel: str) -> str:
+        parts = rel.replace("\\", "/").split("/")
+        for i, seg in enumerate(parts):
+            if seg in ("sonic", "sonic_cli"):
+                mod = ".".join(parts[i:])
+                return mod[:-3] if mod.endswith(".py") else mod
+        return ""
+
     def run_security_regression(self) -> bool:
         """Verifies that no security invariants are broken by the proposed change.
 
@@ -530,6 +612,7 @@ class CodebaseEvolver:
         push: bool = False,
         test_paths: list[str] | None = None,
         pre_applied_files: list[str] | None = None,
+        report_only: bool = False,
     ) -> EvolutionSummaryReport:
         """
         Executes a complete, closed-loop codebase evolution cycle:
@@ -540,7 +623,7 @@ class CodebaseEvolver:
         5. Security regression verification
         6. Optional auto-commit & git push only when explicitly approved
         7. Rollback and lesson learning on any failure
-        8. Automatically appends audit notes to evolution.md
+        8. Automatically appends audit notes to evolution.md (skipped when report_only)
         9. Returns rich EvolutionSummaryReport
         """
         report = self._evolve_impl(
@@ -552,7 +635,8 @@ class CodebaseEvolver:
             test_paths=test_paths,
             pre_applied_files=pre_applied_files,
         )
-        self._log_to_evolution_md(report)
+        if not report_only:
+            self._log_to_evolution_md(report)
         return report
 
     def _log_to_evolution_md(self, report: EvolutionSummaryReport) -> None:
@@ -680,6 +764,21 @@ class CodebaseEvolver:
             return report
 
         self.pipeline.advance_stage(proposal.proposal_id, EvolutionStage.TESTS_PASSING, f"{test_res.passed_tests} tests green")
+
+        # Gate 3.5: Import integrity — the test subset may not import the changed
+        # files at all, so a patch that introduces a broken/undeclared import
+        # (or a syntax-level import error) could otherwise slip through. Verify
+        # every changed .py file still imports.
+        import_ok, import_msg = self.run_import_checks(pre_applied_files or [target_component])
+        report.import_integrity_passed = import_ok
+        if not import_ok:
+            logger.critical("evolution_import_integrity_failed", proposal_id=proposal.proposal_id)
+            self.rollback_snapshots()
+            report.stage = EvolutionStage.ROLLED_BACK
+            report.error_reason = f"Import integrity check failed: {import_msg}"
+            self.pipeline.advance_stage(proposal.proposal_id, EvolutionStage.ROLLED_BACK, report.error_reason)
+            return report
+        self.pipeline.advance_stage(proposal.proposal_id, EvolutionStage.IMPORTS_VERIFIED, import_msg)
 
         # Gate 4: Security Regression Suite
         sec_ok = self.run_security_regression()

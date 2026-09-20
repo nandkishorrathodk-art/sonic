@@ -416,15 +416,20 @@ class EvolutionGoalDirector:
         auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
+        report_only: bool = False,
     ) -> EvolutionSummaryReport:
-        """
-        Executes an end-to-end goal:
+        """Run one goal end-to-end.
+
+        When ``report_only`` is set nothing is committed and no side-effect
+        journal files (e.g. evolution.md) are written, so the caller keeps the
+        tree pristine. Original flow:
         1. Analyzes goal and codebase
         2. Applies patch with atomic rollback guarantees
         3. Runs verification tests
         4. Bumps version upon success
         5. Logs live notes to evolution.md
         """
+        self._report_only = bool(report_only)
         goal = self.get_goal(goal_id)
         if not goal:
             raise ValueError(f"Evolution goal not found: {goal_id}")
@@ -445,7 +450,7 @@ class EvolutionGoalDirector:
             self._update_goal(goal)
 
             # Record rejection in journal & evolution.md
-            self.journal.record_entry(JournalEntry(
+            self._record_entry(JournalEntry(
                 entry_id=f"ent-{uuid.uuid4().hex[:8]}",
                 goal_id=goal.goal_id,
                 title=goal.title,
@@ -502,7 +507,7 @@ class EvolutionGoalDirector:
                     stage=EvolutionStage.REJECTED,
                     error_reason=goal.notes,
                 )
-                self.journal.record_entry(JournalEntry(
+                self._record_entry(JournalEntry(
                     entry_id=f"ent-{uuid.uuid4().hex[:8]}",
                     goal_id=goal.goal_id,
                     title=goal.title,
@@ -548,6 +553,7 @@ class EvolutionGoalDirector:
             push=push,
             test_paths=test_paths,
             pre_applied_files=apply_files if len(apply_files) > 1 else None,
+            report_only=report_only,
         )
 
         # 4. Process outcome & Version Progression
@@ -576,7 +582,7 @@ class EvolutionGoalDirector:
             self._update_goal(goal)
 
             # Record in journal and append live notes to evolution.md
-            self.journal.record_entry(JournalEntry(
+            self._record_entry(JournalEntry(
                 entry_id=f"ent-{uuid.uuid4().hex[:8]}",
                 goal_id=goal.goal_id,
                 title=goal.title,
@@ -608,7 +614,7 @@ class EvolutionGoalDirector:
             self._update_goal(goal)
 
             # Record rollback in journal and append failure note to evolution.md
-            self.journal.record_entry(JournalEntry(
+            self._record_entry(JournalEntry(
                 entry_id=f"ent-{uuid.uuid4().hex[:8]}",
                 goal_id=goal.goal_id,
                 title=goal.title,
@@ -624,6 +630,12 @@ class EvolutionGoalDirector:
             ))
 
         return report
+
+    def _record_entry(self, entry: JournalEntry) -> None:
+        """Write a journal entry unless this run is report-only (no side-effects)."""
+        if getattr(self, "_report_only", False):
+            return
+        self.journal.record_entry(entry)
 
     async def _synthesize_patch(
         self,

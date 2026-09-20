@@ -266,7 +266,8 @@ class SelfCoder:
             return cycle
 
         # Snapshot the working tree so we can restore it after a report-only run.
-        before = self._tree_fingerprint([target_file])
+        # Include evolution.md because constructing the journal creates it.
+        before = self._tree_fingerprint([target_file, "evolution.md"])
 
         goal = self.director.submit_goal(
             title=signal[:180],
@@ -286,6 +287,7 @@ class SelfCoder:
             auto_promote=bool(self.allow_writes),
             push=self.push,
             test_paths=self._test_paths_for(target_file),
+            report_only=not self.allow_writes,
         )
         cycle.stage = report.stage.value
         cycle.summary = report.description
