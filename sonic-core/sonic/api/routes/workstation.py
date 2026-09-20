@@ -2772,6 +2772,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             require_approval_for_intrusive=False,
                             scope_config=verified_scope_config,
                             scope_checker=get_scope_checker(),
+                            max_actions_per_minute=300,
                         )
 
                         async def _record_step_trace(trace: Any) -> None:

@@ -312,6 +312,7 @@ def seal_default(
     scope_config: dict[str, Any] | None = None,
     scope_checker: Any | None = None,
     tenant_id: str = "default",
+    max_actions_per_minute: int = 120,
 ) -> SealedActionPolicy:
     """Build + seal the standard production policy for the being life loop or mission."""
     return SealedActionPolicy(
@@ -322,4 +323,5 @@ def seal_default(
         scope_config=scope_config,
         scope_checker=scope_checker,
         tenant_id=tenant_id,
+        max_actions_per_minute=max_actions_per_minute,
     ).seal()

@@ -236,6 +236,11 @@ class ActionPolicy:
             # M3: Reject Windows drive-letter paths (e.g. C:/...) that might escape workspace confinement
             if re.match(r"^[a-zA-Z]:", clean_path):
                 return PolicyVerdict(False, f"{action_name} escapes workspace: absolute Windows drive path {path}")
+            # Map canonical container workspace symlinks (/workspace <-> /home/sonic/workspace)
+            if clean_path == "/workspace":
+                clean_path = "/home/sonic/workspace"
+            elif clean_path.startswith("/workspace/"):
+                clean_path = "/home/sonic/workspace" + clean_path[len("/workspace"):]
             resolved = Path(clean_path).expanduser()
             # Resolve strictly=False so a not-yet-written path still confines.
             # On Windows, POSIX paths starting with / return is_absolute() == False.
