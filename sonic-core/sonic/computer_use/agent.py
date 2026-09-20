@@ -2052,7 +2052,7 @@ class ComputerUseAgent:
                 cmd_str = re.sub(r'\s+commands?$', '', cmd_str, flags=re.IGNORECASE)
 
                 # Redirect conversational pseudo-commands to real action types
-                m_launch = re.match(r'^(?:launch|open|start)\s+([a-zA-Z0-9_\-\s]+)$', cmd_str, re.IGNORECASE)
+                m_launch = re.match(r'^(?:launch|open|start)\s+([a-zA-Z0-9_\-\s./~]+)$', cmd_str, re.IGNORECASE)
                 m_nav = re.match(r'^(?:navigate|browse|go)(?:\s+to)?\s+(https?://\S+)', cmd_str, re.IGNORECASE)
 
                 if m_launch:
@@ -2074,7 +2074,7 @@ class ComputerUseAgent:
                 else:
                     payload["command"] = cmd_str
 
-        if action_type in (ComputerActionType.GUI_CLICK, ComputerActionType.GUI_DOUBLE_CLICK, ComputerActionType.GUI_RIGHT_CLICK, ComputerActionType.GUI_MOVE, ComputerActionType.GUI_DRAG):
+        if action_type in (ComputerActionType.GUI_CLICK, ComputerActionType.GUI_DOUBLE_CLICK, ComputerActionType.GUI_RIGHT_CLICK, ComputerActionType.GUI_MOVE):
             if target and "," in target:
                 parts = target.split(",")
                 if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
@@ -2083,6 +2083,38 @@ class ComputerUseAgent:
                 elif any(p.strip().lower() in ("x", "y", "x,y", "x, y") for p in parts):
                     payload.pop("x", None)
                     payload.pop("y", None)
+        elif action_type == ComputerActionType.GUI_DRAG:
+            # Flexible GUI_DRAG parsing from payload and target:
+            # Handles {"from": [x,y], "to": [x2,y2]}, {"start": ..., "end": ...}, {"x": ..., "y": ..., "x2": ..., "y2": ...}
+            if "from" in payload and isinstance(payload["from"], (list, tuple)) and len(payload["from"]) == 2:
+                payload["x"] = int(payload["from"][0])
+                payload["y"] = int(payload["from"][1])
+            if "to" in payload and isinstance(payload["to"], (list, tuple)) and len(payload["to"]) == 2:
+                payload["x2"] = int(payload["to"][0])
+                payload["y2"] = int(payload["to"][1])
+            if "start" in payload and isinstance(payload["start"], (list, tuple)) and len(payload["start"]) == 2:
+                payload["x"] = int(payload["start"][0])
+                payload["y"] = int(payload["start"][1])
+            if "end" in payload and isinstance(payload["end"], (list, tuple)) and len(payload["end"]) == 2:
+                payload["x2"] = int(payload["end"][0])
+                payload["y2"] = int(payload["end"][1])
+            # Check target string for coordinates e.g. "600,185 to 200,200", "(600,185) -> (200,200)"
+            m_drag = re.search(r'(\d+)\s*,\s*(\d+).*?(\d+)\s*,\s*(\d+)', str(target or ""))
+            if m_drag:
+                payload.setdefault("x", int(m_drag.group(1)))
+                payload.setdefault("y", int(m_drag.group(2)))
+                payload.setdefault("x2", int(m_drag.group(3)))
+                payload.setdefault("y2", int(m_drag.group(4)))
+            elif target and "," in target:
+                parts = target.split(",")
+                if len(parts) >= 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
+                    payload.setdefault("x", int(parts[0].strip()))
+                    payload.setdefault("y", int(parts[1].strip()))
+            # Default x2, y2 if still missing
+            if "x" in payload and "x2" not in payload:
+                payload["x2"] = payload["x"]
+            if "y" in payload and "y2" not in payload:
+                payload["y2"] = payload["y"]
         if action_type == ComputerActionType.GUI_SCROLL:
             if target and "," in target:
                 parts = target.split(",")

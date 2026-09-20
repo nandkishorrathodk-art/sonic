@@ -718,6 +718,9 @@ ACTION FORMAT EXAMPLES (format reference only — choose whatever action fits yo
 - Direct command / probe: ACTION: TERMINAL_EXEC, TARGET: curl -sI <target_url>, PAYLOAD: {{"command": "curl -sI <target_url>"}}
 - Script & File Authoring: ACTION: FILE_WRITE, TARGET: /home/sonic/workspace/myscript.py, PAYLOAD: {{"path": "/home/sonic/workspace/myscript.py", "content": "import json\nprint('hello')\n"}}
 - Application Launch: ACTION: APP_LAUNCH, TARGET: <application_name>, PAYLOAD: {{"app_name": "<application_name>"}}
+- GUI Text Editor / Notes: ACTION: APP_LAUNCH, TARGET: mousepad /home/sonic/workspace/notes.txt, PAYLOAD: {{"app_name": "mousepad", "path": "/home/sonic/workspace/notes.txt"}}
+- Mouse Drag & Window Move: ACTION: GUI_DRAG, TARGET: 600,180 to 200,200, PAYLOAD: {{"x": 600, "y": 180, "x2": 200, "y2": 200}}
+- Window Focus: ACTION: APP_FOCUS, TARGET: <application_name>, PAYLOAD: {{"app_name": "<application_name>"}}
 - Browser interaction: ACTION: BROWSER_NAVIGATE, TARGET: <target_url>, PAYLOAD: {{"url": "<target_url>"}}
 - Registered tool: ACTION: SECURITY_TOOL, TARGET: tool_name, PAYLOAD: {{"tool": "tool_name", "target": "<target_host>", "args": "..."}}
 
@@ -768,9 +771,9 @@ Do NOT run trivial commands like pwd, whoami, id, or uname unless specifically r
 
 Respond in EXACTLY this format (no markdown fences):
 THOUGHT: <organic technical rationale: analyze observation, state hypothesis, and justify next action>
-ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_SCROLL|GUI_SCREENSHOT|GUI_WAIT|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_COMMIT|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_INSTALL|BROWSER_NAVIGATE|BROWSER_CLICK|BROWSER_TYPE|BROWSER_SCREENSHOT|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|GOAL_COMPLETE>
+ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_SCROLL|GUI_SCREENSHOT|GUI_WAIT|GUI_DRAG|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_COMMIT|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_INSTALL|BROWSER_NAVIGATE|BROWSER_CLICK|BROWSER_TYPE|BROWSER_SCREENSHOT|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|GOAL_COMPLETE>
 TARGET: <path, app name, url, coordinates "x,y", or UI element query>
-PAYLOAD: <json dict, e.g. {{"command": "..."}}, {{"text": "..."}}, {{"url": "..."}}, {{"tool": "...", "target": "...", "args": "..."}}>
+PAYLOAD: <json dict, e.g. {{"command": "..."}}, {{"text": "..."}}, {{"url": "..."}}, {{"x": ..., "y": ..., "x2": ..., "y2": ...}}>
 EXPECTED: <predicted outcome>
 
 SECURITY_TOOL Examples:
@@ -780,11 +783,14 @@ ACTION: SECURITY_TOOL, TARGET: web_scanner, PAYLOAD: {{"tool": "web_scanner", "t
 KEY RULES:
 - TERMINAL_EXEC: TARGET/PAYLOAD must be an EXACT shell command (e.g. curl -sI <target_url>), NEVER natural language
 - FILE_WRITE: TARGET is the file path. PAYLOAD is {{"path": "...", "content": "<file_source_code>"}}. Use FILE_WRITE to author scripts and files with full code. Never write complex scripts as inline single-line bash commands.
+- GUI_DRAG: Drag from (x,y) to (x2,y2). PAYLOAD is {{"x": <sx>, "y": <sy>, "x2": <dx>, "y2": <dy>}}. Use to drag window title bars, reposition windows, move sliders, or canvas items.
+- APP_LAUNCH: TARGET is the app name and optional file/url arguments (e.g. mousepad /home/sonic/workspace/notes.txt)
+- APP_FOCUS: Focus an application window (e.g. mousepad, chrome)
+- GUI TEXT EDITORS (e.g. Mousepad): To open a note/file in Mousepad, pass the file path in APP_LAUNCH (e.g. mousepad /path/notes.txt). To type notes, use GUI_TYPE. To save inside open editor, use GUI_KEYPRESS ctrl+s.
 - SECURITY_TOOL: Run registered tool when needed, with real target and args in PAYLOAD
-- APP_LAUNCH: TARGET is the app name (e.g. <application_name>)
 - GUI_CLICK: TARGET is "x,y" coordinates or a UI element name (e.g. "search bar", "Applications menu")
 - GUI_TYPE: PAYLOAD is {{"text": "..."}}
-- GUI_KEYPRESS: PAYLOAD is {{"key": "Return|Tab|Escape|ctrl+c|..."}}
+- GUI_KEYPRESS: PAYLOAD is {{"key": "Return|Tab|Escape|ctrl+c|ctrl+s|..."}}
 - BROWSER_NAVIGATE: TARGET is the full URL (e.g. <target_url>)
 - GOAL_COMPLETE: when the goal is achieved
 

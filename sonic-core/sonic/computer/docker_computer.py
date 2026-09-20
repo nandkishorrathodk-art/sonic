@@ -532,7 +532,7 @@ class DockerComputerProvider(ComputerProvider):
                 sx, sy = action.x or 0, action.y or 0
                 dx = action.x2 if action.x2 is not None else sx
                 dy = action.y2 if action.y2 is not None else sy
-                await exec_gui(f"DISPLAY={disp} xdotool mousemove {sx} {sy} mousedown 1 mousemove {dx} {dy} mouseup 1")
+                await exec_gui(f"DISPLAY={disp} xdotool mousemove --sync {sx} {sy} sleep 0.1 mousedown 1 sleep 0.1 mousemove --sync {dx} {dy} sleep 0.1 mouseup 1")
 
             elif atype == GUIActionType.TYPE and action.text:
                 safe_text = shlex.quote(action.text)
