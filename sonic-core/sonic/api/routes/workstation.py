@@ -221,11 +221,14 @@ async def _run_prompt_reasoning_with_timeout(
         _append_worklog(state, "error", "Reasoning Timeout", message)
         _persist_workstation_state()
     except Exception as exc:
+        import traceback
+        tb_str = traceback.format_exc()
+        logger.error("workstation_reasoning_failed", exc=str(exc), traceback=tb_str)
         state["status"] = "ERROR"
         state["current_action"] = "Reasoning failed; no desktop action was completed."
         message = f"Reasoning failed before completion: {exc}"
         state["thought_summary"] = message
-        _append_worklog(state, "error", "Reasoning Error", message)
+        _append_worklog(state, "error", "Reasoning Error", f"{message}\n\n{tb_str}")
         _persist_workstation_state()
 
 

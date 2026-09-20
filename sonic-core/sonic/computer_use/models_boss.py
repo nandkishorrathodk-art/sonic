@@ -42,11 +42,11 @@ class SubMission(BaseModel):
         # Explicit headless indicators preserve headless plane despite incidental mentions
         headless_indicators = (
             "terminal", "bash", "shell", "mkdir", "script", "python", "probe",
-            "file", "curl", "sha256", "grep", "ps ", "ss ", "netstat",
-            "directory", "tool_author", "toolsmith",
+            "file", "curl", "sha256", "grep", "ps ", "ss ", "netstat", "wmctrl",
+            "directory", "tool_author", "toolsmith", "audit", "find ", "cat ",
         )
         if any(h in goal_lower for h in headless_indicators):
-            if not any(g in goal_lower for g in ("launch ", "app_launch", "open browser", "click ")):
+            if not any(g in goal_lower for g in ("launch ", "app_launch", "open browser", "open application", "click ")):
                 self.plane = "headless"
                 return self
 

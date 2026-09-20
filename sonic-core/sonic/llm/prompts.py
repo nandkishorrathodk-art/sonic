@@ -716,7 +716,8 @@ EXPECTED: <short description of predicted outcome>
 
 ACTION FORMAT EXAMPLES (format reference only — choose whatever action fits your target):
 - Direct command / probe: ACTION: TERMINAL_EXEC, TARGET: curl -sI <target_url>, PAYLOAD: {{"command": "curl -sI <target_url>"}}
-- Custom Python probe: ACTION: TERMINAL_EXEC, TARGET: python probe.py, PAYLOAD: {{"command": "python -c \"import urllib.request; print(urllib.request.urlopen('<target_url>').info())\""}}
+- Script & File Authoring: ACTION: FILE_WRITE, TARGET: /home/sonic/workspace/myscript.py, PAYLOAD: {{"path": "/home/sonic/workspace/myscript.py", "content": "import json\nprint('hello')\n"}}
+- Application Launch: ACTION: APP_LAUNCH, TARGET: <application_name>, PAYLOAD: {{"app_name": "<application_name>"}}
 - Browser interaction: ACTION: BROWSER_NAVIGATE, TARGET: <target_url>, PAYLOAD: {{"url": "<target_url>"}}
 - Registered tool: ACTION: SECURITY_TOOL, TARGET: tool_name, PAYLOAD: {{"tool": "tool_name", "target": "<target_host>", "args": "..."}}
 
@@ -778,6 +779,7 @@ ACTION: SECURITY_TOOL, TARGET: web_scanner, PAYLOAD: {{"tool": "web_scanner", "t
 
 KEY RULES:
 - TERMINAL_EXEC: TARGET/PAYLOAD must be an EXACT shell command (e.g. curl -sI <target_url>), NEVER natural language
+- FILE_WRITE: TARGET is the file path. PAYLOAD is {{"path": "...", "content": "<file_source_code>"}}. Use FILE_WRITE to author scripts and files with full code. Never write complex scripts as inline single-line bash commands.
 - SECURITY_TOOL: Run registered tool when needed, with real target and args in PAYLOAD
 - APP_LAUNCH: TARGET is the app name (e.g. <application_name>)
 - GUI_CLICK: TARGET is "x,y" coordinates or a UI element name (e.g. "search bar", "Applications menu")

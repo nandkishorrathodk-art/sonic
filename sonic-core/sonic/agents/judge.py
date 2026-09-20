@@ -246,6 +246,9 @@ class JudgeAgent:
                         )
 
         # 6. Workstation Application & Desktop Window Check (Rule 5 & Rule 7):
+        is_window_inspection_only = any(
+            marker in goal_lower for marker in ("wmctrl", "list windows", "confirm active session windows", "inspect windows", "check windows", "xwininfo")
+        )
         is_gui_mission = getattr(sub_mission, "plane", "") == "gui" or any(
             w in goal_lower for w in ("desktop", "browser", "window", "gui", "open application", "launch application")
         )
@@ -253,9 +256,16 @@ class JudgeAgent:
             has_gui_action = any(
                 str(_t_val(t, "action_type", "")).startswith("GUI_")
                 or str(_t_val(t, "action_type", "")) == "APP_LAUNCH"
+                or ("nohup" in str(_t_val(t, "target_resource", "")).lower() and any(app in str(_t_val(t, "target_resource", "")).lower() for app in ("terminal", "mousepad", "chrome", "xterm", "thunar", "editor")))
+                or ("nohup" in str(_t_val(t, "payload", "")).lower() and any(app in str(_t_val(t, "payload", "")).lower() for app in ("terminal", "mousepad", "chrome", "xterm", "thunar", "editor")))
                 for t in traces
             )
-            gui_verified = has_gui_action
+            has_wmctrl_exec = any(
+                ("wmctrl" in str(_t_val(t, "target_resource", "")).lower() or "wmctrl" in str(_t_val(t, "payload", "")).lower() or "wmctrl" in str(_t_val(t, "actual_observation", "")).lower())
+                and _t_val(t, "exit_code", 0) == 0
+                for t in traces
+            )
+            gui_verified = has_gui_action or (is_window_inspection_only and has_wmctrl_exec)
             if self.computer and hasattr(self.computer, "terminal"):
                 try:
                     wm_res = await self.computer.terminal(workspace_id, "DISPLAY=:99 wmctrl -l 2>/dev/null | grep -v ' -1 '")

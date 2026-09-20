@@ -1334,6 +1334,7 @@ class ComputerUseAgent:
                 "This task requires graphical desktop interaction on Display :99.\n"
                 "You MUST interact with the graphical desktop using APP_LAUNCH to start the application,\n"
                 "and GUI actions (GUI_CLICK, GUI_TYPE, GUI_KEYPRESS, GUI_SCREENSHOT) to interact with it.\n"
+                "You may also use TERMINAL_EXEC for window inspection commands like 'wmctrl -l' to verify window status.\n"
                 "You are STRICTLY PROHIBITED from bypassing GUI application tasks with headless terminal curl or scrapers.\n"
                 "===================================================\n\n"
             )
@@ -1349,7 +1350,9 @@ class ComputerUseAgent:
         target_header += (
             "=== SCRIPT & CODE AUTHORING INVARIANTS ===\n"
             "- Valid Syntax: In any Python code or print() calls, strings MUST be quoted (e.g. print('msg')).\n"
-            "- Standard Library: `json`, `urllib`, `time`, `sys`, `os`, `re` are built-in. NEVER execute `pip install json`.\n"
+            "- Standard Library: `json`, `urllib`, `time`, `sys`, `os`, `re`, `socket` are built-in. NEVER execute `pip install json`.\n"
+            "- Creating Files: When asked to author or create a script/file, use FILE_WRITE with target_resource set to the exact requested path and payload set to the complete script content, or TOOL_AUTHOR. NEVER write complex multi-line logic as 'python -c' commands.\n"
+            "- Target Paths: Always create and execute scripts at the exact requested path (e.g. inside the target lab directory).\n"
             "==========================================\n\n"
         )
         if getattr(self, "initial_context", None):
@@ -1734,7 +1737,7 @@ class ComputerUseAgent:
             except Exception:
                 pass
 
-        pattern = r'(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?:\s*(.*?)(?=(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\:|$)'
+        pattern = r'(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?:\s*(.*?)(?=(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\:|$)'
         matches = re.findall(pattern, parse_target_text, re.DOTALL | re.IGNORECASE)
         # Use setdefault to preserve the FIRST action in case of multiple blocks
         raw_fields: dict[str, str] = {}
@@ -1788,6 +1791,8 @@ class ComputerUseAgent:
             "TYPE": ComputerActionType.GUI_TYPE,
             "RUN": ComputerActionType.TERMINAL_EXEC,
             "EXEC": ComputerActionType.TERMINAL_EXEC,
+            "COMMAND": ComputerActionType.TERMINAL_EXEC,
+            "TERMINAL": ComputerActionType.TERMINAL_EXEC,
             "NAVIGATE": ComputerActionType.BROWSER_NAVIGATE,
             "BROWSE": ComputerActionType.BROWSER_NAVIGATE,
             "SCAN": ComputerActionType.SECURITY_TOOL,
@@ -1937,6 +1942,25 @@ class ComputerUseAgent:
             payload = {"text": payload_str.strip('"\' ')} if payload_str.strip() not in ("{}", "") else {}
         elif action_type == ComputerActionType.TERMINAL_EXEC:
             payload = {"command": payload_str.strip('"\' ')} if payload_str.strip() not in ("{}", "") else {}
+        elif action_type == ComputerActionType.FILE_WRITE:
+            payload = {}
+            raw_c = fields.get("CONTENT") or fields.get("CODE") or fields.get("SOURCE") or (payload_str if payload_str.strip() not in ("{}", "", "none") else "")
+            if raw_c:
+                raw_c_str = str(raw_c).strip()
+                if raw_c_str.startswith("```"):
+                    raw_c_str = re.sub(r"^```[a-zA-Z0-9_\-\.]*\s*\n?", "", raw_c_str)
+                    raw_c_str = re.sub(r"\n?\s*```$", "", raw_c_str)
+                payload["content"] = raw_c_str
+        elif action_type == ComputerActionType.TOOL_AUTHOR:
+            payload = {}
+            raw_c = fields.get("CODE") or fields.get("SOURCE") or fields.get("CONTENT") or (payload_str if payload_str.strip() not in ("{}", "", "none") else "")
+            if raw_c:
+                raw_c_str = str(raw_c).strip()
+                if raw_c_str.startswith("```"):
+                    raw_c_str = re.sub(r"^```[a-zA-Z0-9_\-\.]*\s*\n?", "", raw_c_str)
+                    raw_c_str = re.sub(r"\n?\s*```$", "", raw_c_str)
+                payload["code"] = raw_c_str
+                payload["source"] = raw_c_str
         else:
             payload = {}
 
@@ -1970,8 +1994,14 @@ class ComputerUseAgent:
                 payload["tool"] = target
 
         if action_type == ComputerActionType.FILE_WRITE:
-            if "content" not in payload and "CONTENT" in fields:
-                payload["content"] = fields["CONTENT"]
+            if "content" not in payload:
+                raw_c = fields.get("CONTENT") or fields.get("CODE") or fields.get("SOURCE") or (payload_str if payload_str.strip() not in ("{}", "", "none") else "")
+                if raw_c:
+                    raw_c_str = str(raw_c).strip()
+                    if raw_c_str.startswith("```"):
+                        raw_c_str = re.sub(r"^```[a-zA-Z0-9_\-\.]*\s*\n?", "", raw_c_str)
+                        raw_c_str = re.sub(r"\n?\s*```$", "", raw_c_str)
+                    payload["content"] = raw_c_str
             if "path" not in payload and target:
                 payload["path"] = target
 
@@ -1993,6 +2023,14 @@ class ComputerUseAgent:
 
         if action_type == ComputerActionType.TERMINAL_EXEC:
             raw_cmd = payload.get("command") or fields.get("COMMAND")
+            if not raw_cmd and fields.get("ACTION"):
+                act_field = fields["ACTION"].strip()
+                for prefix in ("TERMINAL_EXEC", "TERMINAL", "RUN", "EXEC", "COMMAND", "CMD", "BASH", "SHELL"):
+                    if act_field.upper().startswith(prefix) and len(act_field) > len(prefix):
+                        tail = act_field[len(prefix):].strip(" :")
+                        if tail:
+                            raw_cmd = tail
+                            break
             if not raw_cmd or str(raw_cmd).lower() in ("none", "null", ""):
                 payload["command"] = target if target and target != default_file and not target.startswith("{") else "echo 'ERROR: Empty command payload' >&2; exit 1"
             else:
