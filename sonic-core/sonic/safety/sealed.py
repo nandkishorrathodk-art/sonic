@@ -158,7 +158,7 @@ class SealedActionPolicy(ActionPolicy):
     def seal_hash(self) -> str:
         return self._seal_hash
 
-    def clone_for_agent(self, agent_id: str = "") -> "SealedActionPolicy":
+    def clone_for_agent(self, agent_id: str = "") -> SealedActionPolicy:
         """Clone policy with an independent rate window for a concurrent subagent."""
         cloned = SealedActionPolicy(
             workspace_root=str(self.workspace_root),

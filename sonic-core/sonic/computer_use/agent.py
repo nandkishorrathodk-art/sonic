@@ -30,12 +30,13 @@ from sonic.computer.models import (
     ScreenObservation,
 )
 from sonic.computer.provider import ComputerProvider
-from sonic.sandbox.provider import ExecResult
+from sonic.computer_use.experience import compare_prediction, state_signature
 from sonic.computer_use.grounding import (
     draw_action_marker,
     query_multimodal_grounding,
     resolve_ui_target_async,
 )
+from sonic.computer_use.gui_world_graph import GuiWorldGraph
 from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionType,
@@ -51,15 +52,14 @@ from sonic.computer_use.models import (
 )
 from sonic.computer_use.motor import MotorReflexes
 from sonic.computer_use.perception_bus import PerceptionBus
-from sonic.computer_use.experience import compare_prediction, state_signature
-from sonic.computer_use.gui_world_graph import GuiWorldGraph
-from sonic.orchestration.dual_process import DualProcessController
 from sonic.computer_use.scratchpad import HackerScratchpad
 from sonic.computer_use.wire_telemetry import WireTelemetryEngine
 from sonic.llm.prompts import COMPUTER_USE_SYSTEM_PROMPT
 from sonic.logger import get_logger
+from sonic.orchestration.dual_process import DualProcessController
 from sonic.research.failure_budget import FailureBudgetTracker
 from sonic.research.failure_classifier import classify_failure
+from sonic.sandbox.provider import ExecResult
 
 
 def _extract_command_from_sig(sig_payload_str: str) -> str:
@@ -3005,7 +3005,7 @@ class ComputerUseAgent:
                         if cached is None:
                             apps = await self.computer.application_list(workspace_id)
                             cached = set(a.lower() for a in apps)
-                            setattr(self.computer, "_cached_desktop_apps", cached)
+                            self.computer._cached_desktop_apps = cached
                         if base_bin.lower() in cached or any(base_bin.lower() == a for a in cached):
                             is_desktop_app = True
                     except Exception:

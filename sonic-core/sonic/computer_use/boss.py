@@ -44,8 +44,8 @@ from sonic.computer_use.models_boss import (
     SubMission,
     SubMissionResult,
 )
-from sonic.orchestration.dual_process import DualProcessController
 from sonic.computer_use.replay import evaluate_traces
+from sonic.orchestration.dual_process import DualProcessController
 
 logger = structlog.get_logger(__name__)
 
