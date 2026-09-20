@@ -1337,6 +1337,15 @@ class ComputerUseAgent:
                 "You are STRICTLY PROHIBITED from bypassing GUI application tasks with headless terminal curl or scrapers.\n"
                 "===================================================\n\n"
             )
+        elif init_ctx.get("delegated_plane") == "headless":
+            target_header += (
+                "=== OPERATOR SANDBOX PLANE (HEADLESS DIRECT EXECUTION) MANDATE ===\n"
+                "This task is an operator sandbox task (terminal commands, script execution, file I/O, or diagnostics).\n"
+                "You MUST execute commands DIRECTLY in the sandbox container using TERMINAL_EXEC or FILE_WRITE.\n"
+                "DO NOT attempt to click desktop icons (such as 'Terminal icon') or launch GUI applications for this task.\n"
+                "The sandbox terminal executes directly in the environment without needing a desktop window.\n"
+                "===================================================================\n\n"
+            )
         target_header += (
             "=== SCRIPT & CODE AUTHORING INVARIANTS ===\n"
             "- Valid Syntax: In any Python code or print() calls, strings MUST be quoted (e.g. print('msg')).\n"
@@ -3577,94 +3586,132 @@ class ComputerUseAgent:
                         self.failure_budget.record_success(tool=tool_name, provider=provider_name)
 
             elif action_type == ComputerActionType.TOOL_AUTHOR:
-                # Toolsmith (Phase A, AIOSR): the being authors a NEW tool for an
-                # observation gap or custom capability. The source is persisted
-                # to BeingCraft; the tool is NOT registered until confirmed in-sandbox.
-                # No "tool authored and working" claim by decree.
-                if self.toolsmith is None and self.computer is not None and self.llm_router is not None:
-                    try:
-                        from sonic.being.craft import BeingCraft
-                        from sonic.being.toolsmith import ToolsmithLoop
-                        from sonic.tools.registry import SecurityToolRegistry
-                        reg = SecurityToolRegistry(provider=self.computer)
-                        self.toolsmith = ToolsmithLoop(
-                            craft=BeingCraft(being_id=getattr(self, "agent_id", "computer-use-agent")),
-                            llm=self.llm_router,
-                            registry=reg,
-                        )
-                    except Exception as e:
-                        logger.warning("lazy_toolsmith_init_failed", error=str(e))
+                code = payload.get("source") or payload.get("code") or payload.get("content")
+                target_str = str(target_resource or "").strip()
+                name_str = str(payload.get("name") or payload.get("tool") or payload.get("path") or "").strip()
+                is_auto_verify = bool(payload.get("auto_verify") or payload.get("run"))
 
-                if self.toolsmith is None:
-                    # Direct script/code authoring fallback: write custom code or script directly to workspace
-                    code = payload.get("source") or payload.get("code") or payload.get("content")
-                    if code:
-                        tool_name = payload.get("name") or target_resource or "custom_tool"
-                        tool_name = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name).strip('_') or "custom_tool"
-                        ext = ".py" if ("import " in code or "def " in code) else ".sh"
-                        script_path = f"/home/sonic/workspace/{tool_name}{ext}"
+                is_file_target = (
+                    any(s.endswith((".py", ".sh", ".bash", ".js")) for s in (target_str, name_str) if s)
+                    or "/" in target_str
+                    or "/" in name_str
+                    or bool(payload.get("path"))
+                )
+
+                if is_file_target and not is_auto_verify and self.computer is not None:
+                    # Direct script authoring to sandbox workspace
+                    dest_path = (
+                        payload.get("path")
+                        or (target_str if target_str.startswith("/") else None)
+                        or (name_str if name_str.startswith("/") else None)
+                        or f"/home/sonic/workspace/{name_str or target_str}"
+                    )
+                    # If code is missing, generate it via LLM
+                    if not code and self.llm_router is not None:
                         try:
-                            await self.computer.write_file(workspace_id, script_path, code)
-                            actual_obs_str = (
-                                f"Authored custom script at '{script_path}', but it is "
-                                "UNVERIFIED: no Toolsmith sandbox reproduction or registration was performed."
+                            from sonic.llm.schemas import LLMRequest, Message, MessageRole
+                            gen_prompt = (
+                                f"Author a concise, working script to satisfy this goal: {effective_goal}\n"
+                                f"Target script path: {dest_path}\n"
+                                "Output ONLY valid executable code without markdown blocks or conversational commentary."
                             )
-                            # Writing source is not evidence that a capability
-                            # works. Keep the action non-successful so it
-                            # cannot advance a mission or claim progress.
-                            status = ActionExecutionStatus.FAILED
-                            recovery_needed = True
-                        except Exception as e:
-                            actual_obs_str = f"Failed writing authored script '{script_path}': {e}"
+                            resp = await self.llm_router.complete(
+                                LLMRequest(
+                                    messages=[Message(role=MessageRole.USER, content=gen_prompt)],
+                                    max_tokens=800,
+                                    temperature=0.2,
+                                    task_type="coding",
+                                )
+                            )
+                            code = (resp.content or "").strip()
+                            if code.startswith("```"):
+                                lines = code.splitlines()
+                                if lines and lines[0].startswith("```"):
+                                    lines = lines[1:]
+                                if lines and lines[-1].strip() == "```":
+                                    lines = lines[:-1]
+                                code = "\n".join(lines).strip()
+                        except Exception as gen_err:
+                            logger.warning("script_generation_failed", error=str(gen_err))
+
+                    if code:
+                        try:
+                            await self.computer.write_file(workspace_id, dest_path, code)
+                            actual_obs_str = f"Authored script at '{dest_path}' ({len(code)} bytes). Next action: execute or verify via TERMINAL_EXEC."
+                            status = ActionExecutionStatus.COMPLETED
+                            action_exit_code = 0
+                        except Exception as write_err:
+                            actual_obs_str = f"Failed writing authored script '{dest_path}': {write_err}"
                             recovery_needed = True
                     else:
-                        actual_obs_str = "Toolsmith not configured (no tool authoring)"
+                        actual_obs_str = f"Could not determine code for '{dest_path}'"
                         recovery_needed = True
                 else:
-                    observation = payload.get("observation", "") or target_resource
-                    failed = payload.get("failed_attempts", [])
-                    name = payload.get("name") or payload.get("tool")
-                    source = payload.get("source") or payload.get("code")
-                    rationale = payload.get("rationale", "")
-                    authored = await self.toolsmith.author_tool(
-                        observation=observation,
-                        failed_attempts=list(failed) if failed else None,
-                        name=name,
-                        source=source,
-                        rationale=rationale,
-                    )
-                    if authored is None:
-                        actual_obs_str = "Toolsmith: no novel tool warranted (honest skip)"
+                    # Toolsmith (Phase A, AIOSR): the being authors a NEW tool for an
+                    # observation gap or custom capability. The source is persisted
+                    # to BeingCraft; the tool is NOT registered until confirmed in-sandbox.
+                    if self.toolsmith is None and self.computer is not None and self.llm_router is not None:
+                        try:
+                            from sonic.being.craft import BeingCraft
+                            from sonic.being.toolsmith import ToolsmithLoop
+                            from sonic.tools.registry import SecurityToolRegistry
+                            reg = SecurityToolRegistry(provider=self.computer)
+                            self.toolsmith = ToolsmithLoop(
+                                craft=BeingCraft(being_id=getattr(self, "agent_id", "computer-use-agent")),
+                                llm=self.llm_router,
+                                registry=reg,
+                            )
+                        except Exception as e:
+                            logger.warning("lazy_toolsmith_init_failed", error=str(e))
+
+                    if self.toolsmith is None:
+                        actual_obs_str = "Toolsmith not configured (no tool authoring)"
+                        recovery_needed = True
                     else:
-                        actual_obs_str = (
-                            f"Authored tool '{authored.name}' (unconfirmed; "
-                            f"run TOOL_RUN to verify): {authored.rationale}"
+                        observation = payload.get("observation", "") or target_resource
+                        failed = payload.get("failed_attempts", [])
+                        name = payload.get("name") or payload.get("tool")
+                        source = payload.get("source") or payload.get("code")
+                        rationale = payload.get("rationale", "")
+                        authored = await self.toolsmith.author_tool(
+                            observation=observation,
+                            failed_attempts=list(failed) if failed else None,
+                            name=name,
+                            source=source,
+                            rationale=rationale,
                         )
-                        if payload.get("auto_verify") or payload.get("run"):
-                            target = payload.get("target")
-                            if not target:
-                                actual_obs_str = "TOOL_RUN requires an explicit target"
-                                recovery_needed = True
-                            else:
-                                confirmed = await self.toolsmith.confirm_and_register(
-                                    authored, self.computer, workspace_id, target=target,
-                                )
-                                if confirmed.reproduced:
-                                    adapter = self.toolsmith.registry.get(confirmed.name) if getattr(self.toolsmith, "registry", None) else None
-                                    if adapter is None:
-                                        from sonic.being.toolsmith import AuthoredToolAdapter
-                                        adapter = AuthoredToolAdapter(confirmed, self.computer)
-                                    self.security_tools[confirmed.name] = adapter
-                                    actual_obs_str = (
-                                        f"Tool '{confirmed.name}' CONFIRMED and registered "
-                                        f"(exit={confirmed.run_exit_code})"
-                                    )
-                                else:
-                                    actual_obs_str = (
-                                        f"Tool '{confirmed.name}' NOT confirmed "
-                                        f"(exit={confirmed.run_exit_code}); not registered"
-                                    )
+                        if authored is None:
+                            actual_obs_str = "Toolsmith: no novel tool warranted (honest skip)"
+                        else:
+                            actual_obs_str = (
+                                f"Authored tool '{authored.name}' (unconfirmed; "
+                                f"run TOOL_RUN to verify): {authored.rationale}"
+                            )
+                            if payload.get("auto_verify") or payload.get("run"):
+                                target = payload.get("target")
+                                if not target:
+                                    actual_obs_str = "TOOL_RUN requires an explicit target"
                                     recovery_needed = True
+                                else:
+                                    confirmed = await self.toolsmith.confirm_and_register(
+                                        authored, self.computer, workspace_id, target=target,
+                                    )
+                                    if confirmed.reproduced:
+                                        adapter = self.toolsmith.registry.get(confirmed.name) if getattr(self.toolsmith, "registry", None) else None
+                                        if adapter is None:
+                                            from sonic.being.toolsmith import AuthoredToolAdapter
+                                            adapter = AuthoredToolAdapter(confirmed, self.computer)
+                                        self.security_tools[confirmed.name] = adapter
+                                        actual_obs_str = (
+                                            f"Tool '{confirmed.name}' CONFIRMED and registered "
+                                            f"(exit={confirmed.run_exit_code})"
+                                        )
+                                    else:
+                                        actual_obs_str = (
+                                            f"Tool '{confirmed.name}' NOT confirmed "
+                                            f"(exit={confirmed.run_exit_code}); not registered"
+                                        )
+                                        recovery_needed = True
 
             elif action_type == ComputerActionType.TOOL_RUN:
                 # Run a previously-authored tool in-sandbox and register it into

@@ -38,8 +38,20 @@ class SubMission(BaseModel):
 
     @model_validator(mode="after")
     def _infer_plane_from_goal(self) -> SubMission:
+        goal_lower = self.goal.lower()
+        # Explicit headless indicators preserve headless plane despite incidental mentions
+        headless_indicators = (
+            "terminal", "bash", "shell", "mkdir", "script", "python", "probe",
+            "file", "curl", "sha256", "grep", "ps ", "ss ", "netstat",
+            "directory", "tool_author", "toolsmith",
+        )
+        if any(h in goal_lower for h in headless_indicators):
+            if not any(g in goal_lower for g in ("launch ", "app_launch", "open browser", "click ")):
+                self.plane = "headless"
+                return self
+
         if self.plane == "headless" and any(
-            w in self.goal.lower() for w in ("desktop", "screen", "window", "gui", "browser", "click")
+            w in goal_lower for w in ("desktop", "screen", "window", "gui", "browser", "click")
         ):
             self.plane = "gui"
         return self

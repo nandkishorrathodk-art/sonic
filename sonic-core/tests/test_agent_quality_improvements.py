@@ -606,3 +606,34 @@ async def test_terminal_action_repeat_blocked_and_tracked():
     )
     assert rejection is not None
     assert "BLOCKED: exact repeat" in rejection
+
+
+@pytest.mark.asyncio
+async def test_tool_author_direct_script_writing_completes():
+    """TOOL_AUTHOR on a specific script path writes file to workspace and returns COMPLETED."""
+    from unittest.mock import AsyncMock
+    from sonic.computer_use.models import ComputerActionType, ActionExecutionStatus
+
+    provider = AsyncMock()
+    provider.write_file = AsyncMock()
+    agent = ComputerUseAgent(computer_provider=provider)
+
+    trace = await agent.execute_action(
+        workspace_id="ws-test",
+        action_type=ComputerActionType.TOOL_AUTHOR,
+        target_resource="/home/sonic/workspace/sonic_dual_plane_audit/sys_probe.py",
+        payload={
+            "path": "/home/sonic/workspace/sonic_dual_plane_audit/sys_probe.py",
+            "source": "import os\nprint('sys probe ok')\n",
+        },
+        predicted_outcome="sys probe script written",
+    )
+
+    provider.write_file.assert_awaited_once_with(
+        "ws-test",
+        "/home/sonic/workspace/sonic_dual_plane_audit/sys_probe.py",
+        "import os\nprint('sys probe ok')\n",
+    )
+    assert trace.status == ActionExecutionStatus.COMPLETED
+    assert "Authored script at" in trace.actual_observation
+

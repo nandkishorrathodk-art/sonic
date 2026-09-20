@@ -13,14 +13,28 @@ from sonic.agents.task_graph import TaskStatus
 
 
 class MockComputerProvider:
-    async def terminal(self, cmd: str, timeout: int = 15) -> str:
+    def __getattr__(self, name):
+        async def _default_async(*args, **kwargs):
+            return ""
+        return _default_async
+
+    async def terminal(self, *args, **kwargs) -> str:
         return "mock terminal output"
 
-    async def screenshot(self) -> bytes:
+    async def screenshot(self, *args, **kwargs) -> bytes:
         return b"mock png bytes"
 
-    async def status(self) -> dict:
+    async def status(self, *args, **kwargs) -> dict:
         return {"status": "RUNNING", "windows": ["Terminal"]}
+
+    async def list_files(self, *args, **kwargs) -> list:
+        return []
+
+    async def read_file(self, *args, **kwargs) -> str:
+        return ""
+
+    async def write_file(self, *args, **kwargs):
+        pass
 
 
 class MockHeadlessProvider:
@@ -208,3 +222,84 @@ async def test_phase_summary_and_all_findings_collection():
     all_findings = boss._collect_all_findings()
     assert "[Phase 1 (Service Discovery) Unified Intelligence]:" in all_findings
     assert "Open port 5432 postgresql verified" in all_findings
+
+
+def test_sub_mission_plane_inference_preserves_headless_for_file_commands():
+    """Headless commands with incidental mention of desktop must remain headless."""
+    sm1 = SubMission(goal="Initialize target directory /home/sonic/workspace/sonic_dual_plane_audit")
+    assert sm1.plane == "headless"
+
+    sm2 = SubMission(goal="Inspect environment via terminal plane: operating system details and active ports")
+    assert sm2.plane == "headless"
+
+    sm3 = SubMission(goal="Author custom Python diagnostic script /home/sonic/workspace/sys_probe.py")
+    assert sm3.plane == "headless"
+
+    sm_gui = SubMission(goal="Launch terminal emulator on Display :99 and observe window")
+    assert sm_gui.plane == "gui"
+
+
+@pytest.mark.asyncio
+async def test_boss_judge_falsification_overwrites_findings_summary():
+    """When JudgeAgent falsifies a sub-mission, findings_summary is updated with the rationale."""
+    from sonic.agents.judge import JudgeVerdict, JudgeEvaluation
+
+    boss = BossAgent(MockComputerProvider(), MockLLMRouter())
+    mock_judge = MagicMock()
+    mock_judge.evaluate_sub_mission = AsyncMock(
+        return_value=JudgeEvaluation(
+            verdict=JudgeVerdict.FALSIFIED,
+            confidence=0.95,
+            notes="Expected file probe_receipt.json was not created on disk",
+        )
+    )
+    boss.judge = mock_judge
+
+    sub_m = SubMission(id="sub-test", goal="Create probe_receipt.json", plane="headless")
+    with patch("sonic.computer_use.agent.ComputerUseAgent.run_mission", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = []
+        result = await boss._dispatch_sub_agent(workspace_id="ws-test", sub_mission=sub_m)
+
+    assert result.success is False
+    assert result.status == "FAILED"
+    assert result.evidence_verified is False
+    assert "[FALSIFIED by Judge]" in result.findings_summary
+    assert "Expected file probe_receipt.json was not created" in result.findings_summary
+
+
+@pytest.mark.asyncio
+async def test_synthesize_final_report_does_not_label_failed_items_as_verified():
+    """Final report synthesis must distinguish verified findings from failed/falsified ones."""
+    router = MockLLMRouter()
+    boss = BossAgent(MockComputerProvider(), router)
+
+    phase = Phase(
+        phase_number=1,
+        name="Phase 1",
+        thinking="testing",
+        results=[
+            SubMissionResult(
+                sub_mission_id="sub-1",
+                goal="Initialize directory",
+                success=False,
+                evidence_verified=False,
+                judge_verdict="FALSIFIED",
+                findings_summary="[FALSIFIED by Judge]: Directory missing",
+            ),
+            SubMissionResult(
+                sub_mission_id="sub-2",
+                goal="Inspect disk space",
+                success=True,
+                evidence_verified=True,
+                findings_summary="Disk space: 924G available",
+            ),
+        ],
+    )
+    boss.phases.append(phase)
+
+    report = await boss._synthesize_final_report(objective="Audit system", t_start=time.perf_counter())
+    assert report.status == "PARTIAL"
+    assert report.thinking_log
+    # Final summary should exist and acknowledge execution
+    assert report.findings_summary
+

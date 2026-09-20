@@ -1047,6 +1047,10 @@ Rules:
                         sub_result.evidence_verified = False
                         sub_result.success = False
                         sub_result.status = "FAILED"
+                        sub_result.findings_summary = (
+                            f"[FALSIFIED by Judge]: {getattr(judge_eval, 'notes', '') or getattr(judge_eval, 'rationale', '') or 'Verification failed'}. "
+                            f"(Worker claimed completion but independent sandbox inspection falsified the claim)"
+                        )
                 except Exception as judge_err:
                     logger.warning("boss_judge_evaluation_failed", error=str(judge_err))
 
@@ -1074,14 +1078,20 @@ Rules:
         if not traces:
             return "No actions executed."
 
+        def _fmt_trace(t):
+            act_type = _trace_value(t, 'action_type', '')
+            act_type_str = act_type.value if hasattr(act_type, 'value') else str(act_type)
+            status = _trace_value(t, 'status', '')
+            status_str = status.value if hasattr(status, 'value') else str(status)
+            exit_code = _trace_value(t, 'exit_code', None)
+            target = _trace_value(t, 'target_resource', '')
+            obs = str(_trace_value(t, 'actual_observation', '') or _trace_value(t, 'observation', ''))[:1200]
+            exit_str = f" exit={exit_code}" if exit_code is not None else ""
+            status_tag = f"[{status_str.upper()}{exit_str}]" if status_str else ""
+            return f"- {status_tag} {act_type_str} on {target}: {obs}"
+
         observations = "\n".join(
-            f"- {(
-                _trace_value(t, 'action_type', '').value
-                if hasattr(_trace_value(t, 'action_type', ''), 'value')
-                else _trace_value(t, 'action_type', '')
-            )} "
-            f"on {_trace_value(t, 'target_resource', '')}: "
-            f"{str(_trace_value(t, 'actual_observation', '') or _trace_value(t, 'observation', ''))[:1500]}"
+            _fmt_trace(t)
             for t in traces
             if _trace_value(t, "actual_observation", "") or _trace_value(t, "observation", "")
         )
@@ -1099,9 +1109,10 @@ Rules:
                         content=(
                             "You are an autonomous intelligence officer creating an empirical summary. "
                             "Summarize the worker agent's findings accurately and strictly based on verified reality. "
-                            "CRITICAL MANDATE: If commands failed, exited with non-zero exit codes, threw syntax errors, or produced "
-                            "error outputs, state the failure honestly. NEVER claim that an action, tool, or endpoint succeeded "
-                            "or returned 200 OK when the actual observation shows an error or failure."
+                            "CRITICAL MANDATE: Check the [STATUS] and exit codes of actions. If commands failed, were blocked, "
+                            "exited with non-zero exit codes, or produced errors, state the failure honestly. "
+                            "NEVER claim that an action, tool, or endpoint succeeded when the status is FAILED, BLOCKED, or non-zero. "
+                            "NEVER claim a file exists or was created if the command creating it failed, was blocked, or was skipped."
                         ),
                     ),
                     Message(role=MessageRole.USER, content=f"Worker goal: {goal}\n\nActions and observations:\n{observations}\n\nSummarize the key findings in 2-4 sentences."),
@@ -1223,11 +1234,25 @@ Rules:
         """Synthesize all SubAgent outputs from a phase into unified findings."""
         t_start = time.perf_counter()
 
-        summaries = "\n\n".join(
-            f"SubAgent ({r.goal}):\n{r.findings_summary}"
-            for r in phase.results
-            if r.findings_summary
-        )
+        verified_reports = []
+        failed_reports = []
+        for r in phase.results:
+            if not r.findings_summary:
+                continue
+            is_ver = r.success and (r.evidence_verified or self._result_has_verified_trace(r))
+            status_tag = "VERIFIED SUCCESS" if is_ver else ("FALSIFIED" if r.judge_verdict == "FALSIFIED" else "FAILED")
+            entry = f"SubAgent ({r.goal}) [{status_tag}]:\n{r.findings_summary}"
+            if is_ver:
+                verified_reports.append(entry)
+            else:
+                failed_reports.append(entry)
+
+        summaries_parts = []
+        if verified_reports:
+            summaries_parts.append("=== VERIFIED SUCCESSFUL FINDINGS ===\n" + "\n\n".join(verified_reports))
+        if failed_reports:
+            summaries_parts.append("=== FAILED / UNVERIFIED / FALSIFIED FINDINGS ===\n" + "\n\n".join(failed_reports))
+        summaries = "\n\n".join(summaries_parts)
 
         if not summaries:
             return "No findings from this phase."
@@ -1237,7 +1262,15 @@ Rules:
 
             req = LLMRequest(
                 messages=[
-                    Message(role=MessageRole.SYSTEM, content="You are a Boss Agent analyzing reports from your worker agents. Synthesize their findings into a unified intelligence picture."),
+                    Message(
+                        role=MessageRole.SYSTEM,
+                        content=(
+                            "You are a Boss Agent analyzing reports from your worker agents. "
+                            "Synthesize their findings into an empirical, strictly factual intelligence picture. "
+                            "CRITICAL MANDATE: Clearly distinguish verified successful findings from failed or falsified attempts. "
+                            "NEVER claim that a failed, unverified, or falsified sub-mission succeeded."
+                        ),
+                    ),
                     Message(role=MessageRole.USER, content=f"Objective: {objective}\n\nPhase {phase.phase_number} ({phase.name}) reports:\n{summaries}\n\nSynthesize these findings into a clear, unified analysis. What do we know now? What are the key takeaways?"),
                 ],
                 task_type="reasoning",
@@ -1501,18 +1534,27 @@ If the objective is complete or no more work is needed, return:
         else:
             status = "INCOMPLETE"
 
-        all_findings = self._collect_all_findings()
+        # Collect verified vs failed findings across all phases
+        verified_items = []
+        failed_items = []
+        for phase in self.phases:
+            for r in phase.results:
+                is_ver = r.success and (r.evidence_verified or self._result_has_verified_trace(r))
+                if is_ver:
+                    verified_items.append(f"- [Phase {phase.phase_number} / {r.goal}]: {r.findings_summary}")
+                else:
+                    status_lbl = "FALSIFIED" if r.judge_verdict == "FALSIFIED" else "FAILED"
+                    failed_items.append(f"- [Phase {phase.phase_number} / {r.goal} - {status_lbl}]: {r.findings_summary or 'No verified output'}")
+
+        verified_text = "\n".join(verified_items) if verified_items else "No sub-missions achieved verified success."
+        failed_text = "\n".join(failed_items) if failed_items else "None."
 
         # LLM synthesis of final summary (strictly empirically grounded)
         final_summary = ""
-        if not any_success:
-            failed_goals = [
-                f"- {r.goal}: {r.findings_summary or 'Execution failed'}"
-                for p in self.phases for r in p.results
-            ]
+        if not any_success or not verified_items:
             final_summary = (
                 f"Objective execution incomplete. No sub-missions achieved verified success.\n"
-                f"Sub-mission execution diagnostics:\n" + ("\n".join(failed_goals[:10]) if failed_goals else "No sub-missions executed.")
+                f"Sub-mission execution diagnostics:\n{failed_text}"
             )
         else:
             try:
@@ -1525,13 +1567,20 @@ If the objective is complete or no more work is needed, return:
                             content=(
                                 "You are a Boss Agent creating an empirical final report. "
                                 "CRITICAL MANDATE: Only summarize actions and findings that ACTUALLY succeeded with verified evidence. "
-                                "NEVER claim a file or directory was created if its execution failed. "
+                                "NEVER claim a file, directory, script, or hash was verified if that action failed or was not executed. "
+                                "State what succeeded under Verified Findings, and list failed or incomplete items under Incomplete/Failed Items. "
                                 "NEVER use bracketed placeholders like '[Insert ...]'. Be strictly factual and concise."
                             ),
                         ),
                         Message(
                             role=MessageRole.USER,
-                            content=f"Objective: {objective}\n\nVerified findings:\n{all_findings[:3000]}\n\nSummarize all verified findings clearly and comprehensively.",
+                            content=(
+                                f"Objective: {objective}\n\n"
+                                f"VERIFIED FINDINGS (actions with verified receipts):\n{verified_text[:2500]}\n\n"
+                                f"FAILED OR INCOMPLETE ACTIONS:\n{failed_text[:1500]}\n\n"
+                                "Summarize the mission outcome honestly. Report verified findings only from the VERIFIED list, "
+                                "and clearly report failed/incomplete items as incomplete."
+                            ),
                         ),
                     ],
                     task_type="reasoning",
@@ -1543,7 +1592,7 @@ If the objective is complete or no more work is needed, return:
                 if "[Insert" in final_summary:
                     final_summary = re.sub(r"\[Insert[^\]]*\]", "Not verified", final_summary)
             except Exception:
-                final_summary = all_findings[:1000]
+                final_summary = f"Verified Findings:\n{verified_text}\n\nFailed Items:\n{failed_text}"
 
         self.thinking_log.append(BossThinking(
             phase=len(self.phases),
