@@ -1,5 +1,5 @@
 [project]
-name = "sonic-reda"
+name = "sonic"
 version = "0.1.0"
 description = "SONIC-REDA — Next-Generation Autonomous AI Bug Hunting System"
 readme = "README.md"
