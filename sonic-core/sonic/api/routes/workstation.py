@@ -343,14 +343,9 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
 
     env_sandbox_id = os.environ.get("SONIC_DEFAULT_WORKSPACE_ID", os.environ.get("DAYTONA_SANDBOX_ID", "")).strip()
     active_ws = env_sandbox_id if os.environ.get("SONIC_ALLOW_SHARED_WORKSTATION", "0") == "1" else ""
-    # In local Docker mode, auto-attach to the running workstation container
-    # so new sessions immediately have a live desktop without explicit provisioning.
-    if not active_ws and os.environ.get("SONIC_USE_DAYTONA_CLOUD") != "1":
-        docker_container = os.environ.get(
-            "SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation"
-        ).strip()
-        if docker_container:
-            active_ws = docker_container
+    # Local Docker workspaces must be explicitly provisioned and persisted for
+    # this tenant/session. Never attach the process-wide default container here:
+    # doing so would expose one tenant's desktop to every other tenant.
     if tenant_id in _tenant_workstations and "default" in _tenant_workstations[tenant_id]:
         def_desk = _tenant_workstations[tenant_id]["default"].get("desktop", {})
         active_ws = str(def_desk.get("workspace_id") or def_desk.get("sandbox_id") or "") or active_ws
@@ -482,12 +477,9 @@ def _session_workspace_id_for_tenant(tenant_id: str, session_id: str) -> str:
             workspace_id = str(desktop.get("workspace_id") or desktop.get("sandbox_id") or "").strip()
             if workspace_id:
                 return workspace_id
-        # Fall back to the local Docker workstation container name so the
-        # state endpoint can probe the real container for VNC/status.
-        docker_container = os.environ.get(
-            "SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation"
-        ).strip()
-        return docker_container
+        # No implicit global-container fallback. A tenant must explicitly
+        # provision and own a workspace before desktop operations are allowed.
+        return ""
 
     state = _tenant_workstations.get(tenant_id, {}).get(session_id)
     if state:
