@@ -12,7 +12,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def _now() -> str:
@@ -35,6 +35,14 @@ class SubMission(BaseModel):
     process_mode: str = "deep"
     evidence_context: dict[str, Any] = Field(default_factory=dict)
     status: str = "PENDING"  # PENDING -> RUNNING -> COMPLETED -> FAILED
+
+    @model_validator(mode="after")
+    def _infer_plane_from_goal(self) -> SubMission:
+        if self.plane == "headless" and any(
+            w in self.goal.lower() for w in ("desktop", "screen", "window", "gui", "browser", "click")
+        ):
+            self.plane = "gui"
+        return self
 
 
 class SubMissionResult(BaseModel):

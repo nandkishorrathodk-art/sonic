@@ -26,7 +26,7 @@ from sonic.computer.models import (
 )
 from sonic.computer.provider import ComputerProvider
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType, ComputerWorldObservation
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType, ComputerDecisionTrace, ComputerWorldObservation
 from sonic.llm.providers.custom import (
     CustomLLMProvider,
     _extract_json_object,
@@ -617,3 +617,35 @@ def test_llm_choose_action_recovers_from_refusal_without_target():
     assert action_type == ActionExecutionStatus.BLOCKED
     assert payload == {}
     assert expected == "Record model refusal and trigger replan"
+
+
+def test_execute_action_handles_blocked_refusal_action_type():
+    """Verify that execute_action safely handles ActionExecutionStatus.BLOCKED without validation errors."""
+    comp = _StubComputer()
+    agent = ComputerUseAgent(computer_provider=comp)
+    trace = _run(
+        agent.execute_action(
+            workspace_id="ws-test",
+            action_type=ActionExecutionStatus.BLOCKED,
+            target_resource="refusal-recorded",
+            payload={},
+            predicted_outcome="Record model refusal and trigger replan",
+        )
+    )
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert trace.exit_code == 126
+    assert "Action blocked: refusal-recorded" in trace.actual_observation
+    assert trace.action_type == ComputerActionType.TERMINAL_EXEC
+
+
+def test_computer_decision_trace_coerces_blocked_status_into_valid_action_type():
+    """Verify ComputerDecisionTrace Pydantic model coerces ActionExecutionStatus.BLOCKED."""
+    trace = ComputerDecisionTrace(
+        action_type=ActionExecutionStatus.BLOCKED,
+        target_resource="test-target",
+        predicted_outcome="test outcome",
+        actual_observation="test observation",
+    )
+    assert trace.action_type == ComputerActionType.TERMINAL_EXEC
+    assert trace.target_resource == "test-target"
+

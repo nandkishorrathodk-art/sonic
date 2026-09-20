@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from sonic.computer.models import ScreenObservation
 
@@ -271,15 +271,17 @@ class ComputerDecisionTrace(BaseModel):
     id: str = Field(default_factory=lambda: _new_id("trace"))
     action_id: str = Field(default_factory=lambda: _new_id("act"))
     step_index: int = 1
-    action_type: ComputerActionType
+    action_type: ComputerActionType | ActionExecutionStatus | str = ComputerActionType.TERMINAL_EXEC
     target_resource: str
     payload: str | None = None
     predicted_outcome: str
     actual_observation: str
+    expected_observation: str = ""
     info_gain: float = 1.0
     recovery_attempted: bool = False
     thought: str = ""
     status: ActionExecutionStatus | str = ActionExecutionStatus.COMPLETED
+
     duration_seconds: float = 0.0
     thought_duration_seconds: float = 0.0
     exit_code: int | None = None
@@ -288,6 +290,19 @@ class ComputerDecisionTrace(BaseModel):
     prediction_error: float | None = None
     graph_delta: str = ""
     timestamp: str = Field(default_factory=_now)
+
+    @field_validator("action_type", mode="before")
+    @classmethod
+    def _coerce_action_type(cls, v: Any) -> Any:
+        if isinstance(v, ActionExecutionStatus) or (
+            isinstance(v, str) and v.strip().upper() in ("BLOCKED", "ACTIONEXECUTIONSTATUS.BLOCKED")
+        ):
+            return ComputerActionType.TERMINAL_EXEC
+        if isinstance(v, str):
+            v_clean = v.strip().upper()
+            if v_clean in ComputerActionType._value2member_map_:
+                return ComputerActionType(v_clean)
+        return v
 
     @property
     def observation(self) -> str:

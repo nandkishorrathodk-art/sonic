@@ -1486,7 +1486,11 @@ class ComputerUseAgent:
                 "illegal",
                 "against safety policies",
                 "against safety policy",
-                "malware",
+                "violates our policies",
+                "cannot fulfill this request",
+                "generating malware",
+                "creating malware",
+                "create malware",
             )
             combined_response = f"{content_str} {reasoning_str}".lower()
             is_refusal = any(p in combined_response for p in refusal_phrases) and not re.search(
@@ -1620,7 +1624,11 @@ class ComputerUseAgent:
             "illegal",
             "against safety policies",
             "against safety policy",
-            "malware",
+            "violates our policies",
+            "cannot fulfill this request",
+            "generating malware",
+            "creating malware",
+            "create malware",
         )
         t_lower = parse_target_text.lower()
         if any(p in t_lower for p in refusal_phrases) and not re.search(
@@ -2118,8 +2126,9 @@ class ComputerUseAgent:
 
     def _get_provider_name(self) -> str:
         """Return human-readable identifier for computer provider."""
-        if hasattr(self.computer, "name"):
-            return str(self.computer.name)
+        name = getattr(self.computer, "name", None)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
         if hasattr(self.computer, "compute_provider") and hasattr(self.computer.compute_provider, "__class__"):
             return self.computer.compute_provider.__class__.__name__
         if hasattr(self.computer, "__class__"):
@@ -2271,6 +2280,31 @@ class ComputerUseAgent:
             }
         if not hasattr(self, "_consecutive_unchanged_screens"):
             self._consecutive_unchanged_screens = 0
+        # Pre-execution refusal or blocked action handling (e.g. from LLM safety refusal)
+        if action_type == ActionExecutionStatus.BLOCKED or str(action_type).upper() in ("BLOCKED", "ACTIONEXECUTIONSTATUS.BLOCKED"):
+            actual_obs_str = (
+                f"Action blocked: {target_resource} — {predicted_outcome}"
+                if target_resource else f"Action blocked: {predicted_outcome}"
+            )
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=ComputerActionType.TERMINAL_EXEC,
+                target_resource=target_resource or "blocked-action",
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
+            return trace
 
         provider_name = self._get_provider_name()
         tool_name = self._extract_tool_name(action_type, target_resource, payload)
@@ -4463,12 +4497,13 @@ class ComputerUseAgent:
             # operator can change scope/approval and start a fresh attempt.
             trace_observation = str(getattr(trace, "actual_observation", "") or "")
             prediction_error = float(getattr(trace, "prediction_error", 0.0) or 0.0)
+            action_type_val = getattr(action_type, "value", str(action_type))
             if prediction_error >= 0.75 and trace.status not in (
                 ActionExecutionStatus.BLOCKED,
                 "BLOCKED",
             ):
                 self.history.append({
-                    "action": f"{action_type.value} {target} (PREDICTION_ERROR)",
+                    "action": f"{action_type_val} {target} (PREDICTION_ERROR)",
                     "result": (
                         f"Observed transition diverged from the prediction "
                         f"(error={prediction_error:.1f}). Re-observe before repeating."
@@ -4486,12 +4521,12 @@ class ComputerUseAgent:
                 )
             ):
                 self.history.append({
-                    "action": f"{action_type.value} {target} (BLOCKED)",
+                    "action": f"{action_type_val} {target} (BLOCKED)",
                     "result": trace_observation,
                 })
                 logger.info(
                     "mission_stopped_blocked_action",
-                    action=action_type.value,
+                    action=action_type_val,
                     target=target,
                     reason=trace_observation[:200],
                 )
@@ -4547,7 +4582,7 @@ class ComputerUseAgent:
                                          "of", "and", "or", "is", "it", "with", "run",
                                          "use", "check", "find", "get", "set"}
                                 sg_words = set(re.findall(r'\b[a-z0-9_.-]+\b', active_sg.description.lower())) - _stop
-                                action_text = f"{obs_txt[:300]} {cmd_str} {action_type.value}".lower()
+                                action_text = f"{obs_txt[:300]} {cmd_str} {getattr(action_type, 'value', str(action_type))}".lower()
                                 action_words = set(re.findall(r'\b[a-z0-9_.-]+\b', action_text)) - _stop
                                 overlap = sg_words & action_words
                                 relevance = len(overlap) / max(len(sg_words), 1)
