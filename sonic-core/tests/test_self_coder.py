@@ -408,6 +408,89 @@ def test_report_only_run_writes_no_side_effects(repo: Path, tmp_path: Path):
     assert after == before  # no journal side-effect
 
 
+def test_coding_agent_uses_tools_before_answering(tmp_path: Path):
+    """The agent must be able to explore the real repo with tools and report."""
+    repo = tmp_path / "repo"
+    (repo / "sonic-core" / "sonic" / "x").mkdir(parents=True)
+    (repo / "sonic-core" / "sonic" / "x" / "mod.py").write_text("VALUE = 42\n", encoding="utf-8")
+
+    from sonic.evolution.coding_agent import CodingAgent
+    from sonic.llm.schemas import LLMResponse, ToolCall
+
+    class ToolThenFinish:
+        """First turn: read_file. Second turn: finish with what it saw."""
+        def __init__(self):
+            self.n = 0
+
+        async def complete(self, request, task_type=None, provider_name=None):
+            self.n += 1
+            if self.n == 1:
+                return LLMResponse(content="", tool_calls=[
+                    ToolCall(id="c1", name="read_file", arguments={"path": "sonic-core/sonic/x/mod.py"})
+                ])
+            if self.n == 2:
+                # Confirm the tool output actually reached the model's context.
+                tool_msgs = [m.content for m in request.messages if m.role.value == "tool"]
+                saw = any("VALUE = 42" in (c or "") for c in tool_msgs)
+                return LLMResponse(content="", tool_calls=[
+                    ToolCall(id="c2", name="finish", arguments={"diagnosis": f"saw_value={saw}"})
+                ])
+            return LLMResponse(content="done")
+
+    agent = CodingAgent(llm=ToolThenFinish(), repo_root=repo, max_steps=5, allow_write=False)
+    res = asyncio.run(agent.run("What is VALUE?"))
+    assert res.finished is True
+    assert "saw_value=True" in res.diagnosis
+    assert any("read_file" in c for c in res.tool_calls)
+
+
+def test_coding_agent_tools_are_real(tmp_path: Path):
+    """list_dir/grep/read_file return real repo content; escapes are refused."""
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "a.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
+
+    from sonic.evolution.coding_agent import CodingAgent
+
+    agent = CodingAgent(llm=None, repo_root=repo, allow_write=False)
+    d = agent._t_list_dir("pkg")
+    assert d.ok and "a.py" in d.output
+    r = agent._t_read_file("pkg/a.py")
+    assert r.ok and "def alpha" in r.output
+    g = agent._t_grep("alpha")
+    assert g.ok and "pkg/a.py" in g.output
+    # path escape refused
+    esc = agent._t_read_file("../../etc/passwd")
+    assert esc.ok is False
+
+
+def test_coding_agent_refuses_protected_write(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / "sonic-core" / "sonic" / "safety").mkdir(parents=True)
+
+    from sonic.evolution.coding_agent import CodingAgent
+
+    agent = CodingAgent(llm=None, repo_root=repo, allow_write=True, is_protected=lambda p: "safety" in p)
+    res = agent._t_write_file("sonic-core/sonic/safety/kernel.py", "x=1\n")
+    assert res.ok is False
+    assert "protected" in res.output.lower()
+
+
+def test_coding_agent_write_stages_in_overlay(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "a.py").write_text("old\n", encoding="utf-8")
+
+    from sonic.evolution.coding_agent import CodingAgent
+
+    agent = CodingAgent(llm=None, repo_root=repo, allow_write=True)
+    res = agent._t_write_file("pkg/a.py", "new\n")
+    assert res.ok is True
+    # read_file sees the staged content, but disk is unchanged (no commit).
+    assert "new" in agent._t_read_file("pkg/a.py").output
+    assert (repo / "pkg" / "a.py").read_text() == "old\n"
+
+
 def test_auditor_is_read_only_and_finds_defects(tmp_path: Path):
     repo = tmp_path / "repo"
     (repo / "sonic-core" / "sonic" / "x").mkdir(parents=True)

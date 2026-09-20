@@ -95,6 +95,8 @@ class SelfCoderCycle:
     proposed_diff: str = ""
     # What happened to the tree: "rolled_back" (report-only) or "committed"/"left".
     tree_action: str = "rolled_back"
+    # Root-cause diagnosis produced by the tool-using coding agent.
+    diagnosis: str = ""
 
 
 @dataclass
@@ -129,6 +131,10 @@ class SelfCoderReport:
                 lines.append(f"- Reason: {c.reason}")
             if c.summary:
                 lines.append(f"- Summary: {c.summary}")
+            if c.diagnosis:
+                lines.append("")
+                lines.append("Investigation (tool-verified):")
+                lines.append(c.diagnosis.strip()[:2000])
             if c.proposed_diff:
                 lines.append("")
                 lines.append("Proposed fix (verified against tests, then rolled back):")
@@ -152,6 +158,8 @@ class SelfCoder:
         push: bool = False,
         enabled: bool = True,
         allow_writes: bool = False,
+        agentic: bool = True,
+        max_agent_steps: int = 16,
     ) -> None:
         self.repo_root = Path(repo_root).resolve() if repo_root else self._discover_repo_root()
         self.llm = llm
@@ -161,6 +169,11 @@ class SelfCoder:
         # REPORT-ONLY by default: verify the proposed change, then restore the
         # tree so nothing is committed and no file is left modified.
         self.allow_writes = allow_writes
+        # Agentic mode gives the model real tools (list_dir/read_file/grep/
+        # run_tests/run_command) so it stops guessing at APIs that don't exist.
+        self.agentic = agentic
+        self.max_agent_steps = max_agent_steps
+        self.last_coding_result: Any = None
         self.evolver = evolver or CodebaseEvolver(repo_root=self.repo_root)
         self.director = director or EvolutionGoalDirector(
             repo_root=self.repo_root,
@@ -269,18 +282,49 @@ class SelfCoder:
         # Include evolution.md because constructing the journal creates it.
         before = self._tree_fingerprint([target_file, "evolution.md"])
 
+        # Step 1: agentic investigation — explore the REAL repo with tools so we
+        # do not hallucinate modules/functions (the blind-coder failure mode).
+        diagnosis = ""
+        if self.agentic and self.llm is not None:
+            try:
+                from sonic.evolution.coding_agent import CodingAgent
+
+                agent = CodingAgent(
+                    llm=self.llm,
+                    repo_root=self.repo_root,
+                    max_steps=self.max_agent_steps,
+                    allow_write=False,
+                    is_protected=self.evolver.is_protected,
+                    test_paths=self._test_paths_for(target_file),
+                )
+                cres = await agent.run(
+                    f"Diagnose and plan a fix for this signal in {target_file}: {signal}"
+                )
+                self.last_coding_result = cres
+                diagnosis = cres.diagnosis or ""
+                logger.info(
+                    "self_coder_investigated",
+                    steps=cres.steps,
+                    tools=len(cres.tool_calls),
+                    has_diagnosis=bool(diagnosis),
+                )
+            except Exception as exc:  # investigation is best-effort, never fatal
+                logger.warning("self_coder_investigation_failed", error=str(exc))
+
         goal = self.director.submit_goal(
             title=signal[:180],
             description=(
                 f"Autonomous self-improvement. Real signal: {signal}. "
                 f"Improve {target_file} so the signal is resolved without changing "
                 "unrelated behaviour."
+                + (f"\n\nInvestigation diagnosis (verified against the real repo):\n{diagnosis}" if diagnosis else "")
             ),
             category=category,
             target_files=[target_file],
             max_attempts=2,
         )
         cycle.goal_id = goal.goal_id
+        cycle.diagnosis = diagnosis
 
         report = await self.director.execute_goal(
             goal.goal_id,

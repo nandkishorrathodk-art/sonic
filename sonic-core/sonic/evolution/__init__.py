@@ -3,6 +3,7 @@
 from sonic.evolution.codebase_auditor import AuditFinding, AuditReport, CodebaseAuditor
 from sonic.evolution.codebase_evolver import CodebaseEvolver, EvolutionSummaryReport
 from sonic.evolution.codebase_report import narrate
+from sonic.evolution.coding_agent import CodingAgent, CodingResult
 from sonic.evolution.engine import EvolutionEngine
 from sonic.evolution.evolution_journal import EvolutionJournal, JournalEntry
 from sonic.evolution.goal_director import (
@@ -28,6 +29,8 @@ __all__ = [
     "AuditFinding",
     "AuditReport",
     "narrate",
+    "CodingAgent",
+    "CodingResult",
     "EvolutionEngine",
     "EvolutionGoal",
     "EvolutionGoalDirector",

@@ -72,6 +72,10 @@ class Message(BaseModel):
     images: list[ImageContent] = Field(default_factory=list)
     name: str | None = None  # For tool messages
     tool_call_id: str | None = None  # For tool responses
+    # Tool calls emitted by an assistant turn. Required round-tripping for the
+    # OpenAI/Anthropic tool protocol: without echoing these back, the next
+    # request is rejected ("missing field tool_call_id").
+    tool_calls: list[ToolCall] = Field(default_factory=list)
 
     @property
     def has_images(self) -> bool:
