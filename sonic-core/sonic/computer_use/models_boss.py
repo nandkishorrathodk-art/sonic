@@ -31,6 +31,8 @@ class SubMission(BaseModel):
     max_steps: int = 5
     priority: int = 1  # Higher = execute first within a phase
     depends_on: list[str] = Field(default_factory=list)
+    process_mode: str = "deep"
+    evidence_context: dict[str, Any] = Field(default_factory=dict)
     status: str = "PENDING"  # PENDING -> RUNNING -> COMPLETED -> FAILED
 
 
@@ -87,3 +89,5 @@ class BossReport(BaseModel):
     total_phases: int = 0
     findings_summary: str = ""
     duration_seconds: float = 0.0
+    replay_metrics: dict[str, Any] = Field(default_factory=dict)
+    replay_quality_gate_passed: bool = False

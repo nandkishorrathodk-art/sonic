@@ -23,6 +23,7 @@ from sonic.being.lessons import (
 )
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ComputerActionType, ComputerDecisionTrace
+from sonic.memory.vector import VectorMemory
 
 
 @pytest.fixture
@@ -159,6 +160,36 @@ def test_inject_into_context_and_relevance(temp_ledger_dir):
     rendered = inject_into_context(relevant)
     assert "[AVOID]" in rendered
     assert "WAF blocked" in rendered
+
+
+def test_lessons_use_semantic_memory_for_paraphrased_goals(temp_ledger_dir):
+    """Semantic retrieval supplements keywords for differently worded goals."""
+    semantic_memory = VectorMemory(persist=False)
+    ledger = LessonsLedger(
+        tenant_id="semantic-tenant",
+        agent_id="agent",
+        semantic_memory=semantic_memory,
+    )
+    trace = ComputerDecisionTrace(
+        step_index=1,
+        action_type=ComputerActionType.TERMINAL_EXEC,
+        target_resource="curl -I service",
+        predicted_outcome="Inspect headers",
+        actual_observation="HTTP 403 from gateway",
+        status="FAILED",
+    )
+    ledger.record(extract_lessons([trace], goal="Inspect HTTP response headers"))
+
+    relevant = ledger.relevant("Investigate web gateway denial", k=1)
+    assert len(relevant) == 1
+    assert "curl" in relevant[0].approach
+
+    reloaded = LessonsLedger(
+        tenant_id="semantic-tenant",
+        agent_id="agent",
+        semantic_memory=semantic_memory,
+    )
+    assert "curl" in reloaded.relevant("Investigate web gateway denial", k=1)[0].approach
 
 
 @pytest.mark.asyncio

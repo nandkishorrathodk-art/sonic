@@ -1,5 +1,5 @@
-from sonic.computer_use.scope_manifest import parse_scope_document
 from sonic.api.routes.workstation import _extract_target_url_or_domain
+from sonic.computer_use.scope_manifest import parse_scope_document
 
 
 def test_scope_document_separates_assets_from_reference_links():
@@ -28,6 +28,18 @@ def test_normal_conversation_is_not_treated_as_scope_document():
 
     assert manifest.program_detected is False
     assert manifest.in_scope_assets == ()
+
+
+def test_execution_prompt_with_generic_targets_is_not_scope_document():
+    text = """
+    You are authorized to work only inside the assigned workspace.
+    Do not scan arbitrary internet hosts or use placeholder targets as findings.
+    Create and verify one local workspace file.
+    """ * 4
+
+    manifest = parse_scope_document(text)
+
+    assert manifest.program_detected is False
 
 
 def test_single_scope_asset_wins_over_reference_url():

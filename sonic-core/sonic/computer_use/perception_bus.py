@@ -124,6 +124,13 @@ class PerceptionBus:
         with self._lock:
             return self._snapshot
 
+    def world_graph(self):
+        """Build a generic graph from the current live snapshot."""
+        from sonic.computer_use.gui_world_graph import GuiWorldGraph
+
+        with self._lock:
+            return GuiWorldGraph.from_snapshot(self._snapshot)
+
     def register_target(
         self,
         query: str,

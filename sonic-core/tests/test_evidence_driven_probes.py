@@ -268,7 +268,7 @@ async def test_approve_workstation_mission_probe_endpoint(monkeypatch):
     from sonic.auth.models import User, UserRole
     from sonic.auth.middleware import require_operator
 
-    session = _get_or_create_session("op@corp.com", "test-session")
+    session = _get_or_create_session("tenant-1", "test-session")
     session["target_sandbox"] = {"workspace_id": "ws-target", "sandbox_id": "ws-target", "target": "10.0.0.1", "scope_verified": True}
     session["mission"] = {
         "mission_id": "m-123",
@@ -321,7 +321,7 @@ async def test_dismiss_workstation_mission_probe_endpoint(monkeypatch):
     from sonic.auth.models import User, UserRole
     from sonic.auth.middleware import require_operator
 
-    session = _get_or_create_session("op@corp.com", "test-session-dismiss")
+    session = _get_or_create_session("tenant-1", "test-session-dismiss")
     session["target_sandbox"] = {"workspace_id": "ws-target", "sandbox_id": "ws-target", "target": "10.0.0.1", "scope_verified": True}
     session["mission"] = {
         "mission_id": "m-456",

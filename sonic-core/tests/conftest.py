@@ -149,4 +149,3 @@ def isolate_all_sonic_test_state(tmp_path, monkeypatch):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "no_live_infra: provider state/safety logic only, no live sandbox")
-

@@ -8,9 +8,34 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from sonic.computer_use.gui_world_graph import GuiWorldGraph
+from sonic.computer_use.models import ActionExecutionStatus, ComputerDecisionTrace
+
+
+@dataclass(frozen=True)
+class VerifiedSkill:
+    """A state-conditioned action learned from a real successful trace."""
+
+    skill_id: str
+    action_type: str
+    target_resource: str
+    pre_graph_fingerprint: str
+    post_graph_fingerprint: str
+    post_graph_delta: str
+    evidence: str
+
+    def can_apply(self, graph: GuiWorldGraph) -> bool:
+        """Allow reuse only when the live graph matches the learned pre-state."""
+        return bool(self.pre_graph_fingerprint) and graph.fingerprint() == self.pre_graph_fingerprint
+
+    def postcondition_holds(self, graph: GuiWorldGraph) -> bool:
+        """Verify the learned post-state against a fresh observation."""
+        return bool(self.post_graph_fingerprint) and graph.fingerprint() == self.post_graph_fingerprint
 
 
 class ComputerSkillLedger:
@@ -20,7 +45,7 @@ class ComputerSkillLedger:
         safe_tenant = re.sub(r"[^A-Za-z0-9_.-]", "_", tenant_id or "default")
         base = Path(root or "sonic_data/skills")
         self.path = base / f"{safe_tenant}.json"
-        self._data: dict[str, Any] = {"applications": {}, "actions": []}
+        self._data: dict[str, Any] = {"applications": {}, "actions": [], "verified_skills": []}
         self._load()
 
     def _load(self) -> None:
@@ -66,6 +91,45 @@ class ComputerSkillLedger:
             actions.append(item)
             actions[:] = actions[-20:]
             self._save()
+
+    def compile_verified_skill(
+        self,
+        trace: ComputerDecisionTrace,
+        before_graph: GuiWorldGraph,
+        after_graph: GuiWorldGraph,
+    ) -> VerifiedSkill | None:
+        """Compile a trace only when execution and observed evidence agree."""
+        status = getattr(trace.status, "value", str(trace.status))
+        if status not in {
+            ActionExecutionStatus.SUCCESS.value,
+            ActionExecutionStatus.SUCCEEDED.value,
+            ActionExecutionStatus.COMPLETED.value,
+            ActionExecutionStatus.VERIFIED.value,
+        }:
+            return None
+        if not trace.actual_observation.strip() or (
+            trace.prediction_error is None or trace.prediction_error > 0.0
+        ):
+            return None
+        skill = VerifiedSkill(
+            skill_id=f"skill-{trace.action_id}",
+            action_type=trace.action_type.value,
+            target_resource=trace.target_resource,
+            pre_graph_fingerprint=before_graph.fingerprint(),
+            post_graph_fingerprint=after_graph.fingerprint(),
+            post_graph_delta=trace.graph_delta,
+            evidence=trace.actual_observation[:500],
+        )
+        encoded = asdict(skill)
+        skills = self._data.setdefault("verified_skills", [])
+        if not any(item.get("skill_id") == skill.skill_id for item in skills):
+            skills.append(encoded)
+            skills[:] = skills[-100:]
+            self._save()
+        return skill
+
+    def verified_skills(self) -> list[VerifiedSkill]:
+        return [VerifiedSkill(**item) for item in self._data.get("verified_skills", []) if isinstance(item, dict)]
 
     def context(self, limit: int = 20) -> str:
         lines: list[str] = []

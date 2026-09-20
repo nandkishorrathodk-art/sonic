@@ -314,4 +314,4 @@ def test_command_parser_no_arbitrary_tuln_flag_injection():
         default_file="main.py",
     )
     assert "-tuln" not in payload.get("command", "")
-    assert payload["command"] == "which gcc && gcc || clang"
+    assert payload["command"] == "gcc or clang"

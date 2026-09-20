@@ -8,6 +8,8 @@ from sonic.computer.models import ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ComputerActionType
 from sonic.computer_use.skill_ledger import ComputerSkillLedger
+from sonic.computer_use.gui_world_graph import GuiWorldGraph
+from sonic.computer_use.perception_bus import PerceptionBus
 
 
 def test_skill_ledger_observes_and_persists_applications(tmp_path: Path):
@@ -82,3 +84,26 @@ async def test_agent_learns_inventory_and_successful_gui_action(tmp_path: Path):
     assert "GUI_CLICK" in context
     provider.application_list.assert_awaited_once()
     provider.gui_action.assert_awaited_once()
+
+
+def test_verified_skill_requires_matching_live_graph(tmp_path: Path):
+    ledger = ComputerSkillLedger("tenant", root=str(tmp_path))
+    bus = PerceptionBus()
+    before = GuiWorldGraph.from_snapshot(bus.publish(active_window="desk", controls=["control"]))
+    after = GuiWorldGraph.from_snapshot(bus.publish(active_window="desk", controls=["result"]))
+    trace = SimpleNamespace(
+        action_id="action-1",
+        action_type=ComputerActionType.GUI_CLICK,
+        target_resource="control",
+        status="SUCCESS",
+        actual_observation="result became visible",
+        prediction_error=0.0,
+        graph_delta="added=control",
+    )
+
+    skill = ledger.compile_verified_skill(trace, before, after)
+    assert skill is not None
+    assert skill.can_apply(before)
+    assert not skill.can_apply(after)
+    assert skill.postcondition_holds(after)
+    assert len(ledger.verified_skills()) == 1

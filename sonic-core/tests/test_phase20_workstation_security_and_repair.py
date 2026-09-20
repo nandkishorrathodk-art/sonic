@@ -9,10 +9,12 @@ Proves:
 """
 
 from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
 
 from sonic.api.main import app
+from sonic.api.routes import workstation
 from sonic.auth.google_auth import create_jwt_token
 from sonic.auth.models import User, UserRole
 
@@ -20,6 +22,11 @@ from sonic.auth.models import User, UserRole
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def no_implicit_workstation(monkeypatch):
+    monkeypatch.setenv("SONIC_DOCKER_WORKSTATION_CONTAINER", "")
 
 
 @pytest.fixture
@@ -56,6 +63,27 @@ def test_workstation_unauthenticated_rejected(client):
 
     res_tree = client.get("/workstation/tree")
     assert res_tree.status_code == 401
+
+
+def test_local_docker_workspace_is_not_implicitly_shared(monkeypatch):
+    """A tenant must explicitly provision a workspace before it is usable."""
+    monkeypatch.delenv("SONIC_ALLOW_SHARED_WORKSTATION", raising=False)
+    monkeypatch.delenv("SONIC_DEFAULT_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("DAYTONA_SANDBOX_ID", raising=False)
+    workstation._tenant_workstations.pop("tenant-isolation-a", None)
+    workstation._tenant_workstations.pop("tenant-isolation-b", None)
+
+    first = workstation._get_or_create_session("tenant-isolation-a", "default")
+    second = workstation._get_or_create_session("tenant-isolation-b", "default")
+
+    assert first["desktop"]["workspace_id"] == ""
+    assert second["desktop"]["workspace_id"] == ""
+    assert workstation._session_workspace_id_for_tenant(
+        "tenant-isolation-a", "default"
+    ) == ""
+    assert workstation._session_workspace_id_for_tenant(
+        "tenant-isolation-b", "default"
+    ) == ""
 
 
 def test_workstation_command_executes_in_sandbox(client, auth_headers):
@@ -182,5 +210,5 @@ def test_workstation_desktop_action_no_workspace_degrades(client, auth_headers):
     )
     assert res.status_code == 200
     data = res.json()
-    assert data["status"] == "success"
+    assert data["status"] == "BLOCKED"
     assert data["observation"]["desktop_state"] == "NO_DISPLAY"

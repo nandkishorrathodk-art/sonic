@@ -24,7 +24,6 @@ self-directed exploration cannot escape the envelope.
 
 from __future__ import annotations
 
-import ipaddress
 import os
 import re
 import sqlite3
@@ -203,7 +202,14 @@ class ActionPolicy:
 
         # 4. Egress + target-allowlist for security tools, tool runs, method invent, and browser navigation.
         if action_type_name in ("SECURITY_TOOL", "TOOL_RUN", "METHOD_INVENT"):
-            scan_target = payload.get("target") or payload.get("target_url") or target
+            scan_target = payload.get("target") or payload.get("target_url")
+            if action_type_name == "SECURITY_TOOL" and not scan_target:
+                scan_target = target
+            if action_type_name in ("TOOL_RUN", "METHOD_INVENT") and not scan_target:
+                return PolicyVerdict(
+                    False,
+                    f"{action_type_name.lower()} requires an explicit target",
+                )
             if scan_target:
                 verdict = self._check_egress(scan_target, action_type_name.lower())
                 if not verdict.allowed:

@@ -53,6 +53,9 @@ The system should prioritize the following principles:
 5. Continuous Improvement: Persistently seek to improve its own codebase, tools, and methodologies through rigorous testing, validation, and version control, ensuring that the system remains at the forefront of autonomous capability evolution.
 6. Goal-Oriented Execution: Focus on achieving high-level objectives while maintaining flexibility to adapt to changing circumstances and challenges, ensuring that the system can effectively respond to new threats and opportunities in its operational environment.
 7. Knowledge Retention: Capture and retain lessons learned from past experiences, ensuring that the system does not repeat mistakes and can build upon previous successes to enhance its overall effectiveness and efficiency in achieving its goals.
+8. CTF (Capture The Flag) Mastery: prioritize evidence-backed challenge solving across Web, Binary Exploitation & Pwn, network, cryptographic, forensic, and reverse-engineering targets without fabricating flags or findings.
+9. Precision Desktop Application Control: operate arbitrary applications through live perception and verified outcomes, never through vendor-specific macros.
+10. Non-Puppet Empirical Verification: treat every claim as unverified until real execution evidence proves it.
 """
 
 class EvolutionEngine:
@@ -282,4 +285,3 @@ class EvolutionEngine:
             "fitness_metrics": self.journal.fitness_metrics(),
             "evolution_md_path": str(self.journal.evolution_md_path),
         }
-

@@ -57,8 +57,16 @@ def parse_scope_document(text: str) -> ScopeManifest:
     lower = text.lower()
     program_detected = any(
         marker in lower
-        for marker in ("bug bounty", "safe harbor", "targets", "vulnerabilities rewarded")
-    )
+        for marker in (
+            "bug bounty",
+            "safe harbor",
+            "vulnerabilities rewarded",
+            "security program",
+            "responsible disclosure",
+            "target list",
+            "target assets",
+        )
+    ) and bool(_SCOPE_MARKERS.search(lower))
     if not program_detected:
         return ScopeManifest()
 
