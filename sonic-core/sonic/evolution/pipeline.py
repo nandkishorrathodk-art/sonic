@@ -18,7 +18,9 @@ from sonic.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Protected safety paths that the self-evolution engine is strictly forbidden from proposing edits to
+# Protected safety paths that the self-evolution engine is strictly forbidden from proposing edits to.
+# Single source of truth: CodebaseEvolver imports this set so the two guard
+# lists can never drift apart again.
 _PROTECTED_COMPONENTS = frozenset([
     "sonic/safety",
     "sonic/kernel/action_broker",
@@ -26,6 +28,12 @@ _PROTECTED_COMPONENTS = frozenset([
     "sonic/safety/sealed",
     "sonic/safety/action_policy",
     "sonic/sandbox/egress",
+    "sonic-kernel-rs/src/safety",
+    # The self-coder's own guardrails must not be rewritable by the self-coder.
+    "sonic/evolution/patch_synthesizer",
+    "sonic/evolution/codebase_evolver",
+    "sonic/evolution/goal_director",
+    "sonic/evolution/pipeline",
 ])
 
 

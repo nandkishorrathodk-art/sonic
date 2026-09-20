@@ -90,6 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     # Command: status
     subparsers.add_parser("status", help="Show self-evolution engine safety status, protected components, and evolution.md path")
 
+    selfcoder_parser = subparsers.add_parser("selfcode", help="Run the autonomous self-coder on SONIC's own source")
+    selfcoder_parser.add_argument("--cycles", type=int, default=1, help="Maximum improvement cycles to run")
+    selfcoder_parser.add_argument("--push", action="store_true", default=False, help="Git push to origin after a successful commit")
+
     return parser
 
 
@@ -121,6 +125,17 @@ def main() -> int:
         version_tracker=version_tracker,
         journal=journal,
     )
+
+    if args.command == "selfcode":
+        import asyncio as _asyncio
+
+        from sonic.evolution.self_coder import SelfCoder
+
+        coder = SelfCoder(repo_root=evolver.repo_root, evolver=evolver, director=director,
+                          max_cycles=max(1, args.cycles), push=args.push)
+        report = _asyncio.run(coder.run(max_cycles=max(1, args.cycles)))
+        print(report.to_text())
+        return 0 if not report.changed or all(c.stage != "error" for c in report.cycles) else 2
 
     if args.command == "status":
         print("=" * 70)
@@ -185,7 +200,9 @@ def main() -> int:
 
         if args.execute:
             print("\n🧬 Executing Goal Now...")
-            rep = director.execute_goal(goal.goal_id, auto_promote=True, push=args.push)
+            import asyncio as _asyncio
+
+            rep = _asyncio.run(director.execute_goal(goal.goal_id, auto_promote=True, push=args.push))
             print(f"Outcome: {rep.stage.value}")
             print(f"New Version: v{version_tracker.current_version()}")
             print(f"Notes updated in: {journal.evolution_md_path}")
@@ -207,7 +224,9 @@ def main() -> int:
 
     if args.command == "run":
         print(f"🧬 Starting continuous evolution loop (max_goals={args.max_goals})...")
-        reps = director.run_continuous(max_goals=args.max_goals, push=args.push)
+        import asyncio as _asyncio
+
+        reps = _asyncio.run(director.run_continuous(max_goals=args.max_goals, push=args.push))
         print(f"\n✅ Finished continuous run. Processed {len(reps)} goals.")
         print(f"Active Version: v{version_tracker.current_version()}")
         print(f"All notes logged to: {journal.evolution_md_path}")

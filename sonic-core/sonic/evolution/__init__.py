@@ -9,7 +9,9 @@ from sonic.evolution.goal_director import (
     GoalCategory,
     GoalStatus,
 )
+from sonic.evolution.patch_synthesizer import PatchProposal, PatchSynthesizer
 from sonic.evolution.pipeline import EvolutionPipeline, EvolutionStage, ImprovementProposal
+from sonic.evolution.self_coder import SelfCoder, SelfCoderCycle, SelfCoderReport
 from sonic.evolution.strategy import (
     DynamicStrategyEngine,
     StrategicPosture,
@@ -31,6 +33,11 @@ __all__ = [
     "GoalStatus",
     "ImprovementProposal",
     "JournalEntry",
+    "PatchProposal",
+    "PatchSynthesizer",
+    "SelfCoder",
+    "SelfCoderCycle",
+    "SelfCoderReport",
     "DynamicStrategyEngine",
     "StrategicPosture",
     "StrategyAdaptationPlan",

@@ -172,6 +172,8 @@ class BeingLifeLoop:
         curiosity: Any,
         workspace_id: str,
         tick_interval: float = 60.0,
+        self_coder: Any | None = None,
+        self_coder_every: int = 20,
     ):
         if getattr(agent, "safety", None) is None:
             raise ValueError(
@@ -190,6 +192,11 @@ class BeingLifeLoop:
         self.cycles_completed = 0
         self.before_tick_hooks: list = []
         self.bus: EventBus = EventBus()
+        # Autonomous self-coder (own-codebase improvement). Runs every N idle
+        # ticks (never every tick, so curiosity/exploration still dominates).
+        self.self_coder = self_coder
+        self.self_coder_every = max(1, int(self_coder_every))
+        self.self_coder_reports: list = []
 
     def pause_for_operator(self) -> None:
         self._operator_active.set()
@@ -238,6 +245,7 @@ class BeingLifeLoop:
                 "info_gain": getattr(res, "info_gain", 0.0),
                 "learned_fact": str(learned),
             })
+            await self._maybe_self_improve()
             return res
         except Exception as e:
             # A single failed tick must never kill the being.
@@ -245,6 +253,26 @@ class BeingLifeLoop:
                            being_id=self.being.being_id, error=str(e))
             record_idle_cycle(self.being.being_id, None)  # count as dead-end
             return None
+
+    async def _maybe_self_improve(self) -> None:
+        """Every N ticks, run one honest self-coder cycle on SONIC's own source."""
+        if self.self_coder is None:
+            return
+        if self.cycles_completed % self.self_coder_every != 0:
+            return
+        try:
+            report = await self.self_coder.run(max_cycles=1)
+        except Exception as e:
+            logger.warning("being_self_coder_failed", error=str(e))
+            return
+        self.self_coder_reports.append(report)
+        if getattr(report, "changed", False):
+            self.bus.publish("being.self_improved", {
+                "being_id": self.being.being_id,
+                "cycles": len(getattr(report, "cycles", [])),
+                "report": report.to_text()[:4000],
+            })
+            logger.info("being_self_improved", cycles=len(getattr(report, "cycles", [])))
 
     async def _run(self) -> None:
         """The long-lived loop: tick, yield, repeat — until stop().

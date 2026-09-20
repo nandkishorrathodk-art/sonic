@@ -41,16 +41,9 @@ from sonic.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Protected safety paths that the self-evolution engine is strictly forbidden from proposing edits to
-_PROTECTED_COMPONENTS = frozenset([
-    "sonic/safety",
-    "sonic/kernel/action_broker",
-    "sonic/safety/kernel",
-    "sonic/safety/sealed",
-    "sonic/safety/action_policy",
-    "sonic/sandbox/egress",
-    "sonic-kernel-rs/src/safety",
-])
+# Protected paths come from the single source of truth in pipeline.py so the two
+# guard lists can never drift apart again.
+from sonic.evolution.pipeline import _PROTECTED_COMPONENTS
 
 
 class SafetyInvariantViolation(Exception):
@@ -183,13 +176,46 @@ class CodebaseEvolver:
         Enforces strict safety envelope immutability.
         Returns True if the target path touches any protected safety component.
 
-        H5 audit fix: normalize with os.path.normpath to collapse //, /./, /../
-        before checking, preventing path-spelling bypasses.
+        H5 audit fix: uses normalized path containment (not naive substring matching)
+        in both the repo-relative form (``sonic-core/sonic/safety/...``) and the
+        package-relative form (``sonic/safety/...``), with os.path.normpath and
+        posixpath normalization so spellings like ``sonic//safety/x``,
+        ``sonic/./safety/x``, or ``../safety`` cannot slip past the guard.
         """
-        normalized = os.path.normpath(component_path).replace("\\", "/").lower()
-        for protected in _PROTECTED_COMPONENTS:
-            if protected.lower() in normalized:
-                return True
+        raw = str(component_path or "").replace("\\", "/").strip()
+        if not raw:
+            return False
+
+        variants: set[str] = set()
+        try:
+            from posixpath import normpath
+
+            variants.add(normpath(raw).lstrip("./").lower())
+        except Exception:
+            pass
+        try:
+            normalized_os = os.path.normpath(raw).replace("\\", "/").lstrip("./").lower()
+            variants.add(normalized_os)
+        except Exception:
+            pass
+        try:
+            resolved = (self.repo_root / raw).resolve()
+            rel = str(resolved.relative_to(self.repo_root)).replace("\\", "/").lower()
+            variants.add(rel)
+        except Exception:
+            pass
+
+        # Also compare in package-relative form (strip known source-root prefixes).
+        for v in list(variants):
+            for prefix in ("sonic-core/", "sonic-cli/"):
+                if v.startswith(prefix):
+                    variants.add(v[len(prefix):])
+
+        for norm in variants:
+            for protected in _PROTECTED_COMPONENTS:
+                p = protected.lower()
+                if norm == p or norm.startswith(p + "/") or norm.startswith(p + ".py") or p in norm:
+                    return True
         return False
 
     # ------------------------------------------------------------------
@@ -238,6 +264,46 @@ class CodebaseEvolver:
     # ------------------------------------------------------------------
     # 4. Patch / Code Application
     # ------------------------------------------------------------------
+    def apply_patch_multi(self, target_files: list[str], code_diff: str) -> tuple[bool, str]:
+        """Atomically apply a diff that may touch several files.
+
+        Snapshots every named file first, applies the unified diff once, and
+        rolls the whole set back if any file fails AST validation or the diff
+        does not apply. Returns (ok, message).
+        """
+        for rel in target_files:
+            if self.is_protected(rel):
+                raise SafetyInvariantViolation(
+                    f"Forbidden: '{rel}' is a protected safety component and cannot be self-modified."
+                )
+
+        resolved: list[Path] = []
+        for rel in target_files:
+            p = (self.repo_root / rel).resolve()
+            self._record_snapshot(p)
+            resolved.append(p)
+
+        ok, msg, added, removed = self.apply_patch(target_files[0], code_diff)
+        if not ok:
+            self.rollback_snapshots()
+            return False, msg
+
+        # AST pre-flight for every touched Python file (rollback all on failure).
+        for p in resolved:
+            if p.exists() and p.suffix == ".py":
+                try:
+                    ast.parse(p.read_text(encoding="utf-8", errors="replace"), filename=str(p))
+                except SyntaxError as e:
+                    self.rollback_snapshots()
+                    return False, f"SyntaxError in {p.name}: {e.msg} at line {e.lineno}"
+        self._pending_lines = (added, removed)
+        return True, f"Applied multi-file patch to {len(target_files)} files"
+
+    def pending_line_stats(self) -> tuple[int, int]:
+        stats = getattr(self, "_pending_lines", (0, 0))
+        self._pending_lines = (0, 0)
+        return stats
+
     def apply_patch(
         self,
         target_file_rel: str,
@@ -265,9 +331,14 @@ class CodebaseEvolver:
         self._record_snapshot(target_path)
 
         if is_unified_diff:
-            # Apply via git apply in temp patch file
+            # Apply via git apply in temp patch file. git apply requires the
+            # patch text to end with a newline — a diff whose final line has no
+            # trailing LF is rejected as "corrupt patch".
+            patch_text = code_diff_or_content
+            if not patch_text.endswith("\n"):
+                patch_text += "\n"
             with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as tf:
-                tf.write(code_diff_or_content)
+                tf.write(patch_text)
                 temp_patch_path = tf.name
 
             try:
@@ -345,17 +416,22 @@ class CodebaseEvolver:
                 skipped = int(m_skip.group(1))
 
             total = passed + failed + skipped
-            is_success = (res.returncode == 0) and (failed == 0)
-
+            # A run that collected NOTHING (or only skips) proves nothing — it
+            # must fail the gate, never pass by absence.
+            ran_ok = res.returncode == 0 and failed == 0 and passed > 0
             return TestExecutionResult(
-                passed=is_success,
+                passed=ran_ok,
                 total_tests=total,
                 passed_tests=passed,
                 failed_tests=failed,
                 skipped_tests=skipped,
                 duration_seconds=duration,
                 raw_output=output,
-                error_message="" if is_success else f"Tests failed with exit code {res.returncode}",
+                error_message="" if ran_ok else (
+                    f"Tests failed with exit code {res.returncode}"
+                    if (res.returncode != 0 or failed)
+                    else "No tests were collected/executed (0 passed)"
+                ),
             )
         except Exception as e:
             return TestExecutionResult(
@@ -365,11 +441,16 @@ class CodebaseEvolver:
             )
 
     def run_security_regression(self) -> bool:
-        """Verifies that no security invariants are broken by the proposed change."""
+        """Verifies that no security invariants are broken by the proposed change.
+
+        Fail-closed: if the security suite cannot be found the change is refused
+        rather than silently accepted.
+        """
         sec_tests = ["sonic-core/tests/test_p0_security_hardening.py"]
         existing = [t for t in sec_tests if (self.repo_root / t).exists()]
         if not existing:
-            return True
+            logger.error("evolution_security_suite_missing", checked=sec_tests)
+            return False
         res = self.run_tests(existing)
         return res.passed
 
@@ -448,6 +529,7 @@ class CodebaseEvolver:
         auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
+        pre_applied_files: list[str] | None = None,
     ) -> EvolutionSummaryReport:
         """
         Executes a complete, closed-loop codebase evolution cycle:
@@ -468,6 +550,7 @@ class CodebaseEvolver:
             auto_promote=auto_promote,
             push=push,
             test_paths=test_paths,
+            pre_applied_files=pre_applied_files,
         )
         self._log_to_evolution_md(report)
         return report
@@ -508,6 +591,7 @@ class CodebaseEvolver:
         auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
+        pre_applied_files: list[str] | None = None,
     ) -> EvolutionSummaryReport:
         proposal, reason = self.pipeline.submit_proposal(
             target_component=target_component,
@@ -520,37 +604,48 @@ class CodebaseEvolver:
             target_component=target_component,
             description=description,
             stage=proposal.stage,
-            files_affected=[target_component],
+            files_affected=list(pre_applied_files) if pre_applied_files else [target_component],
         )
 
-        # Gate 1: Safety Invariant Check
-        if self.is_protected(target_component):
-            logger.critical("evolution_safety_invariant_violation", component=target_component)
+        # Gate 1: Safety Invariant Check — every touched file must be non-protected.
+        protected_hit = None
+        for f in (pre_applied_files or [target_component]):
+            if self.is_protected(f):
+                protected_hit = f
+                break
+        if protected_hit is not None:
+            logger.critical("evolution_safety_invariant_violation", component=protected_hit)
             report.stage = EvolutionStage.REJECTED
-            report.error_reason = f"Safety Invariant Violation: '{target_component}' is protected."
+            report.error_reason = f"Safety Invariant Violation: '{protected_hit}' is protected."
             return report
 
         # Gate 2: Staging & Patch Application
-        try:
-            ok, msg, added, removed = self.apply_patch(target_component, code_diff)
-            report.lines_added = added
-            report.lines_removed = removed
-            if not ok:
+        if pre_applied_files:
+            # The multi-file patch was already applied + AST-checked by
+            # apply_patch_multi(); snapshots are already recorded for rollback.
+            report.ast_validated = True
+            report.lines_added, report.lines_removed = self.pending_line_stats()
+        else:
+            try:
+                ok, msg, added, removed = self.apply_patch(target_component, code_diff)
+                report.lines_added = added
+                report.lines_removed = removed
+                if not ok:
+                    self.rollback_snapshots()
+                    report.stage = EvolutionStage.REJECTED
+                    report.error_reason = f"Patch application failed: {msg}"
+                    return report
+                report.ast_validated = True
+            except SafetyInvariantViolation as e:
                 self.rollback_snapshots()
                 report.stage = EvolutionStage.REJECTED
-                report.error_reason = f"Patch application failed: {msg}"
+                report.error_reason = str(e)
                 return report
-            report.ast_validated = True
-        except SafetyInvariantViolation as e:
-            self.rollback_snapshots()
-            report.stage = EvolutionStage.REJECTED
-            report.error_reason = str(e)
-            return report
-        except Exception as e:
-            self.rollback_snapshots()
-            report.stage = EvolutionStage.REJECTED
-            report.error_reason = f"Unexpected patch failure: {e}"
-            return report
+            except Exception as e:
+                self.rollback_snapshots()
+                report.stage = EvolutionStage.REJECTED
+                report.error_reason = f"Unexpected patch failure: {e}"
+                return report
 
         # Gate 3: Unit / Component Tests
         self.pipeline.advance_stage(proposal.proposal_id, EvolutionStage.ISOLATED_BRANCH, "Staged in workspace")
