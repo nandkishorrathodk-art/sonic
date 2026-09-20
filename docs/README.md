@@ -25,3 +25,4 @@ This directory contains the master architectural blueprints, core system invaria
 3. **Zero Puppet Scripts**: Dynamic perception and adaptive reasoning from first principles; no rigid keyword trees or canned checklists.
 4. **Empirical Falsification**: Zero success-by-decree. Every vulnerability finding is backed by real execution receipts inside the isolated sandbox.
 5. **Persistent Being**: Affective state, vector memories, property graph, and durable craft survive reboots without amnesia.
+

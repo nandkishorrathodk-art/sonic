@@ -649,3 +649,28 @@ def test_computer_decision_trace_coerces_blocked_status_into_valid_action_type()
     assert trace.action_type == ComputerActionType.TERMINAL_EXEC
     assert trace.target_resource == "test-target"
 
+
+def test_action_parser_prevents_exec_command_not_found():
+    """Verify _parse_llm_action never sets raw_cmd to '_EXEC' when ACTION is TERMINAL_EXEC."""
+    from sonic.computer_use.agent import ComputerUseAgent
+    
+    # When model outputs ACTION: TERMINAL_EXEC with target as command and empty payload
+    text = (
+        "ACTION: TERMINAL_EXEC\n"
+        "TARGET: mkdir -p /home/sonic/workspace/password_security_suite\n"
+        "PAYLOAD: {}\n"
+    )
+    act_type, target, payload, _ = ComputerUseAgent._parse_llm_action(text, "/home/sonic/workspace/README.md")
+    assert act_type == ComputerActionType.TERMINAL_EXEC
+    assert payload.get("command") == "mkdir -p /home/sonic/workspace/password_security_suite"
+    assert "_EXEC" not in payload.get("command", "")
+
+
+def test_clean_terminal_command_strips_exec():
+    """Verify _clean_terminal_command strips spurious _EXEC or EXEC prefixes."""
+    from sonic.computer_use.agent import ComputerUseAgent
+    assert ComputerUseAgent._clean_terminal_command("_EXEC") == "echo 'ERROR: Empty command' >&2; exit 1"
+    assert ComputerUseAgent._clean_terminal_command("_EXEC ls -la") == "ls -la"
+    assert ComputerUseAgent._clean_terminal_command("EXEC ps aux") == "ps aux"
+
+

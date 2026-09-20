@@ -2027,11 +2027,14 @@ class ComputerUseAgent:
                 act_field = fields["ACTION"].strip()
                 for prefix in ("TERMINAL_EXEC", "TERMINAL", "RUN", "EXEC", "COMMAND", "CMD", "BASH", "SHELL"):
                     if act_field.upper().startswith(prefix) and len(act_field) > len(prefix):
+                        # Avoid taking '_EXEC' as a command when action was 'TERMINAL_EXEC'
+                        if prefix == "TERMINAL" and act_field.upper().startswith("TERMINAL_EXEC"):
+                            continue
                         tail = act_field[len(prefix):].strip(" :")
-                        if tail:
+                        if tail and tail.upper() not in ("_EXEC", "EXEC", "COMMAND", "RUN", "SHELL", "BASH"):
                             raw_cmd = tail
                             break
-            if not raw_cmd or str(raw_cmd).lower() in ("none", "null", ""):
+            if not raw_cmd or str(raw_cmd).lower() in ("none", "null", "") or str(raw_cmd).strip().upper() in ("_EXEC", "EXEC"):
                 payload["command"] = target if target and target != default_file and not target.startswith("{") else "echo 'ERROR: Empty command payload' >&2; exit 1"
             else:
                 payload["command"] = raw_cmd
@@ -2265,6 +2268,12 @@ class ComputerUseAgent:
         s = re.sub(r'^```(?:bash|sh)?\s*', '', s)
         s = re.sub(r'\s*```$', '', s)
         s = s.strip(" \t\n\r`")
+        if s == "_EXEC" or s == "EXEC":
+            s = ""
+        elif s.startswith("_EXEC "):
+            s = s[6:].strip()
+        elif s.startswith("EXEC "):
+            s = s[5:].strip()
 
         # 3. If it is still a JSON object like {"diagnostic": ...} without command, don't execute raw JSON in bash
         if s.startswith("{") and s.endswith("}"):
@@ -3097,8 +3106,13 @@ class ComputerUseAgent:
             elif action_type == ComputerActionType.FILE_WRITE:
                 path = payload.get("path") or target_resource or "/home/sonic/workspace/auth.py"
                 content = payload.get("content") or payload.get("code") or payload.get("file_content") or payload.get("text") or payload.get("data") or ""
-                await self.computer.write_file(workspace_id, path, content)
-                actual_obs_str = f"Wrote patch ({len(content)} bytes) to {path}"
+                ext = os.path.splitext(path.rstrip("/"))[1]
+                if not str(content).strip() and (path.endswith("/") or not ext):
+                    await self.computer.terminal(workspace_id, f"mkdir -p {shlex.quote(path)}")
+                    actual_obs_str = f"Created directory {path}"
+                else:
+                    await self.computer.write_file(workspace_id, path, content)
+                    actual_obs_str = f"Wrote patch ({len(content)} bytes) to {path}"
 
             elif action_type == ComputerActionType.TERMINAL_EXEC:
                 raw_cmd = payload.get("command") or target_resource or "echo OK"

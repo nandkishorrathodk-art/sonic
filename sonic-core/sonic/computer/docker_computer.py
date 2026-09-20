@@ -655,6 +655,15 @@ class DockerComputerProvider(ComputerProvider):
         actor: str = "operator",
     ) -> ExecResult:
         code, stdout, stderr = await self._docker_exec(command, timeout=timeout)
+        # Auto-heal: If mkdir failed because a 0-byte empty file previously blocked directory creation
+        if code != 0 and "cannot create directory" in (stderr or "") and "File exists" in (stderr or ""):
+            m = re.search(r"cannot create directory ['\"]?([^'\":\n]+)['\"]?: File exists", stderr)
+            if m:
+                conflict_path = m.group(1).strip()
+                cleanup_cmd = f"[ -f {shlex.quote(conflict_path)} ] && [ ! -s {shlex.quote(conflict_path)} ] && rm -f {shlex.quote(conflict_path)}"
+                c_code, _, _ = await self._docker_exec(cleanup_cmd, timeout=10)
+                if c_code == 0:
+                    code, stdout, stderr = await self._docker_exec(command, timeout=timeout)
         return ExecResult(
             command=command,
             exit_code=code,
