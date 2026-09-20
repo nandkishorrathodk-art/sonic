@@ -9,6 +9,7 @@ export interface WorklogItem {
   type: "action" | "command" | "read" | "write" | "event" | "evidence" | "thought" | "response" | "approval" | "plan" | "observation" | "replan" | "completed" | "info" | string;
   title: string;
   content?: string;
+  prompt?: string;
   command?: string;
   output?: string;
   file?: string;

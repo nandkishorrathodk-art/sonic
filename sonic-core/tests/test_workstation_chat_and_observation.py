@@ -8,9 +8,11 @@ Verifies:
 
 from __future__ import annotations
 
-import pytest
-
-from sonic.api.routes.workstation import _is_action_prompt
+from sonic.api.routes.workstation import (
+    _append_worklog,
+    _extract_recent_conversation_messages,
+    _is_action_prompt,
+)
 from sonic.llm.prompts import WORKSTATION_CHAT_SYSTEM
 
 
@@ -48,3 +50,24 @@ def test_is_action_prompt_recognizes_common_computer_and_hindi_actions():
     assert not _is_action_prompt("hello")
     assert not _is_action_prompt("hey buddy")
 
+
+def test_user_prompt_is_stored_as_visible_conversation_turn():
+    state = {"worklog": []}
+
+    item = _append_worklog(
+        state,
+        "event",
+        "Objective Received",
+        "Create a local file",
+        role="user",
+        prompt="Create a local file",
+    )
+
+    assert item["role"] == "user"
+    assert item["prompt"] == "Create a local file"
+    history = _extract_recent_conversation_messages(state)
+    assert history == []
+
+    _append_worklog(state, "response", "SONIC Response", "Done")
+    history = _extract_recent_conversation_messages(state)
+    assert [message.content for message in history] == ["Create a local file", "Done"]

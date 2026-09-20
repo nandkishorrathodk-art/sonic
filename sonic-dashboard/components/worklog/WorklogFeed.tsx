@@ -644,8 +644,8 @@ export function WorklogFeed({
             }
 
             // 4. User Chat Message
-            if (item.title === "Objective Received" || item.type === "event" || item.role === "user") {
-              const userText = item.content || item.title;
+            if (item.title === "Objective Received" || item.role === "user") {
+              const userText = item.prompt || item.content || item.title;
               return (
                 <div key={itemId} className="flex justify-end pl-8 my-2 animate-fade-in-up">
                   <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-secondary-900/40 border border-secondary-600/40 px-3.5 py-2.5 text-slate-100 shadow-md">
