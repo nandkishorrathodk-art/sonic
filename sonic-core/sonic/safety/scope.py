@@ -178,7 +178,12 @@ class ScopeChecker:
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?shutdown\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?reboot\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?halt\b", re.IGNORECASE),
-        re.compile(r"\b:()\{\s*:\|:&\s*\};:", re.IGNORECASE),  # fork bomb
+        re.compile(r"(?::\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:|:\(\)\{:\|:&\};:)", re.IGNORECASE),  # fork bomb
+        re.compile(r"\bchmod\s+(-[a-zA-Z]*R\s+)?(0?777|0?666)\s+/(?:\s|$)", re.IGNORECASE),
+        re.compile(r"\bchmod\s+.*[0-7]{3,4}\s+/(etc|boot|root|sys|proc|dev)\b", re.IGNORECASE),
+        re.compile(r"\bchown\s+(-[a-zA-Z]*R\s+)?.*\s+/(?:\s|$)", re.IGNORECASE),
+        re.compile(r">\s*/etc/(passwd|shadow|sudoers|group)\b", re.IGNORECASE),
+        re.compile(r"\b(cat|grep|tail|head|more|less)\s+/etc/shadow\b", re.IGNORECASE),
         # --- Policy parity with safety_rules.yaml forbidden_actions ---
         re.compile(r"\bdrop\s+database\b", re.IGNORECASE),
         re.compile(r"\bexfiltrate\b", re.IGNORECASE),
@@ -310,10 +315,16 @@ class ScopeChecker:
 
     @staticmethod
     def _domain_to_regex(domain: str) -> str:
-        """Convert a domain glob (*.example.com, *.*) to a fully-anchored regex."""
-        # Escape regex metacharacters, then restore glob semantics for * and .
+        """Convert a domain glob (*.example.com, *.*) to a fully-anchored regex.
+
+        M1 audit fix: ``*.example.com`` now also matches bare ``example.com``
+        (apex). The generated pattern uses ``(.*\\.)?`` instead of ``.*\\.`` so
+        the subdomain prefix becomes optional.
+        """
         escaped = re.escape(domain)
-        escaped = escaped.replace(r"\*", ".*").replace(r"\.", r"\.")
+        if escaped.startswith(r"\*\."):
+            escaped = r"(.*\.)?" + escaped[4:]
+        escaped = escaped.replace(r"\*", ".*")
         return escaped
 
     @property

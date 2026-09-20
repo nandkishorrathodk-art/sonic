@@ -110,14 +110,35 @@ class SqliteGraph:
 
     async def init_schema(self) -> bool:
         assert self._db is not None
+        # Check if memory_nodes has compound primary key (tenant_id, uid)
+        async with self._db.execute("PRAGMA table_info(memory_nodes)") as cur:
+            columns = await cur.fetchall()
+        if columns:
+            pk_cols = [col[1] for col in columns if col[5] > 0]
+            if pk_cols == ["uid"]:
+                # Migrate to compound primary key (tenant_id, uid)
+                await self._db.executescript("""
+                    CREATE TABLE IF NOT EXISTS memory_nodes_v2 (
+                        uid        TEXT NOT NULL,
+                        label      TEXT NOT NULL,
+                        tenant_id  TEXT NOT NULL DEFAULT 'default',
+                        props_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (tenant_id, uid)
+                    );
+                    INSERT OR IGNORE INTO memory_nodes_v2 SELECT uid, label, tenant_id, props_json, created_at FROM memory_nodes;
+                    DROP TABLE memory_nodes;
+                    ALTER TABLE memory_nodes_v2 RENAME TO memory_nodes;
+                """)
         await self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS memory_nodes (
-                uid        TEXT PRIMARY KEY,
+                uid        TEXT NOT NULL,
                 label      TEXT NOT NULL,
                 tenant_id  TEXT NOT NULL DEFAULT 'default',
                 props_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, uid)
             );
             CREATE INDEX IF NOT EXISTS idx_nodes_label   ON memory_nodes(label);
             CREATE INDEX IF NOT EXISTS idx_nodes_tenant  ON memory_nodes(tenant_id);
@@ -182,13 +203,10 @@ class SqliteGraph:
     async def _get_node(self, label: str, uid: str, tenant_id: str | None = None) -> dict | None:
         assert self._db is not None
         if tenant_id:
-            sql = (
-                "SELECT label, props_json FROM memory_nodes "
-                "WHERE uid = ? AND label = ? AND tenant_id = ?"
-            )
+            sql = "SELECT label, props_json, tenant_id FROM memory_nodes WHERE uid = ? AND label = ? AND tenant_id = ?"
             params: tuple = (uid, label, tenant_id)
         else:
-            sql = "SELECT label, props_json FROM memory_nodes WHERE uid = ? AND label = ?"
+            sql = "SELECT label, props_json, tenant_id FROM memory_nodes WHERE uid = ? AND label = ?"
             params = (uid, label)
         async with self._db.execute(sql, params) as cur:
             row = await cur.fetchone()
@@ -196,6 +214,7 @@ class SqliteGraph:
             return None
         node = json.loads(row[1])
         node["_label"] = row[0]
+        node["tenant_id"] = row[2]
         return {k: v for k, v in node.items() if k != "_label"}
 
     async def _update_node(self, label: str, uid: str, updates: dict[str, Any], tenant_id: str | None = None) -> bool:
@@ -205,9 +224,10 @@ class SqliteGraph:
             return False
         merged = {**existing, **updates}
         storable = {k: v for k, v in merged.items() if k != "_label"}
+        node_tenant = tenant_id or existing.get("tenant_id", "default")
         await self._db.execute(
-            "UPDATE memory_nodes SET props_json = ? WHERE uid = ?",
-            (json.dumps(storable, default=str), uid),
+            "UPDATE memory_nodes SET props_json = ? WHERE tenant_id = ? AND uid = ?",
+            (json.dumps(storable, default=str), node_tenant, uid),
         )
         await self._db.commit()
         return True
@@ -217,9 +237,11 @@ class SqliteGraph:
         existing = await self._get_node(label, uid, tenant_id=tenant_id)
         if existing is None:
             return False
-        await self._db.execute("DELETE FROM memory_nodes WHERE uid = ?", (uid,))
+        node_tenant = tenant_id or existing.get("tenant_id", "default")
+        await self._db.execute("DELETE FROM memory_nodes WHERE tenant_id = ? AND uid = ?", (node_tenant, uid))
         await self._db.execute(
-            "DELETE FROM memory_relationships WHERE from_uid = ? OR to_uid = ?", (uid, uid)
+            "DELETE FROM memory_relationships WHERE tenant_id = ? AND (from_uid = ? OR to_uid = ?)",
+            (node_tenant, uid, uid),
         )
         await self._db.commit()
         return True

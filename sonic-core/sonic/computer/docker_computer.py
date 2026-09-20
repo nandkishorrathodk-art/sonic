@@ -938,9 +938,10 @@ class DockerComputerProvider(ComputerProvider):
 
         # In root container environments, applications with embedded rendering engines
         # require container flags to prevent unprivileged user namespace crashes.
+        # H7 audit fix: No hardcoded application names (Rule 1). Dynamically probe
+        # whether the resolved binary supports --no-sandbox.
         if "--no-sandbox" not in args:
             chk_cmd = (
-                f"readlink -f {shlex.quote(resolved_bin)} 2>/dev/null | grep -qiE 'chrome|chromium|electron|brave|edge' || "
                 f"{shlex.quote(resolved_bin)} --help 2>&1 | grep -q -- '--no-sandbox'"
             )
             chk_code, _, _ = await self._docker_exec(chk_cmd)

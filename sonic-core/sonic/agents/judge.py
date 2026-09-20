@@ -272,14 +272,46 @@ class JudgeAgent:
                     notes="GUI desktop interaction unverified: No application window or visual action was detected on Display :99.",
                 )
 
-        # 7. Default Grounded Verdict
+        # 7. Default Grounded Verdict (with goal-relevance check — H3 audit fix)
         if has_concrete_proof and result.success:
-            return JudgeEvaluation(
-                verdict=JudgeVerdict.CONFIRMED,
-                confidence=0.85,
-                notes="Empirical execution verified: Non-trivial command executed with exit 0 and observations.",
-                evidence_items=valid_commands,
-            )
+            # Extract meaningful keywords from the goal (>= 3 chars, not stopwords)
+            _stopwords = frozenset({
+                "the", "and", "for", "with", "from", "that", "this", "into",
+                "run", "use", "all", "any", "are", "was", "not", "has", "had",
+                "its", "can", "will", "should", "must", "may", "via", "using",
+            })
+            goal_keywords = {
+                w for w in re.findall(r"[a-z0-9_./:-]+", goal_lower)
+                if len(w) >= 3 and w not in _stopwords
+            }
+            # Check that at least one valid command is related to the goal
+            goal_relevant = False
+            if not goal_keywords:
+                goal_relevant = True  # Degenerate goal — cannot filter
+            else:
+                combined_cmd_text = " ".join(valid_commands).lower()
+                combined_findings = (
+                    result.findings_summary + " " + " ".join(result.key_discoveries)
+                ).lower()
+                for kw in goal_keywords:
+                    if kw in combined_cmd_text or kw in combined_findings:
+                        goal_relevant = True
+                        break
+
+            if goal_relevant:
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.CONFIRMED,
+                    confidence=0.85,
+                    notes="Empirical execution verified: Non-trivial command executed with exit 0 and observations.",
+                    evidence_items=valid_commands,
+                )
+            else:
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.INCONCLUSIVE,
+                    confidence=0.6,
+                    notes="Traces contain successful commands but none are relevant to the sub-mission goal.",
+                    evidence_items=valid_commands,
+                )
 
         return JudgeEvaluation(
             verdict=JudgeVerdict.INCONCLUSIVE,

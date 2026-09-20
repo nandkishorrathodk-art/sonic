@@ -182,8 +182,11 @@ class CodebaseEvolver:
         """
         Enforces strict safety envelope immutability.
         Returns True if the target path touches any protected safety component.
+
+        H5 audit fix: normalize with os.path.normpath to collapse //, /./, /../
+        before checking, preventing path-spelling bypasses.
         """
-        normalized = component_path.replace("\\", "/").lower()
+        normalized = os.path.normpath(component_path).replace("\\", "/").lower()
         for protected in _PROTECTED_COMPONENTS:
             if protected.lower() in normalized:
                 return True

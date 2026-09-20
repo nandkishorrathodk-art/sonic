@@ -12,6 +12,7 @@ Blocks access to:
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from urllib.parse import urlparse
 
@@ -101,8 +102,13 @@ def is_target_allowed(
     scanning sandbox). Genuine leak risks (private/loopback/metadata) are still
     always blocked.
     """
+    # M2 audit fix: allow_private_for_tests only honoured in dev/test environments
     if allow_private_for_tests:
-        return True, "Allowed (test override)"
+        if os.environ.get("APP_ENV", "") in ("development", "test"):
+            return True, "Allowed (test override)"
+        else:
+            logger.warning("egress_test_override_blocked_in_production")
+            # Fall through to normal checks — do NOT bypass in production
 
     nets = blocked_networks if blocked_networks is not None else BLOCKED_NETWORKS
 
@@ -167,8 +173,10 @@ def is_target_allowed(
         return True, "Allowed"
 
     # Check DNS resolution (FAIL-CLOSED on error/timeout)
+    # H8 audit fix: getaddrinfo resolves both IPv4 and IPv6 (not IPv4-only gethostbyname_ex)
     try:
-        resolved_ips = socket.gethostbyname_ex(raw_host)[2]
+        addr_infos = socket.getaddrinfo(raw_host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        resolved_ips = list({info[4][0] for info in addr_infos})
         if not resolved_ips:
             return False, f"Domain {raw_host} DNS resolution failed: no addresses resolved"
         for ip_str in resolved_ips:

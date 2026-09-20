@@ -206,7 +206,7 @@ class EvolutionEngine:
         target_component: str,
         description: str,
         code_diff: str,
-        auto_promote: bool = True,
+        auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
     ) -> EvolutionSummaryReport:
@@ -251,7 +251,7 @@ class EvolutionEngine:
         self,
         goal_id: str,
         custom_patch: str | None = None,
-        auto_promote: bool = True,
+        auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
     ) -> EvolutionSummaryReport:

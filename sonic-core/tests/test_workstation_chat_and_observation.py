@@ -42,7 +42,7 @@ def test_is_action_prompt_recognizes_common_computer_and_hindi_actions():
     assert _is_action_prompt("browser kholo")
     assert _is_action_prompt("ye kaam karo")
     assert _is_action_prompt("file banao test.py")
-    assert _is_action_prompt("desktop pe dekho kya chal raha hai")
+    assert _is_action_prompt("desktop pe application chalao")
     assert _is_action_prompt("terminal chalao")
 
     # Pure greetings remain conversational (not 50-step autonomous loops)

@@ -226,9 +226,11 @@ def _milestone_matches(
     # Milestone 1 (inspection): any FILE_READ / TERMINAL_EXEC / SECURITY_TOOL.
     if any(k in conditions_text for k in ("inspect", "identif", "reproduc", "locat")):
         return bool(succ_types & {"FILE_READ", "TERMINAL_EXEC", "SECURITY_TOOL", "BROWSER_NAVIGATE"})
-    # Milestone 2 (remediation): a FILE_WRITE / patch landed.
+    # Milestone 2 (remediation): an actual FILE_WRITE must have landed.
+    # H4 audit fix: GIT_COMMIT alone is NOT sufficient — a commit without
+    # a preceding file write is an empty or unrelated commit.
     if any(k in conditions_text for k in ("patch", "remediat", "fix", "test", "verif")):
-        return "FILE_WRITE" in succ_types or "GIT_COMMIT" in succ_types
+        return "FILE_WRITE" in succ_types
     # Milestone 3 (commit/deliverable): a GIT_COMMIT landed.
     if any(k in conditions_text for k in ("commit", "deliverable", "evidence", "custody")):
         return "GIT_COMMIT" in succ_types

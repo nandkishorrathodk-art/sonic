@@ -233,6 +233,9 @@ class ActionPolicy:
             clean_path = str(path or "").strip().replace("\\", "/")
             if not clean_path:
                 return PolicyVerdict(False, f"{action_name} empty path")
+            # M3: Reject Windows drive-letter paths (e.g. C:/...) that might escape workspace confinement
+            if re.match(r"^[a-zA-Z]:", clean_path):
+                return PolicyVerdict(False, f"{action_name} escapes workspace: absolute Windows drive path {path}")
             resolved = Path(clean_path).expanduser()
             # Resolve strictly=False so a not-yet-written path still confines.
             # On Windows, POSIX paths starting with / return is_absolute() == False.
@@ -250,20 +253,36 @@ class ActionPolicy:
         return PolicyVerdict(True, "path confined")
 
     _CLOUD_METADATA_RE = re.compile(
-        r"169\.254\.169\.254"
+        r"169\.254\.\d+\.\d+"
+        r"|2852039166\b"  # dword for 169.254.169.254
+        r"|0xa9\.?0xfe\.?0xa9\.?0xfe\b"  # hex dotted
+        r"|0xa9fea9fe\b"  # hex packed
+        r"|0251\.0376\.0251\.0376\b"  # octal
+        r"|::ffff:169\.254\.\d+\.\d+"
+        r"|fd00:ec2::254\b"
         r"|instance-data(?:\.ec2\.internal)?\b"
         r"|metadata\.google\.internal\b"
-        r"|metadata\.azure\.com\b",
+        r"|metadata\.azure\.com\b"
+        r"|metadata\.packet\.net\b"
+        r"|100\.100\.100\.200\b",
         re.IGNORECASE,
     )
 
     def _check_command(self, command: str) -> PolicyVerdict:
-        # TERMINAL_EXEC bypasses the URL-egress filter (it runs shell howeverthe
-        # operator/being chooses). Close the metadata hole explicitly: a shell
-        # command must never reach the cloud metadata endpoint ??? on the host Or
-        # inside an egress-unrestricted container???
-        if self._CLOUD_METADATA_RE.search(command or ""):
+        cmd_str = command or ""
+        if self._CLOUD_METADATA_RE.search(cmd_str):
             return PolicyVerdict(False, "cloud metadata access blocked in terminal command")
+
+        # H1: Inspect potential base64-encoded strings to prevent base64 pipe bypass
+        import base64
+        for b64_match in re.findall(r"[A-Za-z0-9+/]{12,}={0,2}", cmd_str):
+            try:
+                decoded = base64.b64decode(b64_match).decode("utf-8", errors="ignore")
+                if self._CLOUD_METADATA_RE.search(decoded) or "169.254" in decoded:
+                    return PolicyVerdict(False, "cloud metadata access blocked in base64 encoded command payload")
+            except Exception:
+                pass
+
         # Shell commands are another egress surface (curl, wget, python
         # requests, etc.). When an engagement target allowlist is active,
         # validate every explicit URL before the command reaches the provider.

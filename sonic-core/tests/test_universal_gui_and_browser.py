@@ -87,4 +87,5 @@ async def test_docker_computer_injects_root_sandbox_flags():
     called_spawn = provider._docker_exec.call_args_list[-1][0][0]
     assert "google-chrome" in called_spawn
     assert "https://198.51.100.10" in called_spawn
-    assert "--no-sandbox" not in called_spawn
+    # Mock returns exit 0 for --no-sandbox probe so flags are injected
+    assert "--no-sandbox" in called_spawn
