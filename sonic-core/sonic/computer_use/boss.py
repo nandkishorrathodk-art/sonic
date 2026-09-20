@@ -622,7 +622,7 @@ class BossAgent:
         """
         t_start = time.perf_counter()
 
-        prompt = f"""You are the Boss Agent of an Autonomous Self-Evolving Penetration Architect (A-SEA).
+        prompt = f"""You are the Boss Agent of an Autonomous AI Computer Workstation & Engineering System.
 Your job is to analyze the user's objective from first principles and decompose it into focused, independent sub-missions for worker agents.
 
 USER OBJECTIVE: {objective}
