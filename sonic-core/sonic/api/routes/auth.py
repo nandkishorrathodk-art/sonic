@@ -122,6 +122,16 @@ async def get_dev_token(email: str = Query("engineer@company.com")):
     }
 
 
+@router.get("/google/config")
+async def google_auth_config():
+    """Returns Google OAuth client configuration status."""
+    settings = get_settings()
+    return {
+        "enabled": bool(settings.google_client_id and settings.google_client_secret),
+        "client_id": settings.google_client_id if settings.google_client_id else None,
+    }
+
+
 @router.get("/google/login")
 async def google_login(redirect_url: str = Query(default="")):
     """
@@ -144,13 +154,25 @@ async def google_callback(
     Handle Google OAuth2 callback.
     Exchanges authorization code for JWT token.
     """
-    if consume_oauth_state(state) is None:
+    redirect_target = consume_oauth_state(state)
+    if redirect_target is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired OAuth state",
         )
     try:
         auth_token = await authenticate_with_google(code)
+        if redirect_target:
+            from urllib.parse import quote
+            separator = "&" if "?" in redirect_target else "?"
+            target = (
+                f"{redirect_target}{separator}token={auth_token.access_token}"
+                f"&email={quote(auth_token.user.email)}"
+                f"&name={quote(auth_token.user.name)}"
+                f"&role={auth_token.user.role.value}"
+                f"&tenant_id={auth_token.user.tenant_id}"
+            )
+            return RedirectResponse(url=target)
         return {
             "status": "success",
             "message": f"Welcome {auth_token.user.name}!",
