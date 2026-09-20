@@ -75,9 +75,12 @@ class EvolutionEngine:
         version_tracker: VersionTracker | None = None,
         journal: EvolutionJournal | None = None,
         goal_director: EvolutionGoalDirector | None = None,
+        llm_client: Any | None = None,
         north_star: str = CORE_NORTH_STAR_GOAL,
     ):
         self.north_star = north_star
+        # The LLM router that actually writes patches for the self-coder.
+        self.llm_client = llm_client
         self.pipeline = pipeline if pipeline is not None else EvolutionPipeline()
         self.strategy_engine = (
             strategy_engine if strategy_engine is not None else DynamicStrategyEngine()
@@ -109,11 +112,18 @@ class EvolutionEngine:
                 version_tracker=self.version_tracker,
                 journal=self.journal,
                 lessons_ledger=self.lessons_ledger,
+                llm_client=self.llm_client,
             )
         )
-        # Auto‑queue the perpetual self‑update goal if it does not already exist
+        # Auto-queue the perpetual self-update goal only once (idempotent:
+        # ord() equality avoids the earlier U+2011 vs ASCII-hyphen mismatch that
+        # re-created a duplicate goal on every boot).
         from sonic.evolution.goal_director import create_self_update_goal
-        if not any(g.title.startswith("Self‑Update") for g in self.goal_director.list_goals()):
+
+        if not any(
+            g.title.replace("\u2011", "-").startswith("Self-Update")
+            for g in self.goal_director.list_goals()
+        ):
             create_self_update_goal(self.goal_director)
             logger.info("auto_self_update_goal_created")
 
@@ -247,7 +257,7 @@ class EvolutionEngine:
             max_attempts=max_attempts,
         )
 
-    def execute_evolution_goal(
+    async def execute_evolution_goal(
         self,
         goal_id: str,
         custom_patch: str | None = None,
@@ -256,7 +266,7 @@ class EvolutionEngine:
         test_paths: list[str] | None = None,
     ) -> EvolutionSummaryReport:
         """Executes an enqueued evolution goal through analysis, tests, and version bump."""
-        return self.goal_director.execute_goal(
+        return await self.goal_director.execute_goal(
             goal_id=goal_id,
             custom_patch=custom_patch,
             auto_promote=auto_promote,
@@ -264,13 +274,13 @@ class EvolutionEngine:
             test_paths=test_paths,
         )
 
-    def run_evolution_queue(
+    async def run_evolution_queue(
         self,
         max_goals: int | None = None,
         push: bool = False,
     ) -> list[EvolutionSummaryReport]:
         """Runs the continuous evolution loop, draining queued goals in priority order."""
-        return self.goal_director.run_continuous(max_goals=max_goals, push=push)
+        return await self.goal_director.run_continuous(max_goals=max_goals, push=push)
 
     def get_evolution_status(self) -> dict[str, Any]:
         """Returns comprehensive status of current version, queue depth, and journal metrics."""

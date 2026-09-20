@@ -357,6 +357,28 @@ class CustomLLMProvider(LLMProvider):
         """Convert SONIC messages to OpenAI format (with multimodal/vision support)."""
         messages = []
         for msg in request.messages:
+            if msg.role == MessageRole.TOOL:
+                # Tool results must carry the id of the call they answer.
+                messages.append({
+                    "role": "tool",
+                    "content": msg.content,
+                    "tool_call_id": msg.tool_call_id or msg.name or "tool",
+                })
+                continue
+            if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content or None,
+                    "tool_calls": [
+                        {
+                            "id": tc.id or tc.name,
+                            "type": "function",
+                            "function": {"name": tc.name, "arguments": json.dumps(tc.arguments or {})},
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                })
+                continue
             if msg.has_images:
                 # Build multipart content array for vision models
                 content_parts: list[dict] = []

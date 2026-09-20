@@ -31,6 +31,7 @@ from sonic.api.routes import (
     live,
     llm,
     security,
+    self_coder,
     terminal,
     workstation,
 )
@@ -155,6 +156,7 @@ async def _maybe_start_being_life_loop(settings):
             method_lab=method_lab,
             toolsmith=toolsmith,
             lessons_ledger=lessons_ledger,
+            llm_client=router,
         )
         agent = ComputerUseAgent(
             computer_provider=provider, llm_router=router,
@@ -178,8 +180,27 @@ async def _maybe_start_being_life_loop(settings):
             being_mind=get_being_store().get_mind(being.being_id),
         )
         curiosity = CuriosityLoop(llm_router=router, vector_memory=get_vector_memory(), max_cycles=1)
+        # Autonomous self-coder: lets the being improve SONIC's OWN source with a
+        # real LLM-written patch, gated by evolver tests + security regression.
+        self_coder = None
+        if os.environ.get("SONIC_SELF_CODER_ENABLED", "true").lower() in ("1", "true", "yes"):
+            try:
+                from sonic.evolution.self_coder import SelfCoder
+
+                self_coder = SelfCoder(
+                    repo_root=evolution_engine.codebase_evolver.repo_root,
+                    llm=router,
+                    evolver=evolution_engine.codebase_evolver,
+                    max_cycles=1,
+                )
+            except Exception as e:
+                logger.warning("being_self_coder_init_failed", error=str(e))
         tick_interval = float(os.environ.get("SONIC_BEING_TICK_INTERVAL", "60"))
-        loop = BeingLifeLoop(being, agent, curiosity, home.id, tick_interval=tick_interval)
+        self_coder_every = int(os.environ.get("SONIC_SELF_CODER_EVERY_TICKS", "20"))
+        loop = BeingLifeLoop(
+            being, agent, curiosity, home.id, tick_interval=tick_interval,
+            self_coder=self_coder, self_coder_every=self_coder_every,
+        )
         loop.start()
         from sonic.being.life_loop import register_life_loop
         register_life_loop(loop)
@@ -305,6 +326,7 @@ app.include_router(live.router, prefix="/live", tags=["Live Dashboard"])
 app.include_router(jobs.router, prefix="/jobs", tags=["Async Jobs"])
 app.include_router(workstation.router, tags=["Workstation"])
 app.include_router(security.router, prefix="/security", tags=["Self-Security Lab"])
+app.include_router(self_coder.router, prefix="/self-coder", tags=["Self-Coder"])
 
 
 

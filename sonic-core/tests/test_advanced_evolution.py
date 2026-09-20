@@ -12,6 +12,7 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from pathlib import Path
 
@@ -166,7 +167,7 @@ def test_goal_director_safety_invariant_rejection(temp_evolution_env):
         target_files=["sonic-core/sonic/safety/kernel.py"],
     )
 
-    report = director.execute_goal(goal.goal_id)
+    report = asyncio.run(director.execute_goal(goal.goal_id))
     assert report.stage == EvolutionStage.REJECTED
 
     updated = director.get_goal(goal.goal_id)
@@ -210,7 +211,7 @@ def test_goal_director_successful_execution_and_version_bump(temp_evolution_env)
         mock_tests.return_value = TestExecutionResult(passed=True, total_tests=1, passed_tests=1, duration_seconds=0.1)
         mock_sec.return_value = True
 
-        rep = director.execute_goal(goal.goal_id, custom_patch=new_code, auto_promote=True)
+        rep = asyncio.run(director.execute_goal(goal.goal_id, custom_patch=new_code, auto_promote=True))
 
         assert rep.stage == EvolutionStage.PROMOTED
         # Category was bug_fix -> version bumped from 0.1.0 to 0.1.1
@@ -257,7 +258,7 @@ def test_goal_director_capability_add_bumps_minor_version(temp_evolution_env):
         mock_tests.return_value = TestExecutionResult(passed=True, total_tests=3, passed_tests=3, duration_seconds=0.2)
         mock_sec.return_value = True
 
-        rep = director.execute_goal(goal.goal_id, custom_patch=new_code, auto_promote=True)
+        rep = asyncio.run(director.execute_goal(goal.goal_id, custom_patch=new_code, auto_promote=True))
         assert rep.stage == EvolutionStage.PROMOTED
         # Minor bump: 0.1.0 -> 0.2.0
         assert version_tracker.current_version() == "0.2.0"

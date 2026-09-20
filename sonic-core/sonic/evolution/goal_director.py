@@ -118,6 +118,9 @@ class EvolutionGoalDirector:
         journal: EvolutionJournal | None = None,
         lessons_ledger: Any | None = None,
         llm_client: Any | None = None,
+        test_paths: list[str] | None = None,
+        patch_max_attempts: int = 3,
+        patch_max_tokens: int = 8192,
     ) -> None:
         self.db_path = db_path or _default_db_path()
         if repo_root is None:
@@ -136,6 +139,14 @@ class EvolutionGoalDirector:
         self.lessons_ledger = lessons_ledger
         self.evolver = evolver or CodebaseEvolver(repo_root=self.repo_root, lessons_ledger=self.lessons_ledger)
         self.llm_client = llm_client
+        # Default test target for self-evolution verification. When None the
+        # evolver picks its own default; the self-coder overrides this with a
+        # causal subset derived from the changed files.
+        self.test_paths = test_paths
+        self.patch_max_attempts = patch_max_attempts
+        self.patch_max_tokens = patch_max_tokens
+        # Last verified patch proposal (for reporting / the self-coder summary).
+        self.last_patch_proposal: Any = None
 
         self._init_db()
 
@@ -398,22 +409,27 @@ class EvolutionGoalDirector:
     # ------------------------------------------------------------------
     # 3. Patch Synthesis & Execution
     # ------------------------------------------------------------------
-    def execute_goal(
+    async def execute_goal(
         self,
         goal_id: str,
         custom_patch: str | None = None,
         auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
+        report_only: bool = False,
     ) -> EvolutionSummaryReport:
-        """
-        Executes an end-to-end goal:
+        """Run one goal end-to-end.
+
+        When ``report_only`` is set nothing is committed and no side-effect
+        journal files (e.g. evolution.md) are written, so the caller keeps the
+        tree pristine. Original flow:
         1. Analyzes goal and codebase
         2. Applies patch with atomic rollback guarantees
         3. Runs verification tests
         4. Bumps version upon success
         5. Logs live notes to evolution.md
         """
+        self._report_only = bool(report_only)
         goal = self.get_goal(goal_id)
         if not goal:
             raise ValueError(f"Evolution goal not found: {goal_id}")
@@ -434,7 +450,7 @@ class EvolutionGoalDirector:
             self._update_goal(goal)
 
             # Record rejection in journal & evolution.md
-            self.journal.record_entry(JournalEntry(
+            self._record_entry(JournalEntry(
                 entry_id=f"ent-{uuid.uuid4().hex[:8]}",
                 goal_id=goal.goal_id,
                 title=goal.title,
@@ -471,16 +487,67 @@ class EvolutionGoalDirector:
         goal.status = GoalStatus.SYNTHESIZING
         self._update_goal(goal)
 
-        # 2. Patch resolution
+        # 2. Patch resolution — a supplied patch wins; otherwise the LLM must
+        # actually write one. If it cannot, we fail honestly (never a comment stub).
         code_diff = custom_patch
         if not code_diff:
-            # If no patch is explicitly supplied, synthesize via rule/template or LLM
-            code_diff = self._synthesize_patch_fallback(goal, primary_target, analysis["file_contexts"].get(primary_target, {}))
+            synthesis = await self._synthesize_patch(goal, target_files)
+            if synthesis is None or synthesis.proposal is None:
+                reason = getattr(synthesis, "reason", "no patch synthesized")
+                goal.notes = f"Patch synthesis failed: {reason}"
+                if goal.attempts >= goal.max_attempts:
+                    goal.status = GoalStatus.FAILED
+                else:
+                    goal.status = GoalStatus.QUEUED
+                self._update_goal(goal)
+                report = EvolutionSummaryReport(
+                    proposal_id=goal.goal_id,
+                    target_component=", ".join(target_files),
+                    description=goal.description,
+                    stage=EvolutionStage.REJECTED,
+                    error_reason=goal.notes,
+                )
+                self._record_entry(JournalEntry(
+                    entry_id=f"ent-{uuid.uuid4().hex[:8]}",
+                    goal_id=goal.goal_id,
+                    title=goal.title,
+                    category=goal.category.value,
+                    status="rolled_back",
+                    version_before=goal.version_before,
+                    version_after=goal.version_before,
+                    files_affected=goal.target_files,
+                    notes=goal.notes,
+                ))
+                return report
+            code_diff = synthesis.proposal.diff
+            self.last_patch_proposal = synthesis.proposal
+            synth_files = list(synthesis.proposal.files)
+        else:
+            synth_files = [primary_target]
 
         goal.status = GoalStatus.TESTING
         self._update_goal(goal)
 
-        # 3. Evolution cycle via CodebaseEvolver
+        # 3. Evolution cycle via CodebaseEvolver.
+        # A synthesized LLM patch may legitimately touch several files. When it
+        # does (or when the target is the signal target rather than a single
+        # primary), snapshot + apply ALL touched files so a report-only rollback
+        # can restore every one of them — not just the primary target.
+        touched = list(dict.fromkeys([*(synth_files or []), primary_target]))
+        apply_files = touched if len(touched) > 1 else [primary_target]
+        if len(apply_files) > 1:
+            preflight = self.evolver.apply_patch_multi(apply_files, code_diff)
+            if not preflight[0]:
+                goal.notes = f"Multi-file patch failed to apply: {preflight[1][:200]}"
+                goal.status = GoalStatus.QUEUED if goal.attempts < goal.max_attempts else GoalStatus.FAILED
+                self._update_goal(goal)
+                return EvolutionSummaryReport(
+                    proposal_id=goal.goal_id,
+                    target_component=", ".join(apply_files),
+                    description=goal.description,
+                    stage=EvolutionStage.ROLLED_BACK,
+                    error_reason=goal.notes,
+                )
         report: EvolutionSummaryReport = self.evolver.evolve(
             target_component=primary_target,
             description=f"[{goal.category.value}] {goal.title}: {goal.description}",
@@ -488,6 +555,8 @@ class EvolutionGoalDirector:
             auto_promote=auto_promote,
             push=push,
             test_paths=test_paths,
+            pre_applied_files=apply_files if len(apply_files) > 1 else None,
+            report_only=report_only,
         )
 
         # 4. Process outcome & Version Progression
@@ -516,7 +585,7 @@ class EvolutionGoalDirector:
             self._update_goal(goal)
 
             # Record in journal and append live notes to evolution.md
-            self.journal.record_entry(JournalEntry(
+            self._record_entry(JournalEntry(
                 entry_id=f"ent-{uuid.uuid4().hex[:8]}",
                 goal_id=goal.goal_id,
                 title=goal.title,
@@ -548,7 +617,7 @@ class EvolutionGoalDirector:
             self._update_goal(goal)
 
             # Record rollback in journal and append failure note to evolution.md
-            self.journal.record_entry(JournalEntry(
+            self._record_entry(JournalEntry(
                 entry_id=f"ent-{uuid.uuid4().hex[:8]}",
                 goal_id=goal.goal_id,
                 title=goal.title,
@@ -565,23 +634,87 @@ class EvolutionGoalDirector:
 
         return report
 
-    def _synthesize_patch_fallback(self, goal: EvolutionGoal, target_file: str, context: dict[str, Any]) -> str:
-        """Generates a safe fallback code comment/annotation when no external LLM patch is supplied."""
-        orig = context.get("content", "")
-        # Add an audit header or evolutionary note to the target file
-        timestamp = _now()
-        comment = f"\n# [SONIC-EVOLUTION] Goal: {goal.title} ({timestamp})\n"
-        if orig and orig not in comment:
-            return orig + comment
-        return orig
+    def _record_entry(self, entry: JournalEntry) -> None:
+        """Write a journal entry unless this run is report-only (no side-effects)."""
+        if getattr(self, "_report_only", False):
+            return
+        self.journal.record_entry(entry)
+
+    async def _synthesize_patch(
+        self,
+        goal: EvolutionGoal,
+        target_files: list[str],
+        failure_digest: str = "",
+    ) -> Any:
+        """Ask the LLM to write a real unified diff for the goal.
+
+        Returns a ``PatchSynthesisResult``. Unlike the old comment-append stub,
+        this never fabricates a change: no LLM, no diff, or a rejected diff all
+        surface as an honest failure.
+        """
+        from sonic.evolution.patch_synthesizer import PatchSynthesizer
+
+        llm = self.llm_client
+        if llm is None:
+            llm = self._resolve_llm()
+        synthesizer = PatchSynthesizer(
+            llm=llm,
+            repo_root=self.repo_root,
+            is_protected=self.evolver.is_protected,
+            max_tokens=self.patch_max_tokens,
+        )
+        return await synthesizer.synthesize(
+            goal,
+            target_files,
+            max_attempts=self.patch_max_attempts,
+            test_paths=self.test_paths,
+            failure_digest=failure_digest or self._feedback_for(goal),
+        )
+
+    @staticmethod
+    def _feedback_for(goal: EvolutionGoal) -> str:
+        """Feed a previous attempt's real failure back to the LLM.
+
+        On a retry (attempts > 1) the goal's notes hold the concrete failure
+        (usually the pytest output), so the model can fix the actual error
+        instead of re-emitting the same wrong patch. First attempts get nothing.
+        """
+        if getattr(goal, "attempts", 0) and goal.attempts > 1 and goal.notes:
+            return str(goal.notes)[:3000]
+        return ""
+
+    def _resolve_llm(self) -> Any:
+        """Resolve a Model Router lazily so the coder works even in the being loop."""
+        if self.llm_client is not None:
+            return self.llm_client
+        try:
+            from sonic.config import CONFIGS_DIR
+            from sonic.llm.router import ModelRouter
+
+            router = ModelRouter.from_config(CONFIGS_DIR / "models.yaml")
+            if getattr(router, "providers", None):
+                self.llm_client = router
+        except Exception as exc:  # pragma: no cover - env dependent
+            logger.warning("evolution_llm_resolve_failed", error=str(exc))
+        return self.llm_client
 
     # ------------------------------------------------------------------
     # 4. Continuous Runner
     # ------------------------------------------------------------------
-    def run_continuous(self, max_goals: int | None = None, push: bool = False) -> list[EvolutionSummaryReport]:
+    async def run_continuous(
+        self,
+        max_goals: int | None = None,
+        push: bool = False,
+        auto_promote: bool = True,
+    ) -> list[EvolutionSummaryReport]:
         """
         Continuously processes goals from the queue in priority order until
         the queue is exhausted or max_goals is reached.
+
+        ``auto_promote`` defaults to True here because this is the autonomous
+        self-coder loop the operator explicitly enabled: a change that passes
+        the real gates (diff application, AST, tests, security regression) is
+        committed locally and summarised. Remote push stays opt-in.
         """
         reports: list[EvolutionSummaryReport] = []
         processed = 0
@@ -597,7 +730,7 @@ class EvolutionGoalDirector:
                 break
 
             logger.info("evolution_processing_goal", goal_id=goal.goal_id, title=goal.title)
-            rep = self.execute_goal(goal.goal_id, auto_promote=True, push=push)
+            rep = await self.execute_goal(goal.goal_id, auto_promote=auto_promote, push=push)
             reports.append(rep)
             processed += 1
 

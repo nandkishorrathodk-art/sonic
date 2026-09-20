@@ -2182,3 +2182,22 @@ Modernized SONIC's orchestration into a high-throughput **Planner-Worker-Judge A
 
 
 
+
+## Autonomous Self-Coder - SONIC upgrades its OWN source (feat/autonomous-self-coder)
+
+The self-evolution engine now actually writes code (like an AI coder), with no
+per-change approval.
+
+- `sonic/evolution/patch_synthesizer.py` - LLM produces a unified diff; a patch is REJECTED unless it is a real diff (@@ hunks), applies cleanly (git apply --check), changes real (non-comment) code, and touches no protected component.
+- `sonic/evolution/goal_director.py` - the old _synthesize_patch_fallback comment-append stub is GONE; _synthesize_patch calls the synthesizer. execute_goal / run_continuous are now async. Multi-file patches apply atomically via CodebaseEvolver.apply_patch_multi.
+- `sonic/evolution/self_coder.py` - the autonomous loop: observe real signals (TODO/FIXME/HACK markers, leftover [SONIC-EVOLUTION] no-op stubs, stale failing checks) -> LLM patch -> verify -> local commit -> honest report. SelfCoder.run() / run_sync().
+- Hardened gates in codebase_evolver.py: a test run that collects 0 tests (or only skips) FAILS the gate; run_security_regression() is fail-closed when its suite is missing; is_protected() is normalized path containment (fixes the sonic//safety/... substring bypass); _PROTECTED_COMPONENTS has a single source of truth in pipeline.py and now also protects the self-coder own modules.
+- engine.py: fixed the U+2011 hyphen dedup bug that re-queued the self-update goal on every boot; llm_client is threaded through to the goal director.
+- Wiring: being/life_loop.py runs one self-coder cycle every SONIC_SELF_CODER_EVERY_TICKS (default 20) idle ticks; api/main.py builds it when SONIC_SELF_CODER_ENABLED != false; API GET/POST /self-coder/{signals,run,report} (operator role); CLI: python -m sonic.evolution.cli selfcode --cycles N.
+- Remote push stays OFF by default (push=False); commits are local.
+
+Env knobs: SONIC_SELF_CODER_ENABLED (default true), SONIC_SELF_CODER_EVERY_TICKS (default 20).
+
+Done-gate: sonic-core/tests/test_self_coder.py (10 tests). Full suite: 1133 passed, 37 skipped; 5 remaining failures are pre-existing docker/Cython environment tests.
+
+Env setup note: tests need project deps. Use: uv venv .venv && uv pip install --python .venv/bin/python -e "sonic-core[dev]" numpy cython (the bare python interpreter in this sandbox has no deps), then .venv/bin/python -m pytest.
