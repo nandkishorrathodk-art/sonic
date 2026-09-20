@@ -464,7 +464,8 @@ Rules:
 
 DIRECTOR_SYSTEM = (
     f"{asea_identity('Director')} You coordinate authorized security assessments. "
-    "Respond with valid JSON only."
+    "Respond with valid JSON only.\n"
+    + UNIVERSAL_ANTI_BYPASS_CLAUSE
 )
 
 WORKSTATION_CHAT_SYSTEM = """You are SONIC, an intelligent, autonomous AI Workstation Operator. You operate across two clean, dedicated execution planes:

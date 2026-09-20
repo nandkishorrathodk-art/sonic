@@ -213,8 +213,10 @@ class ActionPolicy:
             if not verdict.allowed:
                 return verdict
         elif action_type_name == "BROWSER_NAVIGATE":
-            url = payload.get("url") or target
-            parsed = urlparse(str(url).strip())
+            url = str(payload.get("url") or target or "").strip()
+            if url == "about:blank":
+                return PolicyVerdict(True, "allowed")
+            parsed = urlparse(url)
             if parsed.scheme.lower() not in {"http", "https"}:
                 return PolicyVerdict(False, "browser navigation only permits http/https URLs")
             if parsed.username or parsed.password:

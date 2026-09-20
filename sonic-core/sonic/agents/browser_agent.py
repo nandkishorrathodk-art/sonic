@@ -78,7 +78,10 @@ class BrowserAgent:
 
     def _validate_url(self, url: str) -> None:
         """Reject unsafe browser destinations before any network request."""
-        parsed = urlparse((url or "").strip())
+        clean = (url or "").strip()
+        if clean == "about:blank":
+            return
+        parsed = urlparse(clean)
         if parsed.scheme.lower() not in {"http", "https"}:
             raise ValueError("browser navigation only supports http and https URLs")
         if not parsed.hostname or parsed.username or parsed.password:

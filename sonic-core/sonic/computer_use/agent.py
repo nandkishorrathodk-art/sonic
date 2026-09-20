@@ -3366,16 +3366,19 @@ class ComputerUseAgent:
                         cmd_str = " ".join(parts).strip()
 
                     cmd_str = self._clean_terminal_command(cmd_str)
-                    if "/home/sonic" in cmd_str:
-                        real_home = getattr(self, "_last_working_dir", "") or "/home/daytona"
-                        if "/workspace" in real_home:
-                            real_home = real_home.split("/workspace")[0]
-                        cmd_str = cmd_str.replace("/home/sonic", real_home)
-                    if "~/" in cmd_str:
-                        real_home = getattr(self, "_last_working_dir", "") or "/home/daytona"
-                        if "/workspace" in real_home:
-                            real_home = real_home.split("/workspace")[0]
-                        cmd_str = cmd_str.replace("~/", f"{real_home}/")
+                    provider_name = getattr(self.computer, "__class__", type(None)).__name__
+                    is_daytona = "Daytona" in provider_name or "daytona" in str(getattr(self, "_last_working_dir", "")).lower()
+                    real_home = getattr(self, "_last_working_dir", "")
+                    if "/workspace" in real_home:
+                        real_home = real_home.split("/workspace")[0]
+                    if not real_home and is_daytona:
+                        real_home = "/home/daytona"
+
+                    if real_home and real_home != "/home/sonic":
+                        if "/home/sonic" in cmd_str:
+                            cmd_str = cmd_str.replace("/home/sonic", real_home)
+                        if "~/" in cmd_str:
+                            cmd_str = cmd_str.replace("~/", f"{real_home}/")
 
                     res = await self.computer.terminal(workspace_id, cmd_str)
                     res_stdout = _safe_str(getattr(res, "stdout", "") or "")
