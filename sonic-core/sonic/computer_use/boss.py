@@ -865,6 +865,7 @@ Rules:
             scoped_context.update(sub_mission.evidence_context)
             scoped_context["delegated_process_mode"] = sub_mission.process_mode
             scoped_context["delegated_goal"] = sub_mission.goal
+            scoped_context["delegated_plane"] = getattr(sub_mission, "plane", "headless")
             agent = ComputerUseAgent(
                 computer_provider=self.computer,
                 autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
@@ -887,6 +888,8 @@ Rules:
                 observe_desktop=True,
                 initial_context=scoped_context,
             )
+            if getattr(sub_mission, "plane", "") == "gui":
+                agent.gui_plane_priority = True
 
             # Step callback to stream SubAgent actions to UI
             async def _sub_step_callback(trace):
@@ -1091,7 +1094,16 @@ Rules:
 
             req = LLMRequest(
                 messages=[
-                    Message(role=MessageRole.SYSTEM, content="You are an autonomous intelligence officer. Summarize the worker agent's findings accurately and concisely. Focus on concrete facts: open ports, HTTP status codes, server banners, URLs/paths discovered, configuration details, credentials, flags, or error causes."),
+                    Message(
+                        role=MessageRole.SYSTEM,
+                        content=(
+                            "You are an autonomous intelligence officer creating an empirical summary. "
+                            "Summarize the worker agent's findings accurately and strictly based on verified reality. "
+                            "CRITICAL MANDATE: If commands failed, exited with non-zero exit codes, threw syntax errors, or produced "
+                            "error outputs, state the failure honestly. NEVER claim that an action, tool, or endpoint succeeded "
+                            "or returned 200 OK when the actual observation shows an error or failure."
+                        ),
+                    ),
                     Message(role=MessageRole.USER, content=f"Worker goal: {goal}\n\nActions and observations:\n{observations}\n\nSummarize the key findings in 2-4 sentences."),
                 ],
                 task_type="reasoning",

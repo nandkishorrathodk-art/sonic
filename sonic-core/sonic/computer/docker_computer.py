@@ -936,6 +936,17 @@ class DockerComputerProvider(ComputerProvider):
             if not allowed:
                 return False
 
+        # In root container environments, applications with embedded rendering engines
+        # require container flags to prevent unprivileged user namespace crashes.
+        if "--no-sandbox" not in args:
+            chk_cmd = (
+                f"readlink -f {shlex.quote(resolved_bin)} 2>/dev/null | grep -qiE 'chrome|chromium|electron|brave|edge' || "
+                f"{shlex.quote(resolved_bin)} --help 2>&1 | grep -q -- '--no-sandbox'"
+            )
+            chk_code, _, _ = await self._docker_exec(chk_cmd)
+            if chk_code == 0:
+                args = ["--no-sandbox", "--disable-dev-shm-usage"] + args
+
         parts = [resolved_bin] + args
         disp = self._get_display(workspace_id)
         spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 &"

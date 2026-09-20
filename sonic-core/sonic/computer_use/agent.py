@@ -1327,6 +1327,22 @@ class ComputerUseAgent:
             "scope and directly support the operator objective.\n"
             "================================================================================\n\n"
         )
+        init_ctx = getattr(self, "initial_context", {}) or {}
+        if init_ctx.get("delegated_plane") == "gui" or getattr(self, "gui_plane_priority", False):
+            target_header += (
+                "=== WORKSTATION APPLICATION PLANE (GUI) MANDATE ===\n"
+                "This task requires graphical desktop interaction on Display :99.\n"
+                "You MUST interact with the graphical desktop using APP_LAUNCH to start the application,\n"
+                "and GUI actions (GUI_CLICK, GUI_TYPE, GUI_KEYPRESS, GUI_SCREENSHOT) to interact with it.\n"
+                "You are STRICTLY PROHIBITED from bypassing GUI application tasks with headless terminal curl or scrapers.\n"
+                "===================================================\n\n"
+            )
+        target_header += (
+            "=== SCRIPT & CODE AUTHORING INVARIANTS ===\n"
+            "- Valid Syntax: In any Python code or print() calls, strings MUST be quoted (e.g. print('msg')).\n"
+            "- Standard Library: `json`, `urllib`, `time`, `sys`, `os`, `re` are built-in. NEVER execute `pip install json`.\n"
+            "==========================================\n\n"
+        )
         if getattr(self, "initial_context", None):
             obs_summary = (
                 "=== ADVISORY INITIAL CONTEXT (UNVERIFIED) ===\n"
@@ -2174,6 +2190,11 @@ class ComputerUseAgent:
         # 3. If it is still a JSON object like {"diagnostic": ...} without command, don't execute raw JSON in bash
         if s.startswith("{") and s.endswith("}"):
             return "echo 'ERROR: Unparseable JSON command payload' >&2; exit 1"
+
+        # 4. If launching a graphical desktop application directly via DISPLAY=:... in terminal,
+        # ensure it runs in the background (&) so it does not indefinitely block the headless subshell
+        if re.search(r'^\s*DISPLAY=:\d+\s+', s) and not s.rstrip().endswith("&"):
+            s = f"{s.rstrip()} &"
 
         return s or "echo 'ERROR: Empty command' >&2; exit 1"
 

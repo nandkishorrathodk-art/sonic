@@ -141,3 +141,105 @@ async def test_judge_reruns_security_poc_with_computer():
     assert evaluation.verdict == JudgeVerdict.CONFIRMED
     assert evaluation.reproduction_exit_code == 0
     mock_computer.terminal.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_judge_falsifies_missing_or_empty_claimed_file():
+    mock_computer = MagicMock()
+    mock_computer.read_file = AsyncMock(return_value="")  # File missing/empty
+    judge = JudgeAgent(computer_provider=mock_computer)
+    sub_m = SubMission(goal="create file env_discovery.json with telemetry")
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "touch env_discovery.json",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": "Exit 0",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Created env_discovery.json",
+    )
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-file",
+    )
+    assert evaluation.verdict == JudgeVerdict.FALSIFIED
+    assert "Rule 15 violation" in evaluation.notes
+
+
+@pytest.mark.asyncio
+async def test_judge_falsifies_gui_mission_without_window_or_gui_action():
+    mock_computer = MagicMock()
+    # wmctrl returns only panels, no application window
+    mock_computer.terminal = AsyncMock(return_value=ExecResult(
+        command="DISPLAY=:99 wmctrl -l 2>/dev/null | grep -v ' -1 '",
+        exit_code=0,
+        stdout="",
+        stderr="",
+    ))
+    judge = JudgeAgent(computer_provider=mock_computer)
+    sub_m = SubMission(goal="Launch browser on desktop and observe UI", plane="gui")
+    # Worker bypassed GUI using terminal curl
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "curl -s http://127.0.0.1:12000/health",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": '{"status":"ok"}',
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Observed health endpoint via curl",
+    )
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-gui",
+    )
+    assert evaluation.verdict == JudgeVerdict.FALSIFIED
+    assert "GUI desktop interaction unverified" in evaluation.notes
+
+
+@pytest.mark.asyncio
+async def test_judge_confirms_gui_mission_with_real_window():
+    mock_computer = MagicMock()
+    # wmctrl returns open application window
+    mock_computer.terminal = AsyncMock(return_value=ExecResult(
+        command="DISPLAY=:99 wmctrl -l 2>/dev/null | grep -v ' -1 '",
+        exit_code=0,
+        stdout="0x02600003  1 8e8d478afea9 Terminal - root@8e8d478afea9: /\n",
+        stderr="",
+    ))
+    judge = JudgeAgent(computer_provider=mock_computer)
+    sub_m = SubMission(goal="Launch terminal window on desktop", plane="gui")
+    trace = {
+        "action_type": "APP_LAUNCH",
+        "target": "xfce4-terminal",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": "Launched and focused xfce4-terminal",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Terminal window opened successfully",
+    )
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-gui",
+    )
+    assert evaluation.verdict == JudgeVerdict.CONFIRMED

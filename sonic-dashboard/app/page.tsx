@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   FileText,
   Monitor,
@@ -53,6 +53,25 @@ export default function SonicDevinWorkstation() {
   const [fileContent, setFileContent] = useState<string[]>([]);
   const [gitDiff, setGitDiff] = useState("");
   const [commandLogs, setCommandLogs] = useState<string[]>([]);
+  const combinedCommandLogs = useMemo(() => {
+    const list: string[] = [];
+    if (workstationState?.worklog && Array.isArray(workstationState.worklog)) {
+      for (const entry of workstationState.worklog) {
+        if (entry.type === "command" && entry.command) {
+          list.push(`sonic@workstation:~$ ${entry.command}`);
+          if (entry.output) {
+            list.push(entry.output.trim());
+          }
+        }
+      }
+    }
+    for (const log of commandLogs) {
+      if (!list.includes(log)) {
+        list.push(log);
+      }
+    }
+    return list;
+  }, [workstationState?.worklog, commandLogs]);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -388,7 +407,7 @@ export default function SonicDevinWorkstation() {
                     <ComputerSurface
                       desktopState={workstationState?.desktop}
                       onRunCommand={handleRunCommand}
-                      commandLogs={commandLogs}
+                      commandLogs={combinedCommandLogs}
                       onInterrupt={handleInterrupt}
                       sessionId={sessionId}
                     />

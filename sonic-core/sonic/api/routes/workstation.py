@@ -3021,10 +3021,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             finally:
                                 if browser_agent is not None:
                                     await browser_agent.close()
-                                try:
-                                    await computer.cleanup_desktop_windows(desktop_id)
-                                except Exception:
-                                    pass
                             summary_msg = report.findings_summary
 
                             if state.get("interrupted"):
@@ -3090,7 +3086,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             finally:
                                 if browser_agent is not None:
                                     await browser_agent.close()
-                                await computer.cleanup_desktop_windows(desktop_id)
 
                             # Final summary
                             succeeded = sum(1 for t in traces if t.status in ("SUCCESS", "RECOVERED"))

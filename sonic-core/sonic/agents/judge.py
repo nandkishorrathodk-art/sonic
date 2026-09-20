@@ -226,7 +226,7 @@ class JudgeAgent:
                 )
 
         # 5. File Creation / Modification Check:
-        if any(w in goal_lower for w in ("create file", "create folder", "write file")):
+        if any(w in goal_lower for w in ("create file", "create folder", "write file", "author", "evidence file")):
             file_names = re.findall(r'[\w\-./]+\.(?:py|md|txt|json|sh|yaml|yml)', sub_mission.goal)
             if file_names and self.computer and hasattr(self.computer, "read_file"):
                 for fname in file_names:
@@ -234,14 +234,45 @@ class JudgeAgent:
                         content = await self.computer.read_file(workspace_id, fname)
                         if not content:
                             return JudgeEvaluation(
-                                verdict=JudgeVerdict.INCONCLUSIVE,
-                                confidence=0.7,
-                                notes=f"Claimed file '{fname}' was not found or is empty in workspace.",
+                                verdict=JudgeVerdict.FALSIFIED,
+                                confidence=0.9,
+                                notes=f"Claimed file '{fname}' was not found or is empty in workspace (Rule 15 violation).",
                             )
                     except Exception:
-                        pass
+                        return JudgeEvaluation(
+                            verdict=JudgeVerdict.FALSIFIED,
+                            confidence=0.9,
+                            notes=f"Error reading claimed file '{fname}' from workspace.",
+                        )
 
-        # 6. Default Grounded Verdict
+        # 6. Workstation Application & Desktop Window Check (Rule 5 & Rule 7):
+        is_gui_mission = getattr(sub_mission, "plane", "") == "gui" or any(
+            w in goal_lower for w in ("desktop", "browser", "window", "gui", "open application", "launch application")
+        )
+        if is_gui_mission:
+            has_gui_action = any(
+                str(_t_val(t, "action_type", "")).startswith("GUI_")
+                or str(_t_val(t, "action_type", "")) == "APP_LAUNCH"
+                for t in traces
+            )
+            gui_verified = has_gui_action
+            if self.computer and hasattr(self.computer, "terminal"):
+                try:
+                    wm_res = await self.computer.terminal(workspace_id, "DISPLAY=:99 wmctrl -l 2>/dev/null | grep -v ' -1 '")
+                    open_wins = [line for line in (getattr(wm_res, "stdout", "") or "").splitlines() if line.strip()]
+                    if open_wins:
+                        gui_verified = True
+                except Exception:
+                    pass
+
+            if not gui_verified:
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.FALSIFIED,
+                    confidence=0.85,
+                    notes="GUI desktop interaction unverified: No application window or visual action was detected on Display :99.",
+                )
+
+        # 7. Default Grounded Verdict
         if has_concrete_proof and result.success:
             return JudgeEvaluation(
                 verdict=JudgeVerdict.CONFIRMED,

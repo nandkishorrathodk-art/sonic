@@ -16,8 +16,25 @@ export default function ComputerWorkspacePage() {
     setLoading(true);
     setError(null);
     try {
+      const stateData = await api.getWorkstationState().catch(() => null);
       const data = await api.getDesktopStatus();
       setDesktopState(data);
+      if (stateData?.worklog && Array.isArray(stateData.worklog)) {
+        const logs: string[] = [];
+        for (const entry of stateData.worklog) {
+          if (entry.type === "command" && entry.command) {
+            logs.push(`sonic@workstation:~$ ${entry.command}`);
+            if (entry.output) logs.push(entry.output.trim());
+          }
+        }
+        setCommandLogs((prevManual) => {
+          const combined = [...logs];
+          for (const m of prevManual) {
+            if (!combined.includes(m)) combined.push(m);
+          }
+          return combined;
+        });
+      }
     } catch (err: any) {
       setError(err.message || "Failed to query computer status.");
     } finally {
