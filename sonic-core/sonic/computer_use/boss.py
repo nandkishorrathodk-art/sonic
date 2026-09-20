@@ -638,22 +638,21 @@ Apply target-agnostic first-principles reasoning:
    analysis objective instead of executing.
 1. DOMAIN & MODALITY TRIAGE:
    Identify the primary target type:
-   - [BINARY / REVERSE ENGINEERING / PWN]: local executable or firmware, code behavior, memory safety.
-   - [NETWORK / INFRASTRUCTURE]: address space, reachable services, routing, and protocol behavior.
-   - [API / MICROSERVICE / HEADLESS]: request/response contracts, auth state, schemas, and parameters.
-   - [CRYPTOGRAPHY]: ciphers, hashes, oracles, key material, and entropy.
-   - [FORENSICS / DATA]: memory, captures, logs, and file artifacts.
-   - [WEB APPLICATION]: HTTP state, cookies, DOM, and client behavior when actually required.
+   - [SOFTWARE / SCRIPTING]: Python programming, shell scripts, CLI utilities, code authoring, automated workflows.
+   - [DATA / ANALYSIS]: data processing, CSV/JSON metrics, statistics, report generation, charting.
+   - [DESKTOP / GUI]: desktop applications (mousepad, editors, viewers), window management, visual UI interactions.
+   - [WEB / BROWSER]: web applications, local portals, dashboards, web navigation, HTTP services.
+   - [SYSTEM / OPERATIONS]: directory management, process monitoring, file auditing, system health.
 
 2. METHODOLOGY:
-   - Do not force an application, scanner, protocol, or interaction modality before observing the target.
+   - Do not force an application, script, or interaction modality before observing the objective.
    - Each worker must receive a clear, operational task tailored to the specific target modality.
 
 Respond with EXACTLY this JSON format (no extra text):
 {{
-  "domain": "BINARY | NETWORK | API | CRYPTO | FORENSICS | WEB",
-  "thinking": "First-principles analysis: target architecture, hypotheses, and strategy",
-  "phase_name": "Domain-appropriate phase name (e.g., Static Binary Analysis, Service Enumeration, Schema Discovery)",
+  "domain": "SOFTWARE | DATA | DESKTOP | WEB | SYSTEM",
+  "thinking": "First-principles analysis: target architecture, plan, and strategy",
+  "phase_name": "Domain-appropriate phase name (e.g., Environment Setup, Data Processing, Desktop Application Launch)",
   "sub_missions": [
     {{
       "id": "sub-1",
