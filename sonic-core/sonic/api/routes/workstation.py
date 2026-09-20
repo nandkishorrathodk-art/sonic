@@ -2164,12 +2164,15 @@ def _is_observation_only_prompt(prompt: str) -> bool:
         return False
     observation_terms = (
         "analyze", "analyse", "analysis", "describe", "tell me", "what do you see",
-        "what is on", "inspect", "observe", "look at", "current screen",
-        "current desktop", "screenshot",
+        "what you see", "what is on", "what's on", "visible", "inspect", "observe",
+        "look at", "look", "current screen", "current desktop", "screenshot",
+        "check", "summary", "summarize", "summarise", "sommary", "see", "show me",
+        "kya hai", "kya dikh", "dekho", "view", "read screen", "display",
     )
     mutating_terms = (
-        "open", "launch", "click", "type", "enter", "navigate", "scroll",
-        "drag", "download", "close", "focus", "install", "run", "execute",
+        "open", "launch", "click", "double-click", "type", "enter", "navigate", "scroll",
+        "drag", "download", "close", "focus", "install", "run", "execute", "create", "write",
+        "delete", "rm", "kill", "compile", "build", "exploit", "attack", "scan target",
     )
     return any(term in lower for term in observation_terms) and not any(
         term in lower for term in mutating_terms
@@ -3262,7 +3265,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             messages=messages,
                             max_tokens=900,
                             temperature=0.2,
-                            task_type="reasoning",
+                            task_type="vision" if desktop_screenshot_b64 else "reasoning",
                         )
                     ),
                     timeout=25,
