@@ -158,3 +158,86 @@ def test_evolution_pipeline_safety_immutability_and_canary_flow():
     # Operator approval gate
     assert not pipeline.promote_with_approval(prop_good.proposal_id, operator_approved=False)
     assert prop_good.stage == EvolutionStage.ROLLED_BACK
+
+
+@pytest.mark.no_live_infra
+def test_protected_components_expansion():
+    from sonic.evolution.pipeline import _PROTECTED_COMPONENTS
+
+    expected = frozenset([
+        "sonic/safety",
+        "sonic/kernel/action_broker",
+        "sonic/safety/kernel",
+        "sonic/safety/sealed",
+        "sonic/safety/action_policy",
+        "sonic/sandbox/egress",
+        "sonic-kernel-rs/src/safety",
+        "sonic/auth",
+        "sonic/sandbox/providers",
+        "sonic/evolution/patch_synthesizer",
+        "sonic/evolution/codebase_evolver",
+        "sonic/evolution/goal_director",
+        "sonic/evolution/pipeline",
+        "sonic/evolution/self_coder",
+        "sonic/evolution/coding_agent",
+        "sonic-core/tests/test_p0_security_hardening.py",
+    ])
+    assert _PROTECTED_COMPONENTS == expected
+
+
+@pytest.mark.no_live_infra
+def test_evolution_pipeline_rejects_all_protected_components_and_traversals():
+    from sonic.evolution.pipeline import _PROTECTED_COMPONENTS
+
+    pipeline = EvolutionPipeline()
+
+    # Direct protection check for every item in _PROTECTED_COMPONENTS
+    for component in _PROTECTED_COMPONENTS:
+        prop, reason = pipeline.submit_proposal(
+            target_component=f"{component}.py" if not component.endswith(".py") else component,
+            description="Malicious edit to protected component",
+            code_diff="+ # compromised",
+        )
+        assert prop.stage == EvolutionStage.REJECTED, f"Failed to reject direct edit to {component}"
+        assert "Cannot self-modify safety kernel" in reason
+
+    # Path traversal and normalization evasion attempts (collapse //, /./, ..)
+    traversal_targets = [
+        "sonic//safety//kernel.py",
+        "sonic/./safety/./kernel.py",
+        "sonic/tools/../safety/kernel.py",
+        "sonic/tools/../../sonic/safety/kernel.py",
+        "sonic/evolution/../auth/models.py",
+        "sonic///auth///models.py",
+        "sonic/./auth/models.py",
+        "sonic/sandbox/../sandbox/providers/docker.py",
+        "sonic//sandbox//providers//docker.py",
+        "sonic/evolution/../evolution/pipeline.py",
+        "sonic/tools/../evolution/pipeline.py",
+        "sonic/evolution/./self_coder.py",
+        "sonic//evolution//coding_agent.py",
+        "sonic\\tools\\..\\safety\\action_policy.py",
+        "sonic\\auth\\models.py",
+        "sonic-core/tests/../tests/test_p0_security_hardening.py",
+        "sonic-core//tests//test_p0_security_hardening.py",
+        "tests/test_p0_security_hardening.py",
+    ]
+
+    for target in traversal_targets:
+        prop, reason = pipeline.submit_proposal(
+            target_component=target,
+            description="Evasion attempt via traversal or redundant separators",
+            code_diff="+ # bypass",
+        )
+        assert prop.stage == EvolutionStage.REJECTED, f"Failed to reject traversal target {target}"
+        assert "Cannot self-modify safety kernel" in reason
+
+    # Valid non-protected target must be accepted into isolated branch
+    valid_prop, msg = pipeline.submit_proposal(
+        target_component="sonic/tools/adapters/custom_tool.py",
+        description="Add harmless custom tool adapter",
+        code_diff="+ def parse(): pass",
+    )
+    assert valid_prop.stage == EvolutionStage.ISOLATED_BRANCH
+    assert msg == "Staged in isolated branch"
+

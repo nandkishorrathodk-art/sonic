@@ -27,6 +27,7 @@ commit. This keeps a single, auditable write path.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -39,6 +40,9 @@ from sonic.logger import get_logger
 
 logger = get_logger(__name__)
 
+_TAGGED_FENCE_RE = re.compile(r"```(?:diff|patch)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_UNTAGGED_FENCE_RE = re.compile(r"```\s*\n(.*?)```", re.DOTALL)
+_ANY_FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*\s*\n(.*?)```", re.DOTALL)
 _FENCE_RE = re.compile(r"```(?:diff|patch|git)?\s*\n(.*?)```", re.DOTALL)
 _DIFF_FILE_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)", re.MULTILINE)
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.MULTILINE)
@@ -63,9 +67,19 @@ def _normalize_hunks(diff: str, read_file: Any) -> tuple[str, str]:
     current_file: str | None = None
     while i < len(lines):
         line = lines[i]
+        if line.startswith("--- "):
+            p = line[4:].strip()
+            p = p[2:] if p.startswith("a/") else p
+            if p not in ("/dev/null", "dev/null"):
+                current_file = p
+            out.append(line)
+            i += 1
+            continue
         if line.startswith("+++ "):
             p = line[4:].strip()
-            current_file = p[2:] if p.startswith("b/") else p
+            p = p[2:] if p.startswith("b/") else p
+            if p not in ("/dev/null", "dev/null"):
+                current_file = p
             out.append(line)
             i += 1
             continue
@@ -141,11 +155,45 @@ def _extract_diff(text: str) -> str:
     """Pull a unified diff out of a model response (fenced block or raw)."""
     if not text:
         return ""
-    match = _FENCE_RE.search(text)
-    candidate = match.group(1) if match else text
+
+    candidate = ""
+    # 1. Prioritize fenced blocks tagged with ```diff or ```patch
+    tagged_matches = _TAGGED_FENCE_RE.findall(text)
+    for m in tagged_matches:
+        if "diff --git " in m or "--- " in m:
+            candidate = m
+            break
+    if not candidate and tagged_matches:
+        candidate = tagged_matches[0]
+
+    # 2. Prioritize untagged fences before checking other language fences
+    if not candidate:
+        untagged_matches = _UNTAGGED_FENCE_RE.findall(text)
+        for m in untagged_matches:
+            if "diff --git " in m or "--- " in m:
+                candidate = m
+                break
+
+    # 3. Check any fences (e.g. ```git) that contain diff markers
+    if not candidate:
+        any_matches = _ANY_FENCE_RE.findall(text)
+        for m in any_matches:
+            if "diff --git " in m or "--- " in m:
+                candidate = m
+                break
+
+    # 4. Fall back to raw text or untagged fence
+    if not candidate:
+        if "diff --git " in text or "--- " in text:
+            candidate = text
+        elif untagged := _UNTAGGED_FENCE_RE.findall(text):
+            candidate = untagged[0]
+        else:
+            candidate = text
+
     idx = candidate.find("diff --git ")
     if idx == -1:
-        idx = candidate.find("--- a/")
+        idx = candidate.find("--- ")
     if idx != -1:
         candidate = candidate[idx:]
     return candidate.strip()
@@ -168,18 +216,31 @@ def _count_changes(diff: str) -> tuple[int, int, int]:
     return added, removed, change
 
 
+def _clean_diff_path(p: str) -> str:
+    p = p.strip()
+    if "\t" in p:
+        p = p.split("\t", 1)[0].strip()
+    if p.startswith("a/") or p.startswith("b/"):
+        p = p[2:]
+    p = p.strip()
+    if p in ("/dev/null", "dev/null") or p.endswith("/dev/null"):
+        return ""
+    return p
+
+
 def _files_touched(diff: str) -> list[str]:
     files: list[str] = []
     for m in _DIFF_FILE_RE.finditer(diff):
-        files.append(m.group(2))
+        for raw in (m.group(1), m.group(2)):
+            p = _clean_diff_path(raw)
+            if p and p not in files:
+                files.append(p)
     if not files:
-        # Fall back to +++ b/<path> headers.
+        # Fall back to --- a/<path> and +++ b/<path> headers.
         for line in diff.splitlines():
-            if line.startswith("+++ "):
-                p = line[4:].strip()
-                if p.startswith("b/"):
-                    p = p[2:]
-                if p and p != "/dev/null" and p not in files:
+            if line.startswith("--- ") or line.startswith("+++ "):
+                p = _clean_diff_path(line[4:])
+                if p and p not in files:
                     files.append(p)
     return files
 
@@ -274,6 +335,12 @@ class PatchSynthesizer:
         files = _files_touched(diff)
         if not files:
             return False, "diff does not name any target file", None
+        norm_files: list[str] = []
+        for f in files:
+            nf = os.path.normpath(f).replace("\\", "/")
+            if nf not in norm_files:
+                norm_files.append(nf)
+        files = norm_files
         for f in files:
             if self.is_protected(f):
                 return False, f"diff touches protected safety component: {f}", None
@@ -306,8 +373,15 @@ class PatchSynthesizer:
     def _applies_cleanly(self, diff: str) -> tuple[bool, str]:
         import tempfile
 
+        path: str | None = None
         try:
-            with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as tf:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                suffix=".patch",
+                delete=False,
+                encoding="utf-8",
+                newline="\n",
+            ) as tf:
                 tf.write(diff if diff.endswith("\n") else diff + "\n")
                 path = tf.name
             res = subprocess.run(
@@ -321,11 +395,11 @@ class PatchSynthesizer:
         except Exception as exc:
             return False, str(exc)
         finally:
-            try:
-                import os
-                os.unlink(path)
-            except Exception:
-                pass
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     def _build_context(self, target_files: list[str], test_paths: list[str]) -> str:

@@ -309,6 +309,54 @@ class ComputerDecisionTrace(BaseModel):
         return self.actual_observation
 
 
+class AgentStepResult(ComputerDecisionTrace):
+    """Result of an individual agent step execution.
+
+    Can be unpacked as a 2-tuple (success, message), accessed via attributes
+    (.success, .message), or used as a ComputerDecisionTrace.
+    """
+    success: bool = False
+    message: str = ""
+
+    def __init__(self, success: bool = False, message: str = "", **kwargs: Any):
+        status = kwargs.pop("status", ActionExecutionStatus.COMPLETED if success else ActionExecutionStatus.FAILED)
+        actual_obs = kwargs.pop("actual_observation", message)
+        exit_code = kwargs.pop("exit_code", 0 if success else 1)
+        target = kwargs.pop("target_resource", "")
+        predicted = kwargs.pop("predicted_outcome", "")
+        super().__init__(
+            success=success,
+            message=message,
+            status=status,
+            actual_observation=actual_obs,
+            exit_code=exit_code,
+            target_resource=target,
+            predicted_outcome=predicted,
+            action_type=ComputerActionType.TERMINAL_EXEC,
+            prediction_error=0.0 if success else 1.0,
+            info_gain=0.0,
+            recovery_attempted=False,
+            **kwargs,
+        )
+
+    def __iter__(self):
+        yield self.success
+        yield self.message
+
+    def __getitem__(self, idx: int) -> Any:
+        return (self.success, self.message)[idx]
+
+    def __bool__(self) -> bool:
+        return self.success
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, tuple) and len(other) == 2:
+            return (self.success, self.message) == other
+        if isinstance(other, AgentStepResult):
+            return (self.success, self.message) == (other.success, other.message)
+        return super().__eq__(other)
+
+
 class ComputerUseMetrics(BaseModel):
     """Telemetry and performance metrics for a computer-use mission."""
     actions_total: int = 0

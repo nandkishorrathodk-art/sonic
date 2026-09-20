@@ -39,6 +39,7 @@ from sonic.computer_use.grounding import (
 from sonic.computer_use.gui_world_graph import GuiWorldGraph
 from sonic.computer_use.models import (
     ActionExecutionStatus,
+    AgentStepResult,
     ComputerActionType,
     ComputerAutonomyLevel,
     ComputerDecisionTrace,
@@ -73,10 +74,10 @@ def _extract_command_from_sig(sig_payload_str: str) -> str:
     try:
         parsed = ast.literal_eval(sig_payload_str)
     except Exception:
-        return sig_payload_str.strip().lower()
+        return sig_payload_str.strip().rstrip(',;').strip().lower()
     if isinstance(parsed, dict):
-        return str(parsed.get("command") or parsed.get("tool") or parsed.get("text") or parsed.get("url") or "").strip().lower()
-    return sig_payload_str.strip().lower()
+        return str(parsed.get("command") or parsed.get("tool") or parsed.get("text") or parsed.get("url") or "").strip().rstrip(',;').strip().lower()
+    return sig_payload_str.strip().rstrip(',;').strip().lower()
 
 
 def _safe_str(val: Any) -> str:
@@ -720,7 +721,7 @@ class ComputerUseAgent:
             flags=re.IGNORECASE | re.DOTALL,
         )
         if explicit_terminal:
-            command = explicit_terminal.group("command").strip()
+            command = explicit_terminal.group("command").strip().rstrip(',;').strip()
             return (
                 ComputerActionType.TERMINAL_EXEC,
                 command,
@@ -1941,7 +1942,8 @@ class ComputerUseAgent:
         elif action_type in (ComputerActionType.GUI_TYPE, ComputerActionType.BROWSER_TYPE):
             payload = {"text": payload_str.strip('"\' ')} if payload_str.strip() not in ("{}", "") else {}
         elif action_type == ComputerActionType.TERMINAL_EXEC:
-            payload = {"command": payload_str.strip('"\' ')} if payload_str.strip() not in ("{}", "") else {}
+            cleaned_cmd = payload_str.strip('"\' ').strip().rstrip(',;').strip()
+            payload = {"command": cleaned_cmd} if cleaned_cmd not in ("{}", "") else {}
         elif action_type == ComputerActionType.FILE_WRITE:
             payload = {}
             raw_c = fields.get("CONTENT") or fields.get("CODE") or fields.get("SOURCE") or (payload_str if payload_str.strip() not in ("{}", "", "none") else "")
@@ -1968,8 +1970,8 @@ class ComputerUseAgent:
         if target.startswith("{"):
             tgt_dict = _extract_payload_dict(target)
             if "command" in tgt_dict:
-                payload.setdefault("command", tgt_dict["command"])
-                target = str(tgt_dict["command"]).split()[0]
+                payload.setdefault("command", str(tgt_dict["command"]).strip().rstrip(',;').strip())
+                target = str(tgt_dict["command"]).strip().rstrip(',;').strip().split()[0]
             elif "app_name" in tgt_dict:
                 target = tgt_dict["app_name"]
             elif "url" in tgt_dict:
@@ -2012,12 +2014,12 @@ class ComputerUseAgent:
 
         if action_str in ("PYTHON", "PYTHON_EXEC", "PYTHON3"):
             py_code = payload.get("code") or payload.get("command") or target or ""
-            py_code_str = str(py_code).strip()
+            py_code_str = str(py_code).strip().rstrip(',;').strip()
             if py_code_str and not py_code_str.startswith("python"):
                 payload["command"] = f"python3 -c {shlex.quote(py_code_str)}"
         elif action_str == "CURL":
             curl_arg = payload.get("command") or target or ""
-            curl_arg_str = str(curl_arg).strip()
+            curl_arg_str = str(curl_arg).strip().rstrip(',;').strip()
             if curl_arg_str and not curl_arg_str.startswith("curl"):
                 payload["command"] = f"curl {curl_arg_str}"
 
@@ -2030,21 +2032,22 @@ class ComputerUseAgent:
                         # Avoid taking '_EXEC' as a command when action was 'TERMINAL_EXEC'
                         if prefix == "TERMINAL" and act_field.upper().startswith("TERMINAL_EXEC"):
                             continue
-                        tail = act_field[len(prefix):].strip(" :")
+                        tail = act_field[len(prefix):].strip(" :").strip().rstrip(',;').strip()
                         if tail and tail.upper() not in ("_EXEC", "EXEC", "COMMAND", "RUN", "SHELL", "BASH"):
                             raw_cmd = tail
                             break
             if not raw_cmd or str(raw_cmd).lower() in ("none", "null", "") or str(raw_cmd).strip().upper() in ("_EXEC", "EXEC"):
-                payload["command"] = target if target and target != default_file and not target.startswith("{") else "echo 'ERROR: Empty command payload' >&2; exit 1"
+                fallback_cmd = target if target and target != default_file and not target.startswith("{") else "echo 'ERROR: Empty command payload' >&2; exit 1"
+                payload["command"] = str(fallback_cmd).strip().rstrip(',;').strip()
             else:
-                payload["command"] = raw_cmd
+                payload["command"] = str(raw_cmd).strip().rstrip(',;').strip()
             if payload.get("command"):
-                cmd_str = str(payload["command"]).strip()
-                cmd_str = re.sub(r'^(?:[a-zA-Z0-9_\-\.]+(?:-terminal)?,?\s*)?(?:command|cmd)\s*=\s*', '', cmd_str)
+                cmd_str = str(payload["command"]).strip().rstrip(',;').strip()
+                cmd_str = re.sub(r'^(?:[a-zA-Z0-9_\-\.]+(?:-terminal)?,?\s*)?(?:command|cmd)\s*=\s*', '', cmd_str).strip().rstrip(',;').strip()
                 # Only remove conversational parenthesized comments e.g. "netstat -tuln (or ss)" -> "netstat -tuln",
                 # without destroying parentheses inside quotes, code, or URLs like Wikipedia articles.
                 if not any(k in cmd_str for k in ("http://", "https://", "python", "perl", "awk", "sed", "$(")):
-                    cmd_str = re.sub(r'\s*\((?:or|and|note|comment|alias|e\.g\.)[^)]*\)$', '', cmd_str, flags=re.IGNORECASE).strip()
+                    cmd_str = re.sub(r'\s*\((?:or|and|note|comment|alias|e\.g\.)[^)]*\)$', '', cmd_str, flags=re.IGNORECASE).strip().rstrip(',;').strip()
                 # Filter out UI text and navigation elements that are not commands
                 if any(pattern in cmd_str for pattern in ("localhost:12001", "[Missions]", "[Computer]", "[Research]", "[Experiments]", "[Graph Memory]", "[Evidence Board]", "[Agents]", "[Security Lab]", "[Settings]", "LIVE", "FAIL-CLOSED", "SONICA-SEA", "Copy", "Autonomous execution paused")):
                     cmd_str = "echo 'ERROR: UI navigation text is not an executable command' >&2; exit 1"
@@ -2052,7 +2055,7 @@ class ComputerUseAgent:
                 if cmd_str.lower() in ("terminal", "terminal window", "the terminal", "bash", "shell", "console"):
                     cmd_str = "echo 'ERROR: Shell placeholder name is not an executable command' >&2; exit 1"
                 # Strip trailing " command" or " commands"
-                cmd_str = re.sub(r'\s+commands?$', '', cmd_str, flags=re.IGNORECASE)
+                cmd_str = re.sub(r'\s+commands?$', '', cmd_str, flags=re.IGNORECASE).strip().rstrip(',;').strip()
 
                 # Redirect conversational pseudo-commands to real action types
                 m_launch = re.match(r'^(?:launch|open|start)\s+([a-zA-Z0-9_\-\s./~]+)$', cmd_str, re.IGNORECASE)
@@ -2075,7 +2078,7 @@ class ComputerUseAgent:
                     target = re.sub(r'^(?:click|press)(?:\s+on)?\s+', '', cmd_str, flags=re.IGNORECASE).strip()
                     payload = {}
                 else:
-                    payload["command"] = cmd_str
+                    payload["command"] = cmd_str.strip().rstrip(',;').strip()
 
         if action_type in (ComputerActionType.GUI_CLICK, ComputerActionType.GUI_DOUBLE_CLICK, ComputerActionType.GUI_RIGHT_CLICK, ComputerActionType.GUI_MOVE):
             if target and "," in target:
@@ -2237,7 +2240,7 @@ class ComputerUseAgent:
     def _clean_terminal_command(raw: Any) -> str:
         if raw is None:
             return "echo OK"
-        s = str(raw).strip()
+        s = str(raw).strip().rstrip(',;').strip()
         if not s or s.lower() in ("none", "null", "echo ok"):
             return "echo OK"
 
@@ -2251,29 +2254,29 @@ class ComputerUseAgent:
                 import json
                 p = json.loads(s)
                 if isinstance(p, dict) and "command" in p:
-                    s = str(p["command"]).strip()
+                    s = str(p["command"]).strip().rstrip(',;').strip()
             except Exception:
                 try:
                     import ast
                     p = ast.literal_eval(s)
                     if isinstance(p, dict) and "command" in p:
-                        s = str(p["command"]).strip()
+                        s = str(p["command"]).strip().rstrip(',;').strip()
                 except Exception:
                     cmd_match = re.search(r'["\']command["\']\s*:\s*["\']((?:\\.|[^"\\])+)["\']', s)
                     if cmd_match:
-                        s = cmd_match.group(1).replace(r'\"', '"').replace(r"\'", "'").strip()
+                        s = cmd_match.group(1).replace(r'\"', '"').replace(r"\'", "'").strip().rstrip(',;').strip()
 
         # 2. Strip bash/terminal wrapper prefixes & markdown fences
         s = re.sub(r'^(?:[a-zA-Z0-9_\-\.]+(?:-terminal)?,?\s*)?(?:command|cmd)\s*=\s*', '', s)
         s = re.sub(r'^```(?:bash|sh)?\s*', '', s)
         s = re.sub(r'\s*```$', '', s)
-        s = s.strip(" \t\n\r`")
+        s = s.strip(" \t\n\r`").rstrip(',;').strip()
         if s == "_EXEC" or s == "EXEC":
             s = ""
         elif s.startswith("_EXEC "):
-            s = s[6:].strip()
+            s = s[6:].strip().rstrip(',;').strip()
         elif s.startswith("EXEC "):
-            s = s[5:].strip()
+            s = s[5:].strip().rstrip(',;').strip()
 
         # 3. If it is still a JSON object like {"diagnostic": ...} without command, don't execute raw JSON in bash
         if s.startswith("{") and s.endswith("}"):
@@ -2284,6 +2287,7 @@ class ComputerUseAgent:
         if re.search(r'^\s*DISPLAY=:\d+\s+', s) and not s.rstrip().endswith("&"):
             s = f"{s.rstrip()} &"
 
+        s = s.strip().rstrip(',;').strip()
         return s or "echo 'ERROR: Empty command' >&2; exit 1"
 
     def _extract_tool_name(
@@ -2442,6 +2446,41 @@ class ComputerUseAgent:
             self.traces.append(trace)
             self.history.append({"action": action_type.value, "result": actual_obs_str})
             return trace
+
+        # Command sanitization and empty check for TERMINAL_EXEC
+        if action_type == ComputerActionType.TERMINAL_EXEC:
+            raw_cmd = payload.get("command") if (isinstance(payload, dict) and "command" in payload) else target_resource
+            if raw_cmd is None:
+                raw_cmd = ""
+            if isinstance(raw_cmd, dict):
+                raw_cmd = raw_cmd.get("command", "")
+            cmd = str(raw_cmd).strip().rstrip(',;').strip()
+            cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
+            if cmd.startswith("{") and "command" in cmd:
+                try:
+                    import json
+                    parsed_p = json.loads(cmd)
+                    if isinstance(parsed_p, dict) and "command" in parsed_p:
+                        cmd = str(parsed_p["command"]).strip().rstrip(',;').strip()
+                        cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
+                except Exception:
+                    pass
+            if not cmd.strip(' \t\r\n,;'):
+                cmd = ""
+            if not cmd:
+                res = AgentStepResult(
+                    False,
+                    'Empty command provided',
+                    step_index=self.action_counter,
+                    target_resource=target_resource or "terminal",
+                    payload=str(payload),
+                    predicted_outcome=predicted_outcome,
+                )
+                self.traces.append(res)
+                self.history.append({"action": "TERMINAL_EXEC", "result": "Empty command provided"})
+                return res
+            if isinstance(payload, dict):
+                payload["command"] = cmd
 
         # ----- PLAN Phase 6: fail-closed safety envelope -----
         # Every action — operator-issued OR self-directed (curiosity) — must pass
@@ -3115,8 +3154,39 @@ class ComputerUseAgent:
                     actual_obs_str = f"Wrote patch ({len(content)} bytes) to {path}"
 
             elif action_type == ComputerActionType.TERMINAL_EXEC:
-                raw_cmd = payload.get("command") or target_resource or "echo OK"
-                cmd_str = self._clean_terminal_command(raw_cmd)
+                raw_cmd = payload.get("command") if (isinstance(payload, dict) and "command" in payload) else target_resource
+                if raw_cmd is None:
+                    raw_cmd = ""
+                if isinstance(raw_cmd, dict):
+                    raw_cmd = raw_cmd.get("command", "")
+                cmd = str(raw_cmd).strip().rstrip(',;').strip()
+                cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
+                if cmd.startswith("{") and "command" in cmd:
+                    try:
+                        import json
+                        parsed_p = json.loads(cmd)
+                        if isinstance(parsed_p, dict) and "command" in parsed_p:
+                            cmd = str(parsed_p["command"]).strip().rstrip(',;').strip()
+                            cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
+                    except Exception:
+                        pass
+                if not cmd.strip(' \t\r\n,;'):
+                    cmd = ""
+                if not cmd:
+                    res = AgentStepResult(
+                        False,
+                        'Empty command provided',
+                        step_index=self.action_counter,
+                        target_resource=target_resource or "terminal",
+                        payload=str(payload),
+                        predicted_outcome=predicted_outcome,
+                    )
+                    self.traces.append(res)
+                    self.history.append({"action": "TERMINAL_EXEC", "result": "Empty command provided"})
+                    return res
+                if isinstance(payload, dict):
+                    payload["command"] = cmd
+                cmd_str = self._clean_terminal_command(cmd)
                 # Map /home/sonic to the actual sandbox home directory if running in Daytona
                 provider_name = getattr(self.computer, "__class__", type(None)).__name__
                 is_daytona = "Daytona" in provider_name or "daytona" in str(getattr(self, "_last_working_dir", "")).lower()
@@ -4218,9 +4288,9 @@ class ComputerUseAgent:
         Called BEFORE ``execute_action`` so the step is never wasted.
         """
         if action_type == ComputerActionType.TERMINAL_EXEC:
-            cmd = (payload.get("command") or target or "").strip().lower()
-            # Strip trailing semicolons/whitespace for matching
-            cmd_clean = cmd.rstrip("; \t")
+            cmd = (payload.get("command") or target or "").strip().rstrip(',;').strip().lower()
+            # Strip trailing semicolons/commas/whitespace for matching
+            cmd_clean = cmd.rstrip(",; \t")
             if cmd_clean in self._TRIVIAL_COMMANDS:
                 recent_trivial = 0
                 for h in self.history[-4:]:
@@ -4238,16 +4308,20 @@ class ComputerUseAgent:
 
         # Block repeat of recent actions (within the last 4 actions)
         if self._recent_action_signatures:
-            cmd_val = str(
-                payload.get("command")
-                or payload.get("tool")
-                or payload.get("text")
-                or payload.get("url")
-                or payload.get("path")
-                or payload.get("file_path")
-                or payload.get("content")
-                or target
-            ).strip().lower()
+            cmd_val = (
+                (payload.get("command") or target or "").strip().rstrip(',;').strip().lower()
+                if action_type == ComputerActionType.TERMINAL_EXEC
+                else str(
+                    payload.get("command")
+                    or payload.get("tool")
+                    or payload.get("text")
+                    or payload.get("url")
+                    or payload.get("path")
+                    or payload.get("file_path")
+                    or payload.get("content")
+                    or target
+                ).strip().lower()
+            )
             new_sig = (
                 action_type.value,
                 str(target).strip().lower(),

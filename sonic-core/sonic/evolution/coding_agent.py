@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,7 +47,7 @@ MAX_OUTPUT = 6000
 # Commands the agent may run through run_command (read-only / test tooling only).
 _ALLOWED_CMDS = (
     "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "pwd", "git status",
-    "git diff", "git log", "python -m pytest", "pytest", "ruff", "python -c",
+    "git diff", "git log", "python -m pytest", "pytest", "ruff",
 )
 
 _SAFETY_MARKERS = ("sonic/safety", "sonic/sandbox/egress", "sonic/auth", "sealed")
@@ -267,12 +268,28 @@ class CodingAgent:
         cmd = str(command or "").strip()
         if not cmd:
             return ToolResult(False, "empty command")
-        if not any(cmd.startswith(prefix) for prefix in _ALLOWED_CMDS):
-            return ToolResult(False, f"command not allowlisted: {cmd[:80]}")
+        if any(c in cmd for c in (";", "&&", "|", "&", "\n", "\r")):
+            return ToolResult(False, "command contains disallowed shell chaining characters")
         if any(m in cmd for m in ("rm ", ">", "curl", "wget", "sudo", "chmod", "mv ")):
             return ToolResult(False, "command contains a disallowed operator")
         try:
-            res = subprocess.run(cmd, shell=True, cwd=str(self.repo_root), capture_output=True, text=True, timeout=180)
+            parts = shlex.split(cmd)
+        except ValueError as e:
+            return ToolResult(False, f"invalid command syntax: {e}")
+        if not parts:
+            return ToolResult(False, "empty command")
+
+        def _is_allowed(cmd_parts: list[str]) -> bool:
+            for prefix in _ALLOWED_CMDS:
+                p_parts = prefix.split()
+                if len(cmd_parts) >= len(p_parts) and cmd_parts[:len(p_parts)] == p_parts:
+                    return True
+            return False
+
+        if not _is_allowed(parts):
+            return ToolResult(False, f"command not allowlisted: {cmd[:80]}")
+        try:
+            res = subprocess.run(parts, shell=False, cwd=str(self.repo_root), capture_output=True, text=True, timeout=180)
         except Exception as e:
             return ToolResult(False, f"command failed: {e}")
         out = ((res.stdout or "") + (res.stderr or ""))[-MAX_OUTPUT:]
@@ -281,10 +298,13 @@ class CodingAgent:
     def _t_write_file(self, path: str, content: str) -> ToolResult:
         if not self.allow_write:
             return ToolResult(False, "write_file is not available in investigate mode")
-        rel = str(path or "").replace("\\", "/").lstrip("/")
+        p = self._resolve(path)
+        if p is None:
+            return ToolResult(False, "path escapes repository root")
+        rel = str(p.relative_to(self.repo_root)).replace("\\", "/")
         if self.is_protected(rel):
             return ToolResult(False, f"refusing to write protected component: {rel}")
-        if any(m in rel for m in _SAFETY_MARKERS) and "test" not in rel:
+        if any(m in rel for m in _SAFETY_MARKERS):
             return ToolResult(False, f"refusing to write safety-sensitive path: {rel}")
         self._overlay[rel] = str(content)
         return ToolResult(True, f"staged write to {rel} ({len(str(content).splitlines())} lines)")

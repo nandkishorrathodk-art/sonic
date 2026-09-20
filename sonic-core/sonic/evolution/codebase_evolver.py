@@ -216,7 +216,17 @@ class CodebaseEvolver:
         for norm in variants:
             for protected in _PROTECTED_COMPONENTS:
                 p = protected.lower()
-                if norm == p or norm.startswith(p + "/") or norm.startswith(p + ".py") or p in norm:
+                p_un = p.removeprefix("sonic-core/").removeprefix("sonic-cli/")
+                if (
+                    norm == p
+                    or norm == p_un
+                    or norm.startswith(p + "/")
+                    or norm.startswith(p_un + "/")
+                    or norm.startswith(p + ".py")
+                    or norm.startswith(p_un + ".py")
+                    or p in norm
+                    or p_un in norm
+                ):
                     return True
         return False
 
@@ -274,15 +284,26 @@ class CodebaseEvolver:
         files: list[str] = []
         if not code_diff:
             return files
-        for m in re.finditer(r"^diff --git a/(\S+) b/(\S+)", code_diff, re.MULTILINE):
-            files.append(m.group(2))
+        for m in re.finditer(r"^diff --git a/(\S+) (?:b/)?(\S+)", code_diff, re.MULTILINE):
+            target = m.group(1) if m.group(2) in ("/dev/null", "dev/null") or m.group(2).endswith("/dev/null") else m.group(2)
+            if target and target != "/dev/null" and target not in files:
+                files.append(target)
         if not files:
+            last_a = None
             for line in code_diff.splitlines():
-                if line.startswith("+++ "):
+                if line.startswith("--- "):
+                    p = line[4:].strip()
+                    if p.startswith("a/"):
+                        p = p[2:]
+                    last_a = p
+                elif line.startswith("+++ "):
                     p = line[4:].strip()
                     if p.startswith("b/"):
                         p = p[2:]
-                    if p and p != "/dev/null" and p not in files:
+                    if p in ("/dev/null", "dev/null") and last_a:
+                        if last_a not in files:
+                            files.append(last_a)
+                    elif p and p != "/dev/null" and p not in files:
                         files.append(p)
         return files
 
@@ -318,6 +339,9 @@ class CodebaseEvolver:
                 except SyntaxError as e:
                     self.rollback_snapshots()
                     return False, f"SyntaxError in {p.name}: {e.msg} at line {e.lineno}"
+                except Exception as e:
+                    self.rollback_snapshots()
+                    return False, f"AST verification failed for {p.name}: {e}"
         self._pending_lines = (added, removed)
         return True, f"Applied multi-file patch to {len(target_files)} files"
 
@@ -359,7 +383,7 @@ class CodebaseEvolver:
             patch_text = code_diff_or_content
             if not patch_text.endswith("\n"):
                 patch_text += "\n"
-            with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as tf:
+            with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8", newline="\n") as tf:
                 tf.write(patch_text)
                 temp_patch_path = tf.name
 
@@ -369,6 +393,12 @@ class CodebaseEvolver:
                 if res.returncode != 0:
                     # Fallback to direct replacement if unified diff failed
                     return False, f"git apply failed: {res.stderr or res.stdout}", 0, 0
+
+                # AST check after git apply
+                if target_path.exists() and target_path.suffix == ".py":
+                    ast_ok, ast_msg = self.validate_ast(target_path, target_path.read_text(encoding="utf-8", errors="replace"))
+                    if not ast_ok:
+                        return False, ast_msg, 0, 0
 
                 # Count diff lines
                 added = sum(1 for line in code_diff_or_content.splitlines() if line.startswith("+") and not line.startswith("+++"))
@@ -840,7 +870,7 @@ class CodebaseEvolver:
             committed, chash, pushed, pmsg = self.commit_and_push(
                 proposal_id=proposal.proposal_id,
                 description=description,
-                files=[target_component],
+                files=list(pre_applied_files) if pre_applied_files else [target_component],
                 push=push,
             )
             report.git_committed = committed

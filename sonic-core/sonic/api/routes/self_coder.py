@@ -13,17 +13,19 @@ The coder writes only non-safety source, commits locally, and returns a summary
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from sonic.auth.middleware import require_operator
-from sonic.auth.models import User
+from sonic.auth.models import User, UserRole
 from sonic.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
 
-_last_report: dict | None = None
+_last_reports_by_tenant: dict[str, dict] = {}
 
 
 def _build_coder():
@@ -58,7 +60,7 @@ async def self_coder_audit(
     from sonic.evolution.codebase_report import narrate
 
     auditor = CodebaseAuditor(max_findings=limit)
-    report = auditor.audit(run_tests=run_tests)
+    report = await asyncio.to_thread(auditor.audit, run_tests=run_tests)
     return {
         "ok": report.ok,
         "files_scanned": report.files_scanned,
@@ -78,7 +80,7 @@ async def self_coder_signals(
 ):
     """List the real signals the self-coder would act on (no mutation)."""
     coder = _build_coder()
-    signals = coder.discover_signals(limit=limit)
+    signals = await asyncio.to_thread(coder.discover_signals, limit=limit)
     return {
         "count": len(signals),
         "signals": [
@@ -93,13 +95,17 @@ async def self_coder_run(
     user: User = Depends(require_operator),
 ):
     """Run autonomous self-improvement cycles; returns the honest report."""
-    global _last_report
+    if req.push and user.role not in (UserRole.TENANT_ADMIN, UserRole.SUPER_ADMIN):
+        raise HTTPException(
+            status_code=403,
+            detail="Git push requires tenant_admin or super_admin role",
+        )
     if req.max_cycles < 1 or req.max_cycles > 10:
         raise HTTPException(status_code=400, detail="max_cycles must be between 1 and 10")
     coder = _build_coder()
     coder.push = bool(req.push)
     report = await coder.run(max_cycles=req.max_cycles)
-    _last_report = {
+    report_dict = {
         "cycles": [
             {
                 "signal": c.signal,
@@ -120,10 +126,13 @@ async def self_coder_run(
         "finished_at": report.finished_at,
         "text": report.to_text(),
     }
-    return _last_report
+    tenant_id = user.tenant_id or "default"
+    _last_reports_by_tenant[tenant_id] = report_dict
+    return report_dict
 
 
 @router.get("/report")
 async def self_coder_report(user: User = Depends(require_operator)):
     """Return the most recent self-coder report (empty if none has run yet)."""
-    return _last_report or {"cycles": [], "changed": False, "text": ""}
+    tenant_id = user.tenant_id or "default"
+    return _last_reports_by_tenant.get(tenant_id) or {"cycles": [], "changed": False, "text": ""}

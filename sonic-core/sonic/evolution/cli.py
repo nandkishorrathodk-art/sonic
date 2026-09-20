@@ -29,12 +29,55 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from sonic.evolution.codebase_evolver import CodebaseEvolver, EvolutionSummaryReport
 from sonic.evolution.evolution_journal import EvolutionJournal
 from sonic.evolution.goal_director import EvolutionGoalDirector, GoalStatus
 from sonic.evolution.pipeline import EvolutionStage
 from sonic.evolution.version_tracker import VersionTracker
+
+
+def is_safe_repo_path(path_str: str | Path | None, repo_root: Path) -> bool:
+    """Verify that path_str does not escape repo_root via directory traversal."""
+    if not path_str or not str(path_str).strip():
+        return False
+    p = Path(path_str)
+    root = repo_root.resolve()
+    resolved = p.resolve() if p.is_absolute() else (root / p).resolve()
+    try:
+        resolved.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _positive_int(val: str) -> int:
+    try:
+        ival = int(val)
+    except (ValueError, TypeError):
+        raise argparse.ArgumentTypeError(f"Invalid integer: '{val}'")
+    if ival <= 0:
+        raise argparse.ArgumentTypeError(f"--max-goals must be greater than 0 (got {ival})")
+    return ival
+
+
+def generate_changelog(
+    self: Any = None,
+    from_version: str | None = None,
+    to_version: str | None = None,
+) -> str:
+    """Generate a clean Markdown changelog between versions.
+
+    Delegates to EvolutionJournal.generate_changelog with version range filtering.
+    """
+    if isinstance(self, EvolutionJournal):
+        return self.generate_changelog(from_version=from_version, to_version=to_version)
+    if isinstance(self, str):
+        to_version = from_version
+        from_version = self
+    journal = EvolutionJournal()
+    return journal.generate_changelog(from_version=from_version, to_version=to_version)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Command: run
     run_parser = subparsers.add_parser("run", help="Run continuous evolution loop on queued goals")
-    run_parser.add_argument("--max-goals", type=int, default=None, help="Maximum number of goals to process")
+    run_parser.add_argument("--max-goals", type=_positive_int, default=None, help="Maximum number of goals to process (must be > 0)")
     run_parser.add_argument("--push", action="store_true", default=False, help="Git push to origin for promoted goals")
 
     # Command: version
@@ -247,6 +290,9 @@ def main() -> int:
         return 0
 
     if args.command == "run":
+        if args.max_goals is not None and args.max_goals <= 0:
+            print("Error: --max-goals must be greater than 0", file=sys.stderr)
+            return 1
         print(f"🧬 Starting continuous evolution loop (max_goals={args.max_goals})...")
         import asyncio as _asyncio
 
@@ -257,13 +303,24 @@ def main() -> int:
         return 0
 
     if args.command == "patch":
+        repo_root = evolver.repo_root.resolve()
+
+        if not is_safe_repo_path(args.target, repo_root):
+            print(f"Error: Target path escapes repository root: {args.target}", file=sys.stderr)
+            return 1
+
+        if args.summary_out and not is_safe_repo_path(args.summary_out, repo_root):
+            print(f"Error: Summary output path escapes repository root: {args.summary_out}", file=sys.stderr)
+            return 1
+
         diff_content = ""
         if args.diff_file:
             p = Path(args.diff_file)
-            if not p.exists():
+            diff_p = p.resolve() if p.is_absolute() else (repo_root / args.diff_file).resolve()
+            if not diff_p.exists():
                 print(f"Error: Diff file not found: {args.diff_file}", file=sys.stderr)
                 return 1
-            diff_content = p.read_text(encoding="utf-8", errors="replace")
+            diff_content = diff_p.read_text(encoding="utf-8", errors="replace")
         elif args.diff:
             diff_content = args.diff
         else:
@@ -290,10 +347,11 @@ def main() -> int:
         print("\n" + md + "\n")
 
         if args.summary_out:
-            out_p = Path(args.summary_out)
+            p = Path(args.summary_out)
+            out_p = p.resolve() if p.is_absolute() else (repo_root / args.summary_out).resolve()
             out_p.parent.mkdir(parents=True, exist_ok=True)
             out_p.write_text(md, encoding="utf-8")
-            print(f"📝 Summary saved to: {args.summary_out}")
+            print(f"📝 Summary saved to: {out_p}")
 
         print(f"📝 Live notes appended to: {journal.evolution_md_path}")
 

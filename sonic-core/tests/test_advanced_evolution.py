@@ -13,6 +13,7 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -30,6 +31,10 @@ from sonic.evolution.pipeline import EvolutionStage
 from sonic.evolution.version_tracker import VersionTracker
 
 
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
+
+
 @pytest.fixture
 def temp_evolution_env(tmp_path: Path):
     """Provides an isolated temp workspace with custom DB and repo root."""
@@ -37,6 +42,25 @@ def temp_evolution_env(tmp_path: Path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     (repo_root / "sonic-core" / "sonic").mkdir(parents=True)
+    (repo_root / "sonic-core" / "tests").mkdir(parents=True)
+    (repo_root / "sonic-core" / "sonic" / "__init__.py").write_text("", encoding="utf-8")
+
+    # Real security regression test fixture so run_security_regression executes genuinely
+    (repo_root / "sonic-core" / "tests" / "test_p0_security_hardening.py").write_text(
+        "def test_safety_invariants():\n    assert True\n",
+        encoding="utf-8",
+    )
+    (repo_root / "conftest.py").write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent / 'sonic-core'))\n",
+        encoding="utf-8",
+    )
+
+    _git(repo_root, "init")
+    _git(repo_root, "config", "user.email", "test@example.com")
+    _git(repo_root, "config", "user.name", "Test Runner")
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "init")
 
     version_tracker = VersionTracker(db_path=db_path, repo_root=repo_root)
     journal = EvolutionJournal(db_path=db_path, repo_root=repo_root)
@@ -191,7 +215,20 @@ def test_goal_director_successful_execution_and_version_bump(temp_evolution_env)
     target_rel = "sonic-core/sonic/tools/sample_worker.py"
     target_abs = repo_root / target_rel
     target_abs.parent.mkdir(parents=True, exist_ok=True)
+    (target_abs.parent / "__init__.py").write_text("", encoding="utf-8")
     target_abs.write_text("def worker_task():\n    return 42\n", encoding="utf-8")
+
+    # Real lightweight test fixture that verifies the enhanced return payload
+    test_rel = "sonic-core/tests/test_sample_worker.py"
+    test_abs = repo_root / test_rel
+    test_abs.write_text(
+        "from sonic.tools.sample_worker import worker_task\n\n"
+        "def test_worker_task_payload():\n"
+        "    assert worker_task() == {'status': 'ok', 'val': 42}\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "add worker and test fixture")
 
     # Submit a bug fix goal
     goal = director.submit_goal(
@@ -203,32 +240,32 @@ def test_goal_director_successful_execution_and_version_bump(temp_evolution_env)
 
     new_code = "def worker_task():\n    return {'status': 'ok', 'val': 42}\n"
 
-    # Execute goal with mock test pass
-    import unittest.mock as mock
-    with mock.patch.object(director.evolver, "run_tests") as mock_tests, \
-         mock.patch.object(director.evolver, "run_security_regression") as mock_sec:
-        from sonic.evolution.codebase_evolver import TestExecutionResult
-        mock_tests.return_value = TestExecutionResult(passed=True, total_tests=1, passed_tests=1, duration_seconds=0.1)
-        mock_sec.return_value = True
+    # Execute goal with real test execution and real security regression (zero mocks)
+    rep = asyncio.run(
+        director.execute_goal(
+            goal.goal_id,
+            custom_patch=new_code,
+            auto_promote=True,
+            test_paths=[test_rel],
+        )
+    )
 
-        rep = asyncio.run(director.execute_goal(goal.goal_id, custom_patch=new_code, auto_promote=True))
+    assert rep.stage == EvolutionStage.PROMOTED
+    # Category was bug_fix -> version bumped from 0.1.0 to 0.1.1
+    assert version_tracker.current_version() == "0.1.1"
 
-        assert rep.stage == EvolutionStage.PROMOTED
-        # Category was bug_fix -> version bumped from 0.1.0 to 0.1.1
-        assert version_tracker.current_version() == "0.1.1"
+    # Code on disk was updated
+    assert "{'status': 'ok', 'val': 42}" in target_abs.read_text(encoding="utf-8")
 
-        # Code on disk was updated
-        assert "{'status': 'ok', 'val': 42}" in target_abs.read_text(encoding="utf-8")
+    # Goal is updated to PROMOTED
+    g_done = director.get_goal(goal.goal_id)
+    assert g_done.status == GoalStatus.PROMOTED
+    assert g_done.version_after == "0.1.1"
 
-        # Goal is updated to PROMOTED
-        g_done = director.get_goal(goal.goal_id)
-        assert g_done.status == GoalStatus.PROMOTED
-        assert g_done.version_after == "0.1.1"
-
-        # evolution.md contains the task notes
-        md_text = journal.evolution_md_path.read_text(encoding="utf-8")
-        assert "Enhance worker return payload" in md_text
-        assert "0.1.0 ➔ 0.1.1" in md_text
+    # evolution.md contains the task notes
+    md_text = journal.evolution_md_path.read_text(encoding="utf-8")
+    assert "Enhance worker return payload" in md_text
+    assert "0.1.0 ➔ 0.1.1" in md_text
 
 
 def test_goal_director_capability_add_bumps_minor_version(temp_evolution_env):
@@ -240,7 +277,20 @@ def test_goal_director_capability_add_bumps_minor_version(temp_evolution_env):
     target_rel = "sonic-core/sonic/research/analyzer.py"
     target_abs = repo_root / target_rel
     target_abs.parent.mkdir(parents=True, exist_ok=True)
+    (target_abs.parent / "__init__.py").write_text("", encoding="utf-8")
     target_abs.write_text("class Analyzer:\n    pass\n", encoding="utf-8")
+
+    # Real lightweight test fixture that verifies the added capability
+    test_rel = "sonic-core/tests/test_analyzer.py"
+    test_abs = repo_root / test_rel
+    test_abs.write_text(
+        "from sonic.research.analyzer import Analyzer\n\n"
+        "def test_analyzer_scan_fast():\n"
+        "    assert Analyzer().scan_fast() is True\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "add analyzer and test fixture")
 
     goal = director.submit_goal(
         title="Add Fast Pattern Matching Engine",
@@ -251,17 +301,18 @@ def test_goal_director_capability_add_bumps_minor_version(temp_evolution_env):
 
     new_code = "class Analyzer:\n    def scan_fast(self): return True\n"
 
-    import unittest.mock as mock
-    with mock.patch.object(director.evolver, "run_tests") as mock_tests, \
-         mock.patch.object(director.evolver, "run_security_regression") as mock_sec:
-        from sonic.evolution.codebase_evolver import TestExecutionResult
-        mock_tests.return_value = TestExecutionResult(passed=True, total_tests=3, passed_tests=3, duration_seconds=0.2)
-        mock_sec.return_value = True
-
-        rep = asyncio.run(director.execute_goal(goal.goal_id, custom_patch=new_code, auto_promote=True))
-        assert rep.stage == EvolutionStage.PROMOTED
-        # Minor bump: 0.1.0 -> 0.2.0
-        assert version_tracker.current_version() == "0.2.0"
+    # Execute goal with real test execution and real security regression (zero mocks)
+    rep = asyncio.run(
+        director.execute_goal(
+            goal.goal_id,
+            custom_patch=new_code,
+            auto_promote=True,
+            test_paths=[test_rel],
+        )
+    )
+    assert rep.stage == EvolutionStage.PROMOTED
+    # Minor bump: 0.1.0 -> 0.2.0
+    assert version_tracker.current_version() == "0.2.0"
 
 
 def test_evolution_engine_unified_facade(temp_evolution_env):

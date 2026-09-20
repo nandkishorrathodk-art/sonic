@@ -32,9 +32,32 @@ _KIND_PROSE = {
 }
 
 
+def _is_cycle_verified(cycle: Any) -> bool:
+    """Return True only if the cycle's patch passed verification/tests."""
+    if getattr(cycle, "verified", None) is not None:
+        return bool(cycle.verified)
+    stage = getattr(cycle, "stage", "")
+    return stage in (
+        "promoted",
+        "awaiting_approval",
+        "tests_passing",
+        "imports_verified",
+        "security_regression_passing",
+        "benchmark_validated",
+        "canary_active",
+    )
+
+
 def _count_phrase(n: int, word: str) -> str:
     """Pluralize only when n != 1: '1 crash' vs '2 bugs' (no 'is a latent problem' wording)."""
-    return f"{n} {word}" if n == 1 else f"{n} {word.rstrip()}s" if not word.endswith("s") else f"{n} {word}"
+    if n == 1:
+        return f"{n} {word}"
+    w = word.rstrip()
+    if w.endswith(("s", "outright")):
+        return f"{n} {w}"
+    if w.endswith(("sh", "ch", "x", "z")):
+        return f"{n} {w}es"
+    return f"{n} {w}s"
 
 
 def narrate(report: AuditReport, cycles: list[Any] | None = None) -> str:
@@ -115,10 +138,20 @@ def narrate(report: AuditReport, cycles: list[Any] | None = None) -> str:
         for c in cycles:
             action = getattr(c, "tree_action", "rolled_back")
             stage = getattr(c, "stage", "")
+            if _is_cycle_verified(c):
+                status = f"verified patch ({stage})"
+            elif "reject" in str(stage).lower():
+                status = f"rejected patch ({stage})"
+            else:
+                status = f"failed verification ({stage})"
             lines.append(
-                f"  - {c.signal} -> verified patch ({stage}); tree: {action}."
+                f"  - {c.signal} -> {status}; tree: {action}."
             )
-        if proposed and not promoted:
+        verified_proposed = [
+            c for c in (proposed or cycles)
+            if _is_cycle_verified(c) and getattr(c, "stage", "") != "promoted"
+        ]
+        if verified_proposed:
             lines.append("")
             lines.append(
                 "I verified the fix against the test suite, then I put the tree back "

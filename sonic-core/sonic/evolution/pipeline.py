@@ -9,6 +9,8 @@ Candidate Improvement -> Isolated Branch -> Unit Tests -> Security Regression ->
 
 from __future__ import annotations
 
+import posixpath
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,11 +31,15 @@ _PROTECTED_COMPONENTS = frozenset([
     "sonic/safety/action_policy",
     "sonic/sandbox/egress",
     "sonic-kernel-rs/src/safety",
-    # The self-coder's own guardrails must not be rewritable by the self-coder.
+    "sonic/auth",
+    "sonic/sandbox/providers",
     "sonic/evolution/patch_synthesizer",
     "sonic/evolution/codebase_evolver",
     "sonic/evolution/goal_director",
     "sonic/evolution/pipeline",
+    "sonic/evolution/self_coder",
+    "sonic/evolution/coding_agent",
+    "sonic-core/tests/test_p0_security_hardening.py",
 ])
 
 
@@ -80,8 +86,24 @@ class EvolutionPipeline:
         pid = f"evo-{uuid.uuid4().hex[:8]}"
 
         # Invariant 1: AI cannot propose modifications to safety kernel or policy
+        # Ensure target_component path is normalized (collapse //, /./, ..) before checking against _PROTECTED_COMPONENTS
+        raw_path = str(target_component or "").replace("\\", "/").strip()
+        collapsed = re.sub(r"/+", "/", raw_path)
+        normalized = posixpath.normpath(collapsed)
+        norm_clean = normalized.lstrip("./").lstrip("/")
+
         for protected in _PROTECTED_COMPONENTS:
-            if protected in target_component.replace("\\", "/"):
+            p = protected.lower()
+            p_unprefixed = p.removeprefix("sonic-core/").removeprefix("sonic-cli/")
+            norm_lower = normalized.lower()
+            norm_clean_lower = norm_clean.lower()
+            if (
+                p in norm_lower
+                or p in norm_clean_lower
+                or p_unprefixed in norm_clean_lower
+                or norm_lower == p
+                or norm_clean_lower == p_unprefixed
+            ):
                 logger.critical(
                     "evolution_rejected_safety_violation",
                     component=target_component,

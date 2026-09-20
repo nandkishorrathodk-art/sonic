@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -33,6 +34,17 @@ def _default_db_path() -> str:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _parse_semver(ver: str | None) -> tuple[int, int, int]:
+    clean = str(ver or "").strip().lstrip("v")
+    m = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?", clean)
+    if not m:
+        return (0, 0, 0)
+    major = int(m.group(1)) if m.group(1) is not None else 0
+    minor = int(m.group(2)) if m.group(2) is not None else 0
+    patch = int(m.group(3)) if m.group(3) is not None else 0
+    return (major, minor, patch)
 
 
 @dataclass
@@ -263,8 +275,24 @@ class EvolutionJournal:
         # Filter promoted only
         promoted = [e for e in entries if e.status.lower() == "promoted"]
 
+        if from_version:
+            from_v = _parse_semver(from_version)
+            promoted = [e for e in promoted if _parse_semver(e.version_after) >= from_v]
+
+        if to_version:
+            to_v = _parse_semver(to_version)
+            promoted = [e for e in promoted if _parse_semver(e.version_after) <= to_v]
+
+        range_str = ""
+        if from_version and to_version:
+            range_str = f" ({from_version} ➔ {to_version})"
+        elif from_version:
+            range_str = f" (from {from_version})"
+        elif to_version:
+            range_str = f" (up to {to_version})"
+
         lines = [
-            f"# 📜 SONIC Evolution Changelog {f'({from_version} ➔ {to_version})' if from_version else ''}",
+            f"# 📜 SONIC Evolution Changelog{range_str}".rstrip(),
             "",
         ]
 

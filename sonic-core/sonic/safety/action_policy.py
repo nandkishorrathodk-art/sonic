@@ -195,6 +195,8 @@ class ActionPolicy:
         #    so the command is structural; we only gate user-supplied commands.
         if action_type_name == "TERMINAL_EXEC":
             command = payload.get("command") or payload.get("cmd") or target or ""
+            if isinstance(command, str):
+                command = command.strip().rstrip(',;').strip()
             verdict = self._check_command(command)
             if not verdict.allowed:
                 return verdict

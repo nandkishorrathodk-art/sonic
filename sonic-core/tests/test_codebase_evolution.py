@@ -71,6 +71,15 @@ class TestSafetyInvariants:
             "sonic/kernel/action_broker.py",
             "sonic/sandbox/egress.py",
             "sonic-kernel-rs/src/safety/mod.rs",
+            "sonic/auth/models.py",
+            "sonic/sandbox/providers/docker.py",
+            "sonic/evolution/patch_synthesizer.py",
+            "sonic/evolution/codebase_evolver.py",
+            "sonic/evolution/goal_director.py",
+            "sonic/evolution/pipeline.py",
+            "sonic/evolution/self_coder.py",
+            "sonic/evolution/coding_agent.py",
+            "sonic-core/tests/test_p0_security_hardening.py",
         ]
 
         for target in protected_targets:
@@ -227,3 +236,105 @@ class TestSuccessfulEvolutionAndSummary:
         assert report.stage == EvolutionStage.AWAITING_APPROVAL
         assert report.git_committed is False
         assert "AWAITING OPERATOR APPROVAL" in report.to_markdown()
+
+
+class TestCodebaseEvolverBugFixes:
+    def test_gate5_auto_promote_stages_all_pre_applied_files(self, temp_repo):
+        evolver = CodebaseEvolver(repo_root=temp_repo)
+        target = "sonic/tools/adapters/custom_parser.py"
+        other_file = "tests/test_parser.py"
+
+        mock_test_res = TestExecutionResult(passed=True, total_tests=2, passed_tests=2)
+        mock_commit_and_push = MagicMock(return_value=(True, "commit123", True, "Pushed"))
+
+        with patch.object(evolver, "run_tests", return_value=mock_test_res), \
+             patch.object(evolver, "run_security_regression", return_value=True), \
+             patch.object(evolver, "commit_and_push", mock_commit_and_push):
+
+            report = evolver.evolve(
+                target_component=target,
+                description="Multi-file upgrade",
+                code_diff="pass",
+                auto_promote=True,
+                push=True,
+                pre_applied_files=[target, other_file],
+            )
+
+        assert report.stage == EvolutionStage.PROMOTED
+        mock_commit_and_push.assert_called_once_with(
+            proposal_id=report.proposal_id,
+            description="Multi-file upgrade",
+            files=[target, other_file],
+            push=True,
+        )
+
+    def test_apply_patch_passes_newline_lf_to_named_temporary_file(self, temp_repo):
+        evolver = CodebaseEvolver(repo_root=temp_repo)
+        target = "sonic/tools/adapters/custom_parser.py"
+        unified_diff = (
+            "--- a/sonic/tools/adapters/custom_parser.py\n"
+            "+++ b/sonic/tools/adapters/custom_parser.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-def parse_status(code: int) -> str:\n"
+            "+def parse_status(code: int) -> str:\n"
+        )
+
+        with patch("tempfile.NamedTemporaryFile") as mock_ntf, \
+             patch("subprocess.run") as mock_run:
+            mock_file = MagicMock()
+            mock_file.name = "dummy.patch"
+            mock_ntf.return_value.__enter__.return_value = mock_file
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+            evolver.apply_patch(target, unified_diff)
+
+            mock_ntf.assert_called_once_with(
+                "w",
+                suffix=".patch",
+                delete=False,
+                encoding="utf-8",
+                newline="\n",
+            )
+
+    def test_apply_patch_multi_catches_general_exception_and_rolls_back(self, temp_repo):
+        evolver = CodebaseEvolver(repo_root=temp_repo)
+        file1 = "sonic/tools/adapters/custom_parser.py"
+        orig_content = (temp_repo / file1).read_text(encoding="utf-8")
+
+        with patch.object(evolver, "apply_patch", return_value=(True, "ok", 1, 1)), \
+             patch("ast.parse", side_effect=ValueError("malformed token or null byte")):
+            ok, msg = evolver.apply_patch_multi([file1], "dummy diff")
+
+        assert ok is False
+        assert "AST verification failed" in msg or "malformed token" in msg
+        # Rollback was executed
+        assert (temp_repo / file1).read_text(encoding="utf-8") == orig_content
+
+    def test_diff_files_captures_deleted_files_with_dev_null(self):
+        # Case 1: git diff format with /dev/null
+        git_diff_dev_null = (
+            "diff --git a/sonic/tools/old_module.py b//dev/null\n"
+            "deleted file mode 100644\n"
+            "--- a/sonic/tools/old_module.py\n"
+            "+++ /dev/null\n"
+        )
+        files = CodebaseEvolver._diff_files(git_diff_dev_null)
+        assert files == ["sonic/tools/old_module.py"]
+
+        # Case 2: git diff format with b/dev/null
+        git_diff_b_dev_null = (
+            "diff --git a/sonic/tools/removed.py b/dev/null\n"
+            "deleted file mode 100644\n"
+        )
+        files2 = CodebaseEvolver._diff_files(git_diff_b_dev_null)
+        assert files2 == ["sonic/tools/removed.py"]
+
+        # Case 3: unified diff without diff --git header
+        unified_diff_dev_null = (
+            "--- a/sonic/tools/legacy.py\n"
+            "+++ /dev/null\n"
+            "@@ -1,5 +0,0 @@\n"
+        )
+        files3 = CodebaseEvolver._diff_files(unified_diff_dev_null)
+        assert files3 == ["sonic/tools/legacy.py"]
+
