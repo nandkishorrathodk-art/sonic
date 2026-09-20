@@ -28,6 +28,7 @@ SECURITY INVARIANT:
 
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 from dataclasses import dataclass
@@ -85,6 +86,10 @@ def _source_safety_lint(source: str) -> tuple[bool, str]:
         m = pat.search(source)
         if m:
             return False, f"forbidden pattern in source: {m.group(0)!r}"
+    try:
+        ast.parse(source)
+    except SyntaxError as e:
+        return False, f"invalid python syntax: {e}"
     return True, "ok"
 
 

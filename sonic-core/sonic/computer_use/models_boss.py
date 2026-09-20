@@ -31,6 +31,7 @@ class SubMission(BaseModel):
     max_steps: int = 5
     priority: int = 1  # Higher = execute first within a phase
     depends_on: list[str] = Field(default_factory=list)
+    plane: str = "headless"  # "headless" (terminal/files/toolsmith) | "gui" (desktop/browser)
     process_mode: str = "deep"
     evidence_context: dict[str, Any] = Field(default_factory=dict)
     status: str = "PENDING"  # PENDING -> RUNNING -> COMPLETED -> FAILED
@@ -48,6 +49,8 @@ class SubMissionResult(BaseModel):
     actions_taken: int = 0
     duration_seconds: float = 0.0
     evidence_verified: bool = False
+    judge_verdict: str = "UNVERIFIED"  # CONFIRMED | FALSIFIED | BENIGN | INCONCLUSIVE | UNVERIFIED
+    judge_notes: str = ""
     status: str = "FAILED"  # SUCCESS | FAILED | TIMED_OUT | BLOCKED
 
 

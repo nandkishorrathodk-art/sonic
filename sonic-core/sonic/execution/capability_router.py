@@ -138,16 +138,23 @@ class CapabilityRouter:
     @staticmethod
     def is_docker_available(provider: Any = None) -> bool:
         """Check if Docker CLI and daemon are operational."""
-        if not shutil.which("docker"):
+        if provider is not None and getattr(provider, "_container_running_cache", False) is True:
+            return True
+        try:
+            from sonic.computer.docker_computer import _docker_binary
+            docker_bin = _docker_binary()
+        except Exception:
+            docker_bin = shutil.which("docker")
+        if not docker_bin:
             return False
         if provider is not None and hasattr(provider, "_daemon_checked") and provider._daemon_checked is False:
             return False
         try:
             probe = subprocess.run(
-                ["docker", "info", "--format", "{{.ServerVersion}}"],
+                [docker_bin, "info", "--format", "{{.ServerVersion}}"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=1.5,
+                timeout=10.0,
             )
             return probe.returncode == 0
         except Exception:

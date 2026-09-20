@@ -2189,8 +2189,11 @@ def _is_research_prompt(prompt: str) -> bool:
 def _is_complex_or_multi_part_objective(prompt: str) -> bool:
     """Check if an objective requires Boss Agent multi-phase orchestration."""
     p_lower = prompt.lower().strip()
+    words = p_lower.split()
+    if len(words) > 12:
+        return True
     # Explicit orchestrator keywords
-    if any(k in p_lower for k in ("subagent", "sub-agent", "phase", "deep dive", "orchestrat", "boss")):
+    if any(k in p_lower for k in ("subagent", "sub-agent", "phase", "deep dive", "orchestrat", "boss", "step-by-step", "step by step", "swarm", "worker")):
         return True
     # Security assessments, audits, vulnerabilities, multi-task goals
     complex_keywords = (
@@ -2199,11 +2202,12 @@ def _is_complex_or_multi_part_objective(prompt: str) -> bool:
         "enumerate", "penetration", "exploit", "assess", "scan and",
         "check all", "deep dive", "source code", "binary", "executable",
         "forensics", "reverse engineer", "open ports", "port scan",
+        "banao", "build", "develop", "pipeline", "mission:", "workflow",
     )
     if any(k in p_lower for k in complex_keywords):
         return True
-    # Multi-part objectives with 'and', 'then', or multiple commands
-    if (" and " in p_lower or " then " in p_lower or "\n" in prompt or ";" in prompt) and len(prompt.split()) > 4:
+    # Multi-part objectives with 'and', 'then', Hinglish 'aur', 'phir', or multiple commands
+    if (" and " in p_lower or " then " in p_lower or " aur " in p_lower or " phir " in p_lower or "\n" in prompt or ";" in prompt) and len(words) >= 3:
         return True
     return False
 
@@ -2721,8 +2725,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 default_model=model_to_use,
                             )
 
+                        from sonic.computer.headless import HeadlessComputeProvider
                         from sonic.execution.capability_router import CapabilityRouter
-                        computer = CapabilityRouter.resolve_provider(computer, "agent")
+                        resolved_comp = CapabilityRouter.resolve_provider(computer, "agent")
+                        if desktop_id and isinstance(resolved_comp, HeadlessComputeProvider) and not isinstance(computer, HeadlessComputeProvider):
+                            logger.info("workstation_preserving_desktop_provider", desktop_id=desktop_id)
+                        else:
+                            computer = resolved_comp
                         # The visible X11 desktop is the only Computer surface.
                         # Do not create a hidden Playwright browser with an
                         # independent page state.
@@ -3012,6 +3021,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             finally:
                                 if browser_agent is not None:
                                     await browser_agent.close()
+                                try:
+                                    await computer.cleanup_desktop_windows(desktop_id)
+                                except Exception:
+                                    pass
                             summary_msg = report.findings_summary
 
                             if state.get("interrupted"):

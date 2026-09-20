@@ -1415,8 +1415,12 @@ class ComputerUseAgent:
             raw_b64 = self._last_screenshot_b64
             if "," in raw_b64:
                 raw_b64 = raw_b64.split(",", 1)[1]
-            images = [ImageContent(base64=raw_b64, media_type="image/png")]
-            user_text = f"{obs_summary}\n\nBased on the desktop screenshot and observation above, choose the next action."
+            raw_b64 = raw_b64.strip()
+            if raw_b64:
+                images = [ImageContent(base64=raw_b64, media_type="image/png")]
+                user_text = f"{obs_summary}\n\nBased on the desktop screenshot and observation above, choose the next action."
+            else:
+                user_text = obs_summary
         else:
             user_text = obs_summary
 
@@ -2965,43 +2969,21 @@ class ComputerUseAgent:
             elif action_type == ComputerActionType.TERMINAL_EXEC:
                 raw_cmd = payload.get("command") or target_resource or "echo OK"
                 cmd_str = self._clean_terminal_command(raw_cmd)
-                # Map /home/sonic to the actual sandbox home directory
-                if "/home/sonic" in cmd_str:
-                    real_home = getattr(self, "_last_working_dir", "") or "/home/daytona"
-                    if "/workspace" in real_home:
-                        real_home = real_home.split("/workspace")[0]
-                    cmd_str = cmd_str.replace("/home/sonic", real_home)
-                # Expand ~/ if used
-                if "~/" in cmd_str:
-                    real_home = getattr(self, "_last_working_dir", "") or "/home/daytona"
-                    if "/workspace" in real_home:
-                        real_home = real_home.split("/workspace")[0]
-                    cmd_str = cmd_str.replace("~/", f"{real_home}/")
-                first_token = cmd_str.strip().split()[0].lower() if cmd_str.strip() else ""
-                base_bin = os.path.basename(first_token)
-                is_desktop_app = False
-                if hasattr(self.computer, "application_list"):
-                    try:
-                        cached = getattr(self.computer, "_cached_desktop_apps", None)
-                        if cached is None:
-                            apps = await self.computer.application_list(workspace_id)
-                            cached = set(a.lower() for a in apps)
-                            self.computer._cached_desktop_apps = cached
-                        if base_bin.lower() in cached or any(base_bin.lower() == a for a in cached):
-                            is_desktop_app = True
-                    except Exception:
-                        pass
-                if not is_desktop_app and base_bin in ("x-www-browser", "sensible-browser", "xdg-open"):
-                    is_desktop_app = True
+                # Map /home/sonic to the actual sandbox home directory if running in Daytona
+                provider_name = getattr(self.computer, "__class__", type(None)).__name__
+                is_daytona = "Daytona" in provider_name or "daytona" in str(getattr(self, "_last_working_dir", "")).lower()
+                real_home = getattr(self, "_last_working_dir", "")
+                if "/workspace" in real_home:
+                    real_home = real_home.split("/workspace")[0]
+                if not real_home and is_daytona:
+                    real_home = "/home/daytona"
 
-                if is_desktop_app and hasattr(self.computer, "launch_application"):
-                    ok = await self.computer.launch_application(workspace_id, cmd_str)
-                    action_exit_code = 0 if ok else 1
-                    actual_obs_str = f"Launched desktop GUI application '{cmd_str}' on display :99." if ok else f"Failed to launch GUI application: {cmd_str}"
-                    res = ExecResult(command=cmd_str, exit_code=action_exit_code, stdout=actual_obs_str, stderr="")
-                    await asyncio.sleep(2.0)
-                else:
-                    res = await self.computer.terminal(workspace_id, cmd_str)
+                if real_home and real_home != "/home/sonic":
+                    if "/home/sonic" in cmd_str:
+                        cmd_str = cmd_str.replace("/home/sonic", real_home)
+                    if "~/" in cmd_str:
+                        cmd_str = cmd_str.replace("~/", f"{real_home}/")
+                res = await self.computer.terminal(workspace_id, cmd_str)
                 action_exit_code = getattr(res, "exit_code", None)
                 safe_stdout = _safe_str(getattr(res, "stdout", "") or "")
                 safe_stderr = _safe_str(getattr(res, "stderr", "") or "")

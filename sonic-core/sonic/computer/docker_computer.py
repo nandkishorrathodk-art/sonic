@@ -20,6 +20,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+import uuid
 
 from sonic.computer.models import (
     ApplicationPolicy,
@@ -211,7 +212,8 @@ class DockerComputerProvider(ComputerProvider):
         async with self._exec_semaphore:
             try:
                 disp = self._get_display("") if hasattr(self, "_get_display") else ":99"
-                exec_args = [docker, "exec", "-e", f"DISPLAY={disp}", self.container_name, "bash", "-c", cmd]
+                ws_dir = os.environ.get("SONIC_WORKSPACE_ROOT", "/home/sonic/workspace")
+                exec_args = [docker, "exec", "-e", f"DISPLAY={disp}", "-w", ws_dir, self.container_name, "bash", "-c", cmd]
                 proc = await asyncio.create_subprocess_exec(
                     *exec_args,
                     stdout=asyncio.subprocess.PIPE,
@@ -441,10 +443,12 @@ class DockerComputerProvider(ComputerProvider):
         #     return self._last_screenshot
 
         disp = self._get_display(workspace_id)
+        tmp_id = uuid.uuid4().hex[:8]
+        tmp_path = f"/tmp/sonic_screen_{tmp_id}.png"
         scr_cmd = (
-            f"DISPLAY={disp} scrot -p -o /tmp/sonic_screen.png 2>/dev/null || "
-            f"DISPLAY={disp} import -window root /tmp/sonic_screen.png 2>/dev/null; "
-            f"base64 -w0 /tmp/sonic_screen.png 2>/dev/null && "
+            f"DISPLAY={disp} scrot -p -o {tmp_path} 2>/dev/null || "
+            f"DISPLAY={disp} import -window root {tmp_path} 2>/dev/null; "
+            f"base64 -w0 {tmp_path} 2>/dev/null && rm -f {tmp_path} && "
             f"echo '___ACTIVE_WINDOW___' && "
             f"DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null && "
             f"echo '___OPEN_WINDOWS___' && "
@@ -492,37 +496,6 @@ class DockerComputerProvider(ComputerProvider):
     # -------------------------------------------------------------
     # Graphical Actions (Human Takeover & Agent GUI Actions)
     # -------------------------------------------------------------
-
-    def _split_app_and_args(self, app_name: str) -> tuple[str, list[str]]:
-        parts = shlex.split(app_name)
-        if not parts:
-            return "", []
-        for i, part in enumerate(parts):
-            if part.startswith("http://") or part.startswith("https://") or part.startswith("-"):
-                return " ".join(parts[:i]), parts[i:]
-        return " ".join(parts), []
-
-    async def _resolve_app_binary(self, app_query: str) -> str | None:
-        if not app_query:
-            return None
-        safe_query = shlex.quote(app_query)
-        script = f'''
-        for d in /usr/share/applications/*.desktop ~/.local/share/applications/*.desktop; do
-            [ -f "$d" ] || continue
-            NAME=$(grep -E "^Name=" "$d" | head -n 1 | cut -d'=' -f2)
-            if [ "$NAME" = {safe_query} ] || [ "$(echo "$NAME" | tr '[:upper:]' '[:lower:]')" = "$(echo {safe_query} | tr '[:upper:]' '[:lower:]')" ]; then
-                EXEC_LINE=$(grep -E "^Exec=" "$d" | head -n 1 | cut -d'=' -f2-)
-                echo "$EXEC_LINE" | sed -E 's/%[a-zA-Z]//g' | xargs
-                exit 0
-            fi
-        done
-        which {safe_query} 2>/dev/null
-        '''
-        code, out, _ = await self._docker_exec(script, timeout=5)
-        out = out.strip()
-        if out:
-            return out
-        return None
 
     async def gui_action(
         self,
@@ -723,8 +696,10 @@ class DockerComputerProvider(ComputerProvider):
         parent_dir = os.path.dirname(path)
         if parent_dir:
             await self._docker_exec(f"mkdir -p {shlex.quote(parent_dir)}")
+        ws_dir = os.environ.get("SONIC_WORKSPACE_ROOT", "/home/sonic/workspace")
+        docker_bin = _docker_binary() or "docker"
         proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", "-i", self.container_name, "sh", "-c", f"cat > {shlex.quote(path)}",
+            docker_bin, "exec", "-i", "-w", ws_dir, self.container_name, "sh", "-c", f"cat > {shlex.quote(path)}",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

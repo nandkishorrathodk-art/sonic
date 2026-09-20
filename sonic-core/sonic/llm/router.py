@@ -83,6 +83,7 @@ class ModelRouter:
         self.routing_rules: dict[str, dict] = {}
         self.fallback_chain: list[str] = []
         self.default_provider: str = ""
+        self.default_model: str = ""
         self.cost_records: list[CostRecord] = []
 
         # Cost limits
@@ -161,6 +162,11 @@ class ModelRouter:
             or env.get("LLM_PROVIDER")
             or config.get("default_provider", "")
         )
+        router.default_model = (
+            env.get("DEFAULT_MODEL")
+            or env.get("LLM_MODEL")
+            or config.get("default_model", "")
+        )
         router.fallback_chain = config.get("global_fallback_chain", [])
 
         # Load cost limits
@@ -192,12 +198,13 @@ class ModelRouter:
             fallback_model_ids = [m["id"] for m in models[1:]]
             speed_map = {"fast": SpeedTier.FAST, "medium": SpeedTier.MEDIUM, "slow": SpeedTier.SLOW}
 
-            # Check if default model for this provider is overridden in env
+            # Check if default model for this provider is overridden in env or config
             env_override_model = (
                 env.get(f"{provider_name.upper()}_MODEL")
                 or (env.get("DEFAULT_MODEL") or env.get("LLM_MODEL") if router.default_provider == provider_name else None)
             )
-            model_id = env_override_model or first_model["id"]
+            config_default_for_provider = router.default_model if router.default_provider == provider_name and router.default_model else None
+            model_id = env_override_model or config_default_for_provider or first_model["id"]
 
             kwargs = {}
             # Groq on-demand accounts enforce a hard output-tokens-per-minute

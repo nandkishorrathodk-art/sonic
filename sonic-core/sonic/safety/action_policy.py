@@ -186,10 +186,9 @@ class ActionPolicy:
                 or payload.get("filename")
                 or target
             )
-            if ".." in str(path or ""):
-                verdict = self._check_path(path, action_type_name)
-                if not verdict.allowed:
-                    return verdict
+            verdict = self._check_path(path, action_type_name)
+            if not verdict.allowed:
+                return verdict
 
         # 3. Destructive-command gating for terminal execution + tool runs.
         #    TOOL_RUN executes a hardcoded `python <workspace-toolsmith-path>`,
@@ -203,17 +202,16 @@ class ActionPolicy:
         # 4. Egress + target-allowlist for security tools, tool runs, method invent, and browser navigation.
         if action_type_name in ("SECURITY_TOOL", "TOOL_RUN", "METHOD_INVENT"):
             scan_target = payload.get("target") or payload.get("target_url")
-            if action_type_name == "SECURITY_TOOL" and not scan_target:
+            if not scan_target:
                 scan_target = target
-            if action_type_name in ("TOOL_RUN", "METHOD_INVENT") and not scan_target:
+            if not scan_target or str(scan_target).strip().lower() in ("", "none", "null"):
                 return PolicyVerdict(
                     False,
                     f"{action_type_name.lower()} requires an explicit target",
                 )
-            if scan_target:
-                verdict = self._check_egress(scan_target, action_type_name.lower())
-                if not verdict.allowed:
-                    return verdict
+            verdict = self._check_egress(scan_target, action_type_name.lower())
+            if not verdict.allowed:
+                return verdict
         elif action_type_name == "BROWSER_NAVIGATE":
             url = payload.get("url") or target
             parsed = urlparse(str(url).strip())

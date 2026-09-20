@@ -1,0 +1,143 @@
+"""
+Unit tests for JudgeAgent (Independent Verification & Anti-Self-Attestation).
+Ensures Rule 15 (Empirical Falsification) and Rule 1 (No self-attestation).
+"""
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+
+from sonic.agents.judge import JudgeAgent, JudgeVerdict
+from sonic.computer_use.models_boss import SubMission, SubMissionResult
+from sonic.sandbox.provider import ExecResult
+
+
+@pytest.mark.asyncio
+async def test_judge_rejects_self_attestation_without_proof():
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Audit authentication logic")
+    # Worker claimed status="VERIFIED" on a trace that had no concrete output
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "cat auth.py",
+        "status": "VERIFIED",
+        "exit_code": 1,
+        "actual_observation": "FAIL-CLOSED: Host execution is disabled in HeadlessComputeProvider.",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Worker claims auth is vulnerable",
+    )
+
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-1",
+    )
+
+    assert evaluation.verdict == JudgeVerdict.FALSIFIED
+    assert evaluation.self_attestation_rejected is True
+    assert "Self-attestation rejected" in evaluation.notes
+
+
+@pytest.mark.asyncio
+async def test_judge_flags_complete_failure():
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Create task tracker folder")
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "mkdir sonic_validation_task_tracker",
+        "status": "FAILED",
+        "exit_code": 126,
+        "actual_observation": "FAIL-CLOSED: Host execution is disabled in HeadlessComputeProvider.",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=False,
+        findings_summary="Execution failed",
+    )
+
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-2",
+    )
+
+    assert evaluation.verdict == JudgeVerdict.FALSIFIED
+    assert "no successful execution traces" in evaluation.notes
+
+
+@pytest.mark.asyncio
+async def test_judge_confirms_valid_execution():
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Run task tracker script")
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "python task_tracker.py",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": "Tasks listed: 0 pending, 1 completed",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Task tracker executed successfully",
+    )
+
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-3",
+    )
+
+    assert evaluation.verdict == JudgeVerdict.CONFIRMED
+    assert evaluation.confidence >= 0.8
+
+
+@pytest.mark.asyncio
+async def test_judge_reruns_security_poc_with_computer():
+    mock_computer = MagicMock()
+    mock_computer.terminal = AsyncMock(return_value=ExecResult(
+        command="curl -s http://127.0.0.1:8080/api/users",
+        exit_code=0,
+        stdout='[{"id": 1, "role": "admin"}]',
+        stderr="",
+    ))
+
+    judge = JudgeAgent(computer_provider=mock_computer)
+    sub_m = SubMission(goal="Test for IDOR vulnerability on api/users")
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "curl -s http://127.0.0.1:8080/api/users",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": '[{"id": 1, "role": "admin"}]',
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        key_discoveries=["IDOR vulnerability exposed admin user"],
+        findings_summary="Found IDOR on /api/users",
+    )
+
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-4",
+    )
+
+    assert evaluation.verdict == JudgeVerdict.CONFIRMED
+    assert evaluation.reproduction_exit_code == 0
+    mock_computer.terminal.assert_awaited_once()

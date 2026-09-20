@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC
 from typing import Any
+import uuid
 
 import structlog
 
@@ -36,6 +37,11 @@ from sonic.agents.task_graph import (
     TaskNode,
     TaskPriority,
     TaskStatus,
+)
+from sonic.agents.judge import (
+    JudgeAgent,
+    JudgeEvaluation,
+    JudgeVerdict,
 )
 from sonic.computer_use.models_boss import (
     BossReport,
@@ -177,6 +183,7 @@ class BossAgent:
             max_total_tasks=100,
         )
         self.replan_engine = ReplanEngine()
+        self.judge = JudgeAgent(computer_provider=self.computer, judge_id=f"judge-{self.tenant_id}")
 
     def interrupt(self) -> None:
         """Signal the Boss to stop orchestration."""
@@ -398,10 +405,20 @@ class BossAgent:
                                 pass
                     break
 
-                # Respect the configured worker budget.  Dependencies still
-                # determine waves; this only bounds concurrent execution.
-                worker_limit = 1 if self._shared_desktop else self.max_parallel_workers
-                wave_batch = unblocked_ready[:worker_limit]
+                # Respect the configured worker budget and execution plane.
+                # GUI/browser tasks require serialized access to the shared display.
+                # Headless tasks (terminal, file audits, toolsmith) fan out concurrently.
+                first_plane = getattr(unblocked_ready[0], "plane", "headless")
+                if first_plane == "gui" and self._shared_desktop:
+                    wave_batch = [unblocked_ready[0]]
+                else:
+                    wave_batch = []
+                    for s in unblocked_ready:
+                        if getattr(s, "plane", "headless") == "gui" and self._shared_desktop:
+                            break
+                        wave_batch.append(s)
+                        if len(wave_batch) >= self.max_parallel_workers:
+                            break
                 for s in wave_batch:
                     pending_subs.remove(s)
 
@@ -532,10 +549,11 @@ class BossAgent:
             # Aggregate findings from this phase
             aggregated = await self._aggregate_findings(current_phase, objective)
 
-            # Check if objective is complete
+            # Check if objective is complete across all phases
             all_findings = self._collect_all_findings()
+            all_phase_results = [r for p in self.phases for r in p.results]
             is_complete, completion_reason = await self._check_objective_complete(
-                objective, all_findings, current_phase.results
+                objective, all_findings, all_phase_results
             )
 
             if is_complete:
@@ -638,15 +656,20 @@ Respond with EXACTLY this JSON format (no extra text):
   "phase_name": "Domain-appropriate phase name (e.g., Static Binary Analysis, Service Enumeration, Schema Discovery)",
   "sub_missions": [
     {{
+      "id": "sub-1",
       "goal": "Clear, focused goal for this worker agent with concrete inputs and expected observations.",
+      "plane": "headless",
       "max_steps": 4,
-      "priority": 1
+      "priority": 1,
+      "depends_on": []
     }}
   ]
 }}
 
 Rules:
 - Each sub_mission goal must be FOCUSED and SPECIFIC (one clear task per worker)
+- plane: "headless" for terminal/scripts/file audits/tools; "gui" only for desktop browser/window interactions
+- depends_on: list of sub_mission IDs that must complete before this worker starts
 - max_steps should be 3-5 (workers are efficient, not wasteful)
 - priority: higher number = execute first
 - Create 2-5 sub_missions per phase (not more)
@@ -667,15 +690,13 @@ Rules:
             resp = await self.llm_router.complete(req)
             raw = (resp.content or "").strip()
         except Exception as e:
-            logger.warning("boss_strategic_decomposition_llm_failed", error=str(e))
+            logger.warning("boss_strategic_decomposition_failed", error=str(e))
             return self._fallback_decomposition(objective)
 
         duration = round(time.perf_counter() - t_start, 2)
 
-        # Parse LLM response
         parsed = self._parse_json_response(raw)
         if not parsed:
-            logger.warning("boss_strategic_decomposition_parse_failed", raw=raw[:300])
             return self._fallback_decomposition(objective)
 
         thinking = parsed.get("thinking", "Analyzing objective...")
@@ -706,8 +727,21 @@ Rules:
             process_mode = str(sm.get("process_mode") or "").lower()
             if process_mode not in {"fast", "deep"}:
                 process_mode = self._select_process_mode(evidence_context)
+
+            sub_id = str(sm.get("id") or "").strip()
+            depends_on = [str(d).strip() for d in sm.get("depends_on", []) if str(d).strip()] if isinstance(sm.get("depends_on"), list) else []
+            plane = str(sm.get("plane") or "headless").strip().lower()
+            if plane not in ("headless", "gui"):
+                if any(w in goal.lower() for w in ("click", "browser", "desktop", "window", "gui", "firefox", "chrome")):
+                    plane = "gui"
+                else:
+                    plane = "headless"
+
             sub_missions.append(SubMission(
+                id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
                 goal=goal,
+                plane=plane,
+                depends_on=depends_on,
                 max_steps=max(1, min(requested_steps, 8)),
                 priority=max(0, int(sm.get("priority", 1) or 1)),
                 process_mode=process_mode,
@@ -980,7 +1014,7 @@ Rules:
                 or (succeeded > 0 and total == 1)
             )
 
-            return SubMissionResult(
+            sub_result = SubMissionResult(
                 sub_mission_id=sub_mission.id,
                 goal=sub_mission.goal,
                 traces=traces,
@@ -989,12 +1023,31 @@ Rules:
                 key_discoveries=key_discoveries,
                 actions_taken=total,
                 duration_seconds=duration,
-                evidence_verified=any(
-                    str(_trace_value(t, "status", "")) == "VERIFIED"
-                    for t in traces
-                ),
+                evidence_verified=False,
                 status="SUCCESS" if is_successful else "FAILED",
             )
+
+            # Independent Judge Agent evaluation (Anti-Self-Attestation)
+            if hasattr(self, "judge") and self.judge:
+                try:
+                    judge_eval = await self.judge.evaluate_sub_mission(
+                        workspace_id=workspace_id,
+                        sub_mission=sub_mission,
+                        result=sub_result,
+                        worker_agent_id=sub_agent_id,
+                    )
+                    sub_result.judge_verdict = judge_eval.verdict.value
+                    sub_result.judge_notes = judge_eval.notes
+                    if judge_eval.verdict == JudgeVerdict.CONFIRMED:
+                        sub_result.evidence_verified = True
+                    elif judge_eval.verdict == JudgeVerdict.FALSIFIED:
+                        sub_result.evidence_verified = False
+                        sub_result.success = False
+                        sub_result.status = "FAILED"
+                except Exception as judge_err:
+                    logger.warning("boss_judge_evaluation_failed", error=str(judge_err))
+
+            return sub_result
 
         except Exception as e:
             logger.warning(
@@ -1260,6 +1313,8 @@ Rules:
     @staticmethod
     def _result_has_verified_trace(result: SubMissionResult) -> bool:
         """Recognize independently observed, successful sandbox evidence."""
+        if getattr(result, "judge_verdict", "") == "FALSIFIED" or getattr(result, "status", "") in ("FAILED", "BLOCKED"):
+            return False
         for trace in result.traces:
             explicit_evidence = getattr(trace, "verification_evidence", None)
             if explicit_evidence is None and isinstance(trace, dict):
@@ -1268,9 +1323,17 @@ Rules:
             if status is None and isinstance(trace, dict):
                 status = trace.get("status")
             status_text = str(status or "").upper()
+            exit_code = getattr(trace, "exit_code", None)
+            if exit_code is None and isinstance(trace, dict):
+                exit_code = trace.get("exit_code")
+            obs = getattr(trace, "actual_observation", None) or getattr(trace, "observation", None)
+            if obs is None and isinstance(trace, dict):
+                obs = trace.get("actual_observation") or trace.get("observation")
             if (
                 status_text == "VERIFIED"
                 and str(explicit_evidence or "").strip()
+                and (exit_code is None or exit_code == 0)
+                and bool(str(obs or "").strip())
             ):
                 return True
         return False
@@ -1313,7 +1376,10 @@ Respond with EXACTLY this JSON format:
   "phase_name": "Short name for this phase",
   "sub_missions": [
     {{
+      "id": "sub-1",
       "goal": "Specific goal for this worker",
+      "plane": "headless",
+      "depends_on": [],
       "max_steps": 4,
       "priority": 1
     }}
@@ -1364,8 +1430,17 @@ If the objective is complete or no more work is needed, return:
                 priority = max(0, int(sm.get("priority", 1) or 1))
             except (TypeError, ValueError):
                 priority = 1
+            plane = str(sm.get("plane", "headless")).lower()
+            if plane not in ("headless", "gui"):
+                plane = "headless"
+            raw_deps = sm.get("depends_on", [])
+            depends_on = [str(x).strip() for x in raw_deps if str(x).strip()] if isinstance(raw_deps, list) else []
+            sub_id = str(sm.get("id") or "").strip()
             sub_missions.append(SubMission(
+                id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
                 goal=goal,
+                plane=plane,
+                depends_on=depends_on,
                 max_steps=max(1, min(requested_steps, 8)),
                 priority=priority,
             ))
@@ -1393,34 +1468,6 @@ If the objective is complete or no more work is needed, return:
     ) -> BossReport:
         """Generate the final comprehensive report."""
         total_actions = sum(len(r.traces) for p in self.phases for r in p.results)
-        all_findings = self._collect_all_findings()
-
-        # LLM synthesis of final summary
-        final_summary = ""
-        try:
-            from sonic.llm.schemas import LLMRequest, Message, MessageRole
-
-            req = LLMRequest(
-                messages=[
-                    Message(role=MessageRole.SYSTEM, content="You are a Boss Agent creating a final report. Summarize all findings clearly and comprehensively."),
-                    Message(role=MessageRole.USER, content=f"Objective: {objective}\n\nAll findings:\n{all_findings[:3000]}\n\nCreate a clear, structured final summary answering the user's objective."),
-                ],
-                task_type="reasoning",
-                max_tokens=600,
-                temperature=0.2,
-            )
-            resp = await self.llm_router.complete(req)
-            final_summary = (resp.content or "").strip()
-        except Exception:
-            final_summary = all_findings[:1000]
-
-        self.thinking_log.append(BossThinking(
-            phase=len(self.phases),
-            thinking_type="final_synthesis",
-            content=final_summary,
-            duration_seconds=0.0,
-        ))
-
         # Determine status
         replay_metrics = evaluate_traces(self.all_traces)
         any_success = any(
@@ -1441,6 +1488,57 @@ If the objective is complete or no more work is needed, return:
             status = "PARTIAL"
         else:
             status = "INCOMPLETE"
+
+        all_findings = self._collect_all_findings()
+
+        # LLM synthesis of final summary (strictly empirically grounded)
+        final_summary = ""
+        if not any_success:
+            failed_goals = [
+                f"- {r.goal}: {r.findings_summary or 'Execution failed'}"
+                for p in self.phases for r in p.results
+            ]
+            final_summary = (
+                f"Objective execution incomplete. No sub-missions achieved verified success.\n"
+                f"Sub-mission execution diagnostics:\n" + ("\n".join(failed_goals[:10]) if failed_goals else "No sub-missions executed.")
+            )
+        else:
+            try:
+                from sonic.llm.schemas import LLMRequest, Message, MessageRole
+
+                req = LLMRequest(
+                    messages=[
+                        Message(
+                            role=MessageRole.SYSTEM,
+                            content=(
+                                "You are a Boss Agent creating an empirical final report. "
+                                "CRITICAL MANDATE: Only summarize actions and findings that ACTUALLY succeeded with verified evidence. "
+                                "NEVER claim a file or directory was created if its execution failed. "
+                                "NEVER use bracketed placeholders like '[Insert ...]'. Be strictly factual and concise."
+                            ),
+                        ),
+                        Message(
+                            role=MessageRole.USER,
+                            content=f"Objective: {objective}\n\nVerified findings:\n{all_findings[:3000]}\n\nSummarize all verified findings clearly and comprehensively.",
+                        ),
+                    ],
+                    task_type="reasoning",
+                    max_tokens=600,
+                    temperature=0.2,
+                )
+                resp = await self.llm_router.complete(req)
+                final_summary = (resp.content or "").strip()
+                if "[Insert" in final_summary:
+                    final_summary = re.sub(r"\[Insert[^\]]*\]", "Not verified", final_summary)
+            except Exception:
+                final_summary = all_findings[:1000]
+
+        self.thinking_log.append(BossThinking(
+            phase=len(self.phases),
+            thinking_type="final_synthesis",
+            content=final_summary,
+            duration_seconds=0.0,
+        ))
 
         return BossReport(
             objective=objective,

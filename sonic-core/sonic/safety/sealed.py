@@ -173,6 +173,9 @@ class SealedActionPolicy(ActionPolicy):
             _seal_secret=self._seal_secret,
             auto_seal=False,
         )
+        object.__setattr__(cloned, "_blocked_networks_snapshot", self._blocked_networks_snapshot)
+        object.__setattr__(cloned, "_scope_checker_rules", list(self._scope_checker_rules))
+        object.__setattr__(cloned, "_scope_checker_methods", list(self._scope_checker_methods))
         object.__setattr__(cloned, "_seal_secret", self._seal_secret)
         object.__setattr__(cloned, "_seal_hash", self._seal_hash)
         object.__setattr__(cloned, "_sealed", self._sealed)
@@ -231,18 +234,22 @@ class SealedActionPolicy(ActionPolicy):
         target_resource: str,
         payload: dict[str, Any] | None = None,
     ) -> PolicyVerdict:
-        if self._sealed:
-            current_hash = self._compute_seal_hash()
-            if current_hash != self._seal_hash:
-                logger.error(
-                    "safety_policy_tampered",
-                    expected=self._seal_hash,
-                    computed=current_hash,
-                )
-                return PolicyVerdict(
-                    False,
-                    "safety policy integrity check failed: seal mismatch (policy was tampered)",
-                )
+        if not getattr(self, "_sealed", False) or not getattr(self, "_seal_hash", ""):
+            return PolicyVerdict(
+                False,
+                "safety policy integrity check failed: unsealed policy in sealed context",
+            )
+        current_hash = self._compute_seal_hash()
+        if not hmac.compare_digest(current_hash, self._seal_hash):
+            logger.error(
+                "safety_policy_tampered",
+                expected=self._seal_hash,
+                computed=current_hash,
+            )
+            return PolicyVerdict(
+                False,
+                "safety policy integrity check failed: seal mismatch (policy was tampered)",
+            )
         return super().evaluate(action_type, target_resource, payload)
 
     def _clone(self) -> SealedActionPolicy:

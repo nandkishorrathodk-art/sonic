@@ -252,7 +252,16 @@ def compose_system_prompt(
     extra_clauses: tuple[str, ...] = (),
 ) -> str:
     """Identity + role body + shared honesty/safety + optional JSON contract."""
-    parts: list[str] = [asea_identity(role), "", body.strip(), "", HONESTY_CLAUSE, SAFETY_CLAUSE, AUTHORIZED_BENCHMARK_CLAUSE]
+    parts: list[str] = [
+        asea_identity(role),
+        "",
+        body.strip(),
+        "",
+        HONESTY_CLAUSE,
+        SAFETY_CLAUSE,
+        AUTHORIZED_BENCHMARK_CLAUSE,
+        UNIVERSAL_ANTI_BYPASS_CLAUSE,
+    ]
     parts.extend(extra_clauses)
     if json_schema:
         parts.append(JSON_ONLY_CLAUSE)
@@ -473,7 +482,7 @@ CORE BEHAVIOR:
 2. NO FORCED SECURITY DEMANDS: You are a general-purpose workstation assistant. Do NOT demand target IPs, scope documents, or penetration test targets unless the user specifically asks for security testing.
 3. GROUNDED IN REALITY: Cite only what is actually visible on your screen or in real terminal outputs. Never fabricate outputs or pretend to run actions you haven't executed.
 4. LANGUAGE: Always respond in the user's preferred language (Hindi, Hinglish, English, etc.).
-"""
+""" + UNIVERSAL_ANTI_BYPASS_CLAUSE
 
 
 def react_system_prompt(tools_section: str, max_iterations: int, context: str, task_description: str) -> str:
@@ -502,6 +511,7 @@ Final Answer: <your complete structured answer as JSON>
 5. Maximum {max_iterations} iterations allowed.
 6. {HONESTY_CLAUSE}
 7. {SAFETY_CLAUSE}
+8. {UNIVERSAL_ANTI_BYPASS_CLAUSE}
 {ctx}
 ## Task
 {task_description}
@@ -519,7 +529,7 @@ def curiosity_system_prompt(pivot_note: str = "") -> str:
         "already know. Prefer goals that expose a gap no existing tool or known "
         "technique covers (a candidate for the Toolsmith or Method Lab). "
         f"{pivot_note}"
-        f"{HONESTY_CLAUSE} "
+        f"{HONESTY_CLAUSE} {UNIVERSAL_ANTI_BYPASS_CLAUSE} "
         "Respond in EXACTLY this format (no markdown):\n"
         "GOAL: <one concrete, self-directed exploratory goal>\n"
         "RATIONALE: <why this is the most informative thing to learn now>"
@@ -534,7 +544,7 @@ def toolsmith_system_prompt(existing_str: str) -> str:
         "propose ONE small, self-contained Python 3 tool (a scanner / "
         "fuzzer / parser / probe) that fills a gap NO existing tool covers. "
         f"Existing tools (do NOT duplicate any of these): {existing_str}. "
-        f"{HONESTY_CLAUSE} {SAFETY_CLAUSE} "
+        f"{HONESTY_CLAUSE} {SAFETY_CLAUSE} {UNIVERSAL_ANTI_BYPASS_CLAUSE} "
         "The tool must be non-destructive (no destructive operations like rm -rf, DROP). "
         "Output EXACTLY:\n"
         "NAME: <lowercase snake_case identifier, not in existing>\n"
@@ -558,7 +568,7 @@ def method_lab_system_prompt(known_str: str) -> str:
         "argv[1] and prints one JSON finding per line to stdout when the "
         "technique works. "
         f"KNOWN TECHNIQUES (do NOT re-invent these):\n{known_str}\n"
-        f"{HONESTY_CLAUSE} {SAFETY_CLAUSE} "
+        f"{HONESTY_CLAUSE} {SAFETY_CLAUSE} {UNIVERSAL_ANTI_BYPASS_CLAUSE} "
         "The probe must be non-destructive. "
         "Output EXACTLY:\n"
         "NAME: <lowercase snake_case identifier>\n"
