@@ -653,8 +653,20 @@ class EvolutionGoalDirector:
             target_files,
             max_attempts=self.patch_max_attempts,
             test_paths=self.test_paths,
-            failure_digest=failure_digest,
+            failure_digest=failure_digest or self._feedback_for(goal),
         )
+
+    @staticmethod
+    def _feedback_for(goal: EvolutionGoal) -> str:
+        """Feed a previous attempt's real failure back to the LLM.
+
+        On a retry (attempts > 1) the goal's notes hold the concrete failure
+        (usually the pytest output), so the model can fix the actual error
+        instead of re-emitting the same wrong patch. First attempts get nothing.
+        """
+        if getattr(goal, "attempts", 0) and goal.attempts > 1 and goal.notes:
+            return str(goal.notes)[:3000]
+        return ""
 
     def _resolve_llm(self) -> Any:
         """Resolve a Model Router lazily so the coder works even in the being loop."""

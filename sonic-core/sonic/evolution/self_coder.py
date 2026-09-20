@@ -3,10 +3,15 @@ SONIC — Autonomous Self-Coder (closed-loop codebase self-improvement)
 =====================================================================
 
 This is the engine that makes SONIC behave like an autonomous AI coder (Codex /
-Claude-Code style) on its **own** non-safety source tree, without a human
-approving each step:
+Claude-Code style) on its **own** non-safety source tree:
 
-    observe  ->  decide  ->  write a real patch  ->  verify  ->  commit  ->  report
+    observe  ->  decide  ->  write a real patch  ->  verify  ->  report
+
+Default posture is **REPORT-ONLY**: the coder verifies the change it proposes
+(AST, tests, security regression) on a scratch copy, then rolls the tree back to
+exactly its previous state and writes a report describing what it found and what
+it would fix. It never commits and never leaves a modified file behind unless the
+operator explicitly passes ``allow_writes=True``.
 
 Unlike the old evolution queue (which only ran from a manual CLI and, when it
 ran, appended a timestamp comment), this loop:
@@ -86,6 +91,10 @@ class SelfCoderCycle:
     patch_files: list[str] = field(default_factory=list)
     lines_added: int = 0
     lines_removed: int = 0
+    # The real unified diff the coder wrote and verified (for the operator).
+    proposed_diff: str = ""
+    # What happened to the tree: "rolled_back" (report-only) or "committed"/"left".
+    tree_action: str = "rolled_back"
 
 
 @dataclass
@@ -97,12 +106,12 @@ class SelfCoderReport:
 
     def to_text(self) -> str:
         lines = [
-            "# 🧬 SONIC Self-Coder — autonomous improvement report",
+            "# 🧬 SONIC Self-Coder — codebase report (report-only by default)",
             "",
             f"- Started:  `{self.started_at}`",
             f"- Finished: `{self.finished_at or _now()}`",
             f"- Cycles:   {len(self.cycles)}",
-            f"- Changed:  {'yes ✅' if self.changed else 'no'}",
+            f"- Writes committed: {'yes' if self.changed else 'no (report-only)'}",
             "",
         ]
         for i, c in enumerate(self.cycles, 1):
@@ -110,15 +119,22 @@ class SelfCoderReport:
             if c.target_file:
                 lines.append(f"- Target: `{c.target_file}`")
             lines.append(f"- Outcome: **{c.stage}**" + (f" (v{c.version_after})" if c.version_after else ""))
+            lines.append(f"- Tree: {c.tree_action}")
             if c.commit_hash:
                 lines.append(f"- Commit: `{c.commit_hash}`")
             if c.patch_files:
                 lines.append(f"- Files: {', '.join(f'`{f}`' for f in c.patch_files)}")
-                lines.append(f"- Diff: `+{c.lines_added} / -{c.lines_removed}`")
+                lines.append(f"- Diff size: `+{c.lines_added} / -{c.lines_removed}`")
             if c.reason:
                 lines.append(f"- Reason: {c.reason}")
             if c.summary:
                 lines.append(f"- Summary: {c.summary}")
+            if c.proposed_diff:
+                lines.append("")
+                lines.append("Proposed fix (verified against tests, then rolled back):")
+                lines.append("```diff")
+                lines.append(c.proposed_diff.strip()[:4000])
+                lines.append("```")
             lines.append("")
         return "\n".join(lines)
 
@@ -135,12 +151,16 @@ class SelfCoder:
         max_cycles: int = 1,
         push: bool = False,
         enabled: bool = True,
+        allow_writes: bool = False,
     ) -> None:
         self.repo_root = Path(repo_root).resolve() if repo_root else self._discover_repo_root()
         self.llm = llm
         self.enabled = enabled
         self.push = push
         self.max_cycles = max_cycles
+        # REPORT-ONLY by default: verify the proposed change, then restore the
+        # tree so nothing is committed and no file is left modified.
+        self.allow_writes = allow_writes
         self.evolver = evolver or CodebaseEvolver(repo_root=self.repo_root)
         self.director = director or EvolutionGoalDirector(
             repo_root=self.repo_root,
@@ -245,6 +265,9 @@ class SelfCoder:
             cycle.reason = "target is a protected safety component"
             return cycle
 
+        # Snapshot the working tree so we can restore it after a report-only run.
+        before = self._tree_fingerprint([target_file])
+
         goal = self.director.submit_goal(
             title=signal[:180],
             description=(
@@ -259,7 +282,9 @@ class SelfCoder:
         cycle.goal_id = goal.goal_id
 
         report = await self.director.execute_goal(
-            goal.goal_id, auto_promote=True, push=self.push,
+            goal.goal_id,
+            auto_promote=bool(self.allow_writes),
+            push=self.push,
             test_paths=self._test_paths_for(target_file),
         )
         cycle.stage = report.stage.value
@@ -268,14 +293,48 @@ class SelfCoder:
         cycle.lines_removed = report.lines_removed
         if report.files_affected:
             cycle.patch_files = list(report.files_affected)
-        if report.stage == EvolutionStage.PROMOTED:
+        # Attach the real diff the coder produced (from the verified proposal).
+        proposal = getattr(self.director, "last_patch_proposal", None)
+        if proposal is not None and getattr(proposal, "diff", ""):
+            cycle.proposed_diff = proposal.diff
+        if self.allow_writes and report.stage == EvolutionStage.PROMOTED:
             cycle.commit_hash = report.git_commit_hash
+            cycle.tree_action = "committed"
             g = self.director.get_goal(goal.goal_id)
             if g and g.version_after:
                 cycle.version_after = g.version_after
         else:
-            cycle.reason = (report.error_reason or "gate did not pass")[:400]
+            if report.stage != EvolutionStage.PROMOTED:
+                cycle.reason = (report.error_reason or "gate did not pass")[:400]
+            # Report-only: put the tree back exactly as it was.
+            self._restore_tree(before)
+            cycle.tree_action = "rolled_back"
         return cycle
+
+    # ------------------------------------------------------------------
+    def _tree_fingerprint(self, files: list[str]) -> dict[str, str | None]:
+        """Capture current content of the given files (None = did not exist)."""
+        snap: dict[str, str | None] = {}
+        for rel in files:
+            p = (self.repo_root / rel).resolve()
+            try:
+                snap[rel] = p.read_text(encoding="utf-8", errors="replace") if p.exists() else None
+            except Exception:
+                snap[rel] = None
+        return snap
+
+    def _restore_tree(self, snap: dict[str, str | None]) -> None:
+        """Restore files to their snapshotted content (report-only guarantee)."""
+        for rel, content in snap.items():
+            p = (self.repo_root / rel).resolve()
+            try:
+                if content is None:
+                    if p.exists():
+                        p.unlink()
+                else:
+                    p.write_text(content, encoding="utf-8")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("self_coder_restore_failed", file=rel, error=str(exc))
 
     def _test_paths_for(self, target_file: str) -> list[str] | None:
         """Pick the causal test subset for the changed file (best-effort).

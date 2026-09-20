@@ -245,10 +245,103 @@ def test_self_coder_end_to_end_commits_a_real_change(repo: Path, tmp_path: Path)
     coder = SelfCoder(repo_root=repo, llm=llm, evolver=evolver, director=director)
     report = asyncio.run(coder.run(max_cycles=1))
 
+    # report-only by default: the change is verified (awaiting_approval) but the tree is restored.
+    assert report.changed is False
+    assert report.cycles and report.cycles[0].stage in ("promoted", "awaiting_approval")
+    assert report.cycles[0].stage != "rolled_back"
+    assert report.cycles[0].tree_action == "rolled_back"
+    assert report.cycles[0].proposed_diff
+    # The source file must be exactly as it was before the run.
+    assert (repo / "sonic-core" / "sonic" / "agents" / "widget.py").read_text() == (
+        "def total(items):\n    # TODO: ignore None entries\n    return sum(items)\n"
+    )
+
+
+def test_self_coder_allow_writes_commits(repo: Path, tmp_path: Path):
+    """With allow_writes=True the verified change is committed locally."""
+    db = str(tmp_path / "evo.db")
+    (repo / "sonic-core" / "tests" / "test_widget.py").write_text(
+        "from sonic.agents.widget import total\n\n"
+        "def test_total_ignores_none():\n"
+        "    assert total([1, None, 2]) == 3\n",
+        encoding="utf-8",
+    )
+    (repo / "sonic-core" / "sonic" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "sonic-core" / "sonic" / "agents" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "sonic-core" / "tests" / "test_p0_security_hardening.py").write_text(
+        "def test_safety_present():\n    assert True\n", encoding="utf-8"
+    )
+    (repo / "conftest.py").write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent / 'sonic-core'))\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "add tests")
+    (repo / "sonic-core" / "sonic" / "agents" / "widget.py").write_text(
+        "def total(items):\n    # TODO: ignore None entries\n    return sum(items)\n", encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "todo")
+
+    from sonic.evolution.evolution_journal import EvolutionJournal
+    from sonic.evolution.goal_director import EvolutionGoalDirector
+    from sonic.evolution.version_tracker import VersionTracker
+
+    vtracker = VersionTracker(db_path=db, repo_root=repo)
+    journal = EvolutionJournal(db_path=db, repo_root=repo)
+    evolver = CodebaseEvolver(repo_root=repo)
+    director = EvolutionGoalDirector(
+        repo_root=repo, db_path=db, evolver=evolver,
+        version_tracker=vtracker, journal=journal,
+        test_paths=["sonic-core/tests/test_widget.py"],
+    )
+    llm = _StubLLM([
+        "```diff\ndiff --git a/sonic-core/sonic/agents/widget.py b/sonic-core/sonic/agents/widget.py\n"
+        "--- a/sonic-core/sonic/agents/widget.py\n"
+        "+++ b/sonic-core/sonic/agents/widget.py\n"
+        "@@ -1,3 +1,2 @@\n def total(items):\n-    # TODO: ignore None entries\n-    return sum(items)\n"
+        "+    return sum(i for i in items if i is not None)\n```"
+    ])
+    coder = SelfCoder(repo_root=repo, llm=llm, evolver=evolver, director=director, allow_writes=True)
+    report = asyncio.run(coder.run(max_cycles=1))
     assert report.changed is True
-    assert report.cycles and report.cycles[0].stage == "promoted"
+    assert report.cycles[0].tree_action == "committed"
     assert "is not None" in (repo / "sonic-core" / "sonic" / "agents" / "widget.py").read_text()
-    assert report.cycles[0].commit_hash
+
+
+def test_auditor_is_read_only_and_finds_defects(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / "sonic-core" / "sonic" / "x").mkdir(parents=True)
+    (repo / "configs").mkdir(parents=True)
+    (repo / "configs" / "safety_rules.yaml").write_text("kill_switch:\n  enabled: true\n", encoding="utf-8")
+    (repo / "configs" / "models.yaml").write_text("default_provider: x\n", encoding="utf-8")
+    bad = (
+        "def f(x=[]):\n"
+        "    try:\n"
+        "        return x\n"
+        "    except:\n"
+        "        pass\n"
+        "\ndef g(s):\n"
+        "    return eval(s)  # FIXME: unsafe\n"
+    )
+    (repo / "sonic-core" / "sonic" / "x" / "evil.py").write_text(bad, encoding="utf-8")
+
+    from sonic.evolution.codebase_auditor import CodebaseAuditor
+    from sonic.evolution.codebase_report import narrate
+
+    auditor = CodebaseAuditor(repo_root=repo, source_roots=("sonic-core/sonic",))
+    report = auditor.audit(run_tests=False)
+    kinds = {f.kind for f in report.findings}
+    assert "bare_except" in kinds
+    assert "dynamic_exec" in kinds
+    assert "mutable_default" in kinds
+    assert "todo_marker" in kinds
+    # Read-only: the defective file is unchanged.
+    assert (repo / "sonic-core" / "sonic" / "x" / "evil.py").read_text() == bad
+    text = narrate(report)
+    assert "Sir," in text
+    assert "did not commit" in text.lower() or "nothing was committed" in text.lower()
 
 
 def test_self_coder_reports_no_change_when_llm_declines(repo: Path, tmp_path: Path):

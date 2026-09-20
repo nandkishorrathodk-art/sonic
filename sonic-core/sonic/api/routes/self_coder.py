@@ -47,6 +47,30 @@ class SelfCoderRunRequest(BaseModel):
     push: bool = False
 
 
+@router.get("/audit")
+async def self_coder_audit(
+    run_tests: bool = Query(False),
+    limit: int = Query(60, ge=1, le=200),
+    user: User = Depends(require_operator),
+):
+    """Read-only codebase audit: health, static defects, optionally the tests."""
+    from sonic.evolution.codebase_auditor import CodebaseAuditor
+    from sonic.evolution.codebase_report import narrate
+
+    auditor = CodebaseAuditor(max_findings=limit)
+    report = auditor.audit(run_tests=run_tests)
+    return {
+        "ok": report.ok,
+        "files_scanned": report.files_scanned,
+        "counts": report.counts(),
+        "health": report.health,
+        "tests": report.tests,
+        "findings": [f.__dict__ for f in report.sorted_findings()],
+        "narrative": narrate(report),
+        "text": report.to_text(),
+    }
+
+
 @router.get("/signals")
 async def self_coder_signals(
     limit: int = Query(20, ge=1, le=100),

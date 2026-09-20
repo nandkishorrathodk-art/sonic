@@ -90,9 +90,14 @@ def build_parser() -> argparse.ArgumentParser:
     # Command: status
     subparsers.add_parser("status", help="Show self-evolution engine safety status, protected components, and evolution.md path")
 
-    selfcoder_parser = subparsers.add_parser("selfcode", help="Run the autonomous self-coder on SONIC's own source")
+    selfcoder_parser = subparsers.add_parser("selfcode", help="Inspect SONIC's own source and verify fixes (report-only by default)")
     selfcoder_parser.add_argument("--cycles", type=int, default=1, help="Maximum improvement cycles to run")
     selfcoder_parser.add_argument("--push", action="store_true", default=False, help="Git push to origin after a successful commit")
+    selfcoder_parser.add_argument("--write", action="store_true", default=False, help="Apply + commit the verified change (default is report-only)")
+
+    audit_parser = subparsers.add_parser("audit", help="Read-only full-codebase check: health, defects, failing tests")
+    audit_parser.add_argument("--no-tests", action="store_true", default=False, help="Skip running the test suite")
+    audit_parser.add_argument("--limit", type=int, default=60, help="Maximum findings to report")
 
     return parser
 
@@ -126,16 +131,35 @@ def main() -> int:
         journal=journal,
     )
 
+    if args.command == "audit":
+        from sonic.evolution.codebase_auditor import CodebaseAuditor
+        from sonic.evolution.codebase_report import narrate
+
+        auditor = CodebaseAuditor(repo_root=evolver.repo_root, max_findings=max(1, args.limit))
+        audit_report = auditor.audit(run_tests=not args.no_tests)
+        print(narrate(audit_report))
+        print()
+        print(audit_report.to_text())
+        return 0
+
     if args.command == "selfcode":
         import asyncio as _asyncio
 
+        from sonic.evolution.codebase_auditor import CodebaseAuditor
+        from sonic.evolution.codebase_report import narrate
         from sonic.evolution.self_coder import SelfCoder
 
+        # Always look at the codebase first, then propose/verify fixes.
+        auditor = CodebaseAuditor(repo_root=evolver.repo_root)
+        audit_report = auditor.audit(run_tests=False)
         coder = SelfCoder(repo_root=evolver.repo_root, evolver=evolver, director=director,
-                          max_cycles=max(1, args.cycles), push=args.push)
+                          max_cycles=max(1, args.cycles), push=args.push,
+                          allow_writes=bool(args.write))
         report = _asyncio.run(coder.run(max_cycles=max(1, args.cycles)))
         print(report.to_text())
-        return 0 if not report.changed or all(c.stage != "error" for c in report.cycles) else 2
+        print()
+        print(narrate(audit_report, cycles=report.cycles))
+        return 0
 
     if args.command == "status":
         print("=" * 70)

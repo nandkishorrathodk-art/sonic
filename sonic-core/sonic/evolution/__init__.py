@@ -1,6 +1,8 @@
 """SONIC v2 — Self-Evolution & Method Lab Engine."""
 
+from sonic.evolution.codebase_auditor import AuditFinding, AuditReport, CodebaseAuditor
 from sonic.evolution.codebase_evolver import CodebaseEvolver, EvolutionSummaryReport
+from sonic.evolution.codebase_report import narrate
 from sonic.evolution.engine import EvolutionEngine
 from sonic.evolution.evolution_journal import EvolutionJournal, JournalEntry
 from sonic.evolution.goal_director import (
@@ -22,6 +24,10 @@ from sonic.evolution.version_tracker import VersionRecord, VersionTracker
 
 __all__ = [
     "CodebaseEvolver",
+    "CodebaseAuditor",
+    "AuditFinding",
+    "AuditReport",
+    "narrate",
     "EvolutionEngine",
     "EvolutionGoal",
     "EvolutionGoalDirector",
