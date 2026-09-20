@@ -25,23 +25,19 @@ SecurityToolRegistry, AuthoredToolAdapter, and ActionPolicy gate run.
 from __future__ import annotations
 
 import asyncio
-import tempfile
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
 from sonic.being.craft import BeingCraft
 from sonic.being.toolsmith import (
     AuthoredTool,
-    AuthoredToolAdapter,
     ToolsmithLoop,
 )
 from sonic.safety.action_policy import ActionPolicy
 from sonic.sandbox.provider import ExecResult
 from sonic.tools.base import ToolRequest
 from sonic.tools.registry import SecurityToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -218,7 +214,11 @@ def test_safety_policy_allows_tool_author_action():
     policy = ActionPolicy(workspace_root="/home/sonic/workspace")
     v = policy.evaluate("TOOL_AUTHOR", "observation gap", {"observation": "x"})
     assert v.allowed, f"TOOL_AUTHOR should be allowed: {v.reason}"
-    v2 = policy.evaluate("TOOL_RUN", "header_scan", {"tool": "header_scan"})
+    v2 = policy.evaluate(
+        "TOOL_RUN",
+        "header_scan",
+        {"tool": "header_scan", "target": "198.51.100.1"},
+    )
     assert v2.allowed, f"TOOL_RUN should be allowed: {v2.reason}"
 
 
@@ -312,7 +312,7 @@ def test_agent_tool_run_without_toolsmith_registry(craft):
         workspace_id="ws",
         action_type=ComputerActionType.TOOL_RUN,
         target_resource="custom_scanner",
-        payload={"tool": "custom_scanner"},
+        payload={"tool": "custom_scanner", "target": "198.51.100.1"},
         predicted_outcome="tool confirmed",
     ))
     assert tool.name in agent.security_tools
@@ -365,6 +365,7 @@ def test_agent_author_tool_programmatic(craft, registry):
         observation="need direct api scanner",
         name="api_scanner",
         source="import sys, json\nprint(json.dumps({'finding': 'direct_verified'}))\n",
+        target="198.51.100.1",
         auto_verify=True,
     ))
     assert success is True
@@ -391,6 +392,7 @@ def test_agent_tool_author_auto_verify_action(craft, registry):
             "observation": "need auto probe",
             "name": "auto_probe",
             "source": "import sys, json\nprint(json.dumps({'finding': 'auto_verified'}))\n",
+            "target": "198.51.100.1",
             "auto_verify": True,
         },
         predicted_outcome="tool confirmed",
@@ -456,5 +458,4 @@ def test_reasoning_context_contains_autonomous_tool_authoring_prompt():
     )
     required_prompt = "You have the ability to author your own custom tools, scripts, and probes tailored specifically to this target."
     assert required_prompt in user_prompt or required_prompt in sys_prompt
-
 

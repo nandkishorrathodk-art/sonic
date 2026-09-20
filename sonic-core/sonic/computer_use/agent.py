@@ -1814,28 +1814,9 @@ class ComputerUseAgent:
                     _GOAL_COMPLETE_SENTINEL,
                 )
 
-            # Check for markdown code blocks or explicit shell commands in text
-            m_code = re.search(r'```(?:bash|sh|shell)?\s*\n?([^\n`]+)', parse_target_text)
-            if m_code:
-                cmd_cand = m_code.group(1).strip()
-                if cmd_cand:
-                    return (
-                        ComputerActionType.TERMINAL_EXEC,
-                        cmd_cand.split()[0],
-                        {"command": cmd_cand},
-                        f"Execute {cmd_cand}",
-                    )
-
-            m_cmd_quote = re.search(r'(?:execute|run|use)\s+(?:the\s+)?`([^`]+)`', parse_target_text, re.IGNORECASE)
-            if m_cmd_quote:
-                cmd_cand = m_cmd_quote.group(1).strip()
-                if cmd_cand and not cmd_cand.endswith((".py", ".sh", ".json")):
-                    return (
-                        ComputerActionType.TERMINAL_EXEC,
-                        cmd_cand.split()[0],
-                        {"command": cmd_cand},
-                        f"Execute {cmd_cand}",
-                    )
+            # Free-form prose is never executable. Terminal actions must be
+            # supplied through the explicit ACTION/TARGET/PAYLOAD schema so
+            # observations cannot smuggle shell text into the control plane.
 
         default_action = "TERMINAL_EXEC"
         raw_action = fields.get("ACTION", default_action).upper()
@@ -3620,26 +3601,30 @@ class ComputerUseAgent:
                             f"run TOOL_RUN to verify): {authored.rationale}"
                         )
                         if payload.get("auto_verify") or payload.get("run"):
-                            target = payload.get("target") or getattr(authored, "target", None)
-                            confirmed = await self.toolsmith.confirm_and_register(
-                                authored, self.computer, workspace_id, target=target,
-                            )
-                            if confirmed.reproduced:
-                                adapter = self.toolsmith.registry.get(confirmed.name) if getattr(self.toolsmith, "registry", None) else None
-                                if adapter is None:
-                                    from sonic.being.toolsmith import AuthoredToolAdapter
-                                    adapter = AuthoredToolAdapter(confirmed, self.computer)
-                                self.security_tools[confirmed.name] = adapter
-                                actual_obs_str = (
-                                    f"Tool '{confirmed.name}' CONFIRMED and registered "
-                                    f"(exit={confirmed.run_exit_code})"
-                                )
-                            else:
-                                actual_obs_str = (
-                                    f"Tool '{confirmed.name}' NOT confirmed "
-                                    f"(exit={confirmed.run_exit_code}); not registered"
-                                )
+                            target = payload.get("target")
+                            if not target:
+                                actual_obs_str = "TOOL_RUN requires an explicit target"
                                 recovery_needed = True
+                            else:
+                                confirmed = await self.toolsmith.confirm_and_register(
+                                    authored, self.computer, workspace_id, target=target,
+                                )
+                                if confirmed.reproduced:
+                                    adapter = self.toolsmith.registry.get(confirmed.name) if getattr(self.toolsmith, "registry", None) else None
+                                    if adapter is None:
+                                        from sonic.being.toolsmith import AuthoredToolAdapter
+                                        adapter = AuthoredToolAdapter(confirmed, self.computer)
+                                    self.security_tools[confirmed.name] = adapter
+                                    actual_obs_str = (
+                                        f"Tool '{confirmed.name}' CONFIRMED and registered "
+                                        f"(exit={confirmed.run_exit_code})"
+                                    )
+                                else:
+                                    actual_obs_str = (
+                                        f"Tool '{confirmed.name}' NOT confirmed "
+                                        f"(exit={confirmed.run_exit_code}); not registered"
+                                    )
+                                    recovery_needed = True
 
             elif action_type == ComputerActionType.TOOL_RUN:
                 # Run a previously-authored tool in-sandbox and register it into
@@ -3657,27 +3642,31 @@ class ComputerUseAgent:
                         actual_obs_str = f"No authored tool named '{tool_name}' to run"
                         recovery_needed = True
                     else:
-                        target = payload.get("target") or getattr(authored, "target", None)
-                        confirmed = await self.toolsmith.confirm_and_register(
-                            authored, self.computer, workspace_id, target=target,
-                        )
-                        if confirmed.reproduced:
-                            # Make the confirmed tool callable via SECURITY_TOOL.
-                            adapter = self.toolsmith.registry.get(confirmed.name) if getattr(self.toolsmith, "registry", None) else None
-                            if adapter is None:
-                                from sonic.being.toolsmith import AuthoredToolAdapter
-                                adapter = AuthoredToolAdapter(confirmed, self.computer)
-                            self.security_tools[confirmed.name] = adapter
-                            actual_obs_str = (
-                                f"Tool '{confirmed.name}' CONFIRMED and registered "
-                                f"(exit={confirmed.run_exit_code})"
-                            )
-                        else:
-                            actual_obs_str = (
-                                f"Tool '{confirmed.name}' NOT confirmed "
-                                f"(exit={confirmed.run_exit_code}); not registered"
-                            )
+                        target = payload.get("target")
+                        if not target:
+                            actual_obs_str = "TOOL_RUN requires an explicit target"
                             recovery_needed = True
+                        else:
+                            confirmed = await self.toolsmith.confirm_and_register(
+                                authored, self.computer, workspace_id, target=target,
+                            )
+                            if confirmed.reproduced:
+                                # Make the confirmed tool callable via SECURITY_TOOL.
+                                adapter = self.toolsmith.registry.get(confirmed.name) if getattr(self.toolsmith, "registry", None) else None
+                                if adapter is None:
+                                    from sonic.being.toolsmith import AuthoredToolAdapter
+                                    adapter = AuthoredToolAdapter(confirmed, self.computer)
+                                self.security_tools[confirmed.name] = adapter
+                                actual_obs_str = (
+                                    f"Tool '{confirmed.name}' CONFIRMED and registered "
+                                    f"(exit={confirmed.run_exit_code})"
+                                )
+                            else:
+                                actual_obs_str = (
+                                    f"Tool '{confirmed.name}' NOT confirmed "
+                                    f"(exit={confirmed.run_exit_code}); not registered"
+                                )
+                                recovery_needed = True
 
             elif action_type == ComputerActionType.METHOD_INVENT:
                 # Method-invention (Phase B, AIOSR): synthesize a NOVEL
@@ -3697,22 +3686,26 @@ class ComputerUseAgent:
                         actual_obs_str = "MethodLab: no novel technique warranted (honest skip)"
                     else:
                         # Run the probe in-sandbox; confirm only on a real finding.
-                        target = payload.get("target", "") or technique.target_hint
-                        confirmed = await self.method_lab.confirm(
-                            technique, self.computer, workspace_id, target=target,
-                        )
-                        if confirmed.confirmed:
-                            actual_obs_str = (
-                                f"Technique '{confirmed.name}' ({confirmed.family}) "
-                                f"CONFIRMED — {len(confirmed.findings)} finding(s); "
-                                f"novelty={confirmed.novelty_vs_ledger:.2f} vs ledger"
-                            )
-                        else:
-                            actual_obs_str = (
-                                f"Technique '{confirmed.name}' NOT confirmed "
-                                f"(exit={confirmed.run_exit_code}); not added to ledger"
-                            )
+                        target = payload.get("target", "")
+                        if not target:
+                            actual_obs_str = "METHOD_INVENT requires an explicit target"
                             recovery_needed = True
+                        else:
+                            confirmed = await self.method_lab.confirm(
+                                technique, self.computer, workspace_id, target=target,
+                            )
+                            if confirmed.confirmed:
+                                actual_obs_str = (
+                                    f"Technique '{confirmed.name}' ({confirmed.family}) "
+                                    f"CONFIRMED — {len(confirmed.findings)} finding(s); "
+                                    f"novelty={confirmed.novelty_vs_ledger:.2f} vs ledger"
+                                )
+                            else:
+                                actual_obs_str = (
+                                    f"Technique '{confirmed.name}' NOT confirmed "
+                                    f"(exit={confirmed.run_exit_code}); not added to ledger"
+                                )
+                                recovery_needed = True
 
         except Exception as e:
             actual_obs_str = f"Error: {str(e)}"

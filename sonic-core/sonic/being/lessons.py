@@ -129,7 +129,7 @@ def extract_lessons(
         predicted = getattr(t, "predicted_outcome", "") or ""
         actual = getattr(t, "actual_observation", "") or ""
         approach = f"{getattr(action, 'value', action)} on {target}".strip()
-        evidence = (actual or predicted)[:200]
+        evidence = _sanitize_lesson_evidence(actual or predicted)
 
         if status in ("FAILED", "RECOVERED"):
             # RECOVERED means the action FAILED and a generic recovery ran
@@ -160,6 +160,21 @@ def extract_lessons(
             ))
     logger.info("lessons_extracted", count=len(lessons), goal=goal[:80])
     return lessons
+
+
+def _sanitize_lesson_evidence(value: Any) -> str:
+    """Keep historical evidence factual without persisting executable prose."""
+    text = " ".join(str(value or "").split()).replace("`", "")
+    if not text:
+        return ""
+    instruction_markers = (
+        "ignore previous", "ignore the rules", "system message",
+        "assistant:", "developer:", "run ", "execute ", "use ",
+        "curl ", "wget ", "python ", "bash ", "sh ",
+    )
+    if any(marker in text.lower() for marker in instruction_markers):
+        return "[untrusted executable or instruction-like observation omitted]"
+    return text[:200]
 
 
 class LessonsLedger:
@@ -314,11 +329,11 @@ def inject_into_context(lessons: list[Lesson]) -> str:
     if reuses:
         lines.append("Past lessons — approaches that WORKED (reuse them):")
         for l in reuses:
-            lines.append(f"  [REUSE] {l.approach} → {l.evidence}")
+            lines.append(f"  [REUSE] {l.approach} → <untrusted-evidence>{l.evidence}</untrusted-evidence>")
     if avoids:
         lines.append("Past lessons — approaches that FAILED (avoid repeating):")
         for l in avoids:
-            lines.append(f"  [AVOID] {l.approach} → {l.evidence}")
+            lines.append(f"  [AVOID] {l.approach} → <untrusted-evidence>{l.evidence}</untrusted-evidence>")
     return "\n".join(lines) + "\n"
 
 # ---------------------------------------------------------------------------

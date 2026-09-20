@@ -12,8 +12,9 @@ Verifies:
 8. LLM-driven and target-aware goal decomposition
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from sonic.computer.models import ComputerState, GitStatusInfo, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
@@ -21,7 +22,6 @@ from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionType,
     ComputerWorldObservation,
-    SubGoalStatus,
 )
 
 
@@ -557,7 +557,7 @@ def test_parse_llm_action_detects_freeform_goal_completion():
     assert target == "goal-complete"
 
 
-def test_parse_llm_action_extracts_markdown_code_block():
+def test_parse_llm_action_rejects_markdown_code_block():
     text = (
         "To check system hostname and disk space, execute:\n"
         "```bash\n"
@@ -566,7 +566,8 @@ def test_parse_llm_action_extracts_markdown_code_block():
     )
     act_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "README.md")
     assert act_type == ComputerActionType.TERMINAL_EXEC
-    assert payload.get("command") == "hostname && df -h"
+    assert payload.get("command") != "hostname && df -h"
+    assert "Empty command payload" in payload.get("command", "")
 
 
 def test_parse_llm_action_robust_json_with_trailing_commentary():

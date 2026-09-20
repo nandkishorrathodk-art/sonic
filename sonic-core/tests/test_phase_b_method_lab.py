@@ -22,20 +22,17 @@ VectorMemory, ActionPolicy, and ToolsmithLoop run.
 from __future__ import annotations
 
 import asyncio
-import tempfile
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
+from sonic.being.craft import BeingCraft
 from sonic.being.method_lab import InventedTechnique, MethodLab
 from sonic.being.toolsmith import ToolsmithLoop
-from sonic.being.craft import BeingCraft
 from sonic.memory.vector import VectorMemory, reset_vector_memory_singleton
 from sonic.safety.action_policy import ActionPolicy
 from sonic.sandbox.provider import ExecResult
 from sonic.tools.registry import SecurityToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -252,7 +249,11 @@ def test_ledger_stears_next_invention_away(vm, registry):
 def test_safety_policy_allows_method_invent():
     """METHOD_INVENT is in the policy allowlist (not denied as unknown type)."""
     policy = ActionPolicy(workspace_root="/home/sonic/workspace")
-    v = policy.evaluate("METHOD_INVENT", "observation gap", {"observation": "x"})
+    v = policy.evaluate(
+        "METHOD_INVENT",
+        "observation gap",
+        {"observation": "x", "target": "198.51.100.1"},
+    )
     assert v.allowed, f"METHOD_INVENT should be allowed: {v.reason}"
 
 
@@ -298,4 +299,3 @@ def test_method_lab_direct_fallback_rejects_failure_markers(vm, bad_stdout):
     provider = _StubProvider(exit_code=0, stdout=bad_stdout)
     _run(lab.confirm(tech, provider, "ws", target="10.0.0.5"))
     assert tech.confirmed is False
-
