@@ -6,6 +6,8 @@ Executes raw HTTP requests via curl inside the sandbox with full header and timi
 
 from __future__ import annotations
 
+import re
+import shlex
 from typing import Any
 
 from sonic.tools.base import SecurityTool, ToolRequest
@@ -23,26 +25,30 @@ class HTTPClientAdapter(SecurityTool):
         return "curl-8.5"
 
     def build_command(self, request: ToolRequest) -> str:
-        method = request.options.get("method", "GET").upper()
+        raw_method = str(request.options.get("method", "GET")).upper().strip()
+        method = raw_method if re.match(r"^[A-Z]{3,10}$", raw_method) else "GET"
         headers = request.options.get("headers", {})
         data = request.options.get("data")
-        follow_redirects = request.options.get("follow_redirects", True)
+        follow_redirects = bool(request.options.get("follow_redirects", True))
 
+        timeout_sec = max(1, min(300, int(request.timeout_seconds or 30)))
         cmd = [
             "curl", "-i", "-s",
             "-X", method,
-            "--max-time", str(request.timeout_seconds),
+            "--max-time", str(timeout_sec),
         ]
         if follow_redirects:
             cmd.append("-L")
 
-        for k, v in headers.items():
-            cmd.extend(["-H", f"'{k}: {v}'"])
+        if isinstance(headers, dict):
+            for k, v in headers.items():
+                safe_header = f"{str(k).strip()}: {str(v).strip()}"
+                cmd.extend(["-H", shlex.quote(safe_header)])
 
-        if data:
-            cmd.extend(["--data-raw", f"'{data}'"])
+        if data is not None:
+            cmd.extend(["--data-raw", shlex.quote(str(data))])
 
-        cmd.append(f"'{request.target}'")
+        cmd.append(shlex.quote(request.target.strip()))
         return " ".join(cmd)
 
     def parse_output(self, raw_stdout: str, raw_stderr: str) -> list[dict[str, Any]]:

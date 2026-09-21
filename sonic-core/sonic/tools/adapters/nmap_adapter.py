@@ -7,6 +7,7 @@ Executes Nmap inside the ComputeProvider workspace and parses open ports and ser
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 from sonic.tools.base import SecurityTool, ToolRequest
@@ -24,18 +25,32 @@ class NmapAdapter(SecurityTool):
         return "7.94"
 
     def build_command(self, request: ToolRequest) -> str:
-        ports = request.options.get("ports", "top-100")
-        timing = request.options.get("timing", "T4")
-        extra_args = request.options.get("extra_args", "-sV --open")
+        ports = str(request.options.get("ports", "top-100")).strip()
+        timing_raw = str(request.options.get("timing", "T4")).strip().upper()
+        extra_args_raw = str(request.options.get("extra_args", "-sV --open")).strip()
+
+        # Validate timing: T0..T5 or digits 0..5
+        timing = timing_raw if re.match(r"^T?[0-5]$", timing_raw) else "T4"
+        if not timing.startswith("T"):
+            timing = f"T{timing}"
 
         if ports == "top-100":
             port_arg = "--top-ports 100"
         elif ports == "all":
             port_arg = "-p-"
+        elif re.match(r"^[0-9,\-]+$", ports):
+            port_arg = f"-p {shlex.quote(ports)}"
         else:
-            port_arg = f"-p {ports}"
+            port_arg = "--top-ports 100"
 
-        return f"nmap -{timing} {port_arg} {extra_args} '{request.target}'"
+        # Sanitize extra_args by allowlisting valid nmap flag tokens
+        safe_flags = {"-sV", "--open", "-sC", "-sT", "-sU", "-Pn", "-n", "-O", "-v", "-vv", "--version-light", "--version-all"}
+        tokens = shlex.split(extra_args_raw)
+        validated_tokens = [t for t in tokens if t in safe_flags]
+        extra_args = " ".join(validated_tokens) if validated_tokens else "-sV --open"
+
+        safe_target = shlex.quote(request.target.strip())
+        return f"nmap -{timing} {port_arg} {extra_args} {safe_target}"
 
     def parse_output(self, raw_stdout: str, raw_stderr: str) -> list[dict[str, Any]]:
         """Parse text/greppable Nmap output into structured port mappings."""

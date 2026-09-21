@@ -150,7 +150,7 @@ class SecurityTool(ABC):
         elif exec_res.exit_code == 126:
             status = ToolStatus.BLOCKED
             err = exec_res.stderr or "Execution blocked by fail-closed security engine"
-        elif exec_res.exit_code != 0 and not exec_res.stdout:
+        elif exec_res.exit_code != 0:
             status = ToolStatus.FAILED
             err = exec_res.stderr or f"Tool exited with code {exec_res.exit_code}"
         else:

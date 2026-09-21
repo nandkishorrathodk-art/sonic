@@ -163,32 +163,32 @@ class ActionPolicy:
         if action_type_name not in self.allowed_types:
             return PolicyVerdict(False, f"action type not allowed: {action_type_name}")
 
-        # 2. Path confinement for file operations. TOOL_AUTHOR writes its
-        # source under a hardcoded workspace-subdir (toolsmith hardcodes
-        # /home/sonic/workspace/toolsmith/<name>.py), so confinement is
-        # structural ??? it does not need a payload path to validate.
-        if action_type_name == "FILE_WRITE":
+        # 2. Path confinement for file operations, tool authoring, and browser downloads.
+        if action_type_name in ("FILE_WRITE", "FILE_READ", "BROWSER_DOWNLOAD"):
             path = (
                 payload.get("path")
                 or payload.get("file_path")
                 or payload.get("filepath")
                 or payload.get("filename")
+                or payload.get("dest_path")
+                or payload.get("destination")
                 or target
             )
             verdict = self._check_path(path, action_type_name)
             if not verdict.allowed:
                 return verdict
-        elif action_type_name == "FILE_READ":
-            path = (
+        elif action_type_name == "TOOL_AUTHOR":
+            raw_path = (
                 payload.get("path")
                 or payload.get("file_path")
-                or payload.get("filepath")
-                or payload.get("filename")
-                or target
+                or payload.get("dest_path")
+                or payload.get("destination")
+                or (target if str(target).startswith("/") or "/" in str(target) or "\\" in str(target) else None)
             )
-            verdict = self._check_path(path, action_type_name)
-            if not verdict.allowed:
-                return verdict
+            if raw_path:
+                verdict = self._check_path(raw_path, action_type_name)
+                if not verdict.allowed:
+                    return verdict
 
         # 3. Destructive-command gating for terminal execution + tool runs.
         #    TOOL_RUN executes a hardcoded `python <workspace-toolsmith-path>`,

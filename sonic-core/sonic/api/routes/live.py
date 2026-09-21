@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from sonic.auth.middleware import require_admin, require_auth
 from sonic.auth.models import User
+from sonic.api.routes.workstation import _resolve_tenant_id, _tenant_workstations
 from sonic.computer.daytona_computer import DaytonaComputerProvider
 from sonic.computer.models import ComputerProfile, ComputerWorkspaceType
 from sonic.logger import get_logger
@@ -117,9 +118,10 @@ async def get_live_stats(user: User = Depends(require_auth)):
     else:
         mem_stats = {}
 
-    findings = [f for f in _system_state["findings"] if f.get("tenant_id") == user.email]
-    assets = [a for a in _system_state["assets"] if a.get("tenant_id") == user.email]
-    agents = [a for a in _system_state["agents"] if a.get("tenant_id") == user.email]
+    t_id = _resolve_tenant_id(user)
+    findings = [f for f in _system_state["findings"] if f.get("tenant_id") == t_id]
+    assets = [a for a in _system_state["assets"] if a.get("tenant_id") == t_id]
+    agents = [a for a in _system_state["agents"] if a.get("tenant_id") == t_id]
 
     critical = sum(1 for f in findings if f.get("severity", "").upper() == "CRITICAL")
     high = sum(1 for f in findings if f.get("severity", "").upper() == "HIGH")
@@ -259,8 +261,9 @@ async def get_live_graph(user: User = Depends(require_auth)):
         raw_nodes = memory._nodes
         raw_rels = memory._relationships
         nodes = []
+        t_id = _resolve_tenant_id(user)
         for uid, data in raw_nodes.items():
-            if data.get("tenant_id") != user.email:
+            if data.get("tenant_id") != t_id:
                 continue
             label = data.get("_label", "Unknown")
             nodes.append({
@@ -275,20 +278,21 @@ async def get_live_graph(user: User = Depends(require_auth)):
             for r in raw_rels
             if r.get("from_uid") in node_ids and r.get("to_uid") in node_ids
         ]
-        return {"nodes": nodes, "edges": edges, "backend": "InMemoryGraph", "tenant_id": user.email}
+        return {"nodes": nodes, "edges": edges, "backend": "InMemoryGraph", "tenant_id": t_id}
     else:
-        return {"nodes": [], "edges": [], "backend": "Neo4j", "tenant_id": user.email}
+        t_id = _resolve_tenant_id(user)
+        return {"nodes": [], "edges": [], "backend": "Neo4j", "tenant_id": t_id}
 
 
 @router.get("/evidence")
 async def get_live_evidence(user: User = Depends(require_auth)):
     """Retrieve full verified evidence packages."""
-    from sonic.api.routes.workstation import _tenant_workstations
-    findings = [f for f in _system_state["findings"] if f.get("tenant_id") == user.email]
+    t_id = _resolve_tenant_id(user)
+    findings = [f for f in _system_state["findings"] if f.get("tenant_id") == t_id]
 
     # Aggregate session evidence from all workstation sessions
     seen_hashes = {f.get("manifest_hash") or f.get("sha256") for f in findings if (f.get("manifest_hash") or f.get("sha256"))}
-    tenant_sessions = _tenant_workstations.get(user.email, {})
+    tenant_sessions = _tenant_workstations.get(t_id, {})
     for sdata in tenant_sessions.values():
         for ev in sdata.get("evidence", []):
             ev_hash = ev.get("sha256") or ev.get("manifest_hash")
@@ -305,7 +309,7 @@ async def get_live_evidence(user: User = Depends(require_auth)):
                 "manifest_hash": ev.get("sha256"),
                 "output": ev.get("output", ""),
                 "captured_at": ev.get("captured_at"),
-                "tenant_id": user.email,
+                "tenant_id": t_id,
             })
     return {
         "findings": findings,

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -118,6 +119,7 @@ class BeingStore:
         self._db: sqlite3.Connection | None = None
         self._being_cache: dict[str, Being] = {}
         self._mind_cache: dict[str, BeingMind] = {}
+        self._lock = threading.Lock()
         if persist:
             self._open_db()
 
@@ -125,69 +127,106 @@ class BeingStore:
     def _open_db(self) -> None:
         if self._db is not None or not self.persist:
             return
-        self._db = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA busy_timeout=30000")
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS beings ("
-            "being_id TEXT PRIMARY KEY, name TEXT, tenant_id TEXT, "
-            "born_at TEXT NOT NULL, last_attached_at TEXT NOT NULL)"
-        )
-        self._db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_beings_tenant ON beings(tenant_id)"
-        )
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS being_minds ("
-            "being_id TEXT PRIMARY KEY, mind_json TEXT NOT NULL)"
-        )
-        self._db.commit()
-        for row in self._db.execute(
-            "SELECT being_id, name, tenant_id, born_at, last_attached_at FROM beings"
-        ).fetchall():
-            b = Being(being_id=row[0], name=row[1], tenant_id=row[2],
-                      born_at=row[3], last_attached_at=row[4])
-            self._being_cache[b.being_id] = b
-        for being_id, mind_json in self._db.execute(
-            "SELECT being_id, mind_json FROM being_minds"
-        ).fetchall():
-            import json
-            data = json.loads(mind_json)
-            self._mind_cache[being_id] = BeingMind(
-                being_id=being_id,
-                curiosity_drive=data.get("curiosity_drive", 0.7),
-                focus=data.get("focus", 0.5),
-                satiety=data.get("satiety", 0.5),
-                learned_facts=data.get("learned_facts", []),
-                idle_cycles_run=data.get("idle_cycles_run", 0),
-                goals_pursued=data.get("goals_pursued", 0),
-                last_idle_at=data.get("last_idle_at", ""),
+        with self._lock:
+            self._db = sqlite3.connect(self._db_path, check_same_thread=False)
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA busy_timeout=30000")
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS beings ("
+                "being_id TEXT PRIMARY KEY, name TEXT, tenant_id TEXT, "
+                "born_at TEXT NOT NULL, last_attached_at TEXT NOT NULL)"
             )
+            self._db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_beings_tenant ON beings(tenant_id)"
+            )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS being_minds ("
+                "being_id TEXT PRIMARY KEY, mind_json TEXT NOT NULL)"
+            )
+            self._db.commit()
+            for row in self._db.execute(
+                "SELECT being_id, name, tenant_id, born_at, last_attached_at FROM beings"
+            ).fetchall():
+                b = Being(being_id=row[0], name=row[1], tenant_id=row[2],
+                          born_at=row[3], last_attached_at=row[4])
+                self._being_cache[b.being_id] = b
+            for being_id, mind_json in self._db.execute(
+                "SELECT being_id, mind_json FROM being_minds"
+            ).fetchall():
+                import json
+                data = json.loads(mind_json)
+                self._mind_cache[being_id] = BeingMind(
+                    being_id=being_id,
+                    curiosity_drive=data.get("curiosity_drive", 0.7),
+                    focus=data.get("focus", 0.5),
+                    satiety=data.get("satiety", 0.5),
+                    learned_facts=data.get("learned_facts", []),
+                    idle_cycles_run=data.get("idle_cycles_run", 0),
+                    goals_pursued=data.get("goals_pursued", 0),
+                    last_idle_at=data.get("last_idle_at", ""),
+                )
 
     # -- Being CRUD -------------------------------------------------------
     def get_being(self, being_id: str) -> Being | None:
-        return self._being_cache.get(being_id)
+        with self._lock:
+            b = self._being_cache.get(being_id)
+            if b is not None:
+                return b
+            if self.persist and self._db is not None:
+                row = self._db.execute(
+                    "SELECT being_id, name, tenant_id, born_at, last_attached_at FROM beings WHERE being_id = ?",
+                    (being_id,),
+                ).fetchone()
+                if row:
+                    b = Being(
+                        being_id=row[0],
+                        name=row[1],
+                        tenant_id=row[2],
+                        born_at=row[3],
+                        last_attached_at=row[4],
+                    )
+                    self._being_cache[b.being_id] = b
+                    return b
+            return None
 
     def get_being_for_tenant(self, tenant_id: str) -> Being | None:
-        for b in self._being_cache.values():
-            if b.tenant_id == tenant_id:
-                return b
-        return None
+        with self._lock:
+            for b in self._being_cache.values():
+                if b.tenant_id == tenant_id:
+                    return b
+            if self.persist and self._db is not None:
+                row = self._db.execute(
+                    "SELECT being_id, name, tenant_id, born_at, last_attached_at FROM beings WHERE tenant_id = ?",
+                    (tenant_id,),
+                ).fetchone()
+                if row:
+                    b = Being(
+                        being_id=row[0],
+                        name=row[1],
+                        tenant_id=row[2],
+                        born_at=row[3],
+                        last_attached_at=row[4],
+                    )
+                    self._being_cache[b.being_id] = b
+                    return b
+            return None
 
     def save_being(self, being: Being) -> None:
-        self._being_cache[being.being_id] = being
-        if not self.persist or self._db is None:
-            return
-        self._db.execute(
-            "INSERT INTO beings (being_id, name, tenant_id, born_at, last_attached_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(being_id) DO UPDATE SET "
-            "name=excluded.name, last_attached_at=excluded.last_attached_at",
-            (being.being_id, being.name, being.tenant_id, being.born_at, being.last_attached_at),
-        )
-        self._db.commit()
+        with self._lock:
+            self._being_cache[being.being_id] = being
+            if not self.persist or self._db is None:
+                return
+            self._db.execute(
+                "INSERT INTO beings (being_id, name, tenant_id, born_at, last_attached_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(being_id) DO UPDATE SET "
+                "name=excluded.name, last_attached_at=excluded.last_attached_at",
+                (being.being_id, being.name, being.tenant_id, being.born_at, being.last_attached_at),
+            )
+            self._db.commit()
 
     def touch_attached(self, being_id: str) -> None:
-        b = self._being_cache.get(being_id)
+        b = self.get_being(being_id)
         if b is None:
             return
         b.last_attached_at = _now()
@@ -195,18 +234,39 @@ class BeingStore:
 
     # -- BeingMind CRUD ---------------------------------------------------
     def get_mind(self, being_id: str) -> BeingMind:
-        mind = self._mind_cache.get(being_id)
-        if mind is None:
-            mind = BeingMind(being_id=being_id)
-            self._mind_cache[being_id] = mind
-            self._persist_mind(mind)
-        return mind
+        with self._lock:
+            mind = self._mind_cache.get(being_id)
+            if mind is None and self.persist and self._db is not None:
+                row = self._db.execute(
+                    "SELECT mind_json FROM being_minds WHERE being_id = ?",
+                    (being_id,),
+                ).fetchone()
+                if row:
+                    import json
+                    data = json.loads(row[0])
+                    mind = BeingMind(
+                        being_id=being_id,
+                        curiosity_drive=data.get("curiosity_drive", 0.7),
+                        focus=data.get("focus", 0.5),
+                        satiety=data.get("satiety", 0.5),
+                        learned_facts=data.get("learned_facts", []),
+                        idle_cycles_run=data.get("idle_cycles_run", 0),
+                        goals_pursued=data.get("goals_pursued", 0),
+                        last_idle_at=data.get("last_idle_at", ""),
+                    )
+                    self._mind_cache[being_id] = mind
+            if mind is None:
+                mind = BeingMind(being_id=being_id)
+                self._mind_cache[being_id] = mind
+                self._persist_mind_unlocked(mind)
+            return mind
 
     def save_mind(self, mind: BeingMind) -> None:
-        self._mind_cache[mind.being_id] = mind
-        self._persist_mind(mind)
+        with self._lock:
+            self._mind_cache[mind.being_id] = mind
+            self._persist_mind_unlocked(mind)
 
-    def _persist_mind(self, mind: BeingMind) -> None:
+    def _persist_mind_unlocked(self, mind: BeingMind) -> None:
         if not self.persist or self._db is None:
             return
         import json
@@ -226,10 +286,15 @@ class BeingStore:
         )
         self._db.commit()
 
+    def _persist_mind(self, mind: BeingMind) -> None:
+        with self._lock:
+            self._persist_mind_unlocked(mind)
+
     def close(self) -> None:
-        if self._db is not None:
-            self._db.close()
-            self._db = None
+        with self._lock:
+            if self._db is not None:
+                self._db.close()
+                self._db = None
 
 
 # ---------------------------------------------------------------------------

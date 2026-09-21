@@ -442,7 +442,7 @@ class AuthoredToolAdapter:
         elif exit_code == 126:
             status = "blocked"
             err = stderr or "Execution blocked by fail-closed security engine"
-        elif exit_code != 0 and not stdout:
+        elif exit_code != 0:
             status = "failed"
             err = stderr or f"Tool exited with code {exit_code}"
         else:
@@ -466,6 +466,7 @@ class AuthoredToolAdapter:
             tool_name=self.name,
             tool_version=self.version,
             status=status,
+            evidence=[],
             start_time=start_dt.isoformat(),
             end_time=end_dt.isoformat(),
             exit_code=exit_code,

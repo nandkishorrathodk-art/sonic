@@ -3206,6 +3206,17 @@ class ComputerUseAgent:
                                 path = str(parsed_json["path"])
                     except Exception:
                         pass
+                if self.safety is not None:
+                    path_verdict = self.safety.evaluate("FILE_WRITE", path, {"path": path})
+                    if not path_verdict.allowed:
+                        status = ActionExecutionStatus.BLOCKED
+                        actual_obs_str = f"BLOCKED by safety policy: {path_verdict.reason}"
+                        return AgentStepResult(
+                            success=False,
+                            action=action,
+                            observation=actual_obs_str,
+                            status=status,
+                        )
                 ext = os.path.splitext(path.rstrip("/"))[1]
                 if not str(content).strip() and (path.endswith("/") or not ext):
                     await self.computer.terminal(workspace_id, f"mkdir -p {shlex.quote(path)}")
@@ -3820,6 +3831,17 @@ class ComputerUseAgent:
                         or (name_str if name_str.startswith("/") else None)
                         or f"/home/sonic/workspace/{name_str or target_str}"
                     )
+                    if self.safety is not None:
+                        path_verdict = self.safety.evaluate("TOOL_AUTHOR", dest_path, {"path": dest_path})
+                        if not path_verdict.allowed:
+                            status = ActionExecutionStatus.BLOCKED
+                            actual_obs_str = f"BLOCKED by safety policy: {path_verdict.reason}"
+                            return AgentStepResult(
+                                success=False,
+                                action=action,
+                                observation=actual_obs_str,
+                                status=status,
+                            )
                     # If code is missing, generate it via LLM
                     if not code and self.llm_router is not None:
                         try:

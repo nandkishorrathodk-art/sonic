@@ -415,7 +415,7 @@ class BossAgent:
                     wave_batch = []
                     for s in unblocked_ready:
                         if getattr(s, "plane", "headless") == "gui" and self._shared_desktop:
-                            break
+                            continue
                         wave_batch.append(s)
                         if len(wave_batch) >= self.max_parallel_workers:
                             break
@@ -1051,6 +1051,14 @@ Rules:
                         sub_result.findings_summary = (
                             f"[FALSIFIED by Judge]: {getattr(judge_eval, 'notes', '') or getattr(judge_eval, 'rationale', '') or 'Verification failed'}. "
                             f"(Worker claimed completion but independent sandbox inspection falsified the claim)"
+                        )
+                    elif judge_eval.verdict in (JudgeVerdict.INCONCLUSIVE, JudgeVerdict.UNVERIFIED):
+                        sub_result.evidence_verified = False
+                        sub_result.success = False
+                        sub_result.status = "UNVERIFIED"
+                        sub_result.findings_summary = (
+                            f"[{judge_eval.verdict.value} by Judge]: {getattr(judge_eval, 'notes', '') or getattr(judge_eval, 'rationale', '') or 'Verification inconclusive'}. "
+                            f"(Worker claimed completion without independent reproducible proof)"
                         )
                 except Exception as judge_err:
                     logger.warning("boss_judge_evaluation_failed", error=str(judge_err))

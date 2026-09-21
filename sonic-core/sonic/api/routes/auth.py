@@ -163,7 +163,11 @@ async def google_callback(
     try:
         auth_token = await authenticate_with_google(code)
         if redirect_target:
-            from urllib.parse import quote
+            from urllib.parse import quote, urlparse
+            parsed = urlparse(redirect_target)
+            # Only permit relative paths on the same origin (e.g. /dashboard) to prevent token exfiltration
+            if parsed.scheme or parsed.netloc or not redirect_target.startswith("/") or redirect_target.startswith("//"):
+                redirect_target = "/dashboard"
             separator = "&" if "?" in redirect_target else "?"
             target = (
                 f"{redirect_target}{separator}token={auth_token.access_token}"

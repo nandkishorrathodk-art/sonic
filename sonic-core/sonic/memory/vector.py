@@ -177,7 +177,7 @@ class VectorMemory:
         from sonic.memory.sqlite_graph import _default_db_path
         self.dim = dim
         self.vectorizer = DenseVectorizer(dim=dim)
-        self.documents: dict[str, VectorDocument] = {}
+        self.documents: dict[tuple[str, str], VectorDocument] = {}
         self.persist = persist
         self._lock = threading.Lock()
         self._db_path = db_path or (os.environ.get("SONIC_MEMORY_DB_PATH") or _default_db_path()) if persist else None
@@ -195,24 +195,27 @@ class VectorMemory:
             self._db.execute("PRAGMA busy_timeout=30000")
             self._db.execute(
                 "CREATE TABLE IF NOT EXISTS vector_documents ("
-                "doc_id TEXT PRIMARY KEY, text TEXT NOT NULL, "
+                "doc_id TEXT, text TEXT NOT NULL, "
                 "metadata_json TEXT NOT NULL DEFAULT '{}', vector_json TEXT NOT NULL DEFAULT '[]', "
-                "tenant_id TEXT NOT NULL DEFAULT 'default')"
+                "tenant_id TEXT NOT NULL DEFAULT 'default', "
+                "PRIMARY KEY (tenant_id, doc_id))"
             )
             cols = [c[1] for c in self._db.execute("PRAGMA table_info(vector_documents)").fetchall()]
             if "tenant_id" not in cols:
                 self._db.execute("ALTER TABLE vector_documents ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_vec_tenant_doc ON vector_documents(tenant_id, doc_id)")
             self._db.commit()
             # Load any previously persisted documents into the read cache.
             for doc_id, text, meta_json, vec_json, t_id in self._db.execute(
                 "SELECT doc_id, text, metadata_json, vector_json, tenant_id FROM vector_documents"
             ).fetchall():
-                self.documents[doc_id] = VectorDocument(
+                t = t_id or "default"
+                self.documents[(t, doc_id)] = VectorDocument(
                     doc_id=doc_id,
                     text=text,
                     metadata=json.loads(meta_json),
                     vector=json.loads(vec_json),
-                    tenant_id=t_id or "default",
+                    tenant_id=t,
                 )
 
     def index_document(
@@ -224,19 +227,22 @@ class VectorMemory:
     ) -> None:
         """Add or update a document in the vector index (write-through to SQLite)."""
         vector = self.vectorizer.vectorize(text)
-        self.documents[doc_id] = VectorDocument(
+        t = tenant_id or "default"
+        self.documents[(t, doc_id)] = VectorDocument(
             doc_id=doc_id,
             text=text,
             metadata=metadata or {},
             vector=vector,
-            tenant_id=tenant_id,
+            tenant_id=t,
         )
         if self._db is not None:
             with self._lock:
                 self._db.execute(
-                    "INSERT OR REPLACE INTO vector_documents "
-                    "(doc_id, text, metadata_json, vector_json, tenant_id) VALUES (?, ?, ?, ?, ?)",
-                    (doc_id, text, json.dumps(metadata or {}, default=str), json.dumps(vector), tenant_id),
+                    "INSERT INTO vector_documents "
+                    "(doc_id, text, metadata_json, vector_json, tenant_id) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(tenant_id, doc_id) DO UPDATE SET "
+                    "text=excluded.text, metadata_json=excluded.metadata_json, vector_json=excluded.vector_json",
+                    (doc_id, text, json.dumps(metadata or {}, default=str), json.dumps(vector), t),
                 )
                 self._db.commit()
 
