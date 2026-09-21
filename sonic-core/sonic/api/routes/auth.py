@@ -139,6 +139,12 @@ async def google_login(redirect_url: str = Query(default="")):
 
     After login, Google redirects back to /auth/google/callback
     """
+    settings = get_settings()
+    if not (settings.google_client_id and settings.google_client_secret):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google OAuth is not configured on the server. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the environment.",
+        )
     # Only retain a server-side opaque state token.  Never reflect an
     # operator-controlled redirect URL directly into OAuth state.
     login_url = get_google_login_url(state=create_oauth_state(redirect_url))

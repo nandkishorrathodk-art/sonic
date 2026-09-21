@@ -10,8 +10,8 @@ import {
   Terminal,
   Cpu,
   Lock,
-  CheckCircle2,
   ExternalLink,
+  Info,
 } from "lucide-react";
 import Link from "next/link";
 import { setAuthToken } from "../../lib/auth";
@@ -24,22 +24,19 @@ function LoginContent() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [customGoogleEmail, setCustomGoogleEmail] = useState("");
-  const [showCustomInput, setShowCustomInput] = useState(false);
+  const [googleConfig, setGoogleConfig] = useState<{ enabled: boolean; clientId: string | null }>({
+    enabled: false,
+    clientId: null,
+  });
+  const [configChecked, setConfigChecked] = useState(false);
+  const [localEmail, setLocalEmail] = useState("");
 
-  // Default recognized Google identity for instant 1-click dev authentication
-  const defaultGoogleAccount = {
-    email: "nandkishorrathodk@gmail.com",
-    name: "Nandkishor Rathod",
-    avatarInitial: "N",
-  };
-
-  // Check if returning from Google OAuth with a token in query params
+  // Check if returning from Google OAuth callback with a token in query params
   useEffect(() => {
     const token = searchParams.get("token");
     if (token) {
-      const email = searchParams.get("email") || defaultGoogleAccount.email;
-      const name = searchParams.get("name") || defaultGoogleAccount.name;
+      const email = searchParams.get("email") || "operator@local";
+      const name = searchParams.get("name") || email.split("@")[0];
       const role = searchParams.get("role") || "operator";
       const tenantId = searchParams.get("tenant_id") || "default";
 
@@ -50,36 +47,55 @@ function LoginContent() {
         tenant_id: tenantId,
       });
       router.push("/");
+      return;
     }
+
+    // Probe server Google OAuth configuration status
+    const probeGoogleConfig = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/auth/google/config`);
+        if (res.ok) {
+          const data = await res.json();
+          setGoogleConfig({
+            enabled: Boolean(data?.enabled),
+            clientId: data?.client_id || null,
+          });
+        }
+      } catch {
+        setGoogleConfig({ enabled: false, clientId: null });
+      } finally {
+        setConfigChecked(true);
+      }
+    };
+
+    probeGoogleConfig();
   }, [searchParams, router]);
 
-  const handleGoogleSignIn = async (targetEmail?: string) => {
+  // Real Google OAuth Flow — redirects browser directly to Google consent screen
+  const handleRealGoogleSignIn = () => {
     setLoading(true);
     setError(null);
 
-    const emailToUse = targetEmail || customGoogleEmail || defaultGoogleAccount.email;
-    const nameToUse = targetEmail === defaultGoogleAccount.email ? defaultGoogleAccount.name : emailToUse.split("@")[0].replace(/[._-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    if (!googleConfig.enabled) {
+      setError("Google OAuth is not configured on the backend. Please configure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the environment.");
+      setLoading(false);
+      return;
+    }
+
+    const returnUrl = encodeURIComponent(window.location.origin + "/login");
+    window.location.href = `${API_BASE}/auth/google/login?redirect_url=${returnUrl}`;
+  };
+
+  // Local Workstation Operator Access (Development / Sandbox mode)
+  const handleLocalSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    const emailToUse = localEmail.trim() || "operator@local";
+    const nameToUse = emailToUse.split("@")[0].replace(/[._-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
     try {
-      // 1. Check if backend has live Google OAuth configured
-      let oauthConfig = { enabled: false };
-      try {
-        const configRes = await fetch(`${API_BASE}/auth/google/config`);
-        if (configRes.ok) {
-          oauthConfig = await configRes.json();
-        }
-      } catch {
-        // backend offline or endpoint pending, fall back to direct dev auth
-      }
-
-      // 2. If live Google OAuth is enabled in production, redirect to Google consent screen
-      if (oauthConfig.enabled) {
-        const returnUrl = encodeURIComponent(window.location.origin + "/login");
-        window.location.href = `${API_BASE}/auth/google/login?redirect_url=${returnUrl}`;
-        return;
-      }
-
-      // 3. Otherwise (Development / Local mode): Direct instant Google authentication
       const res = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -92,7 +108,8 @@ function LoginContent() {
       });
 
       if (!res.ok) {
-        throw new Error(`Authentication server returned status ${res.status}`);
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.detail || `Local authentication failed with status ${res.status}`);
       }
 
       const data = await res.json();
@@ -103,15 +120,13 @@ function LoginContent() {
           role: data.user?.role || "operator",
           tenant_id: data.user?.tenant_id || "default",
         });
-
-        // Instant smooth transition into the workstation
         router.push("/");
       } else {
-        throw new Error("No authorization token was issued by the server.");
+        throw new Error("No authorization token was issued by the workstation.");
       }
     } catch (err: any) {
-      console.error("Google sign-in error:", err);
-      setError(err.message || "Failed to complete Google authentication.");
+      console.error("Local sign-in error:", err);
+      setError(err.message || "Failed to complete local workstation authentication.");
       setLoading(false);
     }
   };
@@ -139,11 +154,11 @@ function LoginContent() {
         </div>
       </header>
 
-      {/* Modern Centerpiece Sign-In Card */}
+      {/* Centerpiece Sign-In Card */}
       <main className="flex-1 flex items-center justify-center p-6 z-10">
-        <div className="w-full max-w-[440px] glass-card rounded-2xl p-8 sm:p-9 shadow-2xl border border-ink-700/60 bg-ink-900/80 backdrop-blur-2xl space-y-7 relative animate-fade-in-up">
+        <div className="w-full max-w-[440px] glass-card rounded-2xl p-8 sm:p-9 shadow-2xl border border-ink-700/60 bg-ink-900/80 backdrop-blur-2xl space-y-6 relative animate-fade-in-up">
           
-          {/* Header & Logo */}
+          {/* Header */}
           <div className="space-y-3 text-center">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-ink-800/90 border border-ink-700 text-slate-300 text-[11px] font-mono shadow-sm">
               <Sparkles className="w-3.5 h-3.5 text-primary-400" />
@@ -165,19 +180,23 @@ function LoginContent() {
             </div>
           )}
 
-          {/* Core Action: Modern Google Sign-In */}
+          {/* Authentication Actions */}
           <div className="space-y-4">
             
-            {/* Primary Google Sign-In Button */}
+            {/* Primary Google OAuth Action */}
             <button
-              onClick={() => handleGoogleSignIn()}
-              disabled={loading}
-              className="group relative w-full flex items-center justify-center gap-3.5 px-6 py-3.5 rounded-xl bg-white hover:bg-slate-50 text-slate-900 font-semibold text-sm shadow-lg hover:shadow-xl transition-all duration-200 border border-slate-200 active:scale-[0.99] disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
+              onClick={handleRealGoogleSignIn}
+              disabled={loading || (!googleConfig.enabled && configChecked)}
+              className={`group relative w-full flex items-center justify-center gap-3.5 px-6 py-3.5 rounded-xl font-semibold text-sm shadow-lg transition-all duration-200 border cursor-pointer ${
+                googleConfig.enabled
+                  ? "bg-white hover:bg-slate-50 text-slate-900 border-slate-200 active:scale-[0.99]"
+                  : "bg-ink-800/60 text-slate-400 border-ink-700/50 cursor-not-allowed opacity-60"
+              }`}
             >
               {loading ? (
                 <div className="flex items-center gap-2.5 text-slate-700 font-medium">
                   <span className="w-4 h-4 border-2 border-slate-400 border-t-slate-800 rounded-full animate-spin" />
-                  <span>Connecting with Google...</span>
+                  <span>Connecting to Google OAuth...</span>
                 </div>
               ) : (
                 <>
@@ -200,82 +219,69 @@ function LoginContent() {
                       d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
                     />
                   </svg>
-                  <span className="tracking-tight text-slate-800 font-bold group-hover:text-black">
-                    Continue with Google
+                  <span className={`tracking-tight font-bold ${googleConfig.enabled ? "text-slate-800 group-hover:text-black" : "text-slate-400"}`}>
+                    {googleConfig.enabled ? "Continue with Google" : "Google OAuth (Not Configured)"}
                   </span>
-                  <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-slate-700 group-hover:translate-x-0.5 transition-transform ml-auto" />
+                  {googleConfig.enabled && (
+                    <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-slate-700 group-hover:translate-x-0.5 transition-transform ml-auto" />
+                  )}
                 </>
               )}
             </button>
 
-            {/* Google Profile Card Preview */}
-            <div className="p-3 rounded-xl bg-ink-950/80 border border-ink-800/90 flex items-center justify-between text-xs">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-primary-500 to-secondary-500 p-[1.5px] flex-shrink-0">
-                  <div className="w-full h-full rounded-full bg-ink-950 flex items-center justify-center font-bold text-white text-xs">
-                    {defaultGoogleAccount.avatarInitial}
-                  </div>
+            {/* Google OAuth Status telemetry */}
+            {configChecked && !googleConfig.enabled && (
+              <div className="p-3 rounded-xl bg-ink-950/90 border border-ink-800 text-[11px] font-mono text-muted space-y-1">
+                <div className="flex items-center gap-1.5 text-amber-400/90 font-medium">
+                  <Info className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span>Google OAuth Unconfigured</span>
                 </div>
-                <div className="min-w-0">
-                  <div className="font-semibold text-white truncate text-[12px] flex items-center gap-1.5">
-                    <span>{defaultGoogleAccount.name}</span>
-                    <CheckCircle2 className="w-3 h-3 text-secondary-400 flex-shrink-0" />
-                  </div>
-                  <div className="text-[11px] text-muted-dim font-mono truncate">
-                    {defaultGoogleAccount.email}
-                  </div>
+                <p className="text-[10px] text-muted-dim leading-relaxed">
+                  Set <code className="text-slate-300">GOOGLE_CLIENT_ID</code> and <code className="text-slate-300">GOOGLE_CLIENT_SECRET</code> in the backend environment to enable live Google Sign-In.
+                </p>
+              </div>
+            )}
+
+            {/* Local Workstation Operator Section */}
+            <div className="pt-2">
+              <div className="relative flex items-center justify-center my-3">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-ink-800" />
                 </div>
+                <span className="relative px-3 bg-ink-900 text-[10px] uppercase tracking-wider font-mono text-muted-dim">
+                  Operator Direct Access
+                </span>
               </div>
 
-              <span className="px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                Verified
-              </span>
-            </div>
-
-            {/* Custom Google Account Switcher (Optional) */}
-            <div className="pt-1">
-              {!showCustomInput ? (
-                <button
-                  type="button"
-                  onClick={() => setShowCustomInput(true)}
-                  className="w-full text-center text-[11px] text-muted hover:text-slate-300 font-mono transition py-1 cursor-pointer"
-                >
-                  Use a different Google / Workspace email?
-                </button>
-              ) : (
-                <div className="space-y-2 pt-1 animate-fade-in-up">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="email"
-                      value={customGoogleEmail}
-                      onChange={(e) => setCustomGoogleEmail(e.target.value)}
-                      placeholder="your.google.account@gmail.com"
-                      className="input-field !text-xs !py-2 font-mono"
-                    />
-                    <button
-                      type="button"
-                      disabled={loading || !customGoogleEmail}
-                      onClick={() => handleGoogleSignIn(customGoogleEmail)}
-                      className="btn-secondary !px-3 !py-2 text-xs flex-shrink-0"
-                    >
-                      Sign In
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowCustomInput(false)}
-                    className="text-[10px] text-muted-dim hover:text-muted font-mono"
-                  >
-                    Cancel
-                  </button>
+              <form onSubmit={handleLocalSignIn} className="space-y-2.5">
+                <div>
+                  <label className="block text-[11px] font-mono text-muted mb-1">
+                    Operator Email
+                  </label>
+                  <input
+                    type="email"
+                    value={localEmail}
+                    onChange={(e) => setLocalEmail(e.target.value)}
+                    placeholder="operator@local"
+                    className="input-field !text-xs !py-2.5 font-mono w-full"
+                    disabled={loading}
+                  />
                 </div>
-              )}
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="btn-primary w-full !py-2.5 text-xs font-mono font-medium flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Terminal className="w-3.5 h-3.5" />
+                  <span>Launch Workstation Session</span>
+                </button>
+              </form>
             </div>
 
           </div>
 
           {/* Separator / Divider */}
-          <div className="relative flex items-center justify-center">
+          <div className="relative flex items-center justify-center pt-1">
             <div className="absolute inset-0 flex items-center">
               <div className="w-full border-t border-ink-800" />
             </div>
