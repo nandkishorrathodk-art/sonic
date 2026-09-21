@@ -1331,28 +1331,29 @@ class ComputerUseAgent:
         init_ctx = getattr(self, "initial_context", {}) or {}
         if init_ctx.get("delegated_plane") == "gui" or getattr(self, "gui_plane_priority", False):
             target_header += (
-                "=== WORKSTATION APPLICATION PLANE (GUI) MANDATE ===\n"
-                "This task requires graphical desktop interaction on Display :99.\n"
-                "You MUST interact with the graphical desktop using APP_LAUNCH to start the application,\n"
-                "and GUI actions (GUI_CLICK, GUI_TYPE, GUI_KEYPRESS, GUI_SCREENSHOT) to interact with it.\n"
-                "You may also use TERMINAL_EXEC for window inspection commands like 'wmctrl -l' to verify window status.\n"
-                "You are STRICTLY PROHIBITED from bypassing GUI application tasks with headless terminal curl or scrapers.\n"
-                "===================================================\n\n"
+                "=== WORKSTATION APPLICATION PLANE (GUI DESKTOP AGENCY) ===\n"
+                "You are an AI-Human Engineer operating your graphical computer desktop on Display :99.\n"
+                "You have full agency to launch and operate GUI applications:\n"
+                "- Launch GUI applications directly with APP_LAUNCH (e.g. 'google-chrome', 'browser', 'terminal', 'mousepad') or BROWSER_NAVIGATE.\n"
+                "- Interact dynamically with controls, windows, and web applications using GUI actions (GUI_CLICK, GUI_TYPE, GUI_KEYPRESS, GUI_SCREENSHOT).\n"
+                "- Manage windows via APP_FOCUS or APP_CLOSE, and inspect window state via 'wmctrl -l' in TERMINAL_EXEC.\n"
+                "- You can run background services or commands via TERMINAL_EXEC alongside your graphical applications.\n"
+                "===========================================================\n\n"
             )
         elif init_ctx.get("delegated_plane") == "headless":
             target_header += (
-                "=== OPERATOR SANDBOX PLANE (HEADLESS DIRECT EXECUTION) MANDATE ===\n"
-                "This task is an operator sandbox task (terminal commands, script execution, file I/O, or diagnostics).\n"
-                "You MUST execute commands DIRECTLY in the sandbox container using TERMINAL_EXEC or FILE_WRITE.\n"
-                "DO NOT attempt to click desktop icons (such as 'Terminal icon') or launch GUI applications for this task.\n"
-                "The sandbox terminal executes directly in the environment without needing a desktop window.\n"
-                "===================================================================\n\n"
+                "=== OPERATOR SANDBOX PLANE (HEADLESS DIRECT EXECUTION) ===\n"
+                "You are an AI-Human Engineer executing high-throughput tasks in the sandbox environment.\n"
+                "Use TERMINAL_EXEC for shell commands, background scripts, and process monitoring.\n"
+                "Use FILE_WRITE to author source code, servers, or configuration files directly.\n"
+                "Both your terminal and your graphical desktop remain available at all times.\n"
+                "==========================================================\n\n"
             )
         target_header += (
             "=== SCRIPT & CODE AUTHORING INVARIANTS ===\n"
             "- Valid Syntax: In any Python code or print() calls, strings MUST be quoted (e.g. print('msg')).\n"
             "- Standard Library: `json`, `urllib`, `time`, `sys`, `os`, `re`, `socket` are built-in. NEVER execute `pip install json`.\n"
-            "- Creating Files: When asked to author or create a script/file, use FILE_WRITE with target_resource set to the exact requested path and payload set to the complete script content, or TOOL_AUTHOR. NEVER write complex multi-line logic as 'python -c' commands.\n"
+            "- Creating Files: When asked to author or create a script/file/server, use FILE_WRITE with target_resource set to the exact requested path and payload set to the complete file content. NEVER write complex multi-line logic as 'python -c' commands.\n"
             "- Target Paths: Always create and execute scripts at the exact requested path (e.g. inside the target lab directory).\n"
             "==========================================\n\n"
         )
@@ -1952,6 +1953,16 @@ class ComputerUseAgent:
                 if raw_c_str.startswith("```"):
                     raw_c_str = re.sub(r"^```[a-zA-Z0-9_\-\.]*\s*\n?", "", raw_c_str)
                     raw_c_str = re.sub(r"\n?\s*```$", "", raw_c_str)
+                # Unwrap JSON envelope if model output JSON e.g. {"path": "...", "content": "..."}
+                if raw_c_str.startswith("{") and any(k in raw_c_str for k in ('"content"', '"code"', '"source"', '"text"')):
+                    try:
+                        parsed_c = json.loads(raw_c_str)
+                        if isinstance(parsed_c, dict):
+                            if "path" in parsed_c and "path" not in payload:
+                                payload["path"] = str(parsed_c["path"])
+                            raw_c_str = str(parsed_c.get("content") or parsed_c.get("code") or parsed_c.get("source") or raw_c_str)
+                    except Exception:
+                        pass
                 payload["content"] = raw_c_str
         elif action_type == ComputerActionType.TOOL_AUTHOR:
             payload = {}
@@ -1961,6 +1972,16 @@ class ComputerUseAgent:
                 if raw_c_str.startswith("```"):
                     raw_c_str = re.sub(r"^```[a-zA-Z0-9_\-\.]*\s*\n?", "", raw_c_str)
                     raw_c_str = re.sub(r"\n?\s*```$", "", raw_c_str)
+                # Unwrap JSON envelope if model output JSON
+                if raw_c_str.startswith("{") and any(k in raw_c_str for k in ('"code"', '"source"', '"content"')):
+                    try:
+                        parsed_c = json.loads(raw_c_str)
+                        if isinstance(parsed_c, dict):
+                            if "name" in parsed_c and "name" not in payload:
+                                payload["name"] = str(parsed_c["name"])
+                            raw_c_str = str(parsed_c.get("code") or parsed_c.get("source") or parsed_c.get("content") or raw_c_str)
+                    except Exception:
+                        pass
                 payload["code"] = raw_c_str
                 payload["source"] = raw_c_str
         else:
@@ -2251,7 +2272,6 @@ class ComputerUseAgent:
         # 1. Unpack JSON or dict only if payload is formatted as a JSON object
         if s.startswith("{"):
             try:
-                import json
                 p = json.loads(s)
                 if isinstance(p, dict) and "command" in p:
                     s = str(p["command"]).strip().rstrip(',;').strip()
@@ -2393,6 +2413,17 @@ class ComputerUseAgent:
             }
         if not hasattr(self, "_consecutive_unchanged_screens"):
             self._consecutive_unchanged_screens = 0
+
+        if isinstance(payload, str) and payload.strip().startswith("{"):
+            try:
+                parsed_p = json.loads(payload)
+                if isinstance(parsed_p, dict):
+                    payload = parsed_p
+            except Exception:
+                pass
+        elif not isinstance(payload, dict):
+            payload = {} if payload is None else {"raw": payload}
+
         # Pre-execution refusal or blocked action handling (e.g. from LLM safety refusal)
         if action_type == ActionExecutionStatus.BLOCKED or str(action_type).upper() in ("BLOCKED", "ACTIONEXECUTIONSTATUS.BLOCKED"):
             actual_obs_str = (
@@ -2458,7 +2489,6 @@ class ComputerUseAgent:
             cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
             if cmd.startswith("{") and "command" in cmd:
                 try:
-                    import json
                     parsed_p = json.loads(cmd)
                     if isinstance(parsed_p, dict) and "command" in parsed_p:
                         cmd = str(parsed_p["command"]).strip().rstrip(',;').strip()
@@ -3138,13 +3168,44 @@ class ComputerUseAgent:
                                 status = ActionExecutionStatus.BLOCKED
 
             elif action_type == ComputerActionType.FILE_READ:
-                path = payload.get("path") or target_resource or "/home/sonic/workspace/README.md"
+                path = (payload.get("path") if isinstance(payload, dict) else None) or target_resource or "/home/sonic/workspace/README.md"
                 content = await self.computer.read_file(workspace_id, path)
                 actual_obs_str = f"Read {len(content)} bytes from {path}"
 
             elif action_type == ComputerActionType.FILE_WRITE:
-                path = payload.get("path") or target_resource or "/home/sonic/workspace/auth.py"
-                content = payload.get("content") or payload.get("code") or payload.get("file_content") or payload.get("text") or payload.get("data") or ""
+                p_dict = payload if isinstance(payload, dict) else {}
+                if isinstance(payload, str) and payload.strip().startswith("{"):
+                    try:
+                        parsed = json.loads(payload)
+                        if isinstance(parsed, dict):
+                            p_dict = parsed
+                    except Exception:
+                        pass
+                path = p_dict.get("path") or target_resource or "/home/sonic/workspace/auth.py"
+                content = (
+                    p_dict.get("content")
+                    or p_dict.get("code")
+                    or p_dict.get("file_content")
+                    or p_dict.get("text")
+                    or p_dict.get("data")
+                    or (payload if isinstance(payload, str) and not payload.strip().startswith("{") else "")
+                )
+                # Unwrap JSON envelope if content string is a JSON dictionary
+                if isinstance(content, str) and content.strip().startswith("{") and any(k in content for k in ('"content"', '"code"', '"source"', '"text"')):
+                    try:
+                        parsed_json = json.loads(content)
+                        if isinstance(parsed_json, dict):
+                            content = (
+                                parsed_json.get("content")
+                                or parsed_json.get("code")
+                                or parsed_json.get("source")
+                                or parsed_json.get("text")
+                                or content
+                            )
+                            if (not path or path == "/home/sonic/workspace/auth.py") and "path" in parsed_json:
+                                path = str(parsed_json["path"])
+                    except Exception:
+                        pass
                 ext = os.path.splitext(path.rstrip("/"))[1]
                 if not str(content).strip() and (path.endswith("/") or not ext):
                     await self.computer.terminal(workspace_id, f"mkdir -p {shlex.quote(path)}")
@@ -3163,7 +3224,6 @@ class ComputerUseAgent:
                 cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
                 if cmd.startswith("{") and "command" in cmd:
                     try:
-                        import json
                         parsed_p = json.loads(cmd)
                         if isinstance(parsed_p, dict) and "command" in parsed_p:
                             cmd = str(parsed_p["command"]).strip().rstrip(',;').strip()

@@ -667,8 +667,10 @@ Respond with EXACTLY this JSON format (no extra text):
 
 Rules:
 - Each sub_mission goal must be FOCUSED and SPECIFIC (one clear task per worker)
-- plane: "headless" for terminal/scripts/file audits/tools; "gui" only for desktop browser/window interactions
-- depends_on: list of sub_mission IDs that must complete before this worker starts
+- plane separation is CRITICAL:
+  * "headless": for directory setup (mkdir), code authoring (writing files/scripts/servers), background service starts, socket listeners, and curl/API checks.
+  * "gui": ONLY for launching desktop browsers (e.g. google-chrome), interacting with graphical windows, and visual UI verification.
+- depends_on: list of sub_mission IDs that must complete before this worker starts (e.g. browser verification depends on background server startup)
 - max_steps should be 3-5 (workers are efficient, not wasteful)
 - priority: higher number = execute first
 - Create 2-5 sub_missions per phase (not more)
@@ -1098,6 +1100,24 @@ Rules:
         if not observations:
             return "SubAgent executed but produced no observations."
 
+        # If zero actions succeeded, return a strictly factual failure summary
+        # to guarantee zero hallucinated success claims per Rule 15.
+        any_success = any(
+            str(_trace_value(t, "status", "")).upper() in ("COMPLETED", "SUCCESS", "VERIFIED")
+            and (_trace_value(t, "exit_code", None) in (None, 0))
+            for t in traces
+        )
+        if not any_success:
+            failed_acts = []
+            for t in traces[-3:]:
+                act = _trace_value(t, 'action_type', '')
+                act_str = act.value if hasattr(act, 'value') else str(act)
+                tgt = _trace_value(t, 'target_resource', '')
+                obs = str(_trace_value(t, 'actual_observation', '') or _trace_value(t, 'observation', ''))[:120].strip()
+                failed_acts.append(f"{act_str} on '{tgt}': {obs}")
+            reasons_str = "; ".join(failed_acts) if failed_acts else "all actions failed"
+            return f"Execution failed: no verified progress ({reasons_str})."
+
         try:
             from sonic.llm.schemas import LLMRequest, Message, MessageRole
 
@@ -1429,6 +1449,10 @@ Respond with EXACTLY this JSON format:
     }}
   ]
 }}
+
+Rules:
+- plane: "headless" for terminal/scripts/servers/curl; "gui" ONLY for desktop browser/window interactions
+- depends_on: list of sub_mission IDs that must complete before this worker starts
 
 If the objective is complete or no more work is needed, return:
 {{"thinking": "Objective appears complete", "phase_name": "", "sub_missions": []}}"""

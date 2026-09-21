@@ -909,8 +909,19 @@ class DockerComputerProvider(ComputerProvider):
             return out.strip().splitlines()[0]
 
         # 4. Fallback to POSIX standard alternatives if querying a generic role (browser, editor, terminal)
-        if any(role in app_clean.lower() for role in ("browser", "web")):
-            for alt in ("x-www-browser", "sensible-browser", "xdg-open"):
+        role_lower = app_clean.lower()
+        if any(role in role_lower for role in ("browser", "web")):
+            for alt in ("x-www-browser", "sensible-browser", "google-chrome", "chromium", "firefox", "xdg-open"):
+                code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
+                if code == 0 and out.strip():
+                    return out.strip().splitlines()[0]
+        elif any(role in role_lower for role in ("terminal", "console", "shell", "xterm")):
+            for alt in ("x-terminal-emulator", "xfce4-terminal", "xterm", "sensible-terminal"):
+                code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
+                if code == 0 and out.strip():
+                    return out.strip().splitlines()[0]
+        elif any(role in role_lower for role in ("editor", "text", "notepad")):
+            for alt in ("sensible-editor", "mousepad", "nano", "gedit"):
                 code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
                 if code == 0 and out.strip():
                     return out.strip().splitlines()[0]
