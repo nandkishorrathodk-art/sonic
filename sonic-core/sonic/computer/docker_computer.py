@@ -736,6 +736,19 @@ class DockerComputerProvider(ComputerProvider):
                         )
         return entries
 
+    async def write_file_bytes(
+        self, workspace_id: str, path: str, content: bytes, actor: str = "operator"
+    ) -> bool:
+        import base64
+
+        encoded = base64.b64encode(content).decode("ascii")
+        command = (
+            f"mkdir -p {shlex.quote(os.path.dirname(path) or '.')}; "
+            f"printf '%s' {shlex.quote(encoded)} | base64 -d > {shlex.quote(path)}"
+        )
+        code, _, _ = await self._docker_exec(command, timeout=30)
+        return code == 0
+
     async def git_action(
         self,
         workspace_id: str,
@@ -761,6 +774,7 @@ class DockerComputerProvider(ComputerProvider):
             safe_msg = msg.replace("'", "'\\''")
             code, _, _ = await self._docker_exec(f"git -C /home/sonic/workspace add -A && git -C /home/sonic/workspace commit -m '{safe_msg}'", timeout=15)
             return code == 0
+
         elif action in ["branch", "checkout"]:
             branch_name = kwargs.get("branch_name") or kwargs.get("branch") or "main"
             safe_branch = branch_name.replace("'", "")

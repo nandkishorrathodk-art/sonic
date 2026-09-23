@@ -214,12 +214,16 @@ class CheckpointManager:
             return self._failed_receipt("checkpoint is corrupt", current_state)
         try:
             # Preflight every read before changing any artifact.
+            originals: dict[str, bytes] = {}
             for artifact in checkpoint.artifacts:
                 if not isinstance(artifact.content, bytes):
                     raise ValueError("checkpoint artifact content is invalid")
+                originals[artifact.path] = await self.store.read_file(artifact.path)
+            written: list[str] = []
             for artifact in checkpoint.artifacts:
                 if not await self.store.write_file(artifact.path, artifact.content):
                     raise OSError(f"workspace refused restore: {artifact.path}")
+                written.append(artifact.path)
             if apply_state is not None:
                 result = apply_state(dict(checkpoint.state))
                 if inspect.isawaitable(result):
@@ -235,6 +239,11 @@ class CheckpointManager:
                 evidence=evidence,
             )
         except Exception as exc:
+            for path in (written if "written" in locals() else []):
+                try:
+                    await self.store.write_file(path, originals[path])
+                except Exception:
+                    pass
             return self._failed_receipt(f"rollback failed: {type(exc).__name__}", current_state)
 
     @staticmethod

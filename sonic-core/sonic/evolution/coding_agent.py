@@ -250,6 +250,9 @@ class CodingAgent:
         import sys
 
         target = path or (self.test_paths[0] if self.test_paths else "sonic-core/tests")
+        target_text = str(target).replace("\\", "/")
+        if target_text.startswith("/") or ".." in Path(target_text).parts or self._resolve(target_text) is None:
+            return ToolResult(False, "test path must remain inside the repository")
         cmd = [sys.executable, "-m", "pytest", target, "-q", "--tb=short", "-p", "no:cacheprovider"]
         try:
             res = subprocess.run(cmd, cwd=str(self.repo_root), capture_output=True, text=True, timeout=600)
@@ -270,6 +273,9 @@ class CodingAgent:
             return ToolResult(False, f"invalid command syntax: {e}")
         if not argv:
             return ToolResult(False, "empty command")
+        for arg in argv[1:]:
+            if arg.startswith(("/", "\\")) or ".." in Path(arg).parts:
+                return ToolResult(False, "command paths must remain inside the repository")
         allowed = (
             argv[0] in {"ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "pwd", "pytest", "ruff"}
             or argv[:2] in (["git", "status"], ["git", "diff"], ["git", "log"])

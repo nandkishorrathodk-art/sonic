@@ -48,7 +48,16 @@ class _ProviderFileStore:
         return value.encode() if isinstance(value, str) else bytes(value)
 
     async def write_file(self, path: str, content: bytes | str) -> bool:
-        value = content.decode(errors="strict") if isinstance(content, bytes) else content
+        if isinstance(content, bytes):
+            write_bytes = getattr(self.provider, "write_file_bytes", None)
+            if write_bytes is not None:
+                return bool(await write_bytes(self.workspace_id, path, content, actor=self.actor))
+            try:
+                value = content.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise ValueError("provider does not support binary-safe checkpoint restore") from exc
+        else:
+            value = content
         return bool(await self.provider.write_file(
             self.workspace_id, path, value, actor=self.actor
         ))

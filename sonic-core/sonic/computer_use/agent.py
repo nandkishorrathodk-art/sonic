@@ -188,17 +188,13 @@ class ComputerUseAgent:
         **kwargs: Any,
     ):
         self.computer = computer_provider
-        # Keep the application desktop optional. Sandbox/operator missions
-        # should not capture pixels merely because a workstation exists.
-        self.observe_desktop = observe_desktop
-        # The graphical computer plane can be locked away from PTY/shell
-        # execution. Backend operator tooling remains a separate plane.
-        self.gui_only = gui_only
-        if gui_only:
-            logger.warning(
-                "gui_only_mode_deprecated",
-                message="gui_only mode violates Mandate 5 (Dual-Plane Concurrency); both GUI and Terminal planes should remain concurrently active.",
+        if observe_desktop is False or gui_only:
+            raise ValueError(
+                "Dual-plane execution is mandatory: GUI observation and headless "
+                "terminal execution cannot be disabled."
             )
+        self.observe_desktop = True
+        self.gui_only = False
         # Context supplied by the caller is advisory evidence, never a
         # replacement for the immutable operator objective.
         self.initial_context = dict(initial_context or {})
@@ -2478,12 +2474,12 @@ class ComputerUseAgent:
             )
             return routed
         except Exception as e:
-            logger.debug("native_govern_action_unavailable", error=str(e))
+            logger.error("native_govern_action_failed_closed", error=str(e))
             return {
                 "severity": "info",
-                "tier": "standard",
-                "network_isolated": False,
-                "executable": True,
+                "tier": "forbidden",
+                "network_isolated": True,
+                "executable": False,
                 "native_verdict": "unavailable",
                 "reason": f"native governance unavailable: {e}",
             }
@@ -2626,7 +2622,7 @@ class ComputerUseAgent:
         # the ActionBroker/SafetyKernel's job at execution time. Only an
         # outright forbidden tier hard-blocks at this stage.
         routed = self._native_govern_action(action_type, target_resource)
-        if not routed.get("executable", True):
+        if not routed.get("executable", False):
             actual_obs_str = (
                 f"Sandbox tier forbids execution: {routed.get('reason', 'denied')}"
             )

@@ -232,13 +232,12 @@ class DaytonaComputerProvider(ComputerProvider):
         if workspace_id and workspace_id in self._sandboxes:
             return self._sandboxes[workspace_id]
 
-        env_id = os.environ.get("DAYTONA_SANDBOX_ID", "")
-        # Persisted workspace IDs are Daytona sandbox IDs. Older in-memory
-        # records used a synthetic ws-* ID; prefer attached env sandbox if available.
+        # Persisted workspace IDs are Daytona sandbox IDs. Synthetic IDs cannot
+        # be resolved without an explicit tenant-owned mapping.
         if workspace_id and not workspace_id.startswith("ws-") and workspace_id != "default":
             target_id = workspace_id
         else:
-            target_id = env_id or workspace_id or ""
+            target_id = ""
 
         if target_id:
             if target_id in self._sandboxes:
@@ -293,36 +292,10 @@ class DaytonaComputerProvider(ComputerProvider):
                     )
                     if not is_not_found:
                         return None
-                    # Auto-heal: If sandbox was deleted/expired on Daytona Cloud, check existing or auto-provision a fresh one
+                    # Never attach an arbitrary existing sandbox during recovery:
+                    # ownership cannot be proven from an unscoped list result.
                     try:
-                        logger.info("daytona_auto_healing_checking_existing_sandboxes")
-                        found_sb = None
-                        try:
-                            async for existing_sb in client.list():
-                                found_sb = existing_sb
-                                break
-                        except Exception:
-                            pass
-
-                        if found_sb:
-                            logger.info("daytona_auto_healing_reusing_existing_sandbox", sandbox_id=found_sb.id)
-                            state_token = self._normalize_sandbox_state(getattr(found_sb, "state", None))
-                            if state_token in ("STOPPED", "ARCHIVED", "PAUSED"):
-                                try:
-                                    await client.start(found_sb)
-                                except Exception as start_err:
-                                    logger.warning("daytona_auto_heal_start_failed", error=str(start_err))
-                            if hasattr(found_sb, "computer_use"):
-                                try:
-                                    await found_sb.computer_use.start()
-                                except Exception:
-                                    pass
-                            self._sandboxes[found_sb.id] = found_sb
-                            if workspace_id:
-                                self._sandboxes[workspace_id] = found_sb
-                            return found_sb
-
-                        logger.info("daytona_auto_healing_provisioning_fresh_sandbox")
+                        logger.info("daytona_auto_healing_provisioning_tenant_scoped_sandbox")
                         sandbox = await client.create()
                         if sandbox:
                             if hasattr(sandbox, "computer_use"):
@@ -1016,6 +989,18 @@ class DaytonaComputerProvider(ComputerProvider):
 
         # No alternate-container or host fallback.  A Daytona workstation must
         # expose its filesystem API for writes to be considered successful.
+        return False
+
+    async def write_file_bytes(
+        self, workspace_id: str, path: str, content: bytes, actor: str = "operator"
+    ) -> bool:
+        sandbox = await self._resolve_sandbox(workspace_id)
+        if sandbox and hasattr(sandbox, "fs") and hasattr(sandbox.fs, "upload_file"):
+            try:
+                await sandbox.fs.upload_file(src=content, dst=path)
+                return True
+            except Exception as e:
+                logger.warning("daytona_fs_binary_write_failed", error=str(e), path=path)
         return False
 
     async def list_files(self, workspace_id: str, path: str = ".") -> list[FileEntry]:

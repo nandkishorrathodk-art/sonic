@@ -14,10 +14,10 @@ services:
     image: neo4j:5-community
     container_name: sonic-neo4j
     ports:
-      - "7474:7474"   # Browser UI
-      - "7687:7687"   # Bolt protocol
+      - "127.0.0.1:7474:7474"   # Browser UI
+      - "127.0.0.1:7687:7687"   # Bolt protocol
     environment:
-      NEO4J_AUTH: neo4j/sonic-reda-dev
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set}
       NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
       NEO4J_server_memory_heap_initial__size: "512m"
       NEO4J_server_memory_heap_max__size: "1g"
@@ -38,7 +38,7 @@ services:
     image: redis:7-alpine
     container_name: sonic-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data

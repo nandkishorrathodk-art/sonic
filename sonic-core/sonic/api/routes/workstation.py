@@ -345,8 +345,7 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
     if tenant_id not in _tenant_workstations:
         _tenant_workstations[tenant_id] = {}
 
-    env_sandbox_id = os.environ.get("SONIC_DEFAULT_WORKSPACE_ID", os.environ.get("DAYTONA_SANDBOX_ID", "")).strip()
-    active_ws = env_sandbox_id if os.environ.get("SONIC_ALLOW_SHARED_WORKSTATION", "0") == "1" else ""
+    active_ws = ""
     # Local Docker workspaces must be explicitly provisioned and persisted for
     # this tenant/session. Never attach the process-wide default container here:
     # doing so would expose one tenant's desktop to every other tenant.
@@ -526,7 +525,7 @@ def _session_workspace_id_for_tenant(tenant_id: str, session_id: str) -> str:
         if sandbox_id:
             return sandbox_id
 
-    # Fallback to tenant's default session or active DAYTONA_SANDBOX_ID env
+    # Fallback only to this tenant's explicitly persisted default session.
     default_state = _tenant_workstations.get(tenant_id, {}).get("default", {})
     default_ws = str(default_state.get("desktop", {}).get("workspace_id") or default_state.get("desktop", {}).get("sandbox_id") or "")
     if default_ws:
@@ -534,13 +533,6 @@ def _session_workspace_id_for_tenant(tenant_id: str, session_id: str) -> str:
             state.setdefault("desktop", {})["workspace_id"] = default_ws
             state.setdefault("desktop", {})["sandbox_id"] = default_ws
         return default_ws
-
-    env_sandbox_id = os.environ.get("SONIC_DEFAULT_WORKSPACE_ID", os.environ.get("DAYTONA_SANDBOX_ID", "")).strip()
-    if env_sandbox_id:
-        if state:
-            state.setdefault("desktop", {})["workspace_id"] = env_sandbox_id
-            state.setdefault("desktop", {})["sandbox_id"] = env_sandbox_id
-        return env_sandbox_id
 
     return ""
 

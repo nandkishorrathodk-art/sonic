@@ -53,6 +53,11 @@ export async function ensureAuthToken(apiBase: string, force: boolean = false): 
   }
   clearAuth();
 
+  const devAuthEnabled =
+    process.env.NODE_ENV !== "production" &&
+    process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH === "true";
+  if (!devAuthEnabled) return "";
+
   try {
     const res = await fetch(`${apiBase}/auth/dev-token`, { method: "POST" });
     if (res.ok) {
