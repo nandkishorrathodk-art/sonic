@@ -20,6 +20,11 @@ from sonic.computer_use.models import (
 from sonic.computer_use.motor import MotorReflexes
 from sonic.computer_use.scratchpad import HackerScratchpad
 from sonic.computer_use.wire_telemetry import WireTelemetryEngine
+from sonic.computer_use.checkpoint import (
+    Checkpoint,
+    CheckpointManager,
+    LocalWorkspaceFileStore,
+)
 
 __all__ = [
     "ActionExecutionStatus",
@@ -36,7 +41,9 @@ __all__ = [
     "MotorReflexes",
     "HackerScratchpad",
     "WireTelemetryEngine",
+    "Checkpoint",
+    "CheckpointManager",
+    "LocalWorkspaceFileStore",
     "crop_toolbar_region",
     "map_crop_to_screen",
 ]
-

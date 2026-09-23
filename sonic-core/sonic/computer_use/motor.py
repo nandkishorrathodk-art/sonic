@@ -9,8 +9,12 @@ budget hygiene for the SONIC Computer.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import shlex
+import time
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from sonic.computer.models import GUIAction, GUIActionType
@@ -19,11 +23,192 @@ from sonic.logger import get_logger
 logger = get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class BurstActionResult:
+    """The observed outcome of one action in a motor burst."""
+
+    index: int
+    action: GUIAction
+    success: bool
+    result: Any = None
+    error: str | None = None
+    verification: str | None = None
+
+
+@dataclass
+class BurstResult:
+    """Truthful summary of a burst; only dispatched actions appear in results."""
+
+    success: bool
+    completed: int
+    stopped: bool
+    stop_reason: str | None = None
+    actions: list[BurstActionResult] = field(default_factory=list)
+    elapsed_seconds: float = 0.0
+
+    @property
+    def action_results(self) -> list[BurstActionResult]:
+        """Descriptive alias for callers that prefer the explicit name."""
+        return self.actions
+
+
 class MotorReflexes:
     """System 1 Motor Reflexes and human physical cadence engine."""
 
     def __init__(self, computer: Any):
         self.computer = computer
+
+    @staticmethod
+    async def _call_hook(hook: Callable[..., Any], *args: Any) -> Any:
+        """Call a hook without imposing a needless callback signature."""
+        try:
+            parameters = inspect.signature(hook).parameters
+            positional = [
+                p for p in parameters.values()
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            ]
+        except (TypeError, ValueError):
+            positional = None
+        if positional is None:
+            value = hook(*args)
+        else:
+            # The final argument is the provider's observed result.  This makes
+            # one-argument verifiers useful while retaining the full form.
+            count = min(len(positional), len(args))
+            value = hook(*args[-count:] if count else ())
+        return await value if inspect.isawaitable(value) else value
+
+    @staticmethod
+    def _failure_from_dispatch(value: Any) -> str | None:
+        """Extract explicit provider failure, never infer success from a message."""
+        if value is None:
+            return "GUI provider returned no execution result"
+        status = value.get("status") if isinstance(value, dict) else getattr(value, "status", None)
+        if status is not None and str(status).upper() in {"FAILED", "FAILURE", "BLOCKED", "ERROR"}:
+            return f"GUI provider status: {status}"
+        exit_code = value.get("exit_code") if isinstance(value, dict) else getattr(value, "exit_code", None)
+        if exit_code is not None and exit_code != 0:
+            return f"GUI provider exit code: {exit_code}"
+        return None
+
+    async def execute_burst(
+        self,
+        workspace_id: str,
+        actions: Sequence[GUIAction],
+        *,
+        interval_seconds: float = 0.05,
+        verifier: Callable[..., Awaitable[Any] | Any] | None = None,
+        observation_hook: Callable[..., Awaitable[Any] | Any] | None = None,
+    ) -> BurstResult:
+        """Dispatch typed GUI actions at a controlled cadence, stopping fail-closed.
+
+        ``verifier`` and ``observation_hook`` may accept (result), (action, result),
+        or (workspace_id, action, result).  A verifier must return truthy; a hook
+        may return ``False`` or ``{"ok": False}`` to interrupt the burst.  When
+        no hook is supplied, an available computer ``observe`` method is called
+        for fresh state, but its observation is not treated as a success verdict.
+        """
+        if not isinstance(interval_seconds, (int, float)) or isinstance(interval_seconds, bool):
+            raise ValueError("interval_seconds must be a number")
+        if interval_seconds < 0 or interval_seconds > 1.0:
+            raise ValueError("interval_seconds must be between 0 and 1 second")
+        if actions is None or isinstance(actions, (str, bytes)):
+            raise ValueError("actions must be a sequence of GUIAction values")
+        action_list = list(actions)
+        if any(not isinstance(action, GUIAction) for action in action_list):
+            raise TypeError("every burst action must be a GUIAction")
+
+        started = time.perf_counter()
+        result = BurstResult(success=True, completed=0, stopped=False)
+        for index, action in enumerate(action_list):
+            if index:
+                await asyncio.sleep(interval_seconds)
+            try:
+                dispatched = await self.computer.gui_action(workspace_id, action)
+            except Exception as exc:
+                detail = BurstActionResult(index, action, False, error=str(exc))
+                result.actions.append(detail)
+                result.success = False
+                result.stopped = True
+                result.stop_reason = f"execution failed: {exc}"
+                break
+
+            failure = self._failure_from_dispatch(dispatched)
+            if failure:
+                result.actions.append(BurstActionResult(index, action, False, dispatched, failure))
+                result.success = False
+                result.stopped = True
+                result.stop_reason = failure
+                break
+
+            detail = BurstActionResult(index, action, True, dispatched)
+            result.actions.append(detail)
+            result.completed += 1
+
+            hook = observation_hook
+            if hook is not None:
+                try:
+                    observed = await self._call_hook(hook, workspace_id, action, dispatched)
+                except Exception as exc:
+                    result.actions[-1] = BurstActionResult(
+                        index, action, False, dispatched, f"observation failed: {exc}",
+                        "observation error",
+                    )
+                    result.completed -= 1
+                    result.success = False
+                    result.stopped = True
+                    result.stop_reason = f"observation failed: {exc}"
+                    break
+                if observed is False or (isinstance(observed, dict) and observed.get("ok") is False):
+                    result.actions[-1] = BurstActionResult(
+                        index, action, False, dispatched, "unexpected state/modal change",
+                        "observation rejected",
+                    )
+                    result.completed -= 1
+                    result.success = False
+                    result.stopped = True
+                    result.stop_reason = "observation rejected the action"
+                    break
+            elif hasattr(self.computer, "observe"):
+                try:
+                    # Computer observation APIs conventionally take the
+                    # workspace, unlike the richer optional hook contract.
+                    await self._call_hook(self.computer.observe, workspace_id)
+                except Exception as exc:
+                    result.actions[-1] = BurstActionResult(
+                        index, action, False, dispatched, f"observation failed: {exc}",
+                        "observation error",
+                    )
+                    result.completed -= 1
+                    result.success = False
+                    result.stopped = True
+                    result.stop_reason = f"observation failed: {exc}"
+                    break
+            if verifier is not None:
+                try:
+                    verdict = await self._call_hook(verifier, workspace_id, action, dispatched)
+                except Exception as exc:
+                    result.actions[-1] = BurstActionResult(
+                        index, action, False, dispatched, f"verification failed: {exc}",
+                        "verification error",
+                    )
+                    result.completed -= 1
+                    result.success = False
+                    result.stopped = True
+                    result.stop_reason = f"verification failed: {exc}"
+                    break
+                if verdict is not True and not (isinstance(verdict, dict) and verdict.get("ok") is True):
+                    result.actions[-1] = BurstActionResult(
+                        index, action, False, dispatched, "verifier interrupted burst",
+                        "verification rejected",
+                    )
+                    result.completed -= 1
+                    result.success = False
+                    result.stopped = True
+                    result.stop_reason = "verifier interrupted burst"
+                    break
+        result.elapsed_seconds = time.perf_counter() - started
+        return result
 
     async def _exec_cmd(self, cmd: str, workspace_id: str = "") -> tuple[int, str, str]:
         """Execute a shell command via _docker_exec or terminal."""

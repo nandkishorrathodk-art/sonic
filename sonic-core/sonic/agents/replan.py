@@ -90,6 +90,14 @@ class ProposedTask(BaseModel):
     priority: str = "medium"  # "critical", "high", "medium", "low"
     expected_observation: str = ""
     timeout_seconds: int = 180
+    # Additive human-workflow fields.  They are metadata only; graph
+    # validation still owns tenant, cycle, scope, and budget invariants.
+    workflow_kind: str = "autonomous"
+    requires_human: bool = False
+    checkpoints: list[dict[str, Any]] = Field(default_factory=list)
+    state_delta: dict[str, Any] = Field(default_factory=dict)
+    recovery_for: str | None = None
+    branch_id: str = ""
 
 
 class ReplanDecision(BaseModel):
@@ -392,6 +400,12 @@ Respond with ONLY valid JSON matching this structure:
             "priority": "critical/high/medium/low",
             "expected_observation": "what we expect to see",
             "timeout_seconds": 180
+            ,"workflow_kind": "autonomous",
+            "requires_human": false,
+            "checkpoints": [],
+            "state_delta": {{}},
+            "recovery_for": null,
+            "branch_id": ""
         }}
     ],
     "tasks_to_skip": ["task-id-to-skip"],
@@ -552,6 +566,26 @@ Rules:
                 f"Task '{task.name}': invalid priority '{task.priority}'"
             )
 
+        if not isinstance(task.checkpoints, list) or any(
+            not isinstance(item, dict) or not item.get("name")
+            for item in task.checkpoints
+        ):
+            errors.append(f"Task '{task.name}': checkpoints must contain named objects")
+        if not isinstance(task.state_delta, dict):
+            errors.append(f"Task '{task.name}': state_delta must be an object")
+
+        # A recovery branch may only refer to an existing failed/blocked task.
+        if task.recovery_for:
+            recovery_source = graph.get_task(task.recovery_for)
+            if not recovery_source:
+                errors.append(
+                    f"Task '{task.name}': recovery source '{task.recovery_for}' not found"
+                )
+            elif recovery_source.status not in (TaskStatus.FAILED, TaskStatus.BLOCKED):
+                errors.append(
+                    f"Task '{task.name}': recovery source must be failed or blocked"
+                )
+
         # Scope validation (if targets are specified)
         target = task.task_payload.get("target", "")
         if target and self.allowed_targets:
@@ -609,10 +643,14 @@ Rules:
                 for dep_name in proposed.depends_on_completed:
                     dep_id = completed_name_to_id.get(dep_name)
                     if dep_id:
-                        deps.append(dep_id)
+                        # Recovery branches must be able to run after a
+                        # failure; depending on the failed node would
+                        # immediately block the branch.
+                        if dep_id != proposed.recovery_for:
+                            deps.append(dep_id)
                     else:
                         # Try direct ID match
-                        if graph.get_task(dep_name):
+                        if graph.get_task(dep_name) and dep_name != proposed.recovery_for:
                             deps.append(dep_name)
 
                 task_node = TaskNode(
@@ -626,6 +664,12 @@ Rules:
                     spawned_by="replan_engine",
                     engagement_id=graph.engagement_id,
                     tenant_id=graph.tenant_id,
+                    workflow_kind=proposed.workflow_kind,
+                    requires_human=proposed.requires_human,
+                    checkpoints=proposed.checkpoints,
+                    state_delta=proposed.state_delta,
+                    recovery_for=proposed.recovery_for,
+                    branch_id=proposed.branch_id,
                 )
                 tid = graph.add_task(task_node)
                 changes["tasks_added"].append(tid)
