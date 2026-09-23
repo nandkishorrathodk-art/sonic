@@ -128,6 +128,35 @@ async def test_boss_delegates_when_llm_omits_workers_for_actionable_objective():
 
 
 @pytest.mark.asyncio
+async def test_boss_preserves_requested_gui_plane_over_planner_default():
+    """A GUI objective must not be silently delegated to headless setup work."""
+    llm = _make_llm_mock([json.dumps({
+        "domain": "WEB",
+        "thinking": "The supplied objective requires live application interaction.",
+        "phase_name": "Application Interaction",
+        "sub_missions": [
+            {
+                "goal": "Operate the supplied website from the live desktop state.",
+                "plane": "headless",
+                "max_steps": 3,
+            }
+        ],
+    })])
+    boss = BossAgent(
+        computer_provider=_make_computer_mock(),
+        llm_router=llm,
+        initial_context={"requested_plane": "gui"},
+    )
+
+    phase = await boss._strategic_decomposition(
+        "open the supplied website and complete the requested account workflow"
+    )
+
+    assert phase is not None
+    assert phase.sub_missions[0].plane == "gui"
+
+
+@pytest.mark.asyncio
 async def test_boss_sub_agent_dispatch_creates_focused_agent():
     """Dispatching a sub-mission creates a focused ComputerUseAgent."""
     summary_json = "Found 3 endpoints with parameters."

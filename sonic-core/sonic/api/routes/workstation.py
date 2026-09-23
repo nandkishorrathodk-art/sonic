@@ -3006,6 +3006,11 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 initial_context={
                                     "program_profile": program_profile,
                                     "recent_history": _summarize_recent_worklog(state),
+                                    "requested_plane": (
+                                        "gui"
+                                        if _requires_desktop_observation(prompt)
+                                        else "headless"
+                                    ),
                                 },
                             )
 

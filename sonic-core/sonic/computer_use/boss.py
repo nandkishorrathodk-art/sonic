@@ -745,9 +745,16 @@ Rules:
 
             sub_id = str(sm.get("id") or "").strip()
             depends_on = [str(d).strip() for d in sm.get("depends_on", []) if str(d).strip()] if isinstance(sm.get("depends_on"), list) else []
-            plane = str(sm.get("plane") or "headless").strip().lower()
+            requested_plane = str(
+                self.initial_context.get("requested_plane") or "headless"
+            ).strip().lower()
+            if requested_plane not in ("headless", "gui"):
+                requested_plane = "headless"
+            plane = str(sm.get("plane") or requested_plane).strip().lower()
+            if requested_plane == "gui":
+                plane = "gui"
             if plane not in ("headless", "gui"):
-                if any(w in goal.lower() for w in ("click", "browser", "desktop", "window", "gui", "firefox", "chrome")):
+                if requested_plane == "gui":
                     plane = "gui"
                 else:
                     plane = "headless"
@@ -792,6 +799,11 @@ Rules:
         failure path into a scripted puppet.
         """
         budget = max(1, min(int(self.sub_agent_steps), 8))
+        requested_plane = str(
+            self.initial_context.get("requested_plane") or "headless"
+        ).strip().lower()
+        if requested_plane not in ("headless", "gui"):
+            requested_plane = "headless"
         sub_missions = [
             SubMission(
                 id="adaptive-investigator",
@@ -808,7 +820,9 @@ Rules:
                 process_mode="deep",
                 evidence_context={
                     "reason": "strategic decomposition unavailable; live evidence required",
+                    "requested_plane": self.initial_context.get("requested_plane", "headless"),
                 },
+                plane=requested_plane,
             ),
         ]
 
