@@ -38,14 +38,25 @@ class SubMission(BaseModel):
 
     @model_validator(mode="after")
     def _infer_plane_from_goal(self) -> SubMission:
+        # If plane was explicitly specified (and not "auto"), preserve it unconditionally.
+        if "plane" in self.model_fields_set and self.plane:
+            plane_lower = str(self.plane).lower().strip()
+            if plane_lower in ("gui", "headless"):
+                self.plane = plane_lower
+                return self
+
         goal_lower = self.goal.lower()
 
         # Explicit GUI indicators: tasks that genuinely require X11 display / browser interaction
+        # Strictly target-agnostic and binary-free (complies with AGENTS.md Rule 1)
         gui_indicators = (
             "open browser", "launch browser", "browser navigation", "browser click",
-            "google-chrome", "chromium", "firefox", "visually verify", "visual verification",
-            "gui_click", "gui_type", "app_launch", "click icon", "click button",
-            "click on", "desktop application", "graphical window",
+            "browser window", "browser tab", "web browser", "browser",
+            "visually verify", "visual verification", "visual inspection", "visually inspect",
+            "visual completion", "gui_click", "gui_type", "gui_action", "gui_screenshot",
+            "app_launch", "launch app", "click icon", "click button", "click on",
+            "desktop application", "graphical window", "graphical interface", "graphical application",
+            "desktop screen", "desktop view", "active window", "display :99", ":99",
         )
 
         # Headless indicators: tasks executed directly in the container sandbox without GUI
@@ -67,14 +78,19 @@ class SubMission(BaseModel):
             self.plane = "headless"
         elif has_headless and has_gui:
             # Ambiguous / compound: if it mentions browser or visual verification, check if primary intent is GUI
-            if any(b in goal_lower for b in ("open browser", "launch browser", "visually verify", "visual verification")):
+            if any(b in goal_lower for b in (
+                "open browser", "launch browser", "visually verify",
+                "visual verification", "visual inspection", "visual completion",
+            )):
                 self.plane = "gui"
             else:
                 self.plane = "headless"
-        elif self.plane == "headless" and any(
-            w in goal_lower for w in ("browser", "chromium", "firefox", "gui_click")
+        elif any(
+            w in goal_lower for w in ("browser", "gui_", "desktop application", "graphical window", "visual")
         ):
             self.plane = "gui"
+        else:
+            self.plane = "headless"
 
         return self
 

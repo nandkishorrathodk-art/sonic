@@ -2223,14 +2223,24 @@ def _requires_desktop_observation(prompt: str) -> bool:
     and custom probes must not open or repeatedly inspect the GUI. Desktop
     capture is reserved for explicit application and visual interaction.
     """
-    lower = prompt.strip().lower()
-    desktop_terms = (
-        "desktop", "screen", "screenshot", "gui", "visual", "mouse", "click",
-        "double-click", "right-click", "type into", "keyboard", "window",
-        "browser", "app", "application", "focus ", "scroll", "drag", "download",
-        "page", "web",
+    lower = re.sub(r"\s+", " ", prompt.strip().lower())
+    headless_indicators = (
+        "source code", "code audit", "audit web", "audit server",
+        "application directory", "app directory", "workspace/app",
+        "with curl", "git diff", "git status", "git log", "unit test",
+        "pytest", "grep ", "find ", "cat ", "check server",
     )
-    return any(term in lower for term in desktop_terms)
+    explicit_gui_terms = (
+        "desktop", "screen", "screenshot", "gui", "visual", "visually",
+        "mouse", "click", "double-click", "right-click", "type into",
+        "keyboard", "active window", "desktop window", "open browser",
+        "launch browser", "scroll", "drag", "ui",
+    )
+    if any(term in lower for term in explicit_gui_terms):
+        return True
+    if any(h in lower for h in headless_indicators):
+        return False
+    return bool(re.search(r"\b(?:window|browser|display|page)\b", lower))
 
 
 def _is_observation_only_prompt(prompt: str) -> bool:

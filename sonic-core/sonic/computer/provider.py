@@ -648,8 +648,10 @@ class UnifiedComputerProvider(ComputerProvider):
             )
         elif action == "commit":
             msg = kwargs.get("message", "chore: automated computer commit")
-            res = await self.compute.execute(workspace_id, f"git add -A && git commit -m '{msg}' || true")
-            ok = res.exit_code == 0 or res.exit_code == 126
+            res = await self.compute.execute(workspace_id, f"git add -A && git commit -m '{msg}'")
+            self._last_git_result = res
+            ok = (res.exit_code == 0)
+            audit_result = "SUCCESS" if ok else ("BLOCKED" if res.exit_code == 126 else "FAILED")
             self._record_audit(
                 session_id=actor,
                 workspace_id=workspace_id,
@@ -657,15 +659,17 @@ class UnifiedComputerProvider(ComputerProvider):
                 actor=actor,
                 action="GIT_COMMIT",
                 resource=msg,
-                result="SUCCESS" if ok else "FAILED",
+                result=audit_result,
             )
             return ok
         elif action == "branch":
             branch_name = kwargs.get("branch_name", "feat-candidate")
-            res = await self.compute.execute(workspace_id, f"git checkout -b '{branch_name}' || true")
-            return res.exit_code == 0 or res.exit_code == 126
+            res = await self.compute.execute(workspace_id, f"git checkout -b '{branch_name}'")
+            self._last_git_result = res
+            return res.exit_code == 0
         elif action == "diff":
-            res = await self.compute.execute(workspace_id, "git diff || true")
+            res = await self.compute.execute(workspace_id, "git diff")
+            self._last_git_result = res
             return res.stdout or ""
         return False
 

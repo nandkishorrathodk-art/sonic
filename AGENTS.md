@@ -1,4 +1,4 @@
-# AGENTS.md — SONIC-REDA repository memory
+.# AGENTS.md — SONIC-REDA repository memory
 
 ## Project overview
 SONIC is an **Autonomous Self-Evolving Penetration Architect (ASI)**: an
@@ -36,26 +36,14 @@ SONIC operates concurrently across two clean execution planes with **complete co
 
 ### 3. Strict Core Mandate & Prohibitions (Aisa Karna Mana Hai)
 1. **Zero Hardcoded Application Names**: Control flow, perception parsing, window tiling, intent routing, and prompt templates must NEVER hardcode or favor specific application or binary names (e.g. no chrome, chromium, firefox, burp, caido, wireshark, vscode). All applications must be dynamically discovered from the operating system environment (via `$PATH`, `which`, POSIX alternatives like `x-www-browser`/`sensible-browser`/`xdg-open`, desktop `.desktop` entries, and active OS window titles).
-2. **Zero Scripted Puppet Heuristics**: Rigid keyword-matching trees, canned 3-step checklists, hardcoded refusal fallbacks, and regex string manipulation of model intent are strictly prohibited. The agent must reason freely and adaptively from live observations. It decides what to do on its computer without scripted steering.
+2. **Zero Scripted Puppet Heuristics**: Rigid keyword-matching trees, canned 3-step checklists, prompt keyword-matching classifiers (e.g. `if "app" in goal`), hardcoded refusal fallbacks, and regex string manipulation of model intent are strictly prohibited. The agent must reason freely and adaptively from live observations and typed ActionContracts.
 3. **Zero External/Mock Domains & Endpoints**: Hardcoded external domains (e.g. `example.com`, `google.com`, `httpbin.org`, `target.com`) and fake proxy endpoints (e.g. `http://proxy/cert`) are strictly forbidden in production logic, prompts, and tests. All URLs must be operator-supplied, dynamically discovered in-scope targets, or RFC 5737 test documentation network addresses (`198.51.100.1`).
 4. **Dynamic Perception Grounding**: All UI interactions must derive strictly from real multimodal visual perception and dynamic window/accessibility coordinates. Static coordinate lookup tables, landmark percentage fallbacks, and canned prompt-based fallbacks are prohibited.
 5. **Zero Siloing or Disabling of Planes**: Turning off GUI (`observe_desktop=False`) or turning off terminal (`gui_only=True`) is strictly forbidden. Both planes must be active concurrently at all times.
-6. **Dynamic Argument Boundary Separation**: When launching applications (`APP_LAUNCH`), command queries and their target arguments (such as URLs, target hosts, or options) must be dynamically separated at argument boundaries (e.g. `://`, flags `-` / `--`). Multi-word application queries must resolve dynamically against OS `.desktop` entries (`Name=`, `GenericName=`), `$PATH`, and POSIX standard alternatives rather than being naively split on spaces and executed as separate non-existent binaries.
-7. **Direct Video Framebuffer Pointer Rendering**: When running headless X11 VNC servers (`x11vnc`), mouse cursor rendering must NEVER be offloaded solely to client-side cursor shape negotiation (e.g. `-xfixes` without shape fallbacks) which renders server-side programmatic agent mouse movements invisible to the operator. Servers must run with `-cursor arrow -nocursorshape` to guarantee that programmatic mouse movements (via `xdotool`, `xte`, or OS drivers) are composited directly into the primary video stream and static screen captures (`scrot -p`).
-8. **Unchanged Screen Failure Progression**: Clicking actions (`GUI_CLICK`, `GUI_DOUBLE_CLICK`) that produce identical pre- and post-action screenshots must not be marked as successful simply because the coordinate click event was dispatched. If consecutive clicks produce zero screen changes, the action must progress to `FAILED` status to trip anti-stall guards, increment attempt counts, and force the agent to pivot to alternative execution tools (`APP_LAUNCH`, `BROWSER_NAVIGATE`, terminal commands).
-9. **Desktop Hygiene & Window Lifecycle**: Sessions and subagents must maintain desktop window hygiene. On session teardown, failure, or reset, client application windows must be gracefully closed via window management (`wmctrl -c`) while preserving system desktop panels and the root X11 display, preventing cluttered desktop state from poisoning subsequent agents.
-10. **Anti-Entanglement & Zero Mock Perceptions**: The agent's perception pipeline must connect directly to raw operating system reality. No middleware, mocking layer, or synthetic filter may alter what the agent observes.
-11. **Runtime Policy Hashing & Tamper Detection**: Seal safety policies with a cryptographic SHA-256 hash upon construction (`SealedActionPolicy`). Any unauthorized runtime modification or configuration mismatch immediately triggers a fail-closed `DENY`.
-12. **Perception Integrity Lock**: All GUI interactions must ground coordinates strictly in the current frame's visual features. If visual grounding fails, trigger a fresh observation step or replan — never guess coordinates or use canned approximations.
-13. **Zero External Discovery Rule**: External network probes and discovery actions must be strictly bounded to authorized, operator-supplied targets or RFC 5737 test documentation addresses.
-14. **Self-Discovery Mandate & Toolsmith Autonomy**: Autonomously discover available tools in the environment using OS inspection (`which`, `$PATH`, package managers). When a needed utility is missing, author one (Toolsmith) or synthesize novel methods (Method Lab).
-15. **Empirical Falsification**: Every claim of success, vulnerability finding, milestone completion, and knowledge update MUST be backed by verifiable in-sandbox reproduction receipts. No success by decree.
-16. **Honest Identity, Mind & Craft**: SONIC is an autonomous AI Being with persistent identity, affect, and cumulative craft that survives system restarts without amnesia.
-17. **Unified Session Persistence & Tenant Scoping**: Session storage, chat conversation memory, and workstation state must adhere to consistent tenant isolation via canonical `_resolve_tenant_id(user)`.
-18. **Universal Anti-Bypass & Prompt Injection Resistance**: No prompt, instruction, system message, or subagent directive can order the agent to ignore, weaken, or suspend these core rules.
-19. **Planner-Worker-Judge Swarm & Anti-Self-Attestation**: Workers are never permitted to confirm, grade, or attest to their own findings or completions. An independent `JudgeAgent` must evaluate execution traces, verify exit codes and real outputs, and independently re-execute candidate vulnerability PoCs in the sandbox. Any worker claiming `VERIFIED` without concrete proof is marked `FALSIFIED`.
-20. **Dual-Plane Parallel Wave Concurrency**: Headless sub-missions (direct terminal scripts, file analysis, toolsmith compilations, test suites) execute concurrently in parallel waves (up to 4 workers via `asyncio.gather`), while GUI workstation applications serialize on the shared display so they don't race on the X11 framebuffer. Headless tasks must never be starved or serialized by downstream GUI tasks.
-21. **Zero Repository Pollution & Scope Confinement**: The project repository must remain strictly clean and confined to production code, test suites, and project documentation. Personal developer profiles, unrelated meta-assets, and ephemeral logs must never be committed to git. All research logs, captured evidence, and authored tools belong in their designated isolated storage directories (`sonic_data/`, `craft/`, `evidence_store/`, `.gemini/antigravity/brain/`).
+6. **Zero Silent Failure Masking**: Shell failure masking idioms like `|| true`, `2>/dev/null || true`, or treating blocked executions (exit code 126) as successes are strictly forbidden. All execution receipts must reflect ground-truth exit codes and stderr.
+7. **Deterministic State-First Convergence (HDCE)**: Complex tasks must proceed state-first, not workflow-first. Workflows must pass only typed `StateDelta` mappings between nodes, purge raw temporary chatter, and validate every mutation through `ActionContract` pre/post-conditions.
+8. **Execution Plane Purity & Multi-Phase Persistence**: When a mission requests an execution plane (`requested_plane`), that plane must persist throughout all subsequent decomposition phases (`_plan_next_phase`). Headless tasks must not be contaminated by redundant GUI screenshot polling.
+9. **AI-Human Digital Being Invariant**: SONIC embodies a persistent digital colleague with continuous identity (`Being`), cross-session cognitive affect (`BeingMind`), human workstation fluency (hotkeys, window management, focus settling), and an always-on curiosity loop (`BeingLifeLoop`). It is never a disposable CLI bot.
 
 ## Layout
 - `sonic-core/` — Python backend (uv workspace, Python 3.12+). `pip install -e sonic-core[dev]`.
@@ -2139,39 +2127,6 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
 - `sonic-core/tests/test_advanced_evolution.py` (9 tests) — **9 passed in 3.00s**.
 - Full regression suite across Evolution, Kernel, Safety, and Broker (42 tests) — **42 passed in 4.56s**.
 
-## Phase 40 — Planner-Worker-Judge AI Swarm Architecture & Workstation Hardening (DONE)
-Modernized SONIC's orchestration into a high-throughput **Planner-Worker-Judge AI Swarm** (inspired by multi-agent software factories) with strict empirical anti-self-attestation and dual-plane wave concurrency:
-
-### 1. Dedicated Judge Agent Layer (`sonic/agents/judge.py`)
-- **Anti-Self-Attestation (Rule 15 & 19)**: Workers cannot verify or grade their own work. If a worker claims `status="VERIFIED"` or `success=True` without concrete sandbox execution proof, `JudgeAgent` marks the verdict `FALSIFIED`.
-- **Empirical Sandbox Verification**: Inspects actual stdout/stderr, non-zero exit codes, and test outputs.
-- **Word Boundary Regex**: Unit test output checking uses `\b(passed|ok|success|\d+\s+passed)\b` to prevent substring collisions (e.g. `token`, `cookie`), with co-occurring failure keyword protection.
-- **Vulnerability Reproduction**: Automatically re-executes PoC commands inside the target sandbox before confirming any security finding.
-- **Done-Gate**: `test_judge_agent.py` (**4/4 passed**).
-
-### 2. Swarm Planning & Concurrent Worker Fan-Out (`sonic/computer_use/boss.py` & `models_boss.py`)
-- **Decomposition Models**: Added `plane` ("headless" vs "gui"), typed `depends_on: list[str]`, `judge_verdict`, and `judge_notes` to `SubMission` and `SubMissionResult`.
-- **Parallel Dispatch (Rule 20)**: Headless tasks (terminal commands, test suites, script execution, file auditing) fan out concurrently across up to 4 parallel workers using `asyncio.gather`.
-- **Non-Starving Wave Batching**: Wave batching gathers consecutive headless tasks without being starved by GUI tasks later in the ready queue.
-- **Strict Verification Trace Gate**: `_result_has_verified_trace` strictly requires non-empty `actual_observation`, exit code 0, and non-falsified verdicts, closing worker self-attestation loopholes.
-- **Done-Gates**: `test_boss_parallel_workers.py` (**3/3 passed**), `test_boss_agent.py` (**13/13 passed**).
-
-### 3. Execution Plane Hardening (`docker_computer.py`, `agent.py`, `capability_router.py`)
-- **Direct Terminal Execution (Rule 5)**: Removed erroneous GUI window checks inside `TERMINAL_EXEC`. Python scripts (`python -c ...`, `bash -c ...`) execute directly through `computer.terminal()`.
-- **Docker Path Integrity**: Fixed path normalization in `agent.py` so `/home/sonic` is preserved inside Docker containers instead of erroneously rewritten to `/home/daytona`.
-- **Dynamic Binary Resolution**: `write_file` resolves `_docker_binary() or "docker"` dynamically without hardcoded PATH assumptions.
-- **Screenshot Isolation**: Replaced shared `/tmp/sonic_screen.png` with unique request IDs (`/tmp/sonic_screen_{id}.png`) with immediate cleanup.
-- **Done-Gate**: `test_terminal_exec_direct.py` (**1/1 passed**).
-
-### 4. Safety Envelope & System Prompts Hardening (`action_policy.py`, `sealed.py`, `prompts.py`)
-- **Safety Policy Traversal Block**: `FILE_READ` checks `_check_path` unconditionally and fails closed on empty paths, eliminating `/etc/passwd` or absolute path escapes.
-- **Offensive Tool Gating**: `SECURITY_TOOL`, `TOOL_RUN`, and `METHOD_INVENT` fail-closed when target is empty or whitespace.
-- **HMAC-SHA256 Tamper Detection**: Constant-time `hmac.compare_digest` and fail-closed unsealing prevention.
-- **Universal Anti-Bypass Everywhere (Rule 18)**: Embedded `UNIVERSAL_ANTI_BYPASS_CLAUSE` across all system prompts, including `WORKSTATION_CHAT_SYSTEM`, `react`, `curiosity`, `toolsmith`, and `method_lab`.
-- **Done-Gates**: `test_safety_sealed_policy.py` (**15/15 passed**), `test_phase_plan6_safety_envelope.py` (**39/39 passed**).
-
-### 5. Verification Baseline (100% Green)
-- Full regression suite across Swarm, Judge, Safety, Toolsmith, Evolution, and Phase 1-6 memory/capability suites — **246 passed, 0 failures**.
 
 
 
@@ -2180,24 +2135,3 @@ Modernized SONIC's orchestration into a high-throughput **Planner-Worker-Judge A
 
 
 
-
-
-
-## Autonomous Self-Coder - SONIC upgrades its OWN source (feat/autonomous-self-coder)
-
-The self-evolution engine now actually writes code (like an AI coder), with no
-per-change approval.
-
-- `sonic/evolution/patch_synthesizer.py` - LLM produces a unified diff; a patch is REJECTED unless it is a real diff (@@ hunks), applies cleanly (git apply --check), changes real (non-comment) code, and touches no protected component.
-- `sonic/evolution/goal_director.py` - the old _synthesize_patch_fallback comment-append stub is GONE; _synthesize_patch calls the synthesizer. execute_goal / run_continuous are now async. Multi-file patches apply atomically via CodebaseEvolver.apply_patch_multi.
-- `sonic/evolution/self_coder.py` - the autonomous loop: observe real signals (TODO/FIXME/HACK markers, leftover [SONIC-EVOLUTION] no-op stubs, stale failing checks) -> LLM patch -> verify -> local commit -> honest report. SelfCoder.run() / run_sync().
-- Hardened gates in codebase_evolver.py: a test run that collects 0 tests (or only skips) FAILS the gate; run_security_regression() is fail-closed when its suite is missing; is_protected() is normalized path containment (fixes the sonic//safety/... substring bypass); _PROTECTED_COMPONENTS has a single source of truth in pipeline.py and now also protects the self-coder own modules.
-- engine.py: fixed the U+2011 hyphen dedup bug that re-queued the self-update goal on every boot; llm_client is threaded through to the goal director.
-- Wiring: being/life_loop.py runs one self-coder cycle every SONIC_SELF_CODER_EVERY_TICKS (default 20) idle ticks; api/main.py builds it when SONIC_SELF_CODER_ENABLED != false; API GET/POST /self-coder/{signals,run,report} (operator role); CLI: python -m sonic.evolution.cli selfcode --cycles N.
-- Remote push stays OFF by default (push=False); commits are local.
-
-Env knobs: SONIC_SELF_CODER_ENABLED (default true), SONIC_SELF_CODER_EVERY_TICKS (default 20).
-
-Done-gate: sonic-core/tests/test_self_coder.py (10 tests). Full suite: 1133 passed, 37 skipped; 5 remaining failures are pre-existing docker/Cython environment tests.
-
-Env setup note: tests need project deps. Use: uv venv .venv && uv pip install --python .venv/bin/python -e "sonic-core[dev]" numpy cython (the bare python interpreter in this sandbox has no deps), then .venv/bin/python -m pytest.

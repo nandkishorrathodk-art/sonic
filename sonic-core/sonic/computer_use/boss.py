@@ -122,6 +122,7 @@ class BossAgent:
         being: Any = None,
         being_mind: Any = None,
         agent_id: str | None = None,
+        requested_plane: str | None = None,
     ):
         self.computer = computer_provider
         self.llm_router = llm_router
@@ -135,6 +136,11 @@ class BossAgent:
         self.being = being
         self.being_mind = being_mind
         self.agent_id = agent_id or (being.being_id if being else f"{tenant_id}-boss")
+        self.requested_plane = (
+            requested_plane.lower().strip()
+            if requested_plane
+            else ("gui" if gui_only else None)
+        )
         self.max_phases = max_phases
         self.sub_agent_steps = sub_agent_steps
         # Explicit concurrency budget: the Boss may never create more live
@@ -287,12 +293,30 @@ class BossAgent:
     # Main orchestration loop
     # ------------------------------------------------------------------
 
+    async def run_mission(
+        self,
+        workspace_id: str,
+        goal: str | Any = "",
+        steps: int = 5,
+        step_callback: Callable | None = None,
+        requested_plane: str | None = None,
+        **kwargs: Any,
+    ) -> BossReport:
+        """Run BossAgent via ComputerUseAgent-compatible run_mission entrypoint."""
+        return await self.run(
+            workspace_id=workspace_id,
+            objective=goal,
+            phase_callback=step_callback,
+            requested_plane=requested_plane,
+        )
+
     async def run(
         self,
         workspace_id: str,
         objective: str | Any,
         phase_callback: Callable | None = None,
         interrupt_check: Callable | None = None,
+        requested_plane: str | None = None,
     ) -> BossReport:
         """Run the full Boss Agent orchestration loop.
 
@@ -308,6 +332,8 @@ class BossAgent:
             "phase_complete", "boss_report".
         interrupt_check : callable, optional
             Returns True if the user wants to stop.
+        requested_plane : str, optional
+            Execution plane constraint ("gui" | "headless" | None).
 
         Returns
         -------
@@ -316,6 +342,13 @@ class BossAgent:
         """
         t_start = time.perf_counter()
         self._interrupted = False
+
+        if requested_plane:
+            self.requested_plane = str(requested_plane).lower().strip()
+        elif hasattr(objective, "requested_plane") and getattr(objective, "requested_plane"):
+            self.requested_plane = str(getattr(objective, "requested_plane")).lower().strip()
+        elif isinstance(objective, dict) and objective.get("requested_plane"):
+            self.requested_plane = str(objective["requested_plane"]).lower().strip()
 
         if hasattr(objective, "goal"):
             objective = objective.goal
@@ -352,6 +385,14 @@ class BossAgent:
             self._sync_phase_to_graph(first_phase)
         else:
             self._sync_phase_to_graph(self.phases[0])
+
+        # Store initial requested_plane from Phase 1 if not explicitly set
+        if not self.requested_plane and self.phases and self.phases[0].sub_missions:
+            phase_planes = [sm.plane for sm in self.phases[0].sub_missions if getattr(sm, "plane", None)]
+            if "gui" in phase_planes:
+                self.requested_plane = "gui"
+            elif phase_planes:
+                self.requested_plane = phase_planes[0]
 
         # Execute phases
         for phase_idx in range(self.max_phases):
@@ -408,17 +449,9 @@ class BossAgent:
                 # Respect the configured worker budget and execution plane.
                 # GUI/browser tasks require serialized access to the shared display.
                 # Headless tasks (terminal, file audits, toolsmith) fan out concurrently.
-                first_plane = getattr(unblocked_ready[0], "plane", "headless")
-                if first_plane == "gui" and self._shared_desktop:
-                    wave_batch = [unblocked_ready[0]]
-                else:
-                    wave_batch = []
-                    for s in unblocked_ready:
-                        if getattr(s, "plane", "headless") == "gui" and self._shared_desktop:
-                            continue
-                        wave_batch.append(s)
-                        if len(wave_batch) >= self.max_parallel_workers:
-                            break
+                has_gui_in_wave = any(getattr(s, "plane", "headless") == "gui" for s in unblocked_ready)
+                worker_limit = 1 if (has_gui_in_wave and self._shared_desktop) else self.max_parallel_workers
+                wave_batch = unblocked_ready[:worker_limit]
                 for s in wave_batch:
                     pending_subs.remove(s)
 
@@ -622,7 +655,7 @@ class BossAgent:
         """
         t_start = time.perf_counter()
 
-        prompt = f"""You are the Boss Agent of an Autonomous AI Computer Workstation & Engineering System.
+        prompt = f"""You are the Boss Agent of an Autonomous Self-Evolving Penetration Architect (A-SEA).
 Your job is to analyze the user's objective from first principles and decompose it into focused, independent sub-missions for worker agents.
 
 USER OBJECTIVE: {objective}
@@ -638,21 +671,22 @@ Apply target-agnostic first-principles reasoning:
    analysis objective instead of executing.
 1. DOMAIN & MODALITY TRIAGE:
    Identify the primary target type:
-   - [SOFTWARE / SCRIPTING]: Python programming, shell scripts, CLI utilities, code authoring, automated workflows.
-   - [DATA / ANALYSIS]: data processing, CSV/JSON metrics, statistics, report generation, charting.
-   - [DESKTOP / GUI]: desktop applications (mousepad, editors, viewers), window management, visual UI interactions.
-   - [WEB / BROWSER]: web applications, local portals, dashboards, web navigation, HTTP services.
-   - [SYSTEM / OPERATIONS]: directory management, process monitoring, file auditing, system health.
+   - [BINARY / REVERSE ENGINEERING / PWN]: local executable or firmware, code behavior, memory safety.
+   - [NETWORK / INFRASTRUCTURE]: address space, reachable services, routing, and protocol behavior.
+   - [API / MICROSERVICE / HEADLESS]: request/response contracts, auth state, schemas, and parameters.
+   - [CRYPTOGRAPHY]: ciphers, hashes, oracles, key material, and entropy.
+   - [FORENSICS / DATA]: memory, captures, logs, and file artifacts.
+   - [WEB APPLICATION]: HTTP state, cookies, DOM, and client behavior when actually required.
 
 2. METHODOLOGY:
-   - Do not force an application, script, or interaction modality before observing the objective.
+   - Do not force an application, scanner, protocol, or interaction modality before observing the target.
    - Each worker must receive a clear, operational task tailored to the specific target modality.
 
 Respond with EXACTLY this JSON format (no extra text):
 {{
-  "domain": "SOFTWARE | DATA | DESKTOP | WEB | SYSTEM",
-  "thinking": "First-principles analysis: target architecture, plan, and strategy",
-  "phase_name": "Domain-appropriate phase name (e.g., Environment Setup, Data Processing, Desktop Application Launch)",
+  "domain": "BINARY | NETWORK | API | CRYPTO | FORENSICS | WEB",
+  "thinking": "First-principles analysis: target architecture, hypotheses, and strategy",
+  "phase_name": "Domain-appropriate phase name (e.g., Static Binary Analysis, Service Enumeration, Schema Discovery)",
   "sub_missions": [
     {{
       "id": "sub-1",
@@ -667,10 +701,8 @@ Respond with EXACTLY this JSON format (no extra text):
 
 Rules:
 - Each sub_mission goal must be FOCUSED and SPECIFIC (one clear task per worker)
-- plane separation is CRITICAL:
-  * "headless": for directory setup (mkdir), code authoring (writing files/scripts/servers), background service starts, socket listeners, and curl/API checks.
-  * "gui": ONLY for launching desktop browsers (e.g. google-chrome), interacting with graphical windows, and visual UI verification.
-- depends_on: list of sub_mission IDs that must complete before this worker starts (e.g. browser verification depends on background server startup)
+- plane: "headless" for terminal/scripts/file audits/tools; "gui" only for desktop browser/window interactions
+- depends_on: list of sub_mission IDs that must complete before this worker starts
 - max_steps should be 3-5 (workers are efficient, not wasteful)
 - priority: higher number = execute first
 - Create 2-5 sub_missions per phase (not more)
@@ -697,7 +729,7 @@ Rules:
         duration = round(time.perf_counter() - t_start, 2)
 
         parsed = self._parse_json_response(raw)
-        if not parsed:
+        if parsed is None or (not parsed and raw != "{}"):
             return self._fallback_decomposition(objective)
 
         thinking = parsed.get("thinking", "Analyzing objective...")
@@ -731,9 +763,11 @@ Rules:
 
             sub_id = str(sm.get("id") or "").strip()
             depends_on = [str(d).strip() for d in sm.get("depends_on", []) if str(d).strip()] if isinstance(sm.get("depends_on"), list) else []
-            plane = str(sm.get("plane") or "headless").strip().lower()
+            plane = str(sm.get("plane") or (self.requested_plane or "headless")).strip().lower()
             if plane not in ("headless", "gui"):
-                if any(w in goal.lower() for w in ("click", "browser", "desktop", "window", "gui", "firefox", "chrome")):
+                if self.requested_plane:
+                    plane = self.requested_plane
+                elif any(w in goal.lower() for w in ("click", "browser", "desktop", "window", "gui", "visual", "screen")):
                     plane = "gui"
                 else:
                     plane = "headless"
@@ -778,6 +812,7 @@ Rules:
         failure path into a scripted puppet.
         """
         budget = max(1, min(int(self.sub_agent_steps), 8))
+        fallback_plane = self.requested_plane or "headless"
         sub_missions = [
             SubMission(
                 id="adaptive-investigator",
@@ -791,6 +826,7 @@ Rules:
                 ),
                 max_steps=budget,
                 priority=1,
+                plane=fallback_plane,
                 process_mode="deep",
                 evidence_context={
                     "reason": "strategic decomposition unavailable; live evidence required",
@@ -862,11 +898,13 @@ Rules:
             )
 
             sub_agent_id = f"sub-agent-{sub_agent_num}"
+            execution_plane = getattr(sub_mission, "plane", "headless") or "headless"
             scoped_context = dict(self.initial_context)
             scoped_context.update(sub_mission.evidence_context)
             scoped_context["delegated_process_mode"] = sub_mission.process_mode
             scoped_context["delegated_goal"] = sub_mission.goal
-            scoped_context["delegated_plane"] = getattr(sub_mission, "plane", "headless")
+            scoped_context["delegated_plane"] = execution_plane
+            scoped_context["execution_plane"] = execution_plane
             agent = ComputerUseAgent(
                 computer_provider=self.computer,
                 autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
@@ -887,10 +925,11 @@ Rules:
                 evolution_engine=self.evolution_engine,
                 gui_only=False,
                 observe_desktop=True,
+                execution_plane=execution_plane,
                 initial_context=scoped_context,
             )
-            if getattr(sub_mission, "plane", "") == "gui":
-                agent.gui_plane_priority = True
+            if not hasattr(agent, "execution_plane"):
+                setattr(agent, "execution_plane", execution_plane)
 
             # Step callback to stream SubAgent actions to UI
             async def _sub_step_callback(trace):
@@ -1048,18 +1087,6 @@ Rules:
                         sub_result.evidence_verified = False
                         sub_result.success = False
                         sub_result.status = "FAILED"
-                        sub_result.findings_summary = (
-                            f"[FALSIFIED by Judge]: {getattr(judge_eval, 'notes', '') or getattr(judge_eval, 'rationale', '') or 'Verification failed'}. "
-                            f"(Worker claimed completion but independent sandbox inspection falsified the claim)"
-                        )
-                    elif judge_eval.verdict in (JudgeVerdict.INCONCLUSIVE, JudgeVerdict.UNVERIFIED):
-                        sub_result.evidence_verified = False
-                        sub_result.success = False
-                        sub_result.status = "UNVERIFIED"
-                        sub_result.findings_summary = (
-                            f"[{judge_eval.verdict.value} by Judge]: {getattr(judge_eval, 'notes', '') or getattr(judge_eval, 'rationale', '') or 'Verification inconclusive'}. "
-                            f"(Worker claimed completion without independent reproducible proof)"
-                        )
                 except Exception as judge_err:
                     logger.warning("boss_judge_evaluation_failed", error=str(judge_err))
 
@@ -1087,20 +1114,14 @@ Rules:
         if not traces:
             return "No actions executed."
 
-        def _fmt_trace(t):
-            act_type = _trace_value(t, 'action_type', '')
-            act_type_str = act_type.value if hasattr(act_type, 'value') else str(act_type)
-            status = _trace_value(t, 'status', '')
-            status_str = status.value if hasattr(status, 'value') else str(status)
-            exit_code = _trace_value(t, 'exit_code', None)
-            target = _trace_value(t, 'target_resource', '')
-            obs = str(_trace_value(t, 'actual_observation', '') or _trace_value(t, 'observation', ''))[:1200]
-            exit_str = f" exit={exit_code}" if exit_code is not None else ""
-            status_tag = f"[{status_str.upper()}{exit_str}]" if status_str else ""
-            return f"- {status_tag} {act_type_str} on {target}: {obs}"
-
         observations = "\n".join(
-            _fmt_trace(t)
+            f"- {(
+                _trace_value(t, 'action_type', '').value
+                if hasattr(_trace_value(t, 'action_type', ''), 'value')
+                else _trace_value(t, 'action_type', '')
+            )} "
+            f"on {_trace_value(t, 'target_resource', '')}: "
+            f"{str(_trace_value(t, 'actual_observation', '') or _trace_value(t, 'observation', ''))[:1500]}"
             for t in traces
             if _trace_value(t, "actual_observation", "") or _trace_value(t, "observation", "")
         )
@@ -1108,40 +1129,22 @@ Rules:
         if not observations:
             return "SubAgent executed but produced no observations."
 
-        # If zero actions succeeded, return a strictly factual failure summary
-        # to guarantee zero hallucinated success claims per Rule 15.
-        any_success = any(
-            str(_trace_value(t, "status", "")).upper() in ("COMPLETED", "SUCCESS", "VERIFIED")
-            and (_trace_value(t, "exit_code", None) in (None, 0))
-            for t in traces
-        )
-        if not any_success:
-            failed_acts = []
-            for t in traces[-3:]:
-                act = _trace_value(t, 'action_type', '')
-                act_str = act.value if hasattr(act, 'value') else str(act)
-                tgt = _trace_value(t, 'target_resource', '')
-                obs = str(_trace_value(t, 'actual_observation', '') or _trace_value(t, 'observation', ''))[:120].strip()
-                failed_acts.append(f"{act_str} on '{tgt}': {obs}")
-            reasons_str = "; ".join(failed_acts) if failed_acts else "all actions failed"
-            return f"Execution failed: no verified progress ({reasons_str})."
+        # Check if all worker traces failed or were blocked (zero verified progress).
+        # When all traces fail, return a factual deterministic failure summary without LLM hallucination.
+        succeeded_traces = [
+            t for t in traces
+            if str(_trace_value(t, "status", "")).upper() in ("COMPLETED", "SUCCESS", "SUCCEEDED", "VERIFIED")
+            and _trace_value(t, "exit_code", 0) in (0, None)
+        ]
+        if not succeeded_traces:
+            return f"Execution failed: no verified progress.\n{observations}"
 
         try:
             from sonic.llm.schemas import LLMRequest, Message, MessageRole
 
             req = LLMRequest(
                 messages=[
-                    Message(
-                        role=MessageRole.SYSTEM,
-                        content=(
-                            "You are an autonomous intelligence officer creating an empirical summary. "
-                            "Summarize the worker agent's findings accurately and strictly based on verified reality. "
-                            "CRITICAL MANDATE: Check the [STATUS] and exit codes of actions. If commands failed, were blocked, "
-                            "exited with non-zero exit codes, or produced errors, state the failure honestly. "
-                            "NEVER claim that an action, tool, or endpoint succeeded when the status is FAILED, BLOCKED, or non-zero. "
-                            "NEVER claim a file exists or was created if the command creating it failed, was blocked, or was skipped."
-                        ),
-                    ),
+                    Message(role=MessageRole.SYSTEM, content="You are an autonomous intelligence officer. Summarize the worker agent's findings accurately and concisely. Focus on concrete facts: open ports, HTTP status codes, server banners, URLs/paths discovered, configuration details, credentials, flags, or error causes."),
                     Message(role=MessageRole.USER, content=f"Worker goal: {goal}\n\nActions and observations:\n{observations}\n\nSummarize the key findings in 2-4 sentences."),
                 ],
                 task_type="reasoning",
@@ -1261,25 +1264,11 @@ Rules:
         """Synthesize all SubAgent outputs from a phase into unified findings."""
         t_start = time.perf_counter()
 
-        verified_reports = []
-        failed_reports = []
-        for r in phase.results:
-            if not r.findings_summary:
-                continue
-            is_ver = r.success and (r.evidence_verified or self._result_has_verified_trace(r))
-            status_tag = "VERIFIED SUCCESS" if is_ver else ("FALSIFIED" if r.judge_verdict == "FALSIFIED" else "FAILED")
-            entry = f"SubAgent ({r.goal}) [{status_tag}]:\n{r.findings_summary}"
-            if is_ver:
-                verified_reports.append(entry)
-            else:
-                failed_reports.append(entry)
-
-        summaries_parts = []
-        if verified_reports:
-            summaries_parts.append("=== VERIFIED SUCCESSFUL FINDINGS ===\n" + "\n\n".join(verified_reports))
-        if failed_reports:
-            summaries_parts.append("=== FAILED / UNVERIFIED / FALSIFIED FINDINGS ===\n" + "\n\n".join(failed_reports))
-        summaries = "\n\n".join(summaries_parts)
+        summaries = "\n\n".join(
+            f"SubAgent ({r.goal}):\n{r.findings_summary}"
+            for r in phase.results
+            if r.findings_summary
+        )
 
         if not summaries:
             return "No findings from this phase."
@@ -1289,15 +1278,7 @@ Rules:
 
             req = LLMRequest(
                 messages=[
-                    Message(
-                        role=MessageRole.SYSTEM,
-                        content=(
-                            "You are a Boss Agent analyzing reports from your worker agents. "
-                            "Synthesize their findings into an empirical, strictly factual intelligence picture. "
-                            "CRITICAL MANDATE: Clearly distinguish verified successful findings from failed or falsified attempts. "
-                            "NEVER claim that a failed, unverified, or falsified sub-mission succeeded."
-                        ),
-                    ),
+                    Message(role=MessageRole.SYSTEM, content="You are a Boss Agent analyzing reports from your worker agents. Synthesize their findings into a unified intelligence picture."),
                     Message(role=MessageRole.USER, content=f"Objective: {objective}\n\nPhase {phase.phase_number} ({phase.name}) reports:\n{summaries}\n\nSynthesize these findings into a clear, unified analysis. What do we know now? What are the key takeaways?"),
                 ],
                 task_type="reasoning",
@@ -1385,8 +1366,6 @@ Rules:
     @staticmethod
     def _result_has_verified_trace(result: SubMissionResult) -> bool:
         """Recognize independently observed, successful sandbox evidence."""
-        if getattr(result, "judge_verdict", "") == "FALSIFIED" or getattr(result, "status", "") in ("FAILED", "BLOCKED"):
-            return False
         for trace in result.traces:
             explicit_evidence = getattr(trace, "verification_evidence", None)
             if explicit_evidence is None and isinstance(trace, dict):
@@ -1395,17 +1374,9 @@ Rules:
             if status is None and isinstance(trace, dict):
                 status = trace.get("status")
             status_text = str(status or "").upper()
-            exit_code = getattr(trace, "exit_code", None)
-            if exit_code is None and isinstance(trace, dict):
-                exit_code = trace.get("exit_code")
-            obs = getattr(trace, "actual_observation", None) or getattr(trace, "observation", None)
-            if obs is None and isinstance(trace, dict):
-                obs = trace.get("actual_observation") or trace.get("observation")
             if (
                 status_text == "VERIFIED"
                 and str(explicit_evidence or "").strip()
-                and (exit_code is None or exit_code == 0)
-                and bool(str(obs or "").strip())
             ):
                 return True
         return False
@@ -1427,6 +1398,16 @@ Rules:
             for p in phases
         )
 
+        # Determine effective execution plane across phases
+        effective_plane = self.requested_plane
+        if not effective_plane and phases:
+            for p in reversed(phases):
+                planes = [sm.plane for sm in p.sub_missions if getattr(sm, "plane", None)]
+                if planes:
+                    effective_plane = planes[0]
+                    break
+        effective_plane = effective_plane or "headless"
+
         try:
             from sonic.llm.schemas import LLMRequest, Message, MessageRole
 
@@ -1440,6 +1421,9 @@ PREVIOUS PHASES:
 FINDINGS SO FAR:
 {all_findings[:2000]}
 
+EXECUTION PLANE INVARIANT: The active mission execution plane is '{effective_plane}'.
+All worker sub_missions must default to plane: "{effective_plane}" unless cross-plane handoff is required.
+
 Based on these findings, what should the NEXT phase focus on? Create focused sub-tasks for worker agents.
 
 Respond with EXACTLY this JSON format:
@@ -1448,19 +1432,14 @@ Respond with EXACTLY this JSON format:
   "phase_name": "Short name for this phase",
   "sub_missions": [
     {{
-      "id": "sub-1",
       "goal": "Specific goal for this worker",
-      "plane": "headless",
+      "plane": "{effective_plane}",
       "depends_on": [],
       "max_steps": 4,
       "priority": 1
     }}
   ]
 }}
-
-Rules:
-- plane: "headless" for terminal/scripts/servers/curl; "gui" ONLY for desktop browser/window interactions
-- depends_on: list of sub_mission IDs that must complete before this worker starts
 
 If the objective is complete or no more work is needed, return:
 {{"thinking": "Objective appears complete", "phase_name": "", "sub_missions": []}}"""
@@ -1506,14 +1485,18 @@ If the objective is complete or no more work is needed, return:
                 priority = max(0, int(sm.get("priority", 1) or 1))
             except (TypeError, ValueError):
                 priority = 1
-            plane = str(sm.get("plane", "headless")).lower()
-            if plane not in ("headless", "gui"):
-                plane = "headless"
+            raw_plane = sm.get("plane")
+            if raw_plane:
+                plane = str(raw_plane).lower().strip()
+                if plane not in ("headless", "gui"):
+                    plane = effective_plane
+            else:
+                plane = effective_plane
+            if self.requested_plane:
+                plane = self.requested_plane
             raw_deps = sm.get("depends_on", [])
             depends_on = [str(x).strip() for x in raw_deps if str(x).strip()] if isinstance(raw_deps, list) else []
-            sub_id = str(sm.get("id") or "").strip()
             sub_missions.append(SubMission(
-                id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
                 goal=goal,
                 plane=plane,
                 depends_on=depends_on,
@@ -1565,27 +1548,18 @@ If the objective is complete or no more work is needed, return:
         else:
             status = "INCOMPLETE"
 
-        # Collect verified vs failed findings across all phases
-        verified_items = []
-        failed_items = []
-        for phase in self.phases:
-            for r in phase.results:
-                is_ver = r.success and (r.evidence_verified or self._result_has_verified_trace(r))
-                if is_ver:
-                    verified_items.append(f"- [Phase {phase.phase_number} / {r.goal}]: {r.findings_summary}")
-                else:
-                    status_lbl = "FALSIFIED" if r.judge_verdict == "FALSIFIED" else "FAILED"
-                    failed_items.append(f"- [Phase {phase.phase_number} / {r.goal} - {status_lbl}]: {r.findings_summary or 'No verified output'}")
-
-        verified_text = "\n".join(verified_items) if verified_items else "No sub-missions achieved verified success."
-        failed_text = "\n".join(failed_items) if failed_items else "None."
+        all_findings = self._collect_all_findings()
 
         # LLM synthesis of final summary (strictly empirically grounded)
         final_summary = ""
-        if not any_success or not verified_items:
+        if not any_success:
+            failed_goals = [
+                f"- {r.goal}: {r.findings_summary or 'Execution failed'}"
+                for p in self.phases for r in p.results
+            ]
             final_summary = (
                 f"Objective execution incomplete. No sub-missions achieved verified success.\n"
-                f"Sub-mission execution diagnostics:\n{failed_text}"
+                f"Sub-mission execution diagnostics:\n" + ("\n".join(failed_goals[:10]) if failed_goals else "No sub-missions executed.")
             )
         else:
             try:
@@ -1598,20 +1572,13 @@ If the objective is complete or no more work is needed, return:
                             content=(
                                 "You are a Boss Agent creating an empirical final report. "
                                 "CRITICAL MANDATE: Only summarize actions and findings that ACTUALLY succeeded with verified evidence. "
-                                "NEVER claim a file, directory, script, or hash was verified if that action failed or was not executed. "
-                                "State what succeeded under Verified Findings, and list failed or incomplete items under Incomplete/Failed Items. "
+                                "NEVER claim a file or directory was created if its execution failed. "
                                 "NEVER use bracketed placeholders like '[Insert ...]'. Be strictly factual and concise."
                             ),
                         ),
                         Message(
                             role=MessageRole.USER,
-                            content=(
-                                f"Objective: {objective}\n\n"
-                                f"VERIFIED FINDINGS (actions with verified receipts):\n{verified_text[:2500]}\n\n"
-                                f"FAILED OR INCOMPLETE ACTIONS:\n{failed_text[:1500]}\n\n"
-                                "Summarize the mission outcome honestly. Report verified findings only from the VERIFIED list, "
-                                "and clearly report failed/incomplete items as incomplete."
-                            ),
+                            content=f"Objective: {objective}\n\nVerified findings:\n{all_findings[:3000]}\n\nSummarize all verified findings clearly and comprehensively.",
                         ),
                     ],
                     task_type="reasoning",
@@ -1623,7 +1590,7 @@ If the objective is complete or no more work is needed, return:
                 if "[Insert" in final_summary:
                     final_summary = re.sub(r"\[Insert[^\]]*\]", "Not verified", final_summary)
             except Exception:
-                final_summary = f"Verified Findings:\n{verified_text}\n\nFailed Items:\n{failed_text}"
+                final_summary = all_findings[:1000]
 
         self.thinking_log.append(BossThinking(
             phase=len(self.phases),

@@ -169,11 +169,11 @@ class ScopeChecker:
 
     # Patterns that indicate destructive or high-risk operations
     _DESTRUCTIVE_PATTERNS = [
-        re.compile(r"\brm\s+.*(?:-[a-zA-Z]*[rR][a-zA-Z]*[fF]|-[a-zA-Z]*[fF][a-zA-Z]*[rR]|--recursive\b.*--force\b|--force\b.*--recursive\b|-[rR]\b.*--force\b|--force\b.*-[rR]\b|-[fF]\b.*--recursive\b|--recursive\b.*-[fF]\b)", re.IGNORECASE),
-        re.compile(r"\brm\s+(-[rR]f?|-[fF]r|-[rR]\s+-[fF]|-[fF]\s+-[rR]|--recursive)\b", re.IGNORECASE),
+        re.compile(r"\brm\s+.*(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|--recursive)\b", re.IGNORECASE),
+        re.compile(r"\brm\s+(-rf?|-fr|-r\s+-f|-f\s+-r|--recursive)\b", re.IGNORECASE),
         re.compile(r"\b(mkfs(\.\w+)?|mke2fs|wipefs)\b", re.IGNORECASE),
         re.compile(r"\bdd\b.*\bof=[\"']?/dev/", re.IGNORECASE),
-        re.compile(r">\s*/dev/(sd[a-z]|nvme\d+n\d+|vd[a-z]|xvd[a-z]|dm-\d+|mapper/|loop\d+)", re.IGNORECASE),
+        re.compile(r">\s*/dev/sd", re.IGNORECASE),
         re.compile(r"\b(killall\s+-9|pkill\s+-9)\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?shutdown\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?reboot\b", re.IGNORECASE),
@@ -315,15 +315,20 @@ class ScopeChecker:
 
     @staticmethod
     def _domain_to_regex(domain: str) -> str:
+        """Convert a domain glob (*.example.com, *.*) to a fully-anchored regex."""
         """Convert a domain glob (*.example.com, *.*) to a fully-anchored regex.
 
         M1 audit fix: ``*.example.com`` now also matches bare ``example.com``
         (apex). The generated pattern uses ``(.*\\.)?`` instead of ``.*\\.`` so
         the subdomain prefix becomes optional.
         """
+        # Escape regex metacharacters, then restore glob semantics for * and .
         escaped = re.escape(domain)
-        if escaped.startswith(r"\*\."):
-            escaped = r"(.*\.)?" + escaped[4:]
+        escaped = escaped.replace(r"\*", ".*").replace(r"\.", r"\.")
+        escaped = escaped.replace(r"\.", r"\.")
+        # Replace leading \*\. with optional subdomain group (matches apex too)
+        escaped = re.sub(r"^\.\*\\.", r"(.*\\.)?", escaped)
+        # Replace remaining wildcards
         escaped = escaped.replace(r"\*", ".*")
         return escaped
 

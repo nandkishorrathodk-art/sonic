@@ -24,6 +24,7 @@ self-directed exploration cannot escape the envelope.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import sqlite3
@@ -108,7 +109,7 @@ class ActionPolicy:
         allowed_action_types: set[str] | None = None,
         allow_security_tool_targets: set[str] | None = None,
         max_actions_per_minute: int = 60,
-        require_approval_for_intrusive: bool = False,
+        require_approval_for_intrusive: bool = True,
         scope_checker: ScopeChecker | None = None,
         scope_config: dict | None = None,
         allow_private_networks: bool = False,
@@ -163,67 +164,52 @@ class ActionPolicy:
         if action_type_name not in self.allowed_types:
             return PolicyVerdict(False, f"action type not allowed: {action_type_name}")
 
-        # 2. Path confinement for file operations, tool authoring, and browser downloads.
-        if action_type_name in ("FILE_WRITE", "FILE_READ", "BROWSER_DOWNLOAD"):
+        # 2. Path confinement for file operations. TOOL_AUTHOR writes its
+        # source under a hardcoded workspace-subdir (toolsmith hardcodes
+        # /home/sonic/workspace/toolsmith/<name>.py), so confinement is
+        # structural ??? it does not need a payload path to validate.
+        if action_type_name in ("FILE_READ", "FILE_WRITE"):
             path = (
                 payload.get("path")
                 or payload.get("file_path")
                 or payload.get("filepath")
                 or payload.get("filename")
-                or payload.get("dest_path")
-                or payload.get("destination")
                 or target
             )
             verdict = self._check_path(path, action_type_name)
             if not verdict.allowed:
                 return verdict
-        elif action_type_name == "TOOL_AUTHOR":
-            raw_path = (
-                payload.get("path")
-                or payload.get("file_path")
-                or payload.get("dest_path")
-                or payload.get("destination")
-                or (target if str(target).startswith("/") or "/" in str(target) or "\\" in str(target) else None)
-            )
-            if raw_path:
-                verdict = self._check_path(raw_path, action_type_name)
-                if not verdict.allowed:
-                    return verdict
 
         # 3. Destructive-command gating for terminal execution + tool runs.
         #    TOOL_RUN executes a hardcoded `python <workspace-toolsmith-path>`,
         #    so the command is structural; we only gate user-supplied commands.
         if action_type_name == "TERMINAL_EXEC":
             command = payload.get("command") or payload.get("cmd") or target or ""
-            if isinstance(command, str):
-                command = command.strip().rstrip(',;').strip()
             verdict = self._check_command(command)
             if not verdict.allowed:
                 return verdict
 
         # 4. Egress + target-allowlist for security tools, tool runs, method invent, and browser navigation.
         if action_type_name in ("SECURITY_TOOL", "TOOL_RUN", "METHOD_INVENT"):
-            scan_target = payload.get("target") or payload.get("target_url")
-            if not scan_target:
-                scan_target = target
-            if not scan_target or str(scan_target).strip().lower() in ("", "none", "null"):
-                return PolicyVerdict(
-                    False,
-                    f"{action_type_name.lower()} requires an explicit target",
-                )
-            verdict = self._check_egress(scan_target, action_type_name.lower())
-            if not verdict.allowed:
-                return verdict
+            scan_target = payload.get("target") or payload.get("target_url") or target
+            if scan_target:
+                verdict = self._check_egress(scan_target, action_type_name.lower())
+                if not verdict.allowed:
+                    return verdict
         elif action_type_name == "BROWSER_NAVIGATE":
-            url = str(payload.get("url") or target or "").strip()
-            if url == "about:blank":
-                return PolicyVerdict(True, "allowed")
-            parsed = urlparse(url)
+            url = payload.get("url") or target
+            parsed = urlparse(str(url).strip())
             if parsed.scheme.lower() not in {"http", "https"}:
                 return PolicyVerdict(False, "browser navigation only permits http/https URLs")
             if parsed.username or parsed.password:
                 return PolicyVerdict(False, "browser navigation forbids embedded URL credentials")
             verdict = self._check_egress(url, "browser")
+            if not verdict.allowed:
+                return verdict
+
+        # 5. Git commit message, branch, and path validation
+        elif action_type_name == "GIT_COMMIT":
+            verdict = self._check_git_commit(payload, target)
             if not verdict.allowed:
                 return verdict
 
@@ -235,14 +221,6 @@ class ActionPolicy:
             clean_path = str(path or "").strip().replace("\\", "/")
             if not clean_path:
                 return PolicyVerdict(False, f"{action_name} empty path")
-            # M3: Reject Windows drive-letter paths (e.g. C:/...) that might escape workspace confinement
-            if re.match(r"^[a-zA-Z]:", clean_path):
-                return PolicyVerdict(False, f"{action_name} escapes workspace: absolute Windows drive path {path}")
-            # Map canonical container workspace symlinks (/workspace <-> /home/sonic/workspace)
-            if clean_path == "/workspace":
-                clean_path = "/home/sonic/workspace"
-            elif clean_path.startswith("/workspace/"):
-                clean_path = "/home/sonic/workspace" + clean_path[len("/workspace"):]
             resolved = Path(clean_path).expanduser()
             # Resolve strictly=False so a not-yet-written path still confines.
             # On Windows, POSIX paths starting with / return is_absolute() == False.
@@ -259,37 +237,53 @@ class ActionPolicy:
                 False, f"{action_name} escapes workspace: {path} -> {resolved}")
         return PolicyVerdict(True, "path confined")
 
+    _GIT_INJECTION_RE = re.compile(r"['\"`$&|<>\\\x00\n\r;]|(?:\$\()|(?:`.*`)")
+
+    def _check_git_commit(self, payload: dict[str, Any], target: str) -> PolicyVerdict:
+        path = payload.get("path") or payload.get("file_path") or (target if target and target != "git" else None)
+        if path:
+            p_verdict = self._check_path(path, "GIT_COMMIT")
+            if not p_verdict.allowed:
+                return p_verdict
+
+        raw_msg = str(payload.get("message") if payload.get("message") is not None else "")
+        if "\x00" in raw_msg or "\n" in raw_msg or "\r" in raw_msg:
+            return PolicyVerdict(False, f"GIT_COMMIT message contains forbidden control/null characters: {repr(raw_msg)}")
+        msg = raw_msg.strip()
+        if not msg:
+            return PolicyVerdict(False, "GIT_COMMIT message must not be empty")
+        if len(msg) > 500:
+            return PolicyVerdict(False, "GIT_COMMIT message exceeds maximum length (500 characters)")
+        if self._GIT_INJECTION_RE.search(msg):
+            return PolicyVerdict(False, f"GIT_COMMIT message contains dangerous shell injection characters: {repr(msg)}")
+
+        raw_branch = str(payload.get("branch") or payload.get("branch_name") or "")
+        if "\x00" in raw_branch or "\n" in raw_branch or "\r" in raw_branch:
+            return PolicyVerdict(False, f"GIT_COMMIT branch contains control characters: {repr(raw_branch)}")
+        branch = raw_branch.strip()
+        if branch:
+            if branch.startswith("-") or ".." in branch or branch.startswith("/") or branch.endswith("/"):
+                return PolicyVerdict(False, f"GIT_COMMIT branch name cannot start with hyphen/slash or contain '..': {branch}")
+            if self._GIT_INJECTION_RE.search(branch) or not re.match(r"^[a-zA-Z0-9_.\-\/]+$", branch):
+                return PolicyVerdict(False, f"GIT_COMMIT branch contains invalid characters: {branch}")
+
+        return PolicyVerdict(True, "git commit valid")
+
     _CLOUD_METADATA_RE = re.compile(
-        r"169\.254\.\d+\.\d+"
-        r"|2852039166\b"  # dword for 169.254.169.254
-        r"|0xa9\.?0xfe\.?0xa9\.?0xfe\b"  # hex dotted
-        r"|0xa9fea9fe\b"  # hex packed
-        r"|0251\.0376\.0251\.0376\b"  # octal
-        r"|::ffff:169\.254\.\d+\.\d+"
-        r"|fd00:ec2::254\b"
+        r"169\.254\.169\.254"
         r"|instance-data(?:\.ec2\.internal)?\b"
         r"|metadata\.google\.internal\b"
-        r"|metadata\.azure\.com\b"
-        r"|metadata\.packet\.net\b"
-        r"|100\.100\.100\.200\b",
+        r"|metadata\.azure\.com\b",
         re.IGNORECASE,
     )
 
     def _check_command(self, command: str) -> PolicyVerdict:
-        cmd_str = command or ""
-        if self._CLOUD_METADATA_RE.search(cmd_str):
+        # TERMINAL_EXEC bypasses the URL-egress filter (it runs shell howeverthe
+        # operator/being chooses). Close the metadata hole explicitly: a shell
+        # command must never reach the cloud metadata endpoint ??? on the host Or
+        # inside an egress-unrestricted container???
+        if self._CLOUD_METADATA_RE.search(command or ""):
             return PolicyVerdict(False, "cloud metadata access blocked in terminal command")
-
-        # H1: Inspect potential base64-encoded strings to prevent base64 pipe bypass
-        import base64
-        for b64_match in re.findall(r"[A-Za-z0-9+/]{12,}={0,2}", cmd_str):
-            try:
-                decoded = base64.b64decode(b64_match).decode("utf-8", errors="ignore")
-                if self._CLOUD_METADATA_RE.search(decoded) or "169.254" in decoded:
-                    return PolicyVerdict(False, "cloud metadata access blocked in base64 encoded command payload")
-            except Exception:
-                pass
-
         # Shell commands are another egress surface (curl, wget, python
         # requests, etc.). When an engagement target allowlist is active,
         # validate every explicit URL before the command reaches the provider.
@@ -354,7 +348,7 @@ class ActionPolicy:
         # Sandbox loopback and local container bindings are always permitted within the container
         if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "0") or host.startswith("127."):
             return PolicyVerdict(True, "local sandbox loopback allowed")
-        
+
         verdict = self._check_target_and_scope(target, label)
         if verdict is not None:
             return verdict

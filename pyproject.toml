@@ -1,6 +1,6 @@
 [project]
-name = "sonic"
-version = "0.1.0"
+name = "sonic-monorepo"
+version = "0.2.0"
 description = "SONIC-REDA — Next-Generation Autonomous AI Bug Hunting System"
 readme = "README.md"
 requires-python = ">=3.12"

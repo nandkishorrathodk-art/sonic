@@ -58,10 +58,10 @@ class WorkspaceConfig:
 @dataclass
 class ExecResult:
     """Result of command execution inside an isolated workspace."""
-    command: str
-    exit_code: int
-    stdout: str
-    stderr: str
+    command: str = ""
+    exit_code: int = 0
+    stdout: str = ""
+    stderr: str = ""
     duration_seconds: float = 0.0
     timed_out: bool = False
     sandbox_id: str = ""

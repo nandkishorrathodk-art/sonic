@@ -253,6 +253,14 @@ class ComputerWorldObservation(BaseModel):
     perception_latency_ns: int = 0
     timestamp: str = Field(default_factory=_now)
 
+    @property
+    def desktop_state(self) -> str:
+        return getattr(self.screen, "desktop_state", "")
+
+    @property
+    def screenshot_base64(self) -> str:
+        return getattr(self.screen, "screenshot_base64", "")
+
 
 class ComputerActionPlan(BaseModel):
     """A closed-loop action plan translating mission goals into computer steps."""

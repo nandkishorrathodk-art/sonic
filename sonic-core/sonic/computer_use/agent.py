@@ -195,6 +195,11 @@ class ComputerUseAgent:
         # The graphical computer plane can be locked away from PTY/shell
         # execution. Backend operator tooling remains a separate plane.
         self.gui_only = gui_only
+        self.execution_plane = str(
+            kwargs.get("execution_plane")
+            or kwargs.get("plane")
+            or ""
+        ).lower().strip()
         if gui_only:
             logger.warning(
                 "gui_only_mode_deprecated",
@@ -569,7 +574,17 @@ class ComputerUseAgent:
         interactive elements) is folded into the observation so the same
         reasoning loop can drive web interaction.
         """
-        if getattr(self, "observe_desktop", True):
+        if getattr(self, "execution_plane", "") == "headless":
+            screen_obs = ScreenObservation(
+                screenshot_base64="",
+                width=getattr(self, "_screen_width", 1920) or 1920,
+                height=getattr(self, "_screen_height", 1080) or 1080,
+                active_window="terminal",
+                visible_text="",
+                detected_controls=[],
+                desktop_state="HEADLESS_DECOUPLED",
+            )
+        elif getattr(self, "observe_desktop", True):
             screen_obs = await self.computer.screenshot(workspace_id)
         else:
             screen_obs = ScreenObservation(
@@ -746,18 +761,32 @@ class ComputerUseAgent:
         working_directory = getattr(status, "working_directory", "")
         if not isinstance(working_directory, str):
             working_directory = ""
+        active_app = getattr(status, "active_application", "")
+        if not isinstance(active_app, str):
+            active_app = getattr(status, "active_window", "")
+            if not isinstance(active_app, str):
+                active_app = "Desktop"
+        open_apps = getattr(status, "open_applications", [])
+        if not isinstance(open_apps, list):
+            open_apps = ["Desktop", "Terminal"]
+        running_procs = getattr(status, "running_processes", [])
+        if not isinstance(running_procs, list):
+            running_procs = []
+        branch_val = getattr(git_st, "branch", "main")
+        if not isinstance(branch_val, str):
+            branch_val = "main"
         return ComputerWorldObservation(
             screen=screen_obs,
-            active_application=status.active_application,
-            windows=status.open_applications,
+            active_application=active_app,
+            windows=open_apps,
             visible_text=_safe_str(screen_obs.visible_text),
             filesystem_files=file_names,
-            processes=status.running_processes,
+            processes=running_procs,
             terminal_output=_safe_str(terminal_output),
             working_directory=working_directory or "/home/daytona",
             browser_state=browser_state,
             ide_state={"active_file": file_names[0] if file_names else "", "cursor_line": 1},
-            git_branch=git_st.branch if hasattr(git_st, "branch") else "main",
+            git_branch=branch_val,
             git_clean=git_st.is_clean if hasattr(git_st, "is_clean") else True,
             perception_version=perception_snapshot.version,
             perception_latency_ns=self.perception_bus.last_update_latency_ns,
@@ -2579,8 +2608,34 @@ class ComputerUseAgent:
             self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
             return trace
 
-        provider_name = self._get_provider_name()
-        tool_name = self._extract_tool_name(action_type, target_resource, payload)
+        # Symmetric execution plane boundary check via CapabilityRouter
+        execution_plane = getattr(self, "execution_plane", "") or ""
+        if execution_plane == "headless":
+            try:
+                from sonic.execution.capability_router import CapabilityRouter, ExecutionSubstrate
+                substrate = CapabilityRouter.route_action(action_type, payload)
+                if substrate == ExecutionSubstrate.COMPUTER:
+                    actual_obs_str = f"Headless execution plane prohibits workstation action {action_type.value}."
+                    trace = ComputerDecisionTrace(
+                        step_index=self.action_counter,
+                        action_type=action_type,
+                        target_resource=target_resource,
+                        payload=str(payload),
+                        predicted_outcome=predicted_outcome,
+                        actual_observation=actual_obs_str,
+                        expected_observation=predicted_outcome,
+                        info_gain=0.0,
+                        recovery_attempted=False,
+                        status=ActionExecutionStatus.BLOCKED,
+                        exit_code=126,
+                        duration_seconds=round(time.perf_counter() - t_start, 3),
+                        thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+                    )
+                    self.traces.append(trace)
+                    self.history.append({"action": action_type.value, "result": actual_obs_str})
+                    return trace
+            except Exception as e:
+                logger.warning("capability_router_boundary_check_failed", error=str(e))
 
         if getattr(self, "gui_only", False) and action_type not in self._GUI_ONLY_ACTIONS:
             actual_obs_str = (
@@ -2728,6 +2783,12 @@ class ComputerUseAgent:
 
         # ----- Substrate Outage Detection (Failure Budget) -----
         # If 3 consecutive provider errors occurred, STOP target actions and switch to substrate diagnostic action.
+        provider_name = type(self.computer).__name__
+        tool_name = (
+            payload.get("tool_name") or target_resource or action_type.value
+            if isinstance(payload, dict) and action_type == ComputerActionType.SECURITY_TOOL
+            else (action_type.value if hasattr(action_type, "value") else str(action_type))
+        )
         if self.failure_budget.substrate_outage:
             diag_info = self.failure_budget.diagnose_substrate_health()
             actual_obs_str = (
@@ -3536,8 +3597,20 @@ class ComputerUseAgent:
 
             elif action_type == ComputerActionType.GIT_COMMIT:
                 msg = payload.get("message", "feat: automated patch")
-                await self.computer.git_action(workspace_id, "commit", message=msg)
-                actual_obs_str = f"Committed change: {msg}"
+                ok = await self.computer.git_action(workspace_id, "commit", message=msg)
+                if not ok:
+                    git_res = getattr(self.computer, "_last_git_result", None)
+                    action_exit_code = getattr(git_res, "exit_code", 1) if git_res else 1
+                    action_stderr = getattr(git_res, "stderr", "Git commit failed") if git_res else "Git commit failed"
+                    if action_exit_code == 126:
+                        status = ActionExecutionStatus.BLOCKED
+                    else:
+                        status = ActionExecutionStatus.FAILED
+                    actual_obs_str = f"Git commit failed (exit {action_exit_code}): {action_stderr}"
+                    recovery_needed = False
+                else:
+                    action_exit_code = 0
+                    actual_obs_str = f"Committed change: {msg}"
 
             elif action_type == ComputerActionType.SERVICE_ACTION:
                 svc = payload.get("service", "xvfb")

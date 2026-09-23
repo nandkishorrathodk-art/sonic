@@ -23,18 +23,20 @@ Control flow, perception parsing, window tiling, intent routing, and prompt temp
 ---
 
 ## 2. Zero Scripted Puppet Heuristics
-SONIC is an autonomous AI Being that reasons freely and adaptively from live observations. Rigid keyword-matching decision trees, canned multi-step checklists, hardcoded refusal fallbacks, and regex string-manipulation of model intent are strictly forbidden.
+SONIC is an autonomous AI Being that reasons freely and adaptively from live observations. Rigid keyword-matching decision trees, canned multi-step checklists, hardcoded refusal fallbacks, shell failure-masking idioms, and regex string-manipulation of model intent are strictly forbidden.
 
 **Mana hai (Strictly Forbidden):**
-- Routing actions via keyword trees (e.g. `if "scan" in goal: do X; elif "http" in goal: do Y; else: do Z`).
+- Routing actions or execution planes via naive keyword lists (e.g. `if "app" in goal or "page" in goal: plane="gui"; else: plane="headless"`).
+- Masking execution failures with shell idioms like `|| true`, `2>/dev/null || true`, or treating exit code 126 (BLOCKED) as successful execution.
 - Canned recovery commands that automatically run fixed fallbacks (such as `curl -sI`, `ls`, or fixed bash one-liners) whenever an action refuses or stumbles.
 - Decomposing goals with hardcoded keyword trees instead of asking the LLM to strategize.
 - Hardcoding static action sequences (e.g. `("step 1: open browser", "step 2: navigate to URL", ...)`).
 - Intercepting model intent with regex patterns to replace model-chosen actions with canned commands.
+- Canned prompt-and-parse classification trees that bypass live system state inspection.
 
 **Karna hai (Mandatory):**
-- Ask the LLM to decompose, reason, plan, and choose the next action dynamically at every single step based on live observations.
-- When an action or tool fails, truthfully record the failure in the observation buffer and trigger an honest replan — NEVER fabricate a workaround puppet command.
+- Ask the LLM to decompose, reason, plan, and choose the next action dynamically at every single step based on live observations and typed ActionContracts.
+- When an action or tool fails, truthfully record the failure with its exact exit code in the observation buffer and trigger an honest replan — NEVER fabricate a workaround puppet command or mask failures.
 - Derive every sub-goal, milestone, and next step directly from the agent's actual observed state.
 
 ---
@@ -346,3 +348,51 @@ The project repository must remain strictly clean and confined to production cod
 - Store all research logs, captured evidence, authored tools, and brain transcripts strictly in their designated isolated storage directories (`sonic_data/`, `craft/`, `evidence_store/`, `.gemini/antigravity/brain/`).
 - Maintain a strict `.gitignore` covering personal profiles, temporary evidence, and binary artifacts.
 - Keep the git history and working tree 100% clean and professional.
+
+---
+
+## 22. AI-Human Digital Being Invariant & Workstation Fluency
+SONIC is designed as an autonomous, persistent digital being operating a personal computer workstation with human-grade intuition, reflexes, and natural execution cadence. It is NOT a disposable CLI wrapper or fragile linear script.
+
+**Mana hai (Strictly Forbidden):**
+- Treating the graphical workstation as a toy container or disposable iframe.
+- Resetting Being identity, affect, curiosity drive, or cumulative craft across boots.
+- Freezing execution loops with blind waits (`sleep 10`) instead of reactive event settling and visual state observation.
+- Disabling window manager focus transitions or failing to raise/focus target windows before dispatching physical input events.
+
+**Karna hai (Mandatory):**
+- Embody a persistent digital colleague with continuous identity (`Being`), cross-session cognitive affect (`BeingMind`), and a cumulative craft library (`BeingCraft`).
+- Maintain human workstation fluency: fluidly switch windows (`Alt+Tab`, `wmctrl -a`), use natural physical hotkeys (`Ctrl+L`, `Ctrl+T`, `Ctrl+W`, `Escape`), and execute rapid burst sequences with anti-stall protections.
+- Run an always-on curiosity loop (`BeingLifeLoop`) when idle, self-reflecting and autonomously expanding its craft under the sealed safety envelope.
+
+---
+
+## 23. Deterministic State-First Convergence & Context Isolation (HDCE)
+All complex workflows must be state-first rather than workflow-first: current state determines the next disposable DAG topology, and transitions are strictly guarded by deterministic contracts.
+
+**Mana hai (Strictly Forbidden):**
+- Accumulating massive, unbounded conversational context (raw web scrapes, compiler logs, browser chatter) across multi-step tasks, causing context starvation and hallucinations.
+- Mutating system state or claiming milestone progress without verifying explicit pre-conditions and post-conditions.
+- Accepting state changes where evidence receipts or exit codes are absent or falsified.
+
+**Karna hai (Mandatory):**
+- Isolate context across workflow nodes: extract and emit only typed, verified `StateDelta` objects (`changed`, `removed`, `confidence`), destroying temporary intermediate execution chatter.
+- Govern every state mutation through typed `ActionContract` instances with verified preconditions, capabilities, and postconditions validated by the deterministic kernel (`ActionContractValidator`).
+- Maintain an immutable, SHA-256 verifiable state ledger with transactional rollback capabilities (`CheckpointManager`) across all major execution checkpoints ($S_0 \to S_1 \dots \to S_k$).
+
+---
+
+## 24. Execution Plane Purity & Multi-Phase Boundary Invariance
+The separation between the Workstation Application Plane (GUI) and the Operator & Sandbox Plane (Headless) must remain structurally intact across all phases of task execution.
+
+**Mana hai (Strictly Forbidden):**
+- Losing the assigned execution plane across multi-phase tasks (e.g. `_plan_next_phase()` defaulting back to `headless` after Phase 1 was established as `gui`).
+- Contaminating pure headless missions (`TERMINAL_EXEC`, `FILE_*`, `GIT_*`, `SECURITY_TOOL`) with redundant full-frame GUI screenshot polling and window parsing, causing latency spikes and spurious UI error cascades.
+- Allowing an assigned `headless` worker to silently convert into GUI actions without explicit planner replanning, or vice versa.
+- Keeping `CapabilityRouter` disconnected from the active `ComputerUseAgent.execute_action()` dispatch pipeline.
+
+**Karna hai (Mandatory):**
+- Persist and enforce the `requested_plane` strictly across all decomposition phases, sub-missions, and worker invocations.
+- Decouple headless task observation loops from mandatory desktop screenshot captures while keeping the GUI plane alive and available.
+- Enforce capability boundaries authoritatively through `CapabilityRouter` prior to action execution.
+

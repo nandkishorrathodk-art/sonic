@@ -96,7 +96,7 @@ class SealedActionPolicy(ActionPolicy):
         allowed_action_types: set[str] | None = None,
         allow_security_tool_targets: set[str] | None = None,
         max_actions_per_minute: int = 60,
-        require_approval_for_intrusive: bool = False,
+        require_approval_for_intrusive: bool = True,
         scope_checker: ScopeChecker | None = None,
         scope_config: dict | None = None,
         allow_private_networks: bool = False,
@@ -158,27 +158,21 @@ class SealedActionPolicy(ActionPolicy):
     def seal_hash(self) -> str:
         return self._seal_hash
 
-    def clone_for_agent(self, agent_id: str = "") -> SealedActionPolicy:
+    def clone_for_agent(self, agent_id: str = "") -> "SealedActionPolicy":
         """Clone policy with an independent rate window for a concurrent subagent."""
-        import copy
-        cloned_scope_checker = copy.deepcopy(self.scope_checker) if getattr(self, "scope_checker", None) is not None else None
-        cloned_scope_config = copy.deepcopy(self.scope_config) if getattr(self, "scope_config", None) is not None else None
         cloned = SealedActionPolicy(
             workspace_root=str(self.workspace_root),
             allowed_action_types=set(self.allowed_types),
             allow_security_tool_targets=set(self.security_tool_targets),
             max_actions_per_minute=self.max_actions_per_minute,
             require_approval_for_intrusive=self.require_approval_for_intrusive,
-            scope_checker=cloned_scope_checker,
-            scope_config=cloned_scope_config,
+            scope_checker=self.scope_checker,
+            scope_config=self.scope_config,
             allow_private_networks=self.allow_private_networks,
             tenant_id=self.tenant_id,
             _seal_secret=self._seal_secret,
             auto_seal=False,
         )
-        object.__setattr__(cloned, "_blocked_networks_snapshot", self._blocked_networks_snapshot)
-        object.__setattr__(cloned, "_scope_checker_rules", list(self._scope_checker_rules))
-        object.__setattr__(cloned, "_scope_checker_methods", list(self._scope_checker_methods))
         object.__setattr__(cloned, "_seal_secret", self._seal_secret)
         object.__setattr__(cloned, "_seal_hash", self._seal_hash)
         object.__setattr__(cloned, "_sealed", self._sealed)
@@ -201,16 +195,7 @@ class SealedActionPolicy(ActionPolicy):
         }
         if getattr(self, "scope_config", None):
             payload["scope_config"] = self.scope_config
-        active_scope = self._get_active_scope_config()
-        if active_scope:
-            payload["active_scope_config"] = active_scope
         if hasattr(self, "scope_checker") and self.scope_checker is not None:
-            checker_rules = getattr(self.scope_checker, "_rules", None)
-            if checker_rules:
-                payload["scope_checker_live_rules"] = checker_rules
-            checker_cfg = getattr(self.scope_checker, "scope_config", None)
-            if checker_cfg:
-                payload["scope_checker_live_config"] = checker_cfg
             patterns = getattr(self.scope_checker, "_destructive_patterns", getattr(self.scope_checker, "_DESTRUCTIVE_PATTERNS", []))
             forbidden = getattr(self.scope_checker, "_forbidden_patterns", [])
             payload["scope_patterns_repr"] = sorted([getattr(p, "pattern", str(p)) for p in patterns]) + sorted([getattr(p, "pattern", str(p)) for p in forbidden])
@@ -219,7 +204,7 @@ class SealedActionPolicy(ActionPolicy):
                 payload["scope_instance_intrusive_patterns"] = sorted([getattr(p, "pattern", str(p)) for p in intrusive_inst])
         return hmac.new(
             self._seal_secret.encode(),
-            json.dumps(payload, sort_keys=True, default=str).encode(),
+            json.dumps(payload, sort_keys=True).encode(),
             hashlib.sha256,
         ).hexdigest()
 
@@ -246,22 +231,18 @@ class SealedActionPolicy(ActionPolicy):
         target_resource: str,
         payload: dict[str, Any] | None = None,
     ) -> PolicyVerdict:
-        if not getattr(self, "_sealed", False) or not getattr(self, "_seal_hash", ""):
-            return PolicyVerdict(
-                False,
-                "safety policy integrity check failed: unsealed policy in sealed context",
-            )
-        current_hash = self._compute_seal_hash()
-        if not hmac.compare_digest(current_hash, self._seal_hash):
-            logger.error(
-                "safety_policy_tampered",
-                expected=self._seal_hash,
-                computed=current_hash,
-            )
-            return PolicyVerdict(
-                False,
-                "safety policy integrity check failed: seal mismatch (policy was tampered)",
-            )
+        if self._sealed:
+            current_hash = self._compute_seal_hash()
+            if current_hash != self._seal_hash:
+                logger.error(
+                    "safety_policy_tampered",
+                    expected=self._seal_hash,
+                    computed=current_hash,
+                )
+                return PolicyVerdict(
+                    False,
+                    "safety policy integrity check failed: seal mismatch (policy was tampered)",
+                )
         return super().evaluate(action_type, target_resource, payload)
 
     def _clone(self) -> SealedActionPolicy:
@@ -308,20 +289,24 @@ def seal_default(
     workspace_root: str = "/home/sonic/workspace",
     allow_security_tool_targets: set[str] | None = None,
     allow_private_networks: bool = False,
-    require_approval_for_intrusive: bool = True,
     scope_config: dict[str, Any] | None = None,
     scope_checker: Any | None = None,
     tenant_id: str = "default",
+    require_approval_for_intrusive: bool = False,
     max_actions_per_minute: int = 120,
+    allowed_action_types: set[str] | None = None,
+    **kwargs: Any,
 ) -> SealedActionPolicy:
     """Build + seal the standard production policy for the being life loop or mission."""
     return SealedActionPolicy(
         workspace_root=workspace_root,
         allow_security_tool_targets=allow_security_tool_targets or set(),
         allow_private_networks=allow_private_networks,
-        require_approval_for_intrusive=require_approval_for_intrusive,
         scope_config=scope_config,
         scope_checker=scope_checker,
         tenant_id=tenant_id,
+        require_approval_for_intrusive=require_approval_for_intrusive,
         max_actions_per_minute=max_actions_per_minute,
+        allowed_action_types=allowed_action_types,
+        **kwargs,
     ).seal()

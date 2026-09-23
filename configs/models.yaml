@@ -6,8 +6,8 @@
 # ============================================
 
 # Default provider and model when no task-specific rule matches
-default_provider: nvidia
-default_model: meta/llama-3.2-11b-vision-instruct
+default_provider: groq
+default_model: qwen/qwen3.8-27b
 
 # ---- Provider Definitions ----
 providers:
@@ -182,67 +182,67 @@ providers:
 routing_rules:
   planning:
     description: 'High-level planning, task decomposition, strategy'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/qwen/qwen3.6-27b, nvidia/meta/llama-3.2-11b-vision-instruct]
 
   reasoning:
     description: 'Code analysis, dataflow tracing, pattern matching'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/qwen/qwen3.6-27b, nvidia/meta/llama-3.2-11b-vision-instruct]
 
   fast_recon:
     description: 'Quick reconnaissance, asset discovery, tech detection'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/qwen/qwen3.6-27b]
 
   coding:
     description: 'Code generation, fix generation, test writing'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/qwen/qwen3.6-27b, nvidia/meta/llama-3.2-11b-vision-instruct]
 
   verification:
     description: 'Evidence checking, confidence scoring, FP filtering'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/qwen/qwen3.6-27b, nvidia/meta/llama-3.2-11b-vision-instruct]
 
   hypothesis:
     description: 'Novel bug class ideation, creative reasoning'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/qwen/qwen3.6-27b, nvidia/meta/llama-3.2-11b-vision-instruct]
 
   classification:
     description: 'Quick labeling, triage, categorization'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/qwen/qwen3.6-27b]
 
   vision:
     description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/moonshotai/kimi-k3]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/qwen/qwen3.6-27b, nvidia/meta/llama-3.2-11b-vision-instruct]
 
   computer_use:
     description: 'Autonomous computer vision and desktop interaction'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/moonshotai/kimi-k3]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/qwen/qwen3.6-27b, nvidia/meta/llama-3.2-11b-vision-instruct]
 
 # ---- Global Fallback Chain ----
 # If the preferred provider for a task fails, try these in order
 global_fallback_chain:
-  - nvidia
+  - groq
   - openrouter
   - deepseek
   - claude
   - openai
-  - groq
+  - nvidia
   - local
 
 # ---- Cost Controls ----

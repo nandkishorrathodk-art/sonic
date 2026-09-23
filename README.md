@@ -1,3 +1,5 @@
+# SONIC-REDA
+### Next-Generation Autonomous AI Bug Hunting System
 # ⚡ SONIC-REDA (A-SEA)
 ### Autonomous Self-Evolving Penetration Architect & Cyber Workstation
 
@@ -7,24 +9,38 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
 [![License: Proprietary](https://img.shields.io/badge/license-Proprietary-red.svg)]()
 
+> **Codename:** SONIC A-SEA (Autonomous Self-Evolving Penetration Architect)  
+> **Status:** Phase 22 — Native Docker Cyber Workstation & Autonomous Reasoning  
 > **Identity:** A-SEA (Autonomous Self-Evolving Penetration Architect)  
 > **Core Concept:** An autonomous AI-Human Hacker Being operating its own dedicated personal computer workstation with full graphical desktop agency, headless terminal execution, persistent cognitive mind, and an immutable safety envelope. Every finding is backed by empirical receipts — zero success-by-decree.
 
+## What is SONIC-REDA?
 ---
 
+The most powerful, self-evolving, multi-agent AI red-team system that combines:
 ## 📑 Table of Contents
 - [Overview](#-overview)
-- [Documentation Index](docs/README.md)
-- [Core Architecture & Operational Model](#-core-architecture--operational-model)
+- [Core Architecture: The AI Being & Workstation](#-core-architecture-the-ai-being--workstation)
 - [Key Capabilities & Subsystems](#-key-capabilities--subsystems)
+- [Deep AI / ML Architecture](#-deep-ai--ml-architecture)
 - [Repository Structure](#-repository-structure)
 - [Quick Start Guide](#-quick-start-guide)
 - [The Strict Core Invariants](#-the-strict-core-invariants)
 - [Testing & Quality Assurance](#-testing--quality-assurance)
 - [License](#-license)
 
+- 🖥️ **Devin-style** full virtual computer control
+- 🔴 **RedAmon-level** autonomous kill-chain power
+- 🧠 **True multi-agent swarm intelligence** with Agent-to-Agent Graph Memory
+- 🎯 **Autonomous pentest loop** — Observe → Think → Act → Re-probe, keeps
+  going until the kill-chain is proven (no more one-shot-and-stop)
+- 📋 **Mandatory Evidence Engine** — zero hallucination tolerance, every
+  finding ships with the real request + response that proved it
+- 🔄 **Controlled self-development** with measurable improvement
+- 🛡️ **Production-grade safety** + rollback (default-deny egress, scope, rate-limit)
 ---
 
+## Architecture
 ## 🌟 Overview
 
 **SONIC-REDA** is an autonomous offensive-security artificial intelligence system. Unlike conventional security scanners that blindly run keyword scripts or chatbots that hallucinate vulnerabilities, SONIC operates as an **independent agentic entity** with its own virtual computer environment.
@@ -38,9 +54,20 @@ It autonomously:
 
 ---
 
-## 🖥️ Core Architecture & Operational Model
+## 🖥️ Core Architecture: The AI Being & Workstation
 
 ```
+┌──────────────────────────────────────────────┐
+│       Immutable Safety & Scope Layer         │
+├──────────────────────────────────────────────┤
+│       Meta / Self-Development Layer          │
+├──────────────────────────────────────────────┤
+│       Sonic Agentic Graph (Core Brain)       │
+│  Orchestrator ↔ Recon ↔ Reasoning ↔ Dynamic │
+│  Hypothesis ↔ Verifier ↔ Exploit ↔ CodeFix  │
+├──────────────────────────────────────────────┤
+│       Virtual Computer Layer (Sandbox)       │
+└──────────────────────────────────────────────┘
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                                    SONIC A-SEA BEING                                   │
 │            Persistent Mind (sqlite) │ Vector Memory (Embeddings) │ Graph Memory        │
@@ -74,6 +101,7 @@ It autonomously:
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+## Quick Start
 ### 1. Dual-Plane Operational Model
 SONIC does not silo itself into a terminal-only script or a sluggish GUI-only recorder:
 - **Workstation Application Plane (Computer-Use)**: Interacts with the full graphical desktop environment (X11 via `GUI_*`, `APP_*`, `BROWSER_*`). Operates any arbitrary desktop application, tool, debugger, or browser installed on the OS via visual perception without hardcoded app names.
@@ -105,6 +133,29 @@ SONIC does not silo itself into a terminal-only script or a sluggish GUI-only re
 
 ---
 
+## 🧠 Deep AI / ML Architecture
+
+SONIC is designed from the ground up as an **AI/ML-Native system**, eliminating rigid heuristics in favor of probabilistic reasoning and learned representations:
+
+1. **Multimodal Perception & Computer Vision:**
+   - Screenshots of Display `:99` are captured via `scrot -p` and processed directly by Vision-Language Models (VLMs) like Claude 3.5 Sonnet, GPT-4o, Gemini 1.5 Pro, or local Qwen2-VL.
+   - Grounding algorithms convert bounding-box tokens (`<|box_start|>ymin,xmin,ymax,xmax<|box_end|>`) into sub-pixel click targets.
+
+2. **Cognitive ReAct Decision Loop:**
+   - Every step follows `Observation -> Multimodal LLM Chain-of-Thought -> Structured Action -> Environment Feedback`.
+   - Stderr reflection: Execution failures prompt self-correction, syntax adjustments, and dynamic pivoting.
+
+3. **High-Dimensional Vector Memory (RAG):**
+   - Past penetration testing outcomes, CVE insights, and payloads are embedded via dense vector models (`text-embedding-3`, `BGE-m3`, `SentenceTransformers`) and retrieved using cosine similarity.
+
+4. **Curiosity & Novelty Engine:**
+   - Quantifies the information gain of new server responses, UI states, and files using vector distance. High novelty states incentivize deeper autonomous probing during idle curiosity loops.
+
+5. **Clustering & Anomaly Detection:**
+   - Analyzes response latency, status codes, and DOM trees using clustering algorithms (DBSCAN / K-Means) to surface blind vulnerabilities without pre-canned regexes.
+
+---
+
 ## 📁 Repository Structure
 
 ```
@@ -130,15 +181,8 @@ SONIC does not silo itself into a terminal-only script or a sluggish GUI-only re
 ├── sonic-cli/                          # Command-Line Interface (Typer + Rich)
 ├── docker/                             # Workstation Container Configs & Entrypoints
 ├── configs/                            # System Safety Rules & Model Routing YAMLs
-├── docs/                               # 📚 System Documentation, Architecture, Rules, & Blueprint
-│   ├── ARCHITECTURE.md                 # Six-Layer Architecture, Perception, & Cognitive Engine
-│   ├── BLUEPRINT.md                    # Master Blueprint & Subsystem Interactions
-│   ├── AI_AGENT_GUIDE.md               # Agent Onboarding & Codebase Orientation
-│   ├── RULES.md                        # Absolute Invariants (Aisa Karna Mana Hai)
-│   ├── LICENSE                         # Proprietary License & Terms of Use
-│   └── README.md                       # Documentation Directory Index
 ├── AGENTS.md                           # Core Repository Memory & Operational Rules
-└── README.md                           # Master Project Readme
+└── README.md                           # This Documentation
 ```
 
 ---
@@ -146,31 +190,48 @@ SONIC does not silo itself into a terminal-only script or a sluggish GUI-only re
 ## 🚀 Quick Start Guide
 
 ### Prerequisites
+- Python 3.12+
+- Docker & Docker Compose
+- Node.js 20+ (for dashboard)
+- A Google Cloud project with OAuth2 credentials
 - **Python 3.12+**
 - **Node.js 20+** (for dashboard)
 - **Docker & Docker Compose**
 - LLM API Key (Groq, Anthropic, OpenAI, xAI, or local Ollama/vLLM)
 
+### Setup
+
 ### 1. Clone & Configure Environment
 ```bash
+# 1. Clone and enter the project
 git clone https://github.com/nandkishorrathodk-art/sonic.git
 cd sonic
 
+# 2. Copy environment template
 # Create local environment configuration
 cp .env.example .env
+# Edit .env with your API keys and Google OAuth credentials
 ```
 Edit `.env` to configure your preferred LLM provider (`GROQ_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY`).
 
+# 3. Start infrastructure (Neo4j + Redis)
+#    Neo4j is OPTIONAL in dev — the backend falls back to an in-memory
+#    graph store if localhost:7687 is unreachable.
 ### 2. Start Infrastructure & Workstation Container
 ```bash
 # Start Neo4j & Redis (Optional: backend auto-falls back to persistent SQLite if offline)
 docker-compose up -d
 
+# 4. Install Python dependencies
+pip install -e sonic-core[dev]
+pip install -e sonic-cli[dev]
 # Start the Native Docker Cyber Workstation
 docker start sonic-desktop-workstation
 ```
 > The live XFCE4 desktop stream is available at: **`http://localhost:6080/vnc.html`**
 
+# 5. Start the backend
+#    uvicorn is not on PATH; invoke it as a module:
 ### 3. Install & Start Backend
 ```bash
 # Install backend in editable mode
@@ -181,6 +242,9 @@ APP_ENV=development python -m uvicorn sonic.api.main:app --port 12000 --reload
 ```
 > Interactive API Documentation: **`http://127.0.0.1:12000/docs`**
 
+# 6. Start Native Docker Cyber Workstation
+docker start sonic-desktop-workstation
+# Stream live XFCE4 desktop at: http://localhost:6080/vnc.html
 ### 4. Install & Start Next.js Dashboard
 ```bash
 cd sonic-dashboard
@@ -189,6 +253,20 @@ npm run dev -p 12001
 ```
 > Open your browser at: **`http://127.0.0.1:12001`**
 
+# 7. Launch Autonomous Agent Mission
+sonic/
+├── sonic-core/          # 🧠 Core Python backend (FastAPI)
+│   └── sonic/
+│       ├── auth/        # Google OAuth2 + JWT
+│       ├── llm/         # Abstract LLM Provider + Model Router
+│       ├── agents/      # Multi-agent system
+│       ├── memory/      # Neo4j Graph Memory
+│       ├── safety/      # Immutable Safety Layer
+│       ├── evidence/    # Evidence Engine
+│       └── api/         # REST API
+├── sonic-cli/           # ⌨️ CLI (Typer + Rich)
+├── sonic-dashboard/     # 🖥️ Next.js Dashboard
+└── configs/             # 📋 Shared YAML configs
 ---
 
 ## 🛡️ The Strict Core Invariants
@@ -216,10 +294,19 @@ python -m pytest sonic-core/tests/test_phase_plan6_safety_envelope.py \
                  sonic-core/tests/test_safety_sealed_policy.py
 ```
 
+## Core Principles
 ---
 
+1. **Evidence > Claims** — No finding without proof
+2. **Speed without chaos** — Sonic fast, never reckless
+3. **Shared intelligence** — Graph Memory for all agents
+4. **Self-improvement** — Only through measured experiments
+5. **Immutable safety** — Core rules cannot be modified by agents
+6. **Human authority** — Final say on high-risk actions
 ## 📄 License
 
-**Copyright (c) 2026 Nandkishor Rathod. All Rights Reserved.**
+## License
 
-This project is proprietary software. No entity or individual may copy, clone, distribute, modify, or commercially exploit this software without express prior written permission. See [LICENSE](docs/LICENSE) for full legal terms.
+Proprietary — All rights reserved.
+Proprietary — All rights reserved.  
+Unauthorized copying, modification, distribution, or commercial deployment is strictly prohibited.
