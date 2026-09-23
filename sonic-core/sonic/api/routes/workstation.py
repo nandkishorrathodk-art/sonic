@@ -42,6 +42,7 @@ from sonic.computer.models import (
     GUIAction,
     GUIActionType,
 )
+from sonic.computer_use.human_workflow import HumanFirstWorkflow
 from sonic.logger import get_logger
 from sonic.mission_engine.executor import MissionToolExecutor
 from sonic.mission_engine.planner import MissionPlanner, PlannedAction
@@ -145,6 +146,13 @@ class BrowserOpenRequest(BaseModel):
 class MissionProbeApproveRequest(BaseModel):
     action_id: str
     approved: bool = True
+
+
+class HumanWorkflowPlanRequest(BaseModel):
+    """Input for the planning-only human-first software workflow."""
+
+    objective: str
+    session_id: str | None = "default"
 
 
 # -------------------------------------------------------------
@@ -457,6 +465,38 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
     if migrated_response_labels:
         _persist_workstation_state()
     return session
+
+
+def _human_workflow_plan(workflow: HumanFirstWorkflow) -> dict[str, Any]:
+    """Serialize graph state; planning deliberately performs no execution."""
+    report = workflow.report()
+    stages = [
+        {
+            "id": task.id,
+            "name": task.name,
+            "status": task.status.value,
+            "depends_on": list(task.depends_on),
+            "requires_human": task.requires_human,
+            "workflow_kind": task.workflow_kind,
+        }
+        for task in workflow.graph.tasks.values()
+    ]
+    return {
+        "workflow_id": workflow.graph.engagement_id,
+        "objective": workflow.objective,
+        "graph": {"task_count": len(stages), "tasks": stages},
+        "outcome": report.outcome.value,
+        "complete": report.complete,
+        "completed_stages": list(report.completed_stages),
+        "pending_stages": list(report.pending_stages),
+        "failed_stages": list(report.failed_stages),
+        "approval_required": list(report.approval_required),
+        "stages": stages,
+        "ready_stages": [stage["name"] for stage in stages if stage["status"] == "ready"],
+        "execution_started": False,
+        "commands_executed": False,
+        "commits_executed": False,
+    }
 
 
 def _session_workspace_id(user: User, session_id: str) -> str:
@@ -1769,6 +1809,39 @@ async def execute_workstation_command(
         "exit_code": res.exit_code,
         "output": (res.stdout + ("\n" + res.stderr if res.stderr else "")).strip(),
         "execution_environment": env_label,
+    }
+
+
+@router.post("/workstation/workflow/plan")
+async def plan_human_first_workflow(
+    req: HumanWorkflowPlanRequest,
+    user: User = Depends(require_operator),
+):
+    """Plan a generic software workflow without executing its stages."""
+    objective = (req.objective or "").strip()
+    session_id = (req.session_id or "default").strip()
+    if not objective:
+        raise HTTPException(status_code=400, detail="Workflow objective cannot be empty")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID cannot be empty")
+
+    tenant_id = _resolve_tenant_id(user)
+    state = _get_or_create_session(tenant_id, session_id)
+    workflow = HumanFirstWorkflow(
+        objective,
+        engagement_id=f"workflow-{uuid.uuid4().hex[:12]}",
+        tenant_id=tenant_id,
+    )
+    workflow.build()
+    plan = _human_workflow_plan(workflow)
+    # Keep the plan in the tenant/session state for truthful follow-up reads,
+    # while storing only JSON-serializable graph data.
+    state["human_workflow"] = plan
+    _persist_workstation_state()
+    return {
+        "status": "planned",
+        "session_id": session_id,
+        "workflow": plan,
     }
 
 

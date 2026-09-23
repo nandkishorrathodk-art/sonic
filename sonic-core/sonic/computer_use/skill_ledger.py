@@ -1,7 +1,8 @@
-"""Durable, evidence-backed computer skill memory.
+"""Durable, evidence-backed computer skill and workflow memory.
 
 This is deliberately generic: skills are learned from observed applications
-and successful traces, never from a vendor-specific application map.
+and successful traces, never from a vendor-specific application map. Workflow
+records remain candidates until a replay produces runtime evidence.
 """
 
 from __future__ import annotations
@@ -38,6 +39,20 @@ class VerifiedSkill:
         return bool(self.post_graph_fingerprint) and graph.fingerprint() == self.post_graph_fingerprint
 
 
+@dataclass(frozen=True)
+class WorkflowRecord:
+    """A replayable workflow whose lifecycle is grounded in observed runs."""
+
+    workflow_id: str
+    steps: tuple[dict[str, Any], ...]
+    observed_at: str
+    replay_attempts: int = 0
+    successful_replays: int = 0
+    failed_replays: int = 0
+    last_replay: dict[str, Any] | None = None
+    promoted: bool = False
+
+
 class ComputerSkillLedger:
     """Persist application capabilities learned from real workstation traces."""
 
@@ -45,7 +60,12 @@ class ComputerSkillLedger:
         safe_tenant = re.sub(r"[^A-Za-z0-9_.-]", "_", tenant_id or "default")
         base = Path(root or "sonic_data/skills")
         self.path = base / f"{safe_tenant}.json"
-        self._data: dict[str, Any] = {"applications": {}, "actions": [], "verified_skills": []}
+        self._data: dict[str, Any] = {
+            "applications": {},
+            "actions": [],
+            "verified_skills": [],
+            "workflows": {},
+        }
         self._load()
 
     def _load(self) -> None:
@@ -131,6 +151,119 @@ class ComputerSkillLedger:
     def verified_skills(self) -> list[VerifiedSkill]:
         return [VerifiedSkill(**item) for item in self._data.get("verified_skills", []) if isinstance(item, dict)]
 
+    def record_observed_workflow(
+        self,
+        workflow_id: str,
+        steps: list[dict[str, Any]],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> WorkflowRecord | None:
+        """Store a workflow only when it contains concrete observed steps.
+
+        This is intentionally a recording operation, not a promotion operation:
+        an observed sequence is merely a candidate until a later replay proves
+        its postconditions.
+        """
+        identifier = str(workflow_id or "").strip()
+        observed_steps = [
+            dict(step)
+            for step in steps
+            if isinstance(step, dict)
+            and str(step.get("action_type") or step.get("action") or "").strip()
+            and str(step.get("observation") or step.get("evidence") or "").strip()
+        ]
+        if not identifier or not observed_steps:
+            return None
+        workflows = self._data.setdefault("workflows", {})
+        existing = workflows.get(identifier, {})
+        record = {
+            "workflow_id": identifier,
+            "steps": observed_steps,
+            "observed_at": str(existing.get("observed_at") or datetime.now(UTC).isoformat()),
+            "replay_attempts": int(existing.get("replay_attempts", 0)),
+            "successful_replays": int(existing.get("successful_replays", 0)),
+            "failed_replays": int(existing.get("failed_replays", 0)),
+            "last_replay": existing.get("last_replay"),
+            "promoted": bool(existing.get("promoted", False)),
+        }
+        if metadata:
+            record["observation_metadata"] = dict(metadata)
+        elif "observation_metadata" in existing:
+            record["observation_metadata"] = existing["observation_metadata"]
+        workflows[identifier] = record
+        self._save()
+        return self._workflow_record(record)
+
+    def verify_workflow(
+        self,
+        workflow_id: str,
+        replay: dict[str, Any],
+    ) -> WorkflowRecord | None:
+        """Record one replay, accepting success only with empirical evidence."""
+        identifier = str(workflow_id or "").strip()
+        workflows = self._data.setdefault("workflows", {})
+        record = workflows.get(identifier)
+        if not record or not isinstance(replay, dict):
+            return None
+        status = str(replay.get("status", "")).upper()
+        evidence = str(replay.get("evidence") or replay.get("observation") or "").strip()
+        metadata = replay.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        # A caller's success flag is not evidence. Require a successful runtime
+        # status, non-empty output, and replay metadata identifying the run.
+        successful = (
+            status in {"SUCCESS", "SUCCEEDED", "COMPLETED", "VERIFIED"}
+            and bool(evidence)
+            and bool(str(metadata.get("replay_id") or metadata.get("trace_id") or "").strip())
+        )
+        record["replay_attempts"] = int(record.get("replay_attempts", 0)) + 1
+        if successful:
+            record["successful_replays"] = int(record.get("successful_replays", 0)) + 1
+        else:
+            record["failed_replays"] = int(record.get("failed_replays", 0)) + 1
+        record["last_replay"] = {
+            "status": status,
+            "evidence": evidence[:500],
+            "metadata": dict(metadata),
+            "verified": successful,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+        self._save()
+        return self._workflow_record(record)
+
+    def promote_workflow(self, workflow_id: str) -> WorkflowRecord | None:
+        """Promote only a workflow with at least one successful replay."""
+        identifier = str(workflow_id or "").strip()
+        record = self._data.setdefault("workflows", {}).get(identifier)
+        if not record or int(record.get("successful_replays", 0)) < 1:
+            return None
+        record["promoted"] = True
+        self._save()
+        return self._workflow_record(record)
+
+    def workflows(self, *, promoted_only: bool = False) -> list[WorkflowRecord]:
+        records = [
+            self._workflow_record(item)
+            for item in self._data.setdefault("workflows", {}).values()
+            if isinstance(item, dict)
+            and (not promoted_only or bool(item.get("promoted", False)))
+        ]
+        return records
+
+    @staticmethod
+    def _workflow_record(record: dict[str, Any]) -> WorkflowRecord:
+        return WorkflowRecord(
+            workflow_id=str(record["workflow_id"]),
+            steps=tuple(dict(step) for step in record.get("steps", [])),
+            observed_at=str(record.get("observed_at", "")),
+            replay_attempts=int(record.get("replay_attempts", 0)),
+            successful_replays=int(record.get("successful_replays", 0)),
+            failed_replays=int(record.get("failed_replays", 0)),
+            last_replay=record.get("last_replay"),
+            promoted=bool(record.get("promoted", False)),
+        )
+
     def context(self, limit: int = 20) -> str:
         lines: list[str] = []
         for name, record in list(self._data["applications"].items())[:limit]:
@@ -139,5 +272,10 @@ class ComputerSkillLedger:
             lines.append(
                 f"- {name}: observed {record.get('observations', 0)} times"
                 + (f"; verified actions: {learned}" if learned else "")
+            )
+        for workflow in self.workflows(promoted_only=True)[:limit]:
+            lines.append(
+                f"- workflow {workflow.workflow_id}: promoted after "
+                f"{workflow.successful_replays} successful replay(s)"
             )
         return "\n".join(lines)

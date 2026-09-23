@@ -33,6 +33,9 @@ from pydantic import BaseModel, Field
 VALID_AGENT_TYPES = frozenset({
     "recon", "static", "dynamic", "hypothesis", "verifier",
     "exploit_validator", "codefix", "browser", "orchestrator",
+    # A neutral hand-off for operator-driven workflows.  It deliberately has
+    # no application or security semantics; the payload is caller-defined.
+    "human", "human_workflow",
 })
 
 
@@ -70,6 +73,24 @@ class TaskPriority(StrEnum):
         return {"critical": 1, "high": 2, "medium": 3, "low": 4}[self.value]
 
 
+class CheckpointStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class TaskCheckpoint(BaseModel):
+    """A durable, caller-defined pause point in a task workflow."""
+    id: str = Field(default_factory=_new_id)
+    name: str
+    status: CheckpointStatus = CheckpointStatus.PENDING
+    required: bool = True
+    state_delta: dict[str, Any] = Field(default_factory=dict)
+    note: str = ""
+    created_at: str = Field(default_factory=_now)
+    completed_at: str | None = None
+
+
 # ============================================
 # Task Node
 # ============================================
@@ -85,6 +106,14 @@ class TaskNode(BaseModel):
     spawned_by: str = "initial_plan"  # "initial_plan" or task ID that triggered this
     priority: TaskPriority = TaskPriority.MEDIUM
     expected_observation: str = ""    # What we expect to see (for expected-vs-actual)
+    # Human-first workflow metadata.  These fields are intentionally generic:
+    # callers decide what a checkpoint or state value means.
+    workflow_kind: str = "autonomous"
+    requires_human: bool = False
+    checkpoints: list[TaskCheckpoint] = Field(default_factory=list)
+    state_delta: dict[str, Any] = Field(default_factory=dict)
+    recovery_for: str | None = None
+    branch_id: str = ""
 
     # Execution results
     result: dict[str, Any] | None = None
@@ -389,11 +418,107 @@ class TaskGraph:
             )
         task.status = TaskStatus.SUCCEEDED
         task.result = result
+        if isinstance(result, dict):
+            task.state_delta.update(result.get("state_delta", {}))
         task.completed_at = _now()
 
         # Update dependents' readiness
         for dependent_id in self._dependents.get(task_id, set()):
             self._update_task_readiness(dependent_id)
+
+    def add_checkpoint(
+        self,
+        task_id: str,
+        name: str,
+        *,
+        required: bool = True,
+        checkpoint_id: str | None = None,
+    ) -> str:
+        """Add a generic checkpoint without changing task scheduling state."""
+        task = self._tasks.get(task_id)
+        if not task:
+            raise TaskGraphError(f"Task '{task_id}' not found")
+        checkpoint = TaskCheckpoint(
+            id=checkpoint_id or _new_id(), name=name, required=required
+        )
+        task.checkpoints.append(checkpoint)
+        return checkpoint.id
+
+    def record_checkpoint(
+        self,
+        task_id: str,
+        checkpoint_id: str,
+        *,
+        state_delta: dict[str, Any] | None = None,
+        note: str = "",
+        failed: bool = False,
+    ) -> dict[str, Any]:
+        """Record a human/operator checkpoint and its observed state delta."""
+        task = self._tasks.get(task_id)
+        if not task:
+            raise TaskGraphError(f"Task '{task_id}' not found")
+        checkpoint = next(
+            (item for item in task.checkpoints if item.id == checkpoint_id), None
+        )
+        if not checkpoint:
+            raise TaskGraphError(f"Checkpoint '{checkpoint_id}' not found")
+        checkpoint.status = (
+            CheckpointStatus.FAILED if failed else CheckpointStatus.COMPLETED
+        )
+        checkpoint.completed_at = _now()
+        checkpoint.note = note
+        if state_delta:
+            checkpoint.state_delta.update(state_delta)
+            task.state_delta.update(state_delta)
+        return checkpoint.model_dump()
+
+    def update_state_delta(
+        self, task_id: str, delta: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge an observed workflow state delta and return a copy."""
+        task = self._tasks.get(task_id)
+        if not task:
+            raise TaskGraphError(f"Task '{task_id}' not found")
+        if not isinstance(delta, dict):
+            raise TaskGraphError("State delta must be an object")
+        task.state_delta.update(delta)
+        return dict(task.state_delta)
+
+    # Friendly alias for integrations that call this operation "apply".
+    apply_state_delta = update_state_delta
+
+    def get_checkpoints(self, task_id: str) -> list[TaskCheckpoint]:
+        """Return a task's checkpoint objects without exposing graph internals."""
+        task = self._tasks.get(task_id)
+        if not task:
+            raise TaskGraphError(f"Task '{task_id}' not found")
+        return list(task.checkpoints)
+
+    def required_checkpoints_complete(self, task_id: str) -> bool:
+        """Whether all required human workflow checkpoints are complete."""
+        return all(
+            checkpoint.status == CheckpointStatus.COMPLETED
+            for checkpoint in self.get_checkpoints(task_id)
+            if checkpoint.required
+        )
+
+    def branch_recovery(
+        self, task_id: str, recovery_tasks: list[TaskNode], branch_id: str = ""
+    ) -> list[str]:
+        """Add recovery tasks without making them depend on the failed task."""
+        source = self._tasks.get(task_id)
+        if not source:
+            raise TaskGraphError(f"Task '{task_id}' not found")
+        if source.status not in (TaskStatus.FAILED, TaskStatus.BLOCKED):
+            raise TaskGraphError("Recovery branches require a failed or blocked task")
+        branch = branch_id or f"recovery-{task_id}"
+        for task in recovery_tasks:
+            task.recovery_for = task_id
+            task.branch_id = branch
+            task.spawned_by = task_id
+            task.engagement_id = self.engagement_id
+            task.tenant_id = self.tenant_id
+        return self.inject_tasks(recovery_tasks)
 
     def mark_failed(self, task_id: str, error: str) -> list[str]:
         """

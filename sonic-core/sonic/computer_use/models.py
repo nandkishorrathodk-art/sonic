@@ -289,6 +289,10 @@ class ComputerDecisionTrace(BaseModel):
     state_changed: bool | None = None
     prediction_error: float | None = None
     graph_delta: str = ""
+    # Executor-produced contract evidence.  This is populated by
+    # ComputerUseAgent from live before/after observations; it is never used
+    # to authorize or dispatch an action.
+    action_receipt: Any | None = None
     timestamp: str = Field(default_factory=_now)
 
     @field_validator("action_type", mode="before")
@@ -307,6 +311,16 @@ class ComputerDecisionTrace(BaseModel):
     @property
     def observation(self) -> str:
         return self.actual_observation
+
+    @property
+    def receipt(self) -> Any | None:
+        """Compatibility accessor for executor-produced contract evidence."""
+        return self.action_receipt
+
+    @property
+    def state_delta(self) -> Any | None:
+        """Return the truthful before/after delta, when execution completed."""
+        return getattr(self.action_receipt, "state_delta", None)
 
 
 class ComputerUseMetrics(BaseModel):

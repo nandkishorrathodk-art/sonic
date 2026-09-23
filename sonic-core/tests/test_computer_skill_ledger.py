@@ -6,10 +6,10 @@ import pytest
 
 from sonic.computer.models import ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ComputerActionType
-from sonic.computer_use.skill_ledger import ComputerSkillLedger
 from sonic.computer_use.gui_world_graph import GuiWorldGraph
+from sonic.computer_use.models import ComputerActionType
 from sonic.computer_use.perception_bus import PerceptionBus
+from sonic.computer_use.skill_ledger import ComputerSkillLedger
 
 
 def test_skill_ledger_observes_and_persists_applications(tmp_path: Path):
@@ -107,3 +107,69 @@ def test_verified_skill_requires_matching_live_graph(tmp_path: Path):
     assert not skill.can_apply(after)
     assert skill.postcondition_holds(after)
     assert len(ledger.verified_skills()) == 1
+
+
+def test_workflow_is_observed_then_replayed_before_promotion(tmp_path: Path):
+    ledger = ComputerSkillLedger("tenant", root=str(tmp_path))
+    observed = ledger.record_observed_workflow(
+        "open-and-submit",
+        [
+            {"action_type": "GUI_CLICK", "target": "visible control", "observation": "form appeared"},
+            {"action_type": "GUI_TYPE", "target": "field", "observation": "text was visible"},
+        ],
+        metadata={"source_trace_id": "trace-observed"},
+    )
+
+    assert observed is not None
+    assert observed.replay_attempts == 0
+    assert ledger.promote_workflow("open-and-submit") is None
+
+    verified = ledger.verify_workflow(
+        "open-and-submit",
+        {
+            "status": "SUCCESS",
+            "evidence": "confirmation was visible after replay",
+            "metadata": {"replay_id": "replay-1", "postcondition": "confirmation-visible"},
+        },
+    )
+    assert verified is not None
+    assert verified.replay_attempts == 1
+    assert verified.successful_replays == 1
+    promoted = ledger.promote_workflow("open-and-submit")
+    assert promoted is not None
+    assert promoted.promoted is True
+
+    reloaded = ComputerSkillLedger("tenant", root=str(tmp_path))
+    assert reloaded.workflows(promoted_only=True)[0].workflow_id == "open-and-submit"
+
+
+def test_workflow_failed_or_unverifiable_replay_is_counted_not_promoted(tmp_path: Path):
+    ledger = ComputerSkillLedger("tenant", root=str(tmp_path))
+    ledger.record_observed_workflow(
+        "save-result",
+        [{"action": "GUI_CLICK", "observation": "save control was observed"}],
+    )
+
+    failed = ledger.verify_workflow(
+        "save-result",
+        {"status": "FAILED", "evidence": "control was not reached", "metadata": {"replay_id": "r-1"}},
+    )
+    assert failed is not None
+    assert failed.failed_replays == 1
+    assert ledger.promote_workflow("save-result") is None
+
+    # A success claim without a runtime replay identifier/evidence is not proof.
+    unverified = ledger.verify_workflow("save-result", {"status": "SUCCESS", "success": True, "metadata": {}})
+    assert unverified is not None
+    assert unverified.failed_replays == 2
+    assert unverified.successful_replays == 0
+    assert ledger.workflows(promoted_only=True) == []
+
+
+def test_workflow_rejects_empty_or_unobserved_steps(tmp_path: Path):
+    ledger = ComputerSkillLedger("tenant", root=str(tmp_path))
+    assert ledger.record_observed_workflow("empty", []) is None
+    assert ledger.record_observed_workflow(
+        "missing-observation", [{"action_type": "GUI_CLICK", "target": "control"}]
+    ) is None
+    assert ledger.workflows() == []
