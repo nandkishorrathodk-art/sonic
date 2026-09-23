@@ -154,6 +154,7 @@ class BossAgent:
         self.lessons_ledger = lessons_ledger
         self.evolution_engine = evolution_engine
         self.initial_context = dict(initial_context or {})
+        self._objective = ""
         self.gui_only = gui_only
         if self.evolution_engine is None:
             try:
@@ -323,6 +324,7 @@ class BossAgent:
             objective = str(objective)
 
         logger.info("boss_agent_start", objective=objective[:200])
+        self._objective = objective
 
         # Phase 1: Strategic decomposition (if not already populated)
         if not self.phases:
@@ -627,6 +629,20 @@ Your job is to analyze the user's objective from first principles and decompose 
 
 USER OBJECTIVE: {objective}
 
+OBJECTIVE FIDELITY (NON-NEGOTIABLE):
+- Preserve the user's requested outcome exactly. Every sub-mission must directly
+  contribute to that outcome and must name the evidence it will obtain.
+- Do not invent environment setup, package installation, programming-language
+  installation, account creation, credentials, repository changes, or system
+  modifications unless the user explicitly requested that operation.
+- If the objective asks to operate a website or account, use the graphical
+  application plane and the live desktop/browser state. Do not replace that
+  request with headless setup work or an unrelated terminal task.
+- If credentials, consent, or a required target detail is missing, surface that
+  blocker instead of guessing, installing prerequisites, or claiming progress.
+- A worker goal that cannot be traced back to the USER OBJECTIVE is invalid and
+  must not be dispatched.
+
 Apply target-agnostic first-principles reasoning:
 0. PROGRAM INTAKE:
    If the objective describes a program, repository, binary, service, or
@@ -638,10 +654,10 @@ Apply target-agnostic first-principles reasoning:
    analysis objective instead of executing.
 1. DOMAIN & MODALITY TRIAGE:
    Identify the primary target type:
-   - [SOFTWARE / SCRIPTING]: Python programming, shell scripts, CLI utilities, code authoring, automated workflows.
-   - [DATA / ANALYSIS]: data processing, CSV/JSON metrics, statistics, report generation, charting.
-   - [DESKTOP / GUI]: desktop applications (mousepad, editors, viewers), window management, visual UI interactions.
-   - [WEB / BROWSER]: web applications, local portals, dashboards, web navigation, HTTP services.
+   - [SOFTWARE / SCRIPTING]: source code, CLI utilities, code authoring, automated workflows.
+   - [DATA / ANALYSIS]: data processing, structured documents, statistics, reports, charts.
+   - [DESKTOP / GUI]: desktop applications, window management, visual UI interactions.
+   - [WEB / BROWSER]: websites, web applications, portals, dashboards, web navigation.
    - [SYSTEM / OPERATIONS]: directory management, process monitoring, file auditing, system health.
 
 2. METHODOLOGY:
@@ -656,7 +672,7 @@ Respond with EXACTLY this JSON format (no extra text):
   "sub_missions": [
     {{
       "id": "sub-1",
-      "goal": "Clear, focused goal for this worker agent with concrete inputs and expected observations.",
+      "goal": "Clear, focused goal for this worker agent with concrete inputs, expected observations, and a direct connection to the USER OBJECTIVE.",
       "plane": "headless",
       "max_steps": 4,
       "priority": 1,
@@ -917,7 +933,12 @@ Rules:
                     })
 
             # Forward accumulated discoveries so SubAgents aren't context-starved
-            sub_goal = sub_mission.goal
+            sub_goal = (
+                f"Authoritative user objective: {self._objective}\n"
+                "Stay strictly within that objective. Do not invent setup, "
+                "installation, credentials, or unrelated system changes.\n"
+                f"Assigned sub-mission: {sub_mission.goal}"
+            )
             if self._accumulated_context:
                 valid_discoveries = []
                 for item in self._accumulated_context:
