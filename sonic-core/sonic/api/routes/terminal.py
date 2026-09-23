@@ -5,7 +5,7 @@ Enables live, interactive bash terminal sessions from the Dashboard
 STRICTLY BOUND to running Docker/Daytona sandbox containers via WebSocket.
 
 SECURITY ENFORCEMENT:
-    1. Mandatory JWT Authentication on WebSocket connection (?token=...).
+    1. Mandatory JWT authentication via a WebSocket subprotocol or secure cookie.
     2. Zero host OS execution — strictly attaches to isolated container /bin/bash.
     3. If container is not running, rejects connection with safety error.
 """
@@ -134,18 +134,21 @@ _sessions: dict[str, ContainerTerminalSession] = {}
 @router.websocket("/ws/terminal")
 async def terminal_websocket(
     websocket: WebSocket,
-    token: str | None = Query(None),
     container: str = Query(_DEFAULT_TERMINAL_CONTAINER),
 ):
     """
     Authenticated WebSocket endpoint for isolated container terminal sessions.
-    Requires valid JWT token (?token=...).
+    Requires a valid JWT in the WebSocket subprotocol or secure cookie.
     Strictly attaches to container /bin/bash.
     """
-    await websocket.accept()
-
     # 1. AUTHENTICATION ENFORCEMENT
+    protocol_header = websocket.headers.get("sec-websocket-protocol", "")
+    protocol_parts = [part.strip() for part in protocol_header.split(",")]
+    token = websocket.cookies.get("sonic_access_token")
+    if not token and len(protocol_parts) >= 2 and protocol_parts[0] == "sonic-bearer":
+        token = protocol_parts[1]
     user = verify_ws_token(token)
+    await websocket.accept(subprotocol="sonic-bearer" if user and protocol_parts[:1] == ["sonic-bearer"] else None)
     if not user:
         logger.warning("unauthenticated_terminal_ws_attempt", token_present=bool(token))
         await websocket.send_json({

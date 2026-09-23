@@ -88,7 +88,10 @@ def test_terminal_websocket_unauthenticated_rejection():
 def test_terminal_websocket_rejects_non_sandbox_container():
     """A caller cannot select an arbitrary Docker container for terminal access."""
     _, token = get_auth_headers()
-    with client.websocket_connect(f"/terminal/ws/terminal?token={token}&container=non-existent-sandbox") as ws:
+    with client.websocket_connect(
+        "/terminal/ws/terminal?container=non-existent-sandbox",
+        subprotocols=["sonic-bearer", token],
+    ) as ws:
         msg = ws.receive_json()
         assert msg["type"] == "error"
         assert "POLICY ERROR" in msg["data"]

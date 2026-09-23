@@ -13,10 +13,10 @@ export function createTerminalWebSocket(options: {
   const token = getAuthToken();
   const wsUrl = API_BASE.replace(/^http/, "ws");
   const containerParam = encodeURIComponent(options.container || "sonic-sandbox-debian");
-  const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
-  
-  const fullUrl = `${wsUrl}/terminal/ws/terminal?container=${containerParam}${tokenParam}`;
-  const ws = new WebSocket(fullUrl);
+  const fullUrl = `${wsUrl}/terminal/ws/terminal?container=${containerParam}`;
+  const ws = token
+    ? new WebSocket(fullUrl, ["sonic-bearer", token])
+    : new WebSocket(fullUrl);
 
   if (options.onOpen) ws.onopen = options.onOpen;
   if (options.onClose) ws.onclose = options.onClose;

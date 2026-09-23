@@ -139,9 +139,12 @@ async def google_login(redirect_url: str = Query(default="")):
 
     After login, Google redirects back to /auth/google/callback
     """
-    # Only retain a server-side opaque state token.  Never reflect an
-    # operator-controlled redirect URL directly into OAuth state.
-    login_url = get_google_login_url(state=create_oauth_state(redirect_url))
+    # Only allow a local relative callback path. Tokens are returned in a URL
+    # fragment, never in a query string, so they are not sent to HTTP servers.
+    safe_redirect = redirect_url.strip()
+    if safe_redirect and (not safe_redirect.startswith("/") or safe_redirect.startswith("//")):
+        raise HTTPException(status_code=400, detail="redirect_url must be a local relative path")
+    login_url = get_google_login_url(state=create_oauth_state(safe_redirect))
     return RedirectResponse(url=login_url)
 
 
@@ -164,9 +167,9 @@ async def google_callback(
         auth_token = await authenticate_with_google(code)
         if redirect_target:
             from urllib.parse import quote
-            separator = "&" if "?" in redirect_target else "?"
+            separator = "&" if "#" in redirect_target else "#"
             target = (
-                f"{redirect_target}{separator}token={auth_token.access_token}"
+                f"{redirect_target}{separator}token={quote(auth_token.access_token)}"
                 f"&email={quote(auth_token.user.email)}"
                 f"&name={quote(auth_token.user.name)}"
                 f"&role={auth_token.user.role.value}"

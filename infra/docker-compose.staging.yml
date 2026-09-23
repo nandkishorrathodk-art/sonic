@@ -92,8 +92,6 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - DAYTONA_API_KEY=${DAYTONA_API_KEY}
       - DAYTONA_API_URL=${DAYTONA_API_URL}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock # For launching isolated container sandboxes
     networks:
       - sonic-internal
     depends_on:

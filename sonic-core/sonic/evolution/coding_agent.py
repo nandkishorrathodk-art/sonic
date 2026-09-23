@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,12 +43,6 @@ from sonic.logger import get_logger
 logger = get_logger(__name__)
 
 MAX_OUTPUT = 6000
-
-# Commands the agent may run through run_command (read-only / test tooling only).
-_ALLOWED_CMDS = (
-    "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "pwd", "git status",
-    "git diff", "git log", "python -m pytest", "pytest", "ruff", "python -c",
-)
 
 _SAFETY_MARKERS = ("sonic/safety", "sonic/sandbox/egress", "sonic/auth", "sealed")
 
@@ -267,12 +262,23 @@ class CodingAgent:
         cmd = str(command or "").strip()
         if not cmd:
             return ToolResult(False, "empty command")
-        if not any(cmd.startswith(prefix) for prefix in _ALLOWED_CMDS):
-            return ToolResult(False, f"command not allowlisted: {cmd[:80]}")
-        if any(m in cmd for m in ("rm ", ">", "curl", "wget", "sudo", "chmod", "mv ")):
-            return ToolResult(False, "command contains a disallowed operator")
+        if any(operator in cmd for operator in (";", "&&", "||", "|", "\n", "\r", "`", "$(", ">", "<")):
+            return ToolResult(False, "shell operators are not allowed")
         try:
-            res = subprocess.run(cmd, shell=True, cwd=str(self.repo_root), capture_output=True, text=True, timeout=180)
+            argv = shlex.split(cmd, posix=True)
+        except ValueError as e:
+            return ToolResult(False, f"invalid command syntax: {e}")
+        if not argv:
+            return ToolResult(False, "empty command")
+        allowed = (
+            argv[0] in {"ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "pwd", "pytest", "ruff"}
+            or argv[:2] in (["git", "status"], ["git", "diff"], ["git", "log"])
+            or argv[:3] == ["python", "-m", "pytest"]
+        )
+        if not allowed:
+            return ToolResult(False, f"command not allowlisted: {cmd[:80]}")
+        try:
+            res = subprocess.run(argv, shell=False, cwd=str(self.repo_root), capture_output=True, text=True, timeout=180)
         except Exception as e:
             return ToolResult(False, f"command failed: {e}")
         out = ((res.stdout or "") + (res.stderr or ""))[-MAX_OUTPUT:]

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
   ShieldCheck,
   Sparkles,
@@ -20,7 +20,6 @@ import { BrandMark } from "../../components/common/BrandMark";
 
 function LoginContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,14 +33,16 @@ function LoginContent() {
     avatarInitial: "N",
   };
 
-  // Check if returning from Google OAuth with a token in query params
+  // Check if returning from Google OAuth with a token in the URL fragment.
   useEffect(() => {
-    const token = searchParams.get("token");
+    const fragment = typeof window !== "undefined" ? window.location.hash.slice(1) : "";
+    const fragmentParams = new URLSearchParams(fragment);
+    const token = fragmentParams.get("token");
     if (token) {
-      const email = searchParams.get("email") || defaultGoogleAccount.email;
-      const name = searchParams.get("name") || defaultGoogleAccount.name;
-      const role = searchParams.get("role") || "operator";
-      const tenantId = searchParams.get("tenant_id") || "default";
+      const email = fragmentParams.get("email") || defaultGoogleAccount.email;
+      const name = fragmentParams.get("name") || defaultGoogleAccount.name;
+      const role = fragmentParams.get("role") || "operator";
+      const tenantId = fragmentParams.get("tenant_id") || "default";
 
       setAuthToken(token, {
         email,
@@ -51,7 +52,7 @@ function LoginContent() {
       });
       router.push("/");
     }
-  }, [searchParams, router]);
+  }, [router]);
 
   const handleGoogleSignIn = async (targetEmail?: string) => {
     setLoading(true);
@@ -74,7 +75,7 @@ function LoginContent() {
 
       // 2. If live Google OAuth is enabled in production, redirect to Google consent screen
       if (oauthConfig.enabled) {
-        const returnUrl = encodeURIComponent(window.location.origin + "/login");
+        const returnUrl = encodeURIComponent("/login");
         window.location.href = `${API_BASE}/auth/google/login?redirect_url=${returnUrl}`;
         return;
       }

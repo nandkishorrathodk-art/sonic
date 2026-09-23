@@ -299,8 +299,19 @@ class CodebaseEvolver:
                     f"Forbidden: '{rel}' is a protected safety component and cannot be self-modified."
                 )
 
+        diff_files = self._diff_files(code_diff)
+        for rel in diff_files:
+            if self.is_protected(rel):
+                return False, f"Safety Invariant Violation: '{rel}' is protected."
+            try:
+                (self.repo_root / rel).resolve().relative_to(self.repo_root)
+            except ValueError:
+                return False, f"Patch path escapes repository: '{rel}'."
+
         resolved: list[Path] = []
         for rel in target_files:
+            if self.is_protected(rel):
+                return False, f"Safety Invariant Violation: '{rel}' is protected."
             p = (self.repo_root / rel).resolve()
             self._record_snapshot(p)
             resolved.append(p)
@@ -353,6 +364,18 @@ class CodebaseEvolver:
         self._record_snapshot(target_path)
 
         if is_unified_diff:
+            diff_files = self._diff_files(code_diff_or_content)
+            for rel in diff_files:
+                if self.is_protected(rel):
+                    raise SafetyInvariantViolation(
+                        f"Forbidden: '{rel}' is a protected safety component."
+                    )
+                try:
+                    (self.repo_root / rel).resolve().relative_to(self.repo_root)
+                except ValueError as e:
+                    raise SafetyInvariantViolation(
+                        f"Forbidden: patch path escapes repository: '{rel}'."
+                    ) from e
             # Apply via git apply in temp patch file. git apply requires the
             # patch text to end with a newline — a diff whose final line has no
             # trailing LF is rejected as "corrupt patch".

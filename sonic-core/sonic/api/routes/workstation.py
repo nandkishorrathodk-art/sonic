@@ -302,13 +302,6 @@ def _load_workstation_state() -> None:
                                 desktop["display"] = ":99"
                             if not desktop.get("resolution"):
                                 desktop["resolution"] = {"width": 1280, "height": 800}
-                            # When running locally with Docker workstation (not Daytona Cloud),
-                            # migrate any stale cloud UUIDs so local Docker execution works immediately.
-                            if os.environ.get("SONIC_USE_DAYTONA_CLOUD") != "1":
-                                docker_ws = os.environ.get("SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation").strip()
-                                desktop["workspace_id"] = docker_ws
-                                desktop["sandbox_id"] = docker_ws
-                                desktop["os_name"] = "Linux Cyber Workstation (Docker XFCE4)"
                         # Reset lingering RUNNING status on restart since no background task survived
                         if session.get("status") == "RUNNING":
                             session["status"] = "IDLE"
@@ -1743,7 +1736,12 @@ async def execute_workstation_command(
     If compute container is unavailable, FAIL CLOSED with 503.
     """
     tenant_id = _resolve_tenant_id(user)
-    logger.info("sandbox_command_execution_requested", user=user.email, command=req.command)
+    logger.info(
+        "sandbox_command_execution_requested",
+        user=user.email,
+        tenant_id=tenant_id,
+        session_id=req.session_id or "default",
+    )
     _assert_runtime_execution_enabled(tenant_id)
 
     if not (req.command or "").strip():
@@ -1763,12 +1761,6 @@ async def execute_workstation_command(
                 state["desktop"]["sandbox_id"] = workspace_id
             except Exception:
                 workspace_id = ""
-        else:
-            docker_container = os.environ.get(
-                "SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation"
-            ).strip()
-            workspace_id = docker_container
-
     if not workspace_id:
         # No provisioned workstation is itself a fail-closed condition: we must
         # never fall back to host or shared-container execution, and a 409 here
@@ -1781,7 +1773,12 @@ async def execute_workstation_command(
     try:
         res = await comp.terminal(workspace_id, req.command, timeout=req.timeout or 30, actor=user.email)
     except Exception:
-        logger.warning("sandbox_command_execution_failed_unavailable", user=user.email, command=req.command)
+        logger.warning(
+            "sandbox_command_execution_failed_unavailable",
+            user=user.email,
+            tenant_id=tenant_id,
+            session_id=req.session_id or "default",
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Command execution failed-closed: the tenant-owned workstation sandbox could not run the command. Direct host OS execution is strictly prohibited.",
