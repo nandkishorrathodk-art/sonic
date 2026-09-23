@@ -30,6 +30,7 @@ from sonic.computer.models import (
     ScreenObservation,
 )
 from sonic.computer.provider import ComputerProvider
+from sonic.computer_use.action_contracts import ActionReceipt, StateDelta
 from sonic.computer_use.experience import compare_prediction, state_signature
 from sonic.computer_use.grounding import (
     draw_action_marker,
@@ -59,7 +60,6 @@ from sonic.logger import get_logger
 from sonic.orchestration.dual_process import DualProcessController
 from sonic.research.failure_budget import FailureBudgetTracker
 from sonic.research.failure_classifier import classify_failure
-from sonic.sandbox.provider import ExecResult
 
 
 def _extract_command_from_sig(sig_payload_str: str) -> str:
@@ -331,6 +331,135 @@ class ComputerUseAgent:
         self._last_action_output: dict[str, Any] = {}
         self._last_gui_action_result: dict[str, Any] = {}
         self.checklist: SubGoalChecklist | None = None
+
+    @staticmethod
+    def _burst_gui_actions(payload: dict[str, Any]) -> list[GUIAction] | None:
+        """Decode an explicitly requested GUI burst without inventing actions."""
+        raw = payload.get("burst_actions")
+        if raw is None:
+            raw = payload.get("actions") if payload.get("burst") is True else None
+        if raw is None:
+            return None
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("GUI burst requires a non-empty actions list")
+        actions: list[GUIAction] = []
+        for item in raw:
+            if isinstance(item, GUIAction):
+                actions.append(item)
+                continue
+            if not isinstance(item, dict):
+                raise ValueError("GUI burst actions must be structured GUI actions")
+            data = dict(item)
+            raw_kind = data.pop("action", data.pop("type", ""))
+            try:
+                kind = GUIActionType(str(raw_kind).upper())
+            except ValueError as exc:
+                raise ValueError(f"unknown GUI burst action: {raw_kind}") from exc
+            data["action"] = kind
+            actions.append(GUIAction(**data))
+        return actions
+
+    def _burst_postcondition_ok(
+        self, postcondition: Any, snapshot: Any, *, changed: bool
+    ) -> tuple[bool, str]:
+        """Check only caller-supplied live state; an absent condition is honest."""
+        if postcondition is None:
+            return True, ""
+        if isinstance(postcondition, str):
+            expected = postcondition.strip()
+            ok = bool(expected) and expected.lower() in str(
+                getattr(snapshot, "visible_text", "")
+            ).lower()
+            return ok, "postcondition text was not observed" if not ok else ""
+        if not isinstance(postcondition, dict):
+            return False, "postcondition must be a mapping or visible-text string"
+        if postcondition.get("require_state_change", True) and not changed:
+            return False, "postcondition requires a real UI state change"
+        checks = {
+            "active_window": getattr(snapshot, "active_window", ""),
+            "visible_text": getattr(snapshot, "visible_text", ""),
+            "browser_url": (getattr(snapshot, "browser_state", {}) or {}).get("url", ""),
+            "url": (getattr(snapshot, "browser_state", {}) or {}).get("url", ""),
+        }
+        for key, expected in postcondition.items():
+            if key in {"require_state_change", "screen_changed"}:
+                continue
+            if key not in checks:
+                return False, f"unrecognized postcondition field: {key}"
+            actual = str(checks[key] or "")
+            if str(expected).lower() not in actual.lower():
+                return False, f"postcondition {key} was not observed"
+        if postcondition.get("screen_changed") is True and not changed:
+            return False, "screen did not change as required"
+        return True, ""
+
+    async def _execute_gui_burst(
+        self, workspace_id: str, payload: dict[str, Any], target_resource: str = ""
+    ) -> tuple[bool, str, int | None]:
+        """Run an explicit motor burst against versioned, freshly observed state."""
+        actions = self._burst_gui_actions(payload)
+        if actions is None:
+            raise ValueError("not a GUI burst")
+        bus = self.perception_bus
+        initial = bus.current()
+
+        async def refresh_after_failure() -> None:
+            try:
+                await self.observe(workspace_id)
+            except Exception as exc:
+                logger.warning("burst_reobserve_failed", error=str(exc))
+
+        expected_version = payload.get("state_version")
+        if expected_version is not None and int(expected_version) != initial.version:
+            await refresh_after_failure()
+            return False, "stale perception target; re-observe and replan", 126
+        if target_resource:
+            target = bus.resolve(target_resource)
+            if target is not None and target.state_version != initial.version:
+                await refresh_after_failure()
+                return False, "stale perception target; re-observe and replan", 126
+        previous = initial
+
+        async def observe_after_action(*_args: Any) -> dict[str, Any]:
+            nonlocal previous
+            before = previous
+            await self.observe(workspace_id)
+            current = bus.current()
+            changed = (
+                current.screen_hash != before.screen_hash
+                or current.active_window != before.active_window
+                or current.windows != before.windows
+                or current.visible_text != before.visible_text
+                or current.controls != before.controls
+                or current.browser_state != before.browser_state
+            )
+            if current.version <= before.version:
+                return {"ok": False}
+            previous = current
+            # A burst must not silently continue through an unchanged or
+            # unexpected desktop state.  The caller receives a replan signal.
+            if not changed:
+                return {"ok": False}
+            return {"ok": True}
+
+        result = await self.motor.execute_burst(
+            workspace_id,
+            actions,
+            interval_seconds=float(payload.get("interval_seconds", 0.05)),
+            observation_hook=observe_after_action,
+        )
+        if not result.success:
+            await refresh_after_failure()
+            return False, f"GUI burst stopped: {result.stop_reason or 'action failed'}; re-observe and replan", 126
+        snapshot = bus.current()
+        changed = snapshot.version > initial.version and snapshot != initial
+        ok, reason = self._burst_postcondition_ok(
+            payload.get("postcondition"), snapshot, changed=changed
+        )
+        if not ok:
+            await refresh_after_failure()
+            return False, f"GUI burst postcondition failed: {reason}; re-observe and replan", 126
+        return True, f"GUI burst completed {result.completed} action(s) with verified observation", 0
 
     def interrupt(self) -> None:
         """Signal the agent to stop its active mission loop immediately."""
@@ -2764,7 +2893,20 @@ class ComputerUseAgent:
         # those does nothing useful and can mis-click. We BLOCK such actions —
         # without triggering recovery (the provider state is fine; the agent
         # simply needs to re-observe and pick valid coordinates).
-        coord_err = self._validate_coordinates(action_type, payload)
+        is_gui_burst = (
+            action_type in {
+                ComputerActionType.GUI_CLICK,
+                ComputerActionType.GUI_DOUBLE_CLICK,
+                ComputerActionType.GUI_RIGHT_CLICK,
+                ComputerActionType.GUI_TYPE,
+                ComputerActionType.GUI_KEYPRESS,
+                ComputerActionType.GUI_MOVE,
+                ComputerActionType.GUI_SCROLL,
+                ComputerActionType.GUI_DRAG,
+            }
+            and ("burst_actions" in payload or payload.get("burst") is True)
+        )
+        coord_err = None if is_gui_burst else self._validate_coordinates(action_type, payload)
         if coord_err is not None:
             actual_obs_str = f"Coordinate out of bounds: {coord_err}"
             status = ActionExecutionStatus.BLOCKED
@@ -2788,6 +2930,65 @@ class ComputerUseAgent:
             )
             self.traces.append(trace)
             self.history.append({"action": action_type.value, "result": actual_obs_str})
+            return trace
+
+        # An explicit burst is opt-in; ordinary single actions retain their
+        # existing dispatch path.  MotorReflexes owns cadence and fail-closed
+        # stopping, while this layer owns perception/version/postcondition
+        # verification and the replan signal.
+        if (
+            action_type in {
+                ComputerActionType.GUI_CLICK,
+                ComputerActionType.GUI_DOUBLE_CLICK,
+                ComputerActionType.GUI_RIGHT_CLICK,
+                ComputerActionType.GUI_TYPE,
+                ComputerActionType.GUI_KEYPRESS,
+                ComputerActionType.GUI_MOVE,
+                ComputerActionType.GUI_SCROLL,
+                ComputerActionType.GUI_DRAG,
+            }
+            and is_gui_burst
+        ):
+            try:
+                burst_ok, actual_obs_str, action_exit_code = await self._execute_gui_burst(
+                    workspace_id, payload, target_resource
+                )
+                status = (
+                    ActionExecutionStatus.COMPLETED
+                    if burst_ok
+                    else ActionExecutionStatus.FAILED
+                )
+                recovery_needed = not burst_ok
+            except Exception as exc:
+                actual_obs_str = f"GUI burst rejected: {exc}; re-observe and replan"
+                status = ActionExecutionStatus.FAILED
+                action_exit_code = 126
+                recovery_needed = True
+            self.perception_bus.invalidate()
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource=target_resource,
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=_safe_str(actual_obs_str),
+                expected_observation=predicted_outcome,
+                info_gain=1.0 if status == ActionExecutionStatus.COMPLETED else 0.0,
+                recovery_attempted=recovery_needed,
+                status=status,
+                exit_code=action_exit_code,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append({
+                "thought": getattr(self, "_last_thought", ""),
+                "action": f"{action_type.value} {target_resource}",
+                "result": _safe_str(actual_obs_str),
+            })
+            if not burst_ok:
+                self._inject_replan(goal=str(actual_obs_str))
             return trace
 
         try:
@@ -3695,7 +3896,7 @@ class ComputerUseAgent:
                         try:
                             from sonic.llm.schemas import LLMRequest, Message, MessageRole
                             gen_prompt = (
-                                f"Author a concise, working script to satisfy this goal: {effective_goal}\n"
+                                f"Author a concise, working script to satisfy this goal: {target_str or name_str}\n"
                                 f"Target script path: {dest_path}\n"
                                 "Output ONLY valid executable code without markdown blocks or conversational commentary."
                             )
@@ -3976,6 +4177,19 @@ class ComputerUseAgent:
         trace.state_changed = experience.state_changed
         trace.prediction_error = experience.prediction_error
         trace.graph_delta = experience.graph_delta
+        before_receipt_state = self._contract_state(before_state)
+        after_receipt_state = self._contract_state(after_state)
+        trace.action_receipt = ActionReceipt(
+            action_type=action_type.value,
+            status=status,
+            state_delta=StateDelta.from_states(
+                before_receipt_state, after_receipt_state
+            ),
+            before=before_receipt_state,
+            after=after_receipt_state,
+            exit_code=action_exit_code,
+            evidence=actual_obs_str,
+        )
         if getattr(self, "skill_ledger", None) is not None:
             self._pending_skill_context = (trace, before_graph)
             trace_status = getattr(trace.status, "value", str(trace.status))
@@ -4061,6 +4275,27 @@ class ComputerUseAgent:
             exit_code=exit_code,
             graph_hash=self._current_experience_graph().fingerprint(),
         )
+
+    @staticmethod
+    def _contract_state(state: Any) -> dict[str, Any]:
+        """Expose the observed transition state in the action contract shape.
+
+        ``StateSignature`` intentionally stores large observations as hashes;
+        retaining those exact hashes keeps receipts compact while ensuring the
+        delta is derived from the same live observations used by the trace.
+        """
+        return {
+            "screen_hash": str(getattr(state, "screen_hash", "") or ""),
+            "active_window": str(getattr(state, "active_window", "") or ""),
+            "windows": tuple(getattr(state, "windows", ()) or ()),
+            "processes": tuple(getattr(state, "processes", ()) or ()),
+            "visible_text_hash": str(getattr(state, "visible_text_hash", "") or ""),
+            "terminal_output_hash": str(
+                getattr(state, "terminal_output_hash", "") or ""
+            ),
+            "exit_code": getattr(state, "exit_code", None),
+            "graph_hash": str(getattr(state, "graph_hash", "") or ""),
+        }
 
     def _current_experience_graph(self) -> GuiWorldGraph:
         bus = getattr(self, "perception_bus", None)

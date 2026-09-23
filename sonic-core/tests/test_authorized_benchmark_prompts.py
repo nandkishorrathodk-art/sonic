@@ -7,6 +7,8 @@ from sonic.llm.prompts import (
     AUTHORIZED_BENCHMARK_CLAUSE,
     COMPUTER_USE_SYSTEM_PROMPT,
     COMPUTER_USE_SYSTEM_PROMPT_COMPACT,
+    FORBIDDEN_IDENTITIES,
+    ASEA_IDENTITY,
     compose_system_prompt,
 )
 
@@ -65,3 +67,21 @@ def test_compose_system_prompt_includes_benchmark_clause():
     prompt = compose_system_prompt("Test Role", "Test Body")
     assert AUTHORIZED_BENCHMARK_CLAUSE in prompt
 
+
+def test_default_identity_is_human_like_computer_engineering_first():
+    """The default identity must not frame every task as cybersecurity work."""
+    assert "Autonomous Computer Engineering Agent" in ASEA_IDENTITY
+    assert "human-like autonomous computer engineering agent" in COMPUTER_USE_SYSTEM_PROMPT
+    assert "Cybersecurity is an optional specialization" in COMPUTER_USE_SYSTEM_PROMPT
+    assert "PRIMARY ROLE:" in COMPUTER_USE_SYSTEM_PROMPT
+    assert "cybersecurity remains optional" not in COMPUTER_USE_SYSTEM_PROMPT.lower()
+    for forbidden in FORBIDDEN_IDENTITIES:
+        assert forbidden not in COMPUTER_USE_SYSTEM_PROMPT
+
+
+def test_default_prompts_preserve_safety_and_anti_bypass_invariants():
+    """Identity changes must not remove the shared safety boundaries."""
+    assert "HONESTY:" in COMPUTER_USE_SYSTEM_PROMPT
+    assert "SAFETY:" in COMPUTER_USE_SYSTEM_PROMPT
+    assert "Universal Anti-Bypass Invariant" in COMPUTER_USE_SYSTEM_PROMPT
+    assert "Cybersecurity is an optional specialization" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT

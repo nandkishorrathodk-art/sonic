@@ -22,6 +22,7 @@ from sonic import __codename__, __version__
 from sonic.api.routes import (
     agents,
     auth,
+    checkpoints,
     engagements,
     experiments,
     findings,
@@ -325,6 +326,7 @@ app.include_router(terminal.router, prefix="/terminal", tags=["Terminal"])
 app.include_router(live.router, prefix="/live", tags=["Live Dashboard"])
 app.include_router(jobs.router, prefix="/jobs", tags=["Async Jobs"])
 app.include_router(workstation.router, tags=["Workstation"])
+app.include_router(checkpoints.router, tags=["Workstation Checkpoints"])
 app.include_router(security.router, prefix="/security", tags=["Self-Security Lab"])
 app.include_router(self_coder.router, prefix="/self-coder", tags=["Self-Coder"])
 
