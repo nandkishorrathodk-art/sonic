@@ -28,13 +28,25 @@ import {
 } from "lucide-react";
 import { api } from "../../lib/api";
 import { PageShell, PageHeader } from "../../components/common/PageShell";
-import {
-  Cognitive3DGraph,
+import dynamic from "next/dynamic";
+import type {
   Cognitive3DGraphRef,
   GraphNodeData,
   GraphEdgeData,
-  getNodeVisualSpec,
 } from "../../components/graph/Cognitive3DGraph";
+import { getNodeVisualSpec } from "../../components/graph/Cognitive3DGraph";
+
+const Cognitive3DGraph = dynamic(
+  () => import("../../components/graph/Cognitive3DGraph").then((mod) => mod.Cognitive3DGraph),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-full flex items-center justify-center bg-[#05070e] text-muted-dim font-mono text-xs">
+        Initializing 3D WebGL Canvas…
+      </div>
+    ),
+  }
+);
 
 // Default authentic Cognitive Architecture Topology (reflects SONIC's real system)
 const DEFAULT_COGNITIVE_NODES: GraphNodeData[] = [
