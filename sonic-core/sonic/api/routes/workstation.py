@@ -1059,6 +1059,9 @@ async def delete_workstation_session(
     return {"status": "success", "session_id": session_id}
 
 
+@router.post("/workstation/provision")
+@router.post("/provision")
+@router.post("/desktop/provision")
 @router.post("/workstation/desktop/provision")
 async def provision_desktop(
     session_id: str = Query("default"),
@@ -3026,6 +3029,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 tenant_id=tenant_id,
                                 being=being,
                                 being_mind=mind,
+                                craft=craft,
                                 toolsmith=toolsmith,
                                 method_lab=method_lab,
                                 lessons_ledger=lessons_ledger,
@@ -3123,8 +3127,8 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             summary_msg = report.findings_summary
 
                             boss_waiting_human = (
-                                getattr(boss_report, "waiting_for_human", False)
-                                or getattr(boss, "_waiting_for_human", False)
+                                getattr(boss_report, "waiting_for_human", False) is True
+                                or getattr(boss, "_waiting_for_human", False) is True
                                 or getattr(boss_report, "status", "") == "WAITING_FOR_HUMAN"
                                 or any(
                                     str(getattr(t, "status", "") if not isinstance(t, dict) else t.get("status", "")) == "WAITING_FOR_HUMAN"
@@ -3148,6 +3152,42 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             else:
                                 state["status"] = "IDLE"
                                 state["current_action"] = "Ready when you are."
+
+                            try:
+                                boss_success = str(getattr(boss_report, "status", "")).upper() == "COMPLETE"
+                                summary_text = str(summary_msg or "")
+                                if hasattr(mind, "record_mission_outcome"):
+                                    mind.record_mission_outcome(
+                                        goal=clean_prompt,
+                                        success=boss_success,
+                                        summary=summary_text,
+                                        facts=[summary_text[:200]] if summary_text else [],
+                                    )
+                                elif hasattr(mind, "record_idle_cycle"):
+                                    mind.record_idle_cycle(
+                                        was_novel=boss_success,
+                                        info_gain=0.5 if boss_success else 0.1,
+                                        learned_fact=f"Mission ({clean_prompt[:50]}): {summary_text[:180]}" if summary_text else None,
+                                    )
+                            except Exception:
+                                pass
+                            try:
+                                summary_text = str(summary_msg or "")
+                                try:
+                                    craft.author(
+                                        title=f"Mission: {clean_prompt[:50]}",
+                                        content=summary_text,
+                                        category="note",
+                                        tags=["mission-receipt"],
+                                    )
+                                except TypeError:
+                                    craft.author(
+                                        title=f"Mission: {clean_prompt[:50]}",
+                                        body=summary_text,
+                                        kind="note",
+                                    )
+                            except Exception:
+                                pass
 
                             state["thought_summary"] = summary_msg
                             if not any(item.get("title") == "SONIC Boss Report" for item in state.get("worklog", [])):
@@ -3215,7 +3255,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             succeeded = sum(1 for t in traces if t.status in ("SUCCESS", "RECOVERED"))
                             failed = sum(1 for t in traces if t.status == "FAILED")
                             blocked = sum(1 for t in traces if t.status == "BLOCKED")
-                            waiting_human = getattr(agent, "_waiting_for_human", False) or any(
+                            waiting_human = (getattr(agent, "_waiting_for_human", False) is True) or any(
                                 str(getattr(t, "status", "")) == "WAITING_FOR_HUMAN" for t in traces
                             )
                             if waiting_human:
@@ -3313,6 +3353,43 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     summary_msg = summary_msg.encode('utf-8', errors='replace').decode('utf-8')
                                 except Exception:
                                     summary_msg = "Summary available (encoding issue in display)"
+
+                            try:
+                                agent_success = bool(getattr(agent, "goal_reached", False) or succeeded > 0)
+                                summary_text = str(summary_msg or "")
+                                if hasattr(mind, "record_mission_outcome"):
+                                    mind.record_mission_outcome(
+                                        goal=clean_prompt,
+                                        success=agent_success,
+                                        summary=summary_text,
+                                        facts=[summary_text[:200]] if summary_text else [],
+                                    )
+                                elif hasattr(mind, "record_idle_cycle"):
+                                    mind.record_idle_cycle(
+                                        was_novel=agent_success,
+                                        info_gain=0.5 if agent_success else 0.1,
+                                        learned_fact=f"Mission ({clean_prompt[:50]}): {summary_text[:180]}" if summary_text else None,
+                                    )
+                            except Exception:
+                                pass
+                            try:
+                                summary_text = str(summary_msg or "")
+                                try:
+                                    craft.author(
+                                        title=f"Mission: {clean_prompt[:50]}",
+                                        content=summary_text,
+                                        category="note",
+                                        tags=["mission-receipt"],
+                                    )
+                                except TypeError:
+                                    craft.author(
+                                        title=f"Mission: {clean_prompt[:50]}",
+                                        body=summary_text,
+                                        kind="note",
+                                    )
+                            except Exception:
+                                pass
+
                             state["thought_summary"] = summary_msg
                             _append_worklog(
                                 state, "response",

@@ -550,14 +550,13 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
             await asyncio.sleep(max(0.1, (action.delay_ms or 500) / 1000.0))
         elif atype in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
             await self.launch_application(workspace_id, action.app_name, actor=actor)
-        elif atype in (GUIActionType.CLOSE_APP, GUIActionType.CLOSE_WINDOW):
+        elif atype in (GUIActionType.CLOSE_APP, GUIActionType.CLOSE_WINDOW) and (action.app_name or action.window_id):
             target = action.app_name or action.window_id or ""
-            if target:
-                await self.close_application(workspace_id, target, actor=actor)
+            await self.close_application(workspace_id, target, actor=actor)
         elif atype == GUIActionType.INSTALL_APP and (action.app_name or action.text):
             await self.install_application(workspace_id, action.app_name or action.text or "", actor=actor)
-        elif atype in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY):
-            pass
+        else:
+            raise RuntimeError(f"GUI action {action.action} is not supported on HeadlessComputeProvider")
         logger.info(
             "headless_gui_action_intercepted",
             workspace_id=workspace_id,
@@ -568,7 +567,7 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
             width=0,
             height=0,
             active_window="Headless",
-            visible_text=f"[HEADLESS SUBSTRATE: GUI action '{action_name}' unsupported in headless mode]",
+            visible_text=f"[HEADLESS SUBSTRATE: GUI action '{action_name}' executed in headless mode]",
             detected_controls=[],
             desktop_state="HEADLESS",
         )

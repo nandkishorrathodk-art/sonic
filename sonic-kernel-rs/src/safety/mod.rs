@@ -106,6 +106,7 @@ impl SealedPolicy {
             "SERVICE_ACTION",
             "TOOL_RUN", "TOOL_AUTHOR", "CREATE_TOOL", "METHOD_INVENT", "SYNTHESIZE_METHOD",
             "VAULT_STORE", "VAULT_GET", "CRAFT_NOTE",
+            "DEFINE_SUBAGENT", "INVOKE_SUBAGENT", "SEND_MESSAGE", "MANAGE_SUBAGENTS",
         ] {
             allowed.insert(act.to_string());
         }

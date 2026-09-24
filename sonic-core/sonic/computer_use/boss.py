@@ -122,6 +122,7 @@ class BossAgent:
         gui_only: bool = False,
         being: Any = None,
         being_mind: Any = None,
+        craft: Any = None,
         agent_id: str | None = None,
         requested_plane: str | None = None,
         tree_depth: int = 0,
@@ -138,6 +139,7 @@ class BossAgent:
         self.tenant_id = tenant_id
         self.being = being
         self.being_mind = being_mind
+        self.craft = craft
         self.agent_id = agent_id or (being.being_id if being else f"{tenant_id}-boss")
         self.tree_depth = max(0, int(tree_depth))
         self.max_tree_depth = max(1, int(max_tree_depth))
@@ -230,15 +232,23 @@ class BossAgent:
             except Exception as exc:
                 logger.debug("task_graph_add_skipped", sub_id=sub.id, error=str(exc))
 
-    def _detect_sub_mission_trigger(self, result: SubMissionResult) -> ReplanTrigger | None:
+    def _detect_replan_trigger(self, report: Any) -> ReplanTrigger | None:
         """Inspect sub-mission outcome from verified state to determine if replanning is warranted."""
-        if not result.success:
+        if not getattr(report, "success", True):
             return ReplanTrigger.AGENT_FAILURE
 
-        if result.evidence_verified and result.key_discoveries:
+        findings_list = list(getattr(report, "findings", None) or getattr(report, "key_discoveries", None) or [])
+        summary_text = str(getattr(report, "findings_summary", "") or getattr(report, "summary", "") or "")
+        combined_lower = (" ".join(str(f) for f in findings_list) + " " + summary_text).lower()
+        if any(kw in combined_lower for kw in ("endpoint", "port", "surface", "service")):
+            return ReplanTrigger.NEW_ATTACK_SURFACE
+
+        if getattr(report, "evidence_verified", False) and findings_list:
             return ReplanTrigger.NEW_HIGH_CONFIDENCE_FINDING
 
         return None
+
+    _detect_sub_mission_trigger = _detect_replan_trigger
 
     # ------------------------------------------------------------------
     # Main orchestration loop
@@ -851,6 +861,7 @@ Rules:
         sub_mission: SubMission,
         phase_callback: Callable | None = None,
         sub_agent_num: int = 0,
+        phase_submissions: list[SubMission] | None = None,
     ) -> SubMissionResult:
         """Create a focused ComputerUseAgent and run it on a sub-mission.
 
@@ -865,7 +876,22 @@ Rules:
                 ComputerAutonomyLevel,
                 EngineeringMissionMode,
             )
+            from sonic.computer_use.teamwork import _ScopedSubagentProviderProxy
             from sonic.safety.action_policy import ActionPolicy
+
+            sub = sub_mission
+            if phase_submissions is None:
+                phase_submissions = self.phases[-1].sub_missions if self.phases else []
+
+            effective_computer = (
+                _ScopedSubagentProviderProxy(
+                    self.computer,
+                    subagent_id=sub.id,
+                    workspace_mode="branch",
+                )
+                if len(phase_submissions) > 1
+                else self.computer
+            )
 
             safety_policy = (
                 self.safety.clone_for_agent(f"sub-{sub_agent_num}")
@@ -882,7 +908,7 @@ Rules:
             scoped_context["delegated_plane"] = execution_plane
             scoped_context["execution_plane"] = execution_plane
             agent = ComputerUseAgent(
-                computer_provider=self.computer,
+                computer_provider=effective_computer,
                 autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
                 mode=EngineeringMissionMode.GENERAL_ENGINEERING_MODE,
                 max_actions=sub_mission.max_steps,
@@ -893,6 +919,7 @@ Rules:
                 tenant_id=self.tenant_id,
                 agent_id=sub_agent_id,
                 being_mind=self.being_mind,
+                craft=self.craft,
                 enable_llm_decomposition=False,
                 browser=self.browser,
                 toolsmith=self.toolsmith,
@@ -968,19 +995,21 @@ Rules:
             except TimeoutError:
                 logger.warning("sub_agent_timed_out", sub_id=sub_mission.id, agent_num=sub_agent_num)
                 traces = getattr(agent, "history", [])
+                raw_to_wfh_reason = getattr(agent, "_waiting_for_human_reason", "")
                 return SubMissionResult(
                     sub_mission_id=sub_mission.id, goal=sub_mission.goal, traces=traces,
                     findings_summary="SubAgent timed out before objective verification.",
                     success=False, status="TIMED_OUT", evidence_verified=False,
                     actions_taken=len(traces), duration_seconds=round(time.perf_counter() - t_start, 2),
-                    waiting_for_human=bool(getattr(agent, "_waiting_for_human", False)),
-                    waiting_for_human_reason=str(getattr(agent, "_waiting_for_human_reason", "") or ""),
+                    waiting_for_human=getattr(agent, "_waiting_for_human", False) is True,
+                    waiting_for_human_reason=raw_to_wfh_reason if isinstance(raw_to_wfh_reason, str) else "",
                 )
 
             duration = round(time.perf_counter() - t_start, 2)
 
-            waiting_for_human = bool(getattr(agent, "_waiting_for_human", False))
-            waiting_for_human_reason = str(getattr(agent, "_waiting_for_human_reason", "") or "")
+            waiting_for_human = getattr(agent, "_waiting_for_human", False) is True
+            raw_wfh_reason = getattr(agent, "_waiting_for_human_reason", "")
+            waiting_for_human_reason = raw_wfh_reason if isinstance(raw_wfh_reason, str) else ""
             if not waiting_for_human:
                 for t in traces:
                     t_act = _trace_value(t, "action_type", "")

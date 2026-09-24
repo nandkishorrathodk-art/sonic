@@ -22,8 +22,12 @@ import {
 } from "../types/workstation";
 
 import { OfflineBanner } from "../components/common/OfflineBanner";
-import { WorkstationHeader } from "../components/workstation/WorkstationHeader";
+import { WorkstationHeader as BaseWorkstationHeader } from "../components/workstation/WorkstationHeader";
 import { WorkstationSidebar } from "../components/workstation/WorkstationSidebar";
+
+const WorkstationHeader = BaseWorkstationHeader as React.ComponentType<
+  React.ComponentProps<typeof BaseWorkstationHeader> & { loading?: boolean }
+>;
 import { WorklogFeed } from "../components/worklog/WorklogFeed";
 import { ComputerSurface } from "../components/computer/ComputerSurface";
 import { CodeViewer } from "../components/code/CodeViewer";
@@ -343,6 +347,7 @@ export default function SonicDevinWorkstation() {
             gitBranch={workstationState?.git_branch || ""}
             latestCommit={workstationState?.latest_commit}
             connectionStatus={connectionStatus}
+            loading={loading}
           />
 
           <div className="flex-1 grid grid-cols-12 overflow-hidden">

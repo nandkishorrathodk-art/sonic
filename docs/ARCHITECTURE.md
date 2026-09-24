@@ -1,4 +1,4 @@
-# SONIC-REDA — System Definition & Architecture
+# SONIC — System Definition & Architecture
 
 > **Status:** Grounded in the actual codebase (`sonic-core/sonic/`).
 > Every claim maps to real modules, classes, and invariants in the source.
@@ -7,36 +7,38 @@
 
 ## 1. Formal Definition
 
-SONIC-REDA is a **fail-closed, tamper-evident, self-improving autonomous
-security-research system** that operates its own isolated computer environment
-to perform authorized offensive-security assessments, generates and empirically
-falsifies attack hypotheses, and authors its own tools and methods — all inside
-an unbreachable safety envelope that the agent cannot widen at runtime.
+SONIC is a **fail-closed, tamper-evident, self-improving Autonomous AI-Human
+Digital Being** that operates its own dedicated personal computer workstation
+(`DISPLAY=:99` full graphical desktop + dedicated headless terminal) to perform
+software engineering, web browsing, account management, empirical research, and
+verification — generating and empirically falsifying hypotheses, and authoring
+its own tools and methods inside an unbreachable safety envelope that the agent
+cannot widen at runtime.
 
 ### Plain-language version
 
-> "Ek autonomous pentester jo sirf pre-built scanners nahi chalata. Wo khud
-> ek isolated virtual computer operate karta hai, target ko multi-modal tareeke
-> se samajhta hai (screenshot + accessibility text + terminal + DOM), naye
-> attack hypotheses banata hai, unhe sandbox me empirically test karta hai,
-> results se seekhta hai, aur khud naye tools aur techniques banata hai — lekin
-> har action ek tamper-proof safety envelope ke andar hi ho sakta hai jo agent
-> khud modify nahi kar sakta."
+> "An autonomous AI-Human colleague operating its own isolated computer
+> workstation (`DISPLAY=:99` GUI + headless terminal), perceiving applications
+> multimodally (screenshot + accessibility tree + CDP DOM + terminal),
+> launching dynamic subagent teams in isolated branch workspaces, testing
+> hypotheses empirically in-sandbox, and authoring reusable tools (`BeingCraft`,
+> `Toolsmith`) — with every action governed by a tamper-evident safety policy."
 
 ---
 
-## 2. What makes this more than a "scanner runner"
+## 2. What makes this a complete AI-Human Digital Being
 
 | Capability | Module | What it actually does |
 |---|---|---|
-| **Own computer** | `computer/`, `sandbox/` | Provisions isolated cloud/Docker sandboxes with real GUI desktops |
-| **Multi-modal perception** | `daytona_computer.py` | Real screenshots + AT-SPI accessibility-tree text extraction (not just pixels) |
+| **Own computer** | `computer/`, `sandbox/` | Provisions isolated cloud/Docker sandboxes with real GUI desktops (`DISPLAY=:99`) |
+| **Multi-modal perception** | `daytona_computer.py` | Real screenshots + AT-SPI accessibility-tree text extraction + CDP DOM grounding |
 | **Closed-loop reasoning** | `computer_use/agent.py` | observe → reason(LLM) → act → verify, goal-aware early stop |
+| **Dynamic subagent teamwork** | `computer_use/teamwork.py` | `DEFINE_SUBAGENT`, `INVOKE_SUBAGENT`, `SEND_MESSAGE`, `MANAGE_SUBAGENTS` with `branch` isolation + `JudgeAgent` verification |
 | **Epistemic reasoning** | `research/epistemic.py` | First-class Unknowns, competing hypotheses, contradiction tracking |
 | **Experiment design** | `research/experiment_designer.py` | Discriminating experiments to separate hypotheses + adversarial falsification |
 | **Information-gain selection** | `research/information_gain.py` | Ranks actions by expected information/confidence gain vs cost/risk |
 | **Tool authoring** | `being/toolsmith.py` | Writes new tools, registers them ONLY after in-sandbox verification (exit 0 + non-empty) |
-| **Method invention** | `being/method_lab.py` | Synthesizes novel attack techniques, confirms only after reproducing a finding |
+| **Method invention** | `being/method_lab.py` | Synthesizes novel workflows/methods, confirms only after empirical reproduction |
 | **Evidence & trust** | `evidence/` | Custody chain, independent adversarial verifier, false-positive dedup, confidence bands |
 | **Self-directed life loop** | `being/life_loop.py` | Always-on curiosity tick that pursues goals even without operator prompts |
 | **Tamper-evident safety** | `safety/sealed.py` | SHA-256-sealed policy; runtime mutation → DENY |
@@ -86,7 +88,7 @@ ComputerUseAgent (L4)
        │              (rate / allowlist / path / command / egress)
        ▼ ALLOW
    Computer Provider (L2)
-     ├─ GUI? → DaytonaComputerProvider → SDK mouse/keyboard
+     ├─ GUI? → DaytonaComputerProvider → SDK mouse/keyboard (`x-www-browser` / `xdg-open`)
      └─ Terminal? → UnifiedComputerProvider → compute.execute()
        │
        ▼
@@ -124,10 +126,7 @@ ComputerUseAgent (L4)
 
 **Invariant:** *The agent cannot widen its own permissions at runtime.*
 
-The `ActionPolicy` is a plain mutable object — a self-evolving agent running
-in-process *could* mutate `security_tool_targets.add(...)`,
-`egress.BLOCKED_NETWORKS.clear()`, and then act. `SealedActionPolicy` closes
-this:
+The `ActionPolicy` is sealed via `SealedActionPolicy`:
 
 1. At `seal()` time, a **SHA-256 hash** is recorded over the canonical
    serialization of every safety-relevant field (allowed_types,
@@ -136,8 +135,7 @@ this:
 2. After sealing, mutation is **refused** — fields are frozen (frozenset,
    tuple).
 3. On **every** `evaluate()`, the seal hash is recomputed and compared.
-   Mismatch → `DENY` + `safety_policy_tampered` log. The agent may NOT act
-   under a policy whose integrity cannot be proven.
+   Mismatch → `DENY` + `safety_policy_tampered` log.
 4. The egress check uses the **frozen snapshot**, so runtime mutation of
    `egress.BLOCKED_NETWORKS` cannot widen what this policy permits.
 
@@ -149,11 +147,8 @@ reaches the provider:
 2. Action allowlist    (unknown type → DENY)        ← fail-closed
 3. Path confinement    (workspace-root traversal → DENY)
 4. Command risk        (L2_FORBIDDEN → DENY; L1 → approval gate)
-5. Egress filter        (metadata/loopback/RFC1918 → DENY)
+5. Egress filter       (metadata/loopback/RFC1918 → DENY)
 ```
-
-A blocked action **does not trigger recovery** — the recovery path cannot
-bypass the safety gate.
 
 ### Pillar 3 — Defence-in-Depth Egress (L3↔L1)
 
@@ -166,63 +161,33 @@ bypass the safety gate.
   `::ffff:0.0.0.0/96` and a normalization helper (`_ip_blocked`) that converts
   mapped v6 → v4 before checking.
 - **NAT64** well-known prefix `64:ff9b::/96` is also blocked.
-- Domains are **DNS-resolved** and every resolved IP is checked — the filter
-  does not trust the hostname.
-- Applied at two points: `SECURITY_TOOL` targets and `BROWSER_NAVIGATE` URLs.
+- Domains are **DNS-resolved** and every resolved IP is checked.
 
 ### Pillar 4 — Epistemic, Falsification-Driven Research (L5)
 
 **Invariant:** *The system tracks what it does NOT know and designs experiments to resolve it.*
 
 - **Unknown-First Reasoning** (`research/epistemic.py`): `Unknown` is a
-  first-class object — "What do I NOT know that prevents a high-confidence
-  decision?" — with importance, confidence, possible actions.
+  first-class object with importance, confidence, possible actions.
 - **Competing Hypotheses**: multiple explanations held simultaneously, each
-  with evidence links and a confidence breakdown (not a single number).
+  with evidence links and a confidence breakdown.
 - **Experiment Designer**: generates *discriminating experiments* to separate
-  two competing hypotheses, plus **adversarial falsification challenges** to
-  eliminate confirmation bias.
+  competing hypotheses, plus **adversarial falsification challenges**.
 - **Information-Gain Selection** (`research/information_gain.py`): ranks
-  candidate actions by expected information gain / confidence gain vs cost /
-  time / safety risk — the agent preferentially resolves the highest-value
-  unknown.
-- **World Model & Stop Conditions** (`research/world_model.py`): aggregates
-  verified knowledge, evaluates stop policies (goal satisfied, sufficient
-  evidence, diminishing returns, budget exhausted).
-- **Strategy Switching** (`researcher/strategy_switcher.py`): enforces
-  methodological diversity; pivots on diminishing returns
-  (HTTP differential, DOM analysis, static reasoning, config inspection,
-  specialized tool probe).
-- **Anomaly Detection** (`researcher/anomaly_engine.py`): novelty engine +
-  dead-end detection.
+  candidate actions by expected information gain / confidence gain vs cost.
 
 ### Pillar 5 — Honest Self-Improvement (L6)
 
-**Invariant:** *A self-authored tool or method is registered ONLY after it reproduces a real finding in-sandbox — never by decree.*
+**Invariant:** *A self-authored tool or method is registered ONLY after it reproduces a real result in-sandbox — never by decree.*
 
-- **Toolsmith** (`being/toolsmith.py`): authors a new scanner/fuzzer/parser
-  when no registered tool covers an observation gap. It is recorded as
-  `reproduced=True` and entered into the `SecurityToolRegistry` **only after**
+- **Toolsmith** (`being/toolsmith.py`): authors a new utility/script when no
+  registered tool covers an observation gap, and registers it **only after**
   `confirm_and_register()` runs it in the sandbox and gets `exit 0` + non-empty
-  stdout. A fail-closed (126), failed, or empty run leaves `reproduced=False`.
-  Authored source runs strictly inside the sandbox; destructive source is
-  contained by the sandbox's own fail-closed gate.
-- **Method Lab** (`being/method_lab.py`): synthesizes a *novel offensive
-  technique* (parser-confusion chain, auth-bypass logic, fuzzer mutation
-  strategy, header-injection primitive). The known-technique ledger is
-  consulted so "novel" means genuinely outside what the being already knows.
-  A technique that duplicates a known one is rejected. A technique is
-  `confirmed=True` only after its probe reproduces a finding.
+  stdout.
+- **Method Lab** (`being/method_lab.py`): synthesizes novel workflows and
+  confirms them only after empirical verification.
 - **Being Life Loop** (`being/life_loop.py`): an always-on `asyncio.Task` that
-  runs when no operator goal is active. Each tick proposes a curiosity goal
-  (LLM, novelty-biased), pursues it via the real observe→reason→act loop
-  (every action passes the SealedActionPolicy), records the outcome in the
-  persistent `BeingMind` (mood evolves, facts persist across restarts).
-  Constructing a life loop without a safety policy is **refused**.
-- **Evidence & Trust** (`evidence/`): custody chain, independent adversarial
-  verifier, false-positive fingerprinting/dedup, confidence bands, and a
-  reproduction engine. Findings carry provenance; trust is earned, not
-  asserted.
+  runs when no operator goal is active.
 
 ---
 
@@ -238,7 +203,7 @@ bypass the safety gate.
 | **Terminal output** | `computer.terminal("echo __sonic_obs_ready__")` | Real shell state |
 | **Filesystem** | `computer.list_files()` | What exists on disk |
 | **Git state** | `computer.git_action("status")` | Branch + cleanliness |
-| **Browser DOM** | `_observe_browser()` (Playwright) | URL, title, interactive elements |
+| **Browser DOM** | `_observe_browser()` (CDP DOM grounding via `x-www-browser`) | URL, title, interactive elements |
 
 **"Never fabricate a pixel, never fabricate content."** If no live desktop
 exists, `screenshot()` returns `desktop_state="NO_DISPLAY"` with an empty
@@ -251,7 +216,7 @@ bitmap — it does not synthesize a fake screen.
 ### A. GUI click at (350, 200)
 
 ```
-BeingLifeLoop.tick() → propose("open browser")
+BeingLifeLoop.tick() → propose("open x-www-browser")
   └─ ComputerUseAgent.run_mission()
        ├─ observe() → screenshot + AT-SPI text + status + files + git + DOM
        ├─ choose_action() → LLM → (GUI_CLICK, "(350,200)", {x:350,y:200})
@@ -263,29 +228,24 @@ BeingLifeLoop.tick() → propose("open browser")
                       └─ Daytona SDK → remote X11 desktop, real mouse event
 ```
 
-### B. Run `nmap -sV target.com` (intrusive)
+### B. Run diagnostic command on `app.target.test`
 
 ```
-execute_action(TERMINAL_EXEC, "target.com", {command:"nmap -sV target.com"})
+execute_action(TERMINAL_EXEC, "app.target.test", {command:"curl -I https://app.target.test"})
   └─ SealedActionPolicy.evaluate("TERMINAL_EXEC", ...)
        ├─ rate OK
        ├─ type allowed
-       └─ _check_command("nmap -sV target.com")
-            └─ scope_checker.classify_command_risk() → L1_NEEDS_APPROVAL
-                 └─ require_approval_for_intrusive=True → DENY (needs approval)
-  └─ (if approved) → UnifiedComputerProvider.terminal()
-       └─ compute.execute(workspace_id, "nmap -sV target.com", timeout=60)
-            └─ DaytonaProvider → sandbox.process.exec()
-                 └─ cloud sandbox, real nmap run
-       └─ audit_log: EXECUTE_TERMINAL, SUCCESS/EXIT_N
+       └─ _check_command("curl -I https://app.target.test")
+  └─ UnifiedComputerProvider.terminal()
+       └─ compute.execute(workspace_id, "curl -I https://app.target.test", timeout=60)
 ```
 
-### C. Browse to `http://internal.local/` (SSRF attempt)
+### C. Browse to `http://internal.target.test/` (SSRF attempt blocked)
 
 ```
-execute_action(BROWSER_NAVIGATE, "internal.local", {url:"http://internal.local/"})
+execute_action(BROWSER_NAVIGATE, "internal.target.test", {url:"http://internal.target.test/"})
   └─ SealedActionPolicy.evaluate("BROWSER_NAVIGATE", ...)
-       └─ _check_egress("http://internal.local/", "browser")
+       └─ _check_egress("http://internal.target.test/", "browser")
             └─ egress.is_target_allowed()
                  ├─ DNS resolve → 127.0.0.1
                  ├─ 127.0.0.0/8 in frozen BLOCKED_NETWORKS → True
@@ -313,26 +273,11 @@ BeingLifeLoop.tick() → observation gap: no parser for X format
 
 - **Scope**: `safety/scope.py` — `ScopeChecker.is_target_in_scope` uses
   `fullmatch` (not `endswith`); `_domain_to_regex` escapes then restores globs.
-  Recon subdomain enumeration uses `_is_subdomain_of` (dot-boundary check) —
-  `evil-example.com` is NOT accepted as a subdomain of `example.com`.
-- **Tenancy**: engagements are tenant-scoped; cross-tenant runs are refused.
+  Subdomain enumeration uses `_is_subdomain_of` (dot-boundary check) —
+  `evil-target.test` is NOT accepted as a subdomain of `target.test`.
+- **Tenancy**: sessions and engagements are tenant-scoped; cross-tenant runs are refused.
 - **Audit**: every `UnifiedComputerProvider` op records a `ComputerAuditEvent`
   (actor, action, resource, result).
 - **Evidence custody**: `evidence/custody.py` — provenance chain for every
   finding; `evidence/independent_verifier.py` — adversarial reviewer that
-  challenges findings to prevent self-confirmation bias.
-
----
-
-## 8. Preferred Formal Name
-
-> **Autonomous Self-Improving Penetration Testing Agent (ASIPTA)** — an AI
-> security agent that performs autonomous computer interaction, epistemic
-> hypothesis-driven security testing, experiment-driven falsification, and
-> verified self-improvement (tool + method authoring) — all inside a
-> fail-closed, tamper-evident safety envelope it cannot widen.
-
-The "self-improving" qualifier is **honest**: improvements are registered only
-after empirical in-sandbox reproduction, and every self-directed action passes
-the same sealed safety gate as operator-issued actions. The agent improves,
-but it cannot escape.
+  challenges claims to prevent self-confirmation bias.

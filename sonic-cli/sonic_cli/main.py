@@ -87,10 +87,80 @@ def version():
     )
 
 
+@app.command(name="missions")
+def list_missions(
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
+    token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
+):
+    """List active and past autonomous missions from the backend (`/missions`)."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        with httpx.Client(base_url=server, timeout=15) as client:
+            res = client.get("/missions", headers=headers)
+            if res.status_code == 200:
+                console.print_json(data=res.json())
+            else:
+                console.print(f"[yellow]Server responded with status {res.status_code}: {res.text}[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Failed to query /missions: {e}[/red]")
+
+
+@app.command(name="prompt")
+def run_prompt(
+    prompt: str = typer.Argument(..., help="Operator goal or workstation instruction"),
+    session_id: str = typer.Option("default", "--session", help="Workstation session ID"),
+    mode: str = typer.Option("normal", "--mode", help="Execution mode (normal | autonomous | pair-program)"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
+    token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
+):
+    """Send an instruction to the AI-Human workstation (`/workstation/prompt`)."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        with httpx.Client(base_url=server, timeout=30) as client:
+            res = client.post(
+                "/workstation/prompt",
+                headers=headers,
+                json={"prompt": prompt, "session_id": session_id, "mode": mode},
+            )
+            if res.status_code == 200:
+                console.print_json(data=res.json())
+            else:
+                console.print(f"[yellow]Server responded with status {res.status_code}: {res.text}[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Failed to dispatch prompt to /workstation/prompt: {e}[/red]")
+
+
+@app.command(name="hypotheses")
+def hypotheses(
+    mission_id: str = typer.Argument("default", help="Mission or Engagement ID"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
+    token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
+):
+    """Inspect real competing hypotheses from the backend (never fabricated)."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        with httpx.Client(base_url=server, timeout=15) as client:
+            res = client.get(f"/missions/{mission_id}", headers=headers)
+            if res.status_code != 200:
+                res = client.get(f"/engagements/{mission_id}/hypotheses", headers=headers)
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("hypotheses", [])
+                if not items:
+                    console.print("[dim]No active hypotheses recorded for this mission.[/dim]")
+                else:
+                    console.print_json(data=items)
+            else:
+                console.print(f"[yellow]Server responded with status {res.status_code}: {res.text}[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Failed to fetch hypotheses: {e}[/red]")
+
+
 @app.command()
 def kill(
     all_agents: bool = typer.Option(True, "--all", help="Kill ALL running agents"),
-    server: str = typer.Option("http://localhost:8000", "--server", help="Backend server URL"),
+    session_id: str = typer.Option("default", "--session", help="Session ID to interrupt"),
+    server: str = typer.Option("http://localhost:12000", "--server", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """🛑 Emergency stop — immediately halt all agents and operations."""
@@ -100,9 +170,12 @@ def kill(
         headers["Authorization"] = f"Bearer {token}"
     try:
         with httpx.Client(base_url=server, timeout=10) as client:
-            res = client.post("/api/v1/workstation/stop", headers=headers)
+            res = client.post(
+                f"/workstation/session/interrupt?session_id={session_id}",
+                headers=headers,
+            )
             if res.status_code != 200:
-                res = client.post("/api/v1/engagements/kill", headers=headers)
+                res = client.post("/api/v1/workstation/session/interrupt", headers=headers)
             if res.status_code == 200:
                 console.print("[bold green]✓ Emergency Stop confirmed. All active agents halted safely.[/bold green]")
             else:

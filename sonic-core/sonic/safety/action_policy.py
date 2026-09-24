@@ -244,7 +244,7 @@ class ActionPolicy:
                 False, f"{action_name} escapes workspace: {path} -> {resolved}")
         return PolicyVerdict(True, "path confined")
 
-    _GIT_INJECTION_RE = re.compile(r"[\x00]|(?:\$\()")
+    _GIT_INJECTION_RE = re.compile(r"[\x00;&|`$<>\n\r]")
 
     def _check_git_commit(self, payload: dict[str, Any], target: str) -> PolicyVerdict:
         path = payload.get("path") or payload.get("file_path") or (target if target and target != "git" else None)
@@ -259,8 +259,8 @@ class ActionPolicy:
         msg = raw_msg.strip()
         if not msg:
             return PolicyVerdict(False, "GIT_COMMIT message must not be empty")
-        if len(msg) > 4000:
-            return PolicyVerdict(False, "GIT_COMMIT message exceeds maximum length (4000 characters)")
+        if len(msg) > 500:
+            return PolicyVerdict(False, "GIT_COMMIT message exceeds maximum length (500 characters)")
         if self._GIT_INJECTION_RE.search(msg):
             return PolicyVerdict(False, f"GIT_COMMIT message contains dangerous shell injection characters: {repr(msg)}")
 

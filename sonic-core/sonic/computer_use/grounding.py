@@ -25,6 +25,18 @@ from sonic.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Compatibility dictionary kept empty per Mandate 4 (no static percentage landmarks)
+_COMMON_UI_LANDMARKS: dict[str, tuple[float, float]] = {}
+
+
+def _parse_grounding_coords(
+    text: str,
+    width: int = 1280,
+    height: int = 800,
+) -> tuple[int, int] | None:
+    """Parse grounding model coordinate text, scaling [0, 1000] tagged boxes to screen dimensions."""
+    return extract_bbox_midpoint(text, width=width, height=height)
+
 
 def extract_bbox_midpoint(
     bbox_response: Any,
@@ -111,7 +123,7 @@ def _extract_bbox_midpoint_impl(
                 else:
                     mid_x = int((x1 + x2) / 2.0)
                     mid_y = int((y1 + y2) / 2.0)
-                mid_pt = (min(max(0, mid_x), width), min(max(0, mid_y), height))
+                mid_pt = (min(max(0, mid_x), max(0, width - 1)), min(max(0, mid_y), max(0, height - 1)))
                 return mid_pt
             elif len(bbox_response) >= 2:
                 x, y = float(bbox_response[0]), float(bbox_response[1])
@@ -123,7 +135,7 @@ def _extract_bbox_midpoint_impl(
                     py = int((y / 1000.0) * height)
                 else:
                     px, py = int(x), int(y)
-                pt = (min(max(0, px), width), min(max(0, py), height))
+                pt = (min(max(0, px), max(0, width - 1)), min(max(0, py), max(0, height - 1)))
                 return pt
         except (ValueError, TypeError):
             pass
@@ -131,7 +143,8 @@ def _extract_bbox_midpoint_impl(
     if not isinstance(bbox_response, str):
         bbox_response = str(bbox_response)
 
-    match = re.search(r"<\|box_start\|>(.*?)<\|box_end\|>", bbox_response, re.DOTALL)
+    tagged_box = ("<|box_start|>" in bbox_response) or ("<box>" in bbox_response)
+    match = re.search(r"(?:<\|box_start\|>|<box>)(.*?)(?:<\|box_end\|>|</box>)", bbox_response, re.DOTALL)
     inner_text = match.group(1) if match else bbox_response
 
     numbers = [float(num) for num in re.findall(r"\d+\.?\d*", inner_text)]
@@ -140,35 +153,55 @@ def _extract_bbox_midpoint_impl(
 
     if len(numbers) >= 4:
         x1, y1, x2, y2 = numbers[0], numbers[1], numbers[2], numbers[3]
+        raw_x = (x1 + x2) / 2.0
+        raw_y = (y1 + y2) / 2.0
         if max(x1, y1, x2, y2) <= 1.0:
-            mid_x = int(((x1 + x2) / 2.0) * width)
-            mid_y = int(((y1 + y2) / 2.0) * height)
-        elif is_normalized_1000 is True or (
-            is_normalized_1000 is None and max(x1, y1, x2, y2) <= 1000 and (x2 > width or y2 > height)
+            mid_x = int(raw_x * width)
+            mid_y = int(raw_y * height)
+        elif (
+            is_normalized_1000 is True
+            or (
+                tagged_box
+                and 0.0 <= raw_x <= 1000.0
+                and 0.0 <= raw_y <= 1000.0
+                and (raw_x > 1.0 or raw_y > 1.0)
+            )
+            or (
+                is_normalized_1000 is None and max(x1, y1, x2, y2) <= 1000 and (x2 > width or y2 > height)
+            )
         ):
             # Explicitly normalized [0, 1000] scale
-            mid_x = int(((x1 + x2) / 2.0 / 1000.0) * width)
-            mid_y = int(((y1 + y2) / 2.0 / 1000.0) * height)
+            mid_x = int((raw_x / 1000.0) * width)
+            mid_y = int((raw_y / 1000.0) * height)
         else:
-            mid_x = int((x1 + x2) / 2.0)
-            mid_y = int((y1 + y2) / 2.0)
-        mid_pt = (min(max(0, mid_x), width), min(max(0, mid_y), height))
+            mid_x = int(raw_x)
+            mid_y = int(raw_y)
+        mid_pt = (max(0, min(width - 1, mid_x)), max(0, min(height - 1, mid_y)))
         return mid_pt
 
     elif len(numbers) >= 2:
-        x, y = numbers[0], numbers[1]
-        if max(x, y) <= 1.0:
-            px = int(x * width)
-            py = int(y * height)
-        elif is_normalized_1000 is True or (
-            is_normalized_1000 is None and max(x, y) <= 1000 and (x > width or y > height)
+        raw_x, raw_y = numbers[0], numbers[1]
+        if max(raw_x, raw_y) <= 1.0:
+            px = int(raw_x * width)
+            py = int(raw_y * height)
+        elif (
+            is_normalized_1000 is True
+            or (
+                tagged_box
+                and 0.0 <= raw_x <= 1000.0
+                and 0.0 <= raw_y <= 1000.0
+                and (raw_x > 1.0 or raw_y > 1.0)
+            )
+            or (
+                is_normalized_1000 is None and max(raw_x, raw_y) <= 1000 and (raw_x > width or raw_y > height)
+            )
         ):
-            px = int((x / 1000.0) * width)
-            py = int((y / 1000.0) * height)
+            px = int((raw_x / 1000.0) * width)
+            py = int((raw_y / 1000.0) * height)
         else:
-            px = int(x)
-            py = int(y)
-        pt = (min(max(0, px), width), min(max(0, py), height))
+            px = int(raw_x)
+            py = int(raw_y)
+        pt = (max(0, min(width - 1, px)), max(0, min(height - 1, py)))
         return pt
 
     return None

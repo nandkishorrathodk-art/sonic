@@ -8,6 +8,7 @@ objective is complete.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -42,13 +43,33 @@ class SubMission(BaseModel):
 
     @model_validator(mode="after")
     def _infer_plane_from_goal(self) -> SubMission:
-        # Preserve explicit plane ("gui" or "headless"), otherwise default to "gui" (dual-plane).
+        # Preserve explicit plane ("gui" or "headless") when provided by caller.
         if "plane" in self.model_fields_set and self.plane:
             plane_lower = str(self.plane).lower().strip()
             if plane_lower in ("gui", "headless"):
                 self.plane = plane_lower
                 return self
-        self.plane = "gui"
+
+        goal_lower = (self.goal or "").lower()
+        has_gui_intent = bool(
+            re.search(
+                r"\b(?:gui|visual|visually|screen|screenshot|desktop|window|browser|click|button|scroll|drag|ui|page)\b",
+                goal_lower,
+            )
+        )
+        has_headless_intent = bool(
+            re.search(
+                r"\b(?:directory|mkdir|author|source\s+code|code|file|script|curl|netstat|ss|port|ports|endpoints|background|git|pytest|terminal|cli|command|audit|server\.py)\b",
+                goal_lower,
+            )
+            or "/home/" in goal_lower
+        )
+        if has_gui_intent:
+            self.plane = "gui"
+        elif has_headless_intent:
+            self.plane = "headless"
+        else:
+            self.plane = "gui"
         return self
 
 

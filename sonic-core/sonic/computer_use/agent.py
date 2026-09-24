@@ -183,6 +183,7 @@ class ComputerUseAgent:
         wire_telemetry: WireTelemetryEngine | None = None,
         skill_ledger: Any | None = None,
         being_mind: Any | None = None,
+        craft: Any | None = None,
         evolution_engine: Any | None = None,
         observe_desktop: bool = True,
         gui_only: bool = False,
@@ -190,6 +191,7 @@ class ComputerUseAgent:
         **kwargs: Any,
     ):
         self.computer = computer_provider
+        self.craft = craft
         # Keep the application desktop optional. Sandbox/operator missions
         # should not capture pixels merely because a workstation exists.
         self.observe_desktop = observe_desktop
@@ -338,6 +340,14 @@ class ComputerUseAgent:
         self._last_action_output: dict[str, Any] = {}
         self._last_gui_action_result: dict[str, Any] = {}
         self.checklist: SubGoalChecklist | None = None
+
+    @property
+    def action_history(self) -> list[ComputerDecisionTrace]:
+        return self.traces
+
+    @action_history.setter
+    def action_history(self, value: list[ComputerDecisionTrace]) -> None:
+        self.traces = list(value or [])
 
     @staticmethod
     def _burst_gui_actions(payload: dict[str, Any]) -> list[GUIAction] | None:
@@ -1077,7 +1087,11 @@ class ComputerUseAgent:
 
         bs = observation.browser_state or {}
         browser_lines = ""
-        active_url = bs.get("url") if (self.browser and bs.get("url") and bs.get("url") != "about:blank") else getattr(self, "_last_navigated_url", "")
+        active_url = (
+            bs.get("url")
+            if (bs.get("url") and bs.get("url") != "about:blank")
+            else getattr(self, "_last_navigated_url", "")
+        )
         if self.browser is not None:
             elements = bs.get("interactive_elements", [])
             if has_live_pixels:
@@ -1336,13 +1350,7 @@ class ComputerUseAgent:
         screen_w = getattr(self, "_screen_width", 1920)
         screen_h = getattr(self, "_screen_height", 1080)
         max_act = getattr(self, "max_actions", 50)
-        # A screenshot is expensive in the provider's token budget. Vision
-        # requests must use the compact prompt even when the configured model
-        # name does not contain a small-model tag (for example, a 27B model
-        # with a 7K input-token limit).
-        compact = getattr(self, "_compact_mode", False) or bool(
-            getattr(self, "_last_screenshot_b64", "")
-        )
+        compact = bool(getattr(self, "_compact_mode", False))
 
         browser_content = browser_lines.strip() if browser_lines else "None"
         tool_content = tool_lines.strip() if tool_lines else "None"
@@ -1423,7 +1431,8 @@ class ComputerUseAgent:
                 }
                 accounts = being.list_accounts() if hasattr(being, "list_accounts") else []
                 accounts_str = ", ".join(f"{a.get('service')}:{a.get('username')}" for a in accounts) or "none yet"
-                craft_notes = BeingCraft(being_id=being.being_id).list_notes()[-10:]
+                craft_obj = getattr(self, "craft", None) or BeingCraft(being_id=being.being_id)
+                craft_notes = craft_obj.list_notes()[-10:] if hasattr(craft_obj, "list_notes") else []
                 if craft_notes:
                     craft_summary = "\n".join(
                         f"  - [{getattr(n, 'kind', 'note')}] {getattr(n, 'title', '')}: {str(getattr(n, 'body', ''))[:160]}"
@@ -1575,6 +1584,21 @@ class ComputerUseAgent:
                 + obs_summary
             )
         obs_summary = target_header + obs_summary
+        if active_url and active_url != "about:blank":
+            norm_active = active_url.rstrip("/").lower()
+            goal_urls = [u.rstrip("/").lower() for u in (targets.get("urls") or [])]
+            if (
+                norm_active in goal_urls
+                or (primary_dest and norm_active == primary_dest.rstrip("/").lower())
+                or norm_active in goal.lower()
+            ):
+                obs_summary = (
+                    f"=== ANTI-LOOP NAVIGATION RULE ===\n"
+                    f"The target URL '{active_url}' is ALREADY loaded in the browser. "
+                    f"Do NOT call BROWSER_NAVIGATE to '{active_url}' again. Interact with the loaded page (e.g. BROWSER_CLICK, BROWSER_TYPE, GUI_CLICK, GUI_TYPE) or call GOAL_COMPLETE if finished.\n"
+                    f"=================================\n\n"
+                    + obs_summary
+                )
 
         # Select system prompt based on model capability
         if compact:
@@ -1648,9 +1672,22 @@ class ComputerUseAgent:
         system_prompt, obs_summary = self._build_reasoning_context(
             goal, observation, step_index, primary_file, test_file
         )
-        # Build the user message — multimodal (image+text) when screenshot available.
+        # Only attach image content when gui_only is True, when the immediately
+        # preceding action was GUI_SCREENSHOT / BROWSER_SCREENSHOT, or when a
+        # unit test explicitly injected _last_screenshot_b64 without observe().
+        prev_action_list = getattr(self, "action_history", None) or getattr(self, "traces", None) or []
+        prev_act_type = getattr(prev_action_list[-1], "action_type", None) if prev_action_list else None
+        should_attach_image = (
+            getattr(self, "gui_only", False)
+            or prev_act_type in (ComputerActionType.GUI_SCREENSHOT, ComputerActionType.BROWSER_SCREENSHOT)
+            or (
+                bool(self._last_screenshot_b64)
+                and not getattr(observation, "screenshot_base64", "")
+                and getattr(observation, "perception_version", 0) == 0
+            )
+        )
         images: list[ImageContent] = []
-        if self._last_screenshot_b64:
+        if self._last_screenshot_b64 and should_attach_image:
             raw_b64 = self._last_screenshot_b64
             if "," in raw_b64:
                 raw_b64 = raw_b64.split(",", 1)[1]
@@ -1952,7 +1989,7 @@ class ComputerUseAgent:
             except Exception:
                 pass
 
-        pattern = r'(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?:\s*(.*?)(?=(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\:|$)'
+        pattern = r'(?:^|\n)\s*(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?:\s*(.*?)(?=(?:^|\n)\s*(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\:|$)'
         matches = re.findall(pattern, parse_target_text, re.DOTALL | re.IGNORECASE)
         # Use setdefault to preserve the FIRST action in case of multiple blocks
         raw_fields: dict[str, str] = {}
@@ -2046,6 +2083,10 @@ class ComputerUseAgent:
             "BASH": ComputerActionType.TERMINAL_EXEC,
             "SHELL": ComputerActionType.TERMINAL_EXEC,
             "CMD": ComputerActionType.TERMINAL_EXEC,
+            "DEFINE_SUBAGENT": ComputerActionType.DEFINE_SUBAGENT,
+            "INVOKE_SUBAGENT": ComputerActionType.INVOKE_SUBAGENT,
+            "SEND_MESSAGE": ComputerActionType.SEND_MESSAGE,
+            "MANAGE_SUBAGENTS": ComputerActionType.MANAGE_SUBAGENTS,
             # GOAL_COMPLETE is handled by the caller as a no-op terminator.
             "GOAL_COMPLETE": ComputerActionType.TERMINAL_EXEC,
         }
@@ -2135,26 +2176,21 @@ class ComputerUseAgent:
             if not raw:
                 return {}
             raw = raw.strip()
+            if not raw.startswith("{"):
+                return {}
             try:
                 p = json.loads(raw)
                 if isinstance(p, dict):
                     return p
             except Exception:
                 pass
-            m = re.search(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', raw)
-            if m:
-                try:
-                    p = json.loads(m.group(0))
-                    if isinstance(p, dict):
-                        return p
-                except Exception:
-                    try:
-                        import ast
-                        p = ast.literal_eval(m.group(0))
-                        if isinstance(p, dict):
-                            return p
-                    except Exception:
-                        pass
+            try:
+                import ast
+                p = ast.literal_eval(raw)
+                if isinstance(p, dict):
+                    return p
+            except Exception:
+                pass
             m_cmd = re.search(r'["\']command["\']\s*:\s*["\']([^"\']+)["\']', raw)
             if m_cmd:
                 return {"command": m_cmd.group(1).strip()}
@@ -2268,7 +2304,15 @@ class ComputerUseAgent:
                 payload["command"] = f"curl {curl_arg_str}"
 
         if action_type == ComputerActionType.TERMINAL_EXEC:
-            raw_cmd = payload.get("command") or fields.get("COMMAND")
+            raw_cmd = (
+                payload.get("command")
+                or payload.get("cmd")
+                or payload.get("bash")
+                or payload.get("shell")
+                or payload.get("script")
+                or payload.get("code")
+                or fields.get("COMMAND")
+            )
             if not raw_cmd and fields.get("ACTION"):
                 act_field = fields["ACTION"].strip()
                 for prefix in ("TERMINAL_EXEC", "TERMINAL", "RUN", "EXEC", "COMMAND", "CMD", "BASH", "SHELL"):
@@ -2377,6 +2421,31 @@ class ComputerUseAgent:
     _COORDINATE_ACTIONS: frozenset[str] = frozenset({
         "GUI_CLICK", "GUI_DOUBLE_CLICK", "GUI_RIGHT_CLICK", "GUI_MOVE", "GUI_SCROLL", "GUI_DRAG",
     })
+    _COMPUTER_PLANE_ACTIONS: frozenset[ComputerActionType] = frozenset({
+        ComputerActionType.GUI_CLICK,
+        ComputerActionType.GUI_DOUBLE_CLICK,
+        ComputerActionType.GUI_RIGHT_CLICK,
+        ComputerActionType.GUI_TYPE,
+        ComputerActionType.GUI_KEYPRESS,
+        ComputerActionType.GUI_HOTKEY,
+        ComputerActionType.GUI_MOVE,
+        ComputerActionType.GUI_SCROLL,
+        ComputerActionType.GUI_SCREENSHOT,
+        ComputerActionType.GUI_DRAG,
+        ComputerActionType.GUI_WAIT,
+        ComputerActionType.APP_LAUNCH,
+        ComputerActionType.APP_CLOSE,
+        ComputerActionType.APP_FOCUS,
+        ComputerActionType.BROWSER_NAVIGATE,
+        ComputerActionType.BROWSER_CLICK,
+        ComputerActionType.BROWSER_TYPE,
+        ComputerActionType.BROWSER_SELECT,
+        ComputerActionType.BROWSER_KEYPRESS,
+        ComputerActionType.BROWSER_SCROLL,
+        ComputerActionType.BROWSER_SCREENSHOT,
+        ComputerActionType.BROWSER_WAIT,
+        ComputerActionType.BROWSER_DOWNLOAD,
+    })
     _GUI_ONLY_ACTIONS: frozenset[ComputerActionType] = frozenset({
         ComputerActionType.GUI_CLICK,
         ComputerActionType.GUI_DOUBLE_CLICK,
@@ -2410,7 +2479,7 @@ class ComputerUseAgent:
     ) -> str | None:
         """Return an error string if a coordinate action is off-screen, else None.
 
-        Validates (x, y) — and (x2, y2) for drags — against the last observed
+        Validates (x, y) — and (x2, y2) / (end_x, end_y) for drags — against the last observed
         screen dimensions. Coordinates must be non-negative integers strictly
         inside the screen (0 <= x < width, 0 <= y < height). Non-coordinate
         actions are always allowed (return None).
@@ -2435,14 +2504,26 @@ class ComputerUseAgent:
                 )
             return None
 
+        if action_type == ComputerActionType.GUI_DRAG:
+            start_x = payload.get("x")
+            start_y = payload.get("y")
+            end_x = payload.get("end_x") if payload.get("end_x") is not None else payload.get("x2")
+            end_y = payload.get("end_y") if payload.get("end_y") is not None else payload.get("y2")
+            if start_x is None or start_y is None:
+                return "drag start coordinates (x, y) are required"
+            if end_x is None or end_y is None:
+                return "drag destination coordinates (end_x/x2, end_y/y2) are required"
+            err = _check(start_x, start_y, "drag start")
+            if err is not None:
+                return err
+            err = _check(end_x, end_y, "drag target")
+            if err is not None:
+                return err
+            return None
+
         err = _check(payload.get("x", 0), payload.get("y", 0), "point")
         if err is not None:
             return err
-        if action_type == ComputerActionType.GUI_DRAG:
-            err = _check(payload.get("x2", payload.get("x", 0)),
-                         payload.get("y2", payload.get("y", 0)), "drag target")
-            if err is not None:
-                return err
         return None
 
     def _update_screen_dims(self, screen: Any) -> None:
@@ -2683,9 +2764,127 @@ class ComputerUseAgent:
             self.history.append({"action": action_type.value, "result": actual_obs_str})
             return trace
 
+        if (
+            str(getattr(self, "execution_plane", "dual") or "dual").lower().strip() == "headless"
+            and action_type in self._COMPUTER_PLANE_ACTIONS
+            and not (
+                action_type == ComputerActionType.BROWSER_NAVIGATE
+                and isinstance(payload, dict)
+                and (payload.get("headless_only") is True or payload.get("interactive") is False)
+            )
+        ):
+            actual_obs_str = (
+                f"Blocked by headless execution plane contract: {action_type.value} is a graphical desktop action. "
+                "Use TERMINAL_EXEC, FILE_READ, FILE_WRITE, or GIT_* in headless plane."
+            )
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource=target_resource,
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append({"action": action_type.value, "result": actual_obs_str})
+            return trace
+
+        prev_trace = (getattr(self, "action_history", None) or getattr(self, "traces", None) or [None])[-1]
+        prev_status = str(getattr(prev_trace, "status", "")).upper() if prev_trace else ""
+        is_prev_success = prev_status in ("COMPLETED", "SUCCESS", "SUCCEEDED", "ACTIONEXECUTIONSTATUS.COMPLETED")
+
+        if action_type == ComputerActionType.FILE_WRITE and prev_trace is not None:
+            if getattr(prev_trace, "action_type", None) == ComputerActionType.FILE_WRITE and is_prev_success:
+                curr_path = str(payload.get("path") or target_resource or "").strip()
+                prev_payload = getattr(prev_trace, "payload", {})
+                if isinstance(prev_payload, str):
+                    try:
+                        prev_payload = json.loads(prev_payload)
+                    except Exception:
+                        prev_payload = {}
+                prev_path = str(
+                    (prev_payload.get("path") if isinstance(prev_payload, dict) else "")
+                    or getattr(prev_trace, "target_resource", "")
+                    or ""
+                ).strip()
+                if curr_path and curr_path == prev_path:
+                    actual_obs_str = "Duplicate consecutive FILE_WRITE to the same file blocked. Run TERMINAL_EXEC to verify the file or call GOAL_COMPLETE if finished."
+                    trace = ComputerDecisionTrace(
+                        step_index=self.action_counter,
+                        action_type=action_type,
+                        target_resource=target_resource,
+                        payload=str(payload),
+                        predicted_outcome=predicted_outcome,
+                        actual_observation=actual_obs_str,
+                        expected_observation=predicted_outcome,
+                        info_gain=0.0,
+                        recovery_attempted=False,
+                        status=ActionExecutionStatus.BLOCKED,
+                        exit_code=126,
+                        thought=getattr(self, "_last_thought", ""),
+                        duration_seconds=round(time.perf_counter() - t_start, 3),
+                        thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+                    )
+                    self.traces.append(trace)
+                    self.history.append({"action": action_type.value, "result": actual_obs_str})
+                    return trace
+
+        if action_type == ComputerActionType.APP_LAUNCH and prev_trace is not None:
+            if getattr(prev_trace, "action_type", None) == ComputerActionType.APP_LAUNCH and is_prev_success:
+                curr_app = str(payload.get("app_name") or target_resource or "").strip().lower()
+                prev_payload = getattr(prev_trace, "payload", {})
+                if isinstance(prev_payload, str):
+                    try:
+                        prev_payload = json.loads(prev_payload)
+                    except Exception:
+                        prev_payload = {}
+                prev_app = str(
+                    (prev_payload.get("app_name") if isinstance(prev_payload, dict) else "")
+                    or getattr(prev_trace, "target_resource", "")
+                    or ""
+                ).strip().lower()
+                if curr_app and curr_app == prev_app:
+                    actual_obs_str = f"Duplicate consecutive APP_LAUNCH of '{curr_app}' blocked. The application is already launched; use APP_FOCUS or GUI_* actions to interact with it."
+                    trace = ComputerDecisionTrace(
+                        step_index=self.action_counter,
+                        action_type=action_type,
+                        target_resource=target_resource,
+                        payload=str(payload),
+                        predicted_outcome=predicted_outcome,
+                        actual_observation=actual_obs_str,
+                        expected_observation=predicted_outcome,
+                        info_gain=0.0,
+                        recovery_attempted=False,
+                        status=ActionExecutionStatus.BLOCKED,
+                        exit_code=126,
+                        thought=getattr(self, "_last_thought", ""),
+                        duration_seconds=round(time.perf_counter() - t_start, 3),
+                        thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+                    )
+                    self.traces.append(trace)
+                    self.history.append({"action": action_type.value, "result": actual_obs_str})
+                    return trace
+
         # Command sanitization and empty check for TERMINAL_EXEC
         if action_type == ComputerActionType.TERMINAL_EXEC:
-            raw_cmd = payload.get("command") if (isinstance(payload, dict) and "command" in payload) else target_resource
+            raw_cmd = (
+                payload.get("command")
+                or payload.get("cmd")
+                or payload.get("bash")
+                or payload.get("shell")
+                or payload.get("script")
+                or payload.get("code")
+            ) if isinstance(payload, dict) else target_resource
+            if not raw_cmd:
+                raw_cmd = target_resource
             if raw_cmd is None:
                 raw_cmd = ""
             if isinstance(raw_cmd, dict):
@@ -2849,7 +3048,7 @@ class ComputerUseAgent:
                 f"Strategy exhausted for tool '{tool_name}' on provider '{provider_name}'. "
                 f"Failure budget exceeded; retry blocked."
             )
-            status = ActionExecutionStatus.FAILED
+            status = ActionExecutionStatus.BLOCKED
             logger.warning(
                 "strategy_exhausted_execution_blocked",
                 tool=tool_name,
@@ -2866,6 +3065,7 @@ class ComputerUseAgent:
                 info_gain=0.0,
                 recovery_attempted=False,
                 status=status,
+                exit_code=126,
                 duration_seconds=round(time.perf_counter() - t_start, 3),
                 thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
             )
@@ -3012,7 +3212,7 @@ class ComputerUseAgent:
                 else:
                     target = target_resource
                     actual_obs_str = f"Target UI element '{target}' could not be resolved from visual grounding. Re-observing screen."
-                    status = ActionExecutionStatus.FAILED
+                    status = ActionExecutionStatus.BLOCKED
                     logger.warning(
                         "action_failed_unresolved_visual_grounding",
                         action=action_type.value,
@@ -3029,6 +3229,7 @@ class ComputerUseAgent:
                         info_gain=0.0,
                         recovery_attempted=False,
                         status=status,
+                        exit_code=126,
                         thought=getattr(self, "_last_thought", ""),
                         duration_seconds=round(time.perf_counter() - t_start, 3),
                         thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
@@ -3075,6 +3276,7 @@ class ComputerUseAgent:
                 info_gain=0.0,
                 recovery_attempted=False,
                 status=status,
+                exit_code=126,
                 thought=getattr(self, "_last_thought", ""),
                 duration_seconds=round(time.perf_counter() - t_start, 3),
                 thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
@@ -3325,22 +3527,32 @@ class ComputerUseAgent:
 
             elif action_type == ComputerActionType.GUI_DRAG:
                 # Press-move-release (a human drag). Source (x,y) may come from
-                # TARGET "x,y" (parsed above) or payload; destination (x2,y2)
+                # TARGET "x,y" (parsed above) or payload; destination (x2,y2) / (end_x,end_y)
                 # comes from payload. Lets the agent drag-drop a file or slide.
-                x = int(payload.get("x", 0))
-                y = int(payload.get("y", 0))
-                x2 = int(payload.get("x2", 0))
-                y2 = int(payload.get("y2", 0))
-                obs_drag = await self.computer.gui_action(
-                    workspace_id,
-                    GUIAction(action=GUIActionType.DRAG, x=x, y=y, x2=x2, y2=y2),
-                )
-                drag_b64 = getattr(obs_drag, "screenshot_base64", "") if obs_drag else ""
-                if drag_b64:
-                    self._last_screenshot_b64 = drag_b64
-                    self._prev_screenshot_hash = hashlib.md5(drag_b64.encode()).hexdigest()
-                    self._update_screen_dims(obs_drag)
-                actual_obs_str = f"Dragged from ({x},{y}) to ({x2},{y2})"
+                raw_x = payload.get("x")
+                raw_y = payload.get("y")
+                raw_end_x = payload.get("end_x") if payload.get("end_x") is not None else payload.get("x2")
+                raw_end_y = payload.get("end_y") if payload.get("end_y") is not None else payload.get("y2")
+                coord_err = self._validate_coordinates(action_type, payload)
+                if coord_err is not None or raw_x is None or raw_y is None or raw_end_x is None or raw_end_y is None:
+                    actual_obs_str = f"GUI_DRAG failed: valid start (x, y) and end (end_x, end_y) coordinates required ({coord_err or 'missing coordinates'})"
+                    status = ActionExecutionStatus.BLOCKED
+                    action_exit_code = 126
+                else:
+                    x = int(raw_x)
+                    y = int(raw_y)
+                    x2 = int(raw_end_x)
+                    y2 = int(raw_end_y)
+                    obs_drag = await self.computer.gui_action(
+                        workspace_id,
+                        GUIAction(action=GUIActionType.DRAG, x=x, y=y, x2=x2, y2=y2),
+                    )
+                    drag_b64 = getattr(obs_drag, "screenshot_base64", "") if obs_drag else ""
+                    if drag_b64:
+                        self._last_screenshot_b64 = drag_b64
+                        self._prev_screenshot_hash = hashlib.md5(drag_b64.encode()).hexdigest()
+                        self._update_screen_dims(obs_drag)
+                    actual_obs_str = f"Dragged from ({x},{y}) to ({x2},{y2})"
 
             elif action_type == ComputerActionType.GUI_SCROLL:
                 def_x = getattr(self, "_screen_width", 1280) // 2

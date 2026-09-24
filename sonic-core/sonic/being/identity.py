@@ -152,6 +152,7 @@ class BeingMind:
     # Running tallies.
     idle_cycles_run: int = 0
     goals_pursued: int = 0
+    goals_completed: int = 0
     last_idle_at: str = ""
 
     def record_idle_cycle(
@@ -182,6 +183,48 @@ class BeingMind:
                 _being_store.save_mind(self)
             except Exception:
                 pass
+        return self
+
+    def record_mission_outcome(
+        self,
+        goal: str,
+        success: bool,
+        summary: str = "",
+        facts: list[str] | None = None,
+    ) -> BeingMind:
+        """Record an operator or autonomous mission outcome on this BeingMind."""
+        self.goals_pursued += 1
+        if success:
+            self.goals_completed += 1
+        candidate_facts: list[str] = []
+        if facts:
+            for item in facts:
+                cleaned = str(item or "").strip()
+                if cleaned:
+                    candidate_facts.append(cleaned)
+        elif summary and str(summary).strip():
+            candidate_facts.append(str(summary).strip()[:240])
+        elif goal and str(goal).strip():
+            prefix = "completed" if success else "attempted"
+            candidate_facts.append(f"{prefix}: {str(goal).strip()[:200]}")
+
+        for fact_str in candidate_facts:
+            if fact_str not in self.learned_facts:
+                self.learned_facts.append(fact_str)
+
+        if success:
+            self.satiety = min(1.0, self.satiety + 0.08)
+            self.focus = min(1.0, self.focus + 0.05)
+            self.curiosity_drive = min(1.0, self.curiosity_drive + 0.04)
+        else:
+            self.focus = min(1.0, self.focus + 0.06)
+            self.curiosity_drive = max(0.1, self.curiosity_drive - 0.03)
+            self.satiety = max(0.0, self.satiety - 0.02)
+
+        try:
+            get_being_store().save_mind(self)
+        except Exception:
+            pass
         return self
 
 
@@ -261,6 +304,7 @@ class BeingStore:
                     learned_facts=data.get("learned_facts", []),
                     idle_cycles_run=data.get("idle_cycles_run", 0),
                     goals_pursued=data.get("goals_pursued", 0),
+                    goals_completed=data.get("goals_completed", 0),
                     last_idle_at=data.get("last_idle_at", ""),
                 )
             for row in self._db.execute(
@@ -353,6 +397,9 @@ class BeingStore:
         self.save_being(b)
 
     # -- BeingMind CRUD ---------------------------------------------------
+    def get_or_create_mind(self, being_id: str) -> BeingMind:
+        return self.get_mind(being_id)
+
     def get_mind(self, being_id: str) -> BeingMind:
         with self._lock:
             mind = self._mind_cache.get(being_id)
@@ -372,6 +419,7 @@ class BeingStore:
                         learned_facts=data.get("learned_facts", []),
                         idle_cycles_run=data.get("idle_cycles_run", 0),
                         goals_pursued=data.get("goals_pursued", 0),
+                        goals_completed=data.get("goals_completed", 0),
                         last_idle_at=data.get("last_idle_at", ""),
                     )
                     self._mind_cache[being_id] = mind
@@ -397,6 +445,7 @@ class BeingStore:
             "learned_facts": mind.learned_facts,
             "idle_cycles_run": mind.idle_cycles_run,
             "goals_pursued": mind.goals_pursued,
+            "goals_completed": mind.goals_completed,
             "last_idle_at": mind.last_idle_at,
         })
         self._db.execute(
@@ -596,6 +645,15 @@ def get_or_create_being(tenant_id: str, name: str = "SONIC") -> Being:
         logger.info("being_reattached", being_id=being.being_id,
                     born_at=being.born_at, tenant_id=tenant_id)
     return being
+
+
+def get_or_create_mind(tenant_id: str = "default") -> BeingMind:
+    """Return the persisted BeingMind for a tenant (or being_id), provisioning if needed."""
+    store = get_being_store()
+    if tenant_id.startswith("being-") and store.get_being(tenant_id) is not None:
+        return store.get_or_create_mind(tenant_id)
+    being = get_or_create_being(tenant_id)
+    return store.get_or_create_mind(being.being_id)
 
 
 # ---------------------------------------------------------------------------

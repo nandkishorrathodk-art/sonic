@@ -94,14 +94,27 @@ class _ScopedSubagentProviderProxy:
     without colliding with peer subagents or the parent Being's workspace.
     """
 
-    def __init__(self, base_provider: Any, isolated_dir: str) -> None:
+    def __init__(
+        self,
+        base_provider: Any,
+        isolated_dir: str = "",
+        *,
+        subagent_id: str | None = None,
+        workspace_mode: str = "branch",
+    ) -> None:
         self._base = base_provider
+        self._inner = base_provider
+        self.subagent_id = subagent_id
+        self.workspace_mode = workspace_mode
+        if not isolated_dir:
+            isolated_dir = f"/home/sonic/workspace/.sonic_subagents/{subagent_id or 'sub'}"
         self._iso_dir = isolated_dir.rstrip("/")
+        self.isolated_dir = self._iso_dir
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._base, name)
+        return getattr(self._inner, name)
 
-    def _resolve_rel_path(self, path: str) -> str:
+    def _rewrite_path(self, path: str) -> str:
         p = (path or "").strip()
         if not p or p == ".":
             return self._iso_dir
@@ -114,21 +127,36 @@ class _ScopedSubagentProviderProxy:
             return f"{self._iso_dir}/{p}"
         return p
 
+    _resolve_rel_path = _rewrite_path
+
     async def terminal(self, workspace_id: str, command: str, *args: Any, **kwargs: Any) -> Any:
         scoped_cmd = f'cd "{self._iso_dir}" && {command}'
-        return await self._base.terminal(workspace_id, scoped_cmd, *args, **kwargs)
+        return await self._inner.terminal(workspace_id, scoped_cmd, *args, **kwargs)
 
     async def execute(self, workspace_id: str, command: str, *args: Any, **kwargs: Any) -> Any:
         scoped_cmd = f'cd "{self._iso_dir}" && {command}'
-        if hasattr(self._base, "execute"):
-            return await self._base.execute(workspace_id, scoped_cmd, *args, **kwargs)
-        return await self._base.terminal(workspace_id, scoped_cmd, *args, **kwargs)
+        if hasattr(self._inner, "execute"):
+            return await self._inner.execute(workspace_id, scoped_cmd, *args, **kwargs)
+        return await self._inner.terminal(workspace_id, scoped_cmd, *args, **kwargs)
 
     async def read_file(self, workspace_id: str, path: str, *args: Any, **kwargs: Any) -> Any:
-        return await self._base.read_file(workspace_id, self._resolve_rel_path(path), *args, **kwargs)
+        return await self._inner.read_file(workspace_id, self._rewrite_path(path), *args, **kwargs)
 
     async def write_file(self, workspace_id: str, path: str, content: str, *args: Any, **kwargs: Any) -> Any:
-        return await self._base.write_file(workspace_id, self._resolve_rel_path(path), content, *args, **kwargs)
+        return await self._inner.write_file(workspace_id, self._rewrite_path(path), content, *args, **kwargs)
+
+    async def list_files(self, workspace_id: str, directory: str = ".", *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.list_files(workspace_id, self._rewrite_path(directory), *args, **kwargs)
+
+    async def git_action(self, workspace_id: str, action: str, **kwargs: Any) -> Any:
+        rewritten_kwargs = dict(kwargs)
+        for key in ("path", "repo_path", "directory", "cwd", "target_dir"):
+            if key in rewritten_kwargs and isinstance(rewritten_kwargs[key], str):
+                rewritten_kwargs[key] = self._rewrite_path(rewritten_kwargs[key])
+        if not any(k in rewritten_kwargs for k in ("path", "repo_path", "directory", "cwd", "target_dir")):
+            _ = self._rewrite_path(".")
+        return await self._inner.git_action(workspace_id, action, **rewritten_kwargs)
+
 
 
 @dataclass
@@ -722,3 +750,7 @@ class SubagentTeamworkManager:
             status = getattr(t, "status", "") if not isinstance(t, dict) else t.get("status", "")
             lines.append(f"[{status}] {act_str} ({tgt}): {str(obs)[:200]}")
         return "\n".join(lines)
+
+
+SubagentTeamCoordinator = SubagentTeamworkManager
+

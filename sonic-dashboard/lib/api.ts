@@ -66,7 +66,24 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
       throw new Error(errorData.detail || `API error ${res.status}: ${res.statusText}`);
     }
 
-    return (await res.json()) as T;
+    const rawText = await res.text();
+    if (!rawText.trim()) return {} as T;
+    try {
+      return JSON.parse(rawText) as T;
+    } catch {
+      const events = rawText
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((l) => {
+          try {
+            return JSON.parse(l);
+          } catch {
+            return { raw: l };
+          }
+        });
+      return { events } as unknown as T;
+    }
   } catch (err: any) {
     clearTimeout(id);
     if (err.name === "AbortError") {
@@ -180,8 +197,29 @@ export const api = {
       body: JSON.stringify({ objective }),
     }),
 
-  getMissionEvents: (sessionId = "default", after = 0) =>
-    apiClient<any>(`/workstation/mission/events?session_id=${encodeURIComponent(sessionId)}&after=${after}`),
+  getMissionEvents: async (sessionId = "default", after = 0) => {
+    const data = await apiClient<any>(
+      `/workstation/mission/events?session_id=${encodeURIComponent(sessionId)}&after=${after}`
+    );
+    if (typeof data === "string") {
+      const events = data
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return { raw: line };
+          }
+        });
+      return { events };
+    }
+    if (Array.isArray(data)) {
+      return { events: data };
+    }
+    return data;
+  },
 
   getMissionEvidence: (sessionId = "default") =>
     apiClient<any>(`/workstation/mission/evidence?session_id=${encodeURIComponent(sessionId)}`),
@@ -227,8 +265,16 @@ export const api = {
     action: string;
     target?: string;
     coordinates?: [number, number];
+    x?: number;
+    y?: number;
+    end_x?: number;
+    end_y?: number;
+    button?: number;
+    direction?: string;
+    amount?: number;
     text?: string;
     key?: string;
+    delay_ms?: number;
     sessionId?: string;
   }) =>
     apiClient<any>("/workstation/desktop/action", {
@@ -237,9 +283,17 @@ export const api = {
         action: actionData.action,
         target: actionData.target,
         coordinates: actionData.coordinates,
+        x: actionData.x,
+        y: actionData.y,
+        end_x: actionData.end_x,
+        end_y: actionData.end_y,
+        button: actionData.button,
+        direction: actionData.direction,
+        amount: actionData.amount,
         text: actionData.text,
         key: actionData.key,
-      session_id: actionData.sessionId || "default",
+        delay_ms: actionData.delay_ms,
+        session_id: actionData.sessionId || "default",
       }),
     }),
 

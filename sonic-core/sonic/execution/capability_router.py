@@ -120,7 +120,7 @@ class CapabilityRouter:
 
         # Navigation: routes to COMPUTER by default unless headless_only is explicitly requested
         if val == "BROWSER_NAVIGATE":
-            if payload.get("headless_only") is True:
+            if payload.get("headless_only") is True or payload.get("interactive") is False:
                 return ExecutionSubstrate.HEADLESS
             return ExecutionSubstrate.COMPUTER
 

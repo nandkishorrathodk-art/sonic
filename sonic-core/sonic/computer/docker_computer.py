@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -540,11 +541,14 @@ class DockerComputerProvider(ComputerProvider):
                     raise RuntimeError(f"GUI action failed with exit code {code}: {err.strip()}")
 
             if atype in (GUIActionType.CLICK, GUIActionType.DOUBLE_CLICK):
+                if action.button is not None and action.button not in (1, 2, 3):
+                    raise ValueError(f"Unsupported mouse button: {action.button}")
+                button = action.button if action.button in (1, 2, 3) else 1
                 repeat = 2 if atype == GUIActionType.DOUBLE_CLICK else 1
                 if action.x is not None and action.y is not None:
-                    await exec_gui(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} click --repeat {repeat} 1")
+                    await exec_gui(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} click --repeat {repeat} {button}")
                 else:
-                    await exec_gui(f"DISPLAY={disp} xdotool click --repeat {repeat} 1")
+                    await exec_gui(f"DISPLAY={disp} xdotool click --repeat {repeat} {button}")
 
             elif atype == GUIActionType.RIGHT_CLICK:
                 if action.x is not None and action.y is not None:
@@ -561,9 +565,12 @@ class DockerComputerProvider(ComputerProvider):
                 dy = action.y2 if action.y2 is not None else sy
                 await exec_gui(f"DISPLAY={disp} xdotool mousemove --sync {sx} {sy} sleep 0.1 mousedown 1 sleep 0.1 mousemove --sync {dx} {dy} sleep 0.1 mouseup 1")
 
-            elif atype == GUIActionType.TYPE and action.text:
+            elif atype == GUIActionType.TYPE:
+                if not action.text:
+                    raise ValueError("GUIActionType.TYPE requires non-empty text")
+                delay = max(0, int(action.delay_ms)) if action.delay_ms is not None else 25
                 safe_text = shlex.quote(action.text)
-                await exec_gui(f"DISPLAY={disp} xdotool type --delay 25 --clearmodifiers -- {safe_text}")
+                await exec_gui(f"DISPLAY={disp} xdotool type --clearmodifiers --delay {delay} -- {safe_text}")
 
             elif atype in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
                 norm_key = self._normalize_x11_keysym(action.key or action.text or "")
@@ -611,7 +618,7 @@ class DockerComputerProvider(ComputerProvider):
             elif atype == GUIActionType.WAIT:
                 await asyncio.sleep(max(0.1, (action.delay_ms or 500) / 1000.0))
 
-            elif atype == GUIActionType.SELECT_WINDOW:
+            elif atype == GUIActionType.SELECT_WINDOW and (action.window_id or action.app_name):
                 target = action.window_id or action.app_name
                 if target:
                     focus_code, _, focus_err = await self._docker_exec(
@@ -626,6 +633,9 @@ class DockerComputerProvider(ComputerProvider):
                             f"window focus failed for '{target}': {focus_err.strip()}"
                         )
                     self._active_windows[workspace_id] = target
+
+            else:
+                raise ValueError(f"Unsupported or incomplete GUI action: {action.action}")
 
             # Invalidate 2-second cache so fresh post-action screen is captured
             self._last_screenshot_time = 0.0

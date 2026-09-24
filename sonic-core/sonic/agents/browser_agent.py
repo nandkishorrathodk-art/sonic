@@ -11,6 +11,7 @@ Autonomous browser interaction agent using Playwright for:
 from __future__ import annotations
 
 import base64
+import inspect
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -59,6 +60,7 @@ class BrowserAgent:
         self,
         headless: bool = True,
         timeout: int = 30000,
+        vault: Any = None,
         *,
         scope_checker: Any | None = None,
         scope_config: dict[str, Any] | None = None,
@@ -67,11 +69,13 @@ class BrowserAgent:
     ):
         self.headless = headless
         self.timeout = timeout
+        self.vault = vault
         self._browser = None
         self._context = None
         self._page = None
         self._playwright = None
         self._using_playwright = False
+        self._attached_cdp = False
         self.scope_checker = scope_checker
         self.scope_config = scope_config
         self.allow_javascript = allow_javascript
@@ -104,30 +108,50 @@ class BrowserAgent:
             engine_name = os.environ.get("SONIC_BROWSER_ENGINE", "chromium")
             browser_engine = getattr(self._playwright, engine_name)
             cdp_url = os.environ.get("SONIC_BROWSER_CDP_URL", "http://127.0.0.1:9222")
+
+            saved_state = None
+            if self.vault is not None and hasattr(self.vault, "load_browser_state"):
+                try:
+                    loaded = self.vault.load_browser_state()
+                    if inspect.isawaitable(loaded):
+                        loaded = await loaded
+                    if loaded:
+                        saved_state = loaded
+                except Exception as exc:
+                    logger.debug("browser_vault_load_failed", error=str(exc))
+
+            ctx_kwargs: dict[str, Any] = {
+                "viewport": {"width": 1280, "height": 800},
+                "ignore_https_errors": False,
+                "accept_downloads": True,
+            }
+            if saved_state is not None:
+                ctx_kwargs["storage_state"] = saved_state
+
             connected_cdp = False
             if not self.headless or os.environ.get("SONIC_ATTACH_VISIBLE_BROWSER") == "1":
                 try:
                     self._browser = await browser_engine.connect_over_cdp(cdp_url, timeout=2500)
+                    self._attached_cdp = True
                     contexts = self._browser.contexts
-                    self._context = contexts[0] if contexts else await self._browser.new_context(
-                        viewport={"width": 1280, "height": 800},
-                        ignore_https_errors=False,
-                        accept_downloads=True,
-                    )
+                    self._context = contexts[0] if contexts else await self._browser.new_context(**ctx_kwargs)
+                    if contexts and saved_state and isinstance(saved_state, dict) and saved_state.get("cookies"):
+                        try:
+                            await self._context.add_cookies(saved_state["cookies"])
+                        except Exception:
+                            pass
                     pages = self._context.pages
                     self._page = pages[0] if pages else await self._context.new_page()
                     connected_cdp = True
                     logger.info("browser_agent_attached_cdp", cdp_url=cdp_url)
                 except Exception:
+                    self._attached_cdp = False
                     connected_cdp = False
 
             if not connected_cdp:
+                self._attached_cdp = False
                 self._browser = await browser_engine.launch(headless=self.headless)
-                self._context = await self._browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    ignore_https_errors=False,
-                    accept_downloads=True,
-                )
+                self._context = await self._browser.new_context(**ctx_kwargs)
                 self._page = await self._context.new_page()
 
             await self._page.route("**/*", self._guard_request)
@@ -141,6 +165,21 @@ class BrowserAgent:
         except Exception as e:
             logger.error("browser_launch_failed", error=str(e))
             return False
+
+    async def save_state_to_vault(self) -> None:
+        """Export current browser context storage_state to self.vault when available."""
+        if self.vault is None or self._context is None:
+            return
+        if not hasattr(self.vault, "save_browser_state"):
+            return
+        try:
+            state = await self._context.storage_state()
+            if state is not None:
+                res = self.vault.save_browser_state(state)
+                if inspect.isawaitable(res):
+                    await res
+        except Exception as exc:
+            logger.debug("browser_vault_save_failed", error=str(exc))
 
     async def _guard_request(self, route: Any) -> None:
         """Apply scheme/egress guard to navigations and SSRF guard to subresources."""
@@ -172,8 +211,11 @@ class BrowserAgent:
         """Navigate to URL and capture full page state."""
         self._validate_url(url)
         if self._using_playwright and self._page:
-            return await self._playwright_navigate(url)
-        return await self._httpx_navigate(url)
+            snap = await self._playwright_navigate(url)
+        else:
+            snap = await self._httpx_navigate(url)
+        await self.save_state_to_vault()
+        return snap
 
     async def _playwright_navigate(self, url: str) -> PageSnapshot:
         """Full browser navigation with Playwright."""
@@ -494,34 +536,38 @@ class BrowserAgent:
 
     async def close(self) -> None:
         """Close browser and cleanup. Safe to call even if launch failed."""
+        await self.save_state_to_vault()
         # Close the page/context before stopping playwright so the browser
-        # process can shut down cleanly. Each step is independent so a
-        # partially-launched agent (e.g. context created but page failed)
-        # still cleans up what it can.
-        if self._page is not None:
-            try:
-                await self._page.close()
-            except Exception as e:
-                logger.debug("browser_page_close_error", error=str(e))
-            self._page = None
-        if self._context is not None:
-            try:
-                await self._context.close()
-            except Exception as e:
-                logger.debug("browser_context_close_error", error=str(e))
-            self._context = None
-        if self._browser is not None:
-            try:
-                await self._browser.close()
-            except Exception as e:
-                logger.debug("browser_close_error", error=str(e))
-            self._browser = None
+        # process can shut down cleanly. When attached over CDP to the shared
+        # :99 desktop browser, do NOT call self._browser.close() (which kills
+        # the user's shared :99 desktop browser window); only disconnect and
+        # clean up Playwright handles.
+        if not self._attached_cdp:
+            if self._page is not None:
+                try:
+                    await self._page.close()
+                except Exception as e:
+                    logger.debug("browser_page_close_error", error=str(e))
+            if self._context is not None:
+                try:
+                    await self._context.close()
+                except Exception as e:
+                    logger.debug("browser_context_close_error", error=str(e))
+            if self._browser is not None:
+                try:
+                    await self._browser.close()
+                except Exception as e:
+                    logger.debug("browser_close_error", error=str(e))
+        self._page = None
+        self._context = None
+        self._browser = None
         if self._playwright is not None:
             try:
                 await self._playwright.stop()
             except Exception as e:
                 logger.debug("playwright_stop_error", error=str(e))
             self._playwright = None
+        self._attached_cdp = False
         self._using_playwright = False
         logger.info("browser_agent_closed")
 

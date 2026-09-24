@@ -174,7 +174,7 @@ class ScopeChecker:
         re.compile(r"\b(mkfs(\.\w+)?|mke2fs|wipefs)\b", re.IGNORECASE),
         re.compile(r"\bdd\b.*\bof=[\"']?/dev/", re.IGNORECASE),
         re.compile(r">\s*/dev/sd", re.IGNORECASE),
-        re.compile(r"\b(?:kill\s+-9\s+(?:1|-1)\b|(?:pkill|killall)\s+-9\s+-u\s+root\b)", re.IGNORECASE),
+        re.compile(r"\b(?:kill\s+-9\s+(?:1|-1)\b|(?:pkill|killall)\s+-9\s+(?!x-www-browser\b)\S+)", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?shutdown\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?reboot\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?halt\b", re.IGNORECASE),
