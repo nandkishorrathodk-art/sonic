@@ -338,7 +338,7 @@ def test_laptop_ram_protection_check():
     assert _has_sufficient_ram_gb(999999.0) is False
 
     # Graceful fallback on unexpected system query error
-    with patch("ctypes.windll", create=True, side_effect=RuntimeError("Unavailable")):
+    with patch.dict("sys.modules", {"psutil": None, "ctypes": None}):
         with patch("builtins.open", side_effect=FileNotFoundError):
             assert _has_sufficient_ram_gb(1.5) is True
 

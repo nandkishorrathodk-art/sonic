@@ -295,9 +295,23 @@ class LayaSystem1Engine:
         if local_router is not None:
             try:
                 raw = local_router.predict(state, questions, model=chosen_model, max_len=max_len)
+                ans_map = dict(raw.get("answers", {}))
+                for q_k, q_v in ans_map.items():
+                    if isinstance(q_v, dict):
+                        q_copy = dict(q_v)
+                        if "probability" not in q_copy:
+                            q_copy["probability"] = q_copy.get("answer_confidence") or (
+                                q_copy.get("probabilities", {}).get(q_copy.get("choice", ""), 0.5)
+                            )
+                        ans_map[q_k] = q_copy
+                raw_routing = raw.get("routing")
+                routing_dict = dict(raw_routing) if isinstance(raw_routing, dict) else {}
+                routing_dict.setdefault("model", chosen_model)
+                routing_dict.setdefault("backend", "laya_local")
+                routing_dict.setdefault("language", lang_code)
                 return LayaDecisionResult(
-                    answers=raw.get("answers", {}),
-                    routing=raw.get("routing", {"model": chosen_model, "backend": "laya_local"}),
+                    answers=ans_map,
+                    routing=routing_dict,
                 )
             except Exception as exc:
                 logger.debug("laya_local_predict_failed", error=str(exc))
@@ -535,7 +549,13 @@ class LayaSystem1Engine:
             },
         )
         ans = res.answers.get("plane", {})
-        return str(ans.get("choice", "gui")), float(ans.get("probability", 0.5))
+        choice = str(ans.get("choice", "gui"))
+        prob = (
+            ans.get("probability")
+            or ans.get("answer_confidence")
+            or ans.get("probabilities", {}).get(choice, 0.5)
+        )
+        return choice, float(prob)
 
     def verify_execution_receipt(self, goal: str, evidence: str) -> float:
         """Estimate probability [0.0, 1.0] that `evidence` empirically proves `goal` succeeded."""
