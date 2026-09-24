@@ -31,6 +31,101 @@ logger = get_logger(__name__)
 _TOKEN_RE = re.compile(r"[\w\u0900-\u097F]+", re.UNICODE)
 
 
+DEFAULT_SCALE_ANCHORS: dict[str, str] = {
+    "safe": "safe benign read harmless echo ls cat status dir view inspect check query git status pwd",
+    "needs_approval": "needs_approval sensitive privilege sudo chown chmod nmap scan modify install network auth curl wget",
+    "destructive": "destructive wipe format delete drop purge kill shutdown rm rf mkfs dd corrupt danger terminate attack",
+    "routine": "routine normal standard regular maintenance periodic trivial query background low",
+    "important": "important high urgent priority pending deadline immediate action necessary",
+    "critical": "critical emergency block outage disaster failure fatal severity immediate escalation blocker",
+    "incomplete": "incomplete missing pending error failed blocked unstarted partial none broken",
+    "partial": "partial ongoing progress WIP halfway progressing incomplete running",
+    "complete": "complete finished done resolved success passed verified 200 OK validated exit 0",
+    "redundant": "redundant repeated duplicate static unchanged seen known stale identical repetitive",
+    "moderate": "moderate intermediate typical interesting some variation partial novelty",
+    "high": "high novel unique new discovery breakthrough unseen extraordinary unprecedented",
+    "low": "low minor negligible tiny small zero minimal",
+    "medium": "medium average moderate typical standard ordinary",
+}
+
+
+PRESET_QUESTIONS: dict[str, dict[str, dict[str, Any]]] = {
+    "triage": {
+        "plane": {
+            "type": "choice",
+            "instructions": "Select the execution plane substrate matching this objective",
+            "criteria": {
+                "gui": (
+                    "gui visual visually screen screenshot desktop window browser click button "
+                    "scroll drag ui page website open kholo dikhao ब्राउज़र स्क्रीन विंडो खोलो दिखाओ"
+                ),
+                "headless": (
+                    "headless terminal cli command bash shell script directory mkdir author "
+                    "source code file curl netstat ss port ports endpoints background git "
+                    "pytest test audit server likho banao टर्मिनल कोड फाइल कमांड"
+                ),
+            },
+        },
+        "urgency": {
+            "type": "score",
+            "instructions": "Assess operational priority and execution urgency",
+            "criteria": ["routine", "important", "critical"],
+        },
+    },
+    "guard": {
+        "risk_tier": {
+            "type": "score",
+            "instructions": "Assess operational safety and command risk tier",
+            "criteria": ["safe", "needs_approval", "destructive"],
+        },
+        "is_dangerous": {
+            "type": "noul",
+            "instructions": "Determine if command or action carries critical risk of destructive data loss or harm",
+            "affirmative_anchor": (
+                "destructive wipe rm -rf format drop purge kill shutdown reboot malicious "
+                "exploit danger critical rm mkfs dd pkill forkbomb drop table truncate"
+            ),
+            "negative_anchor": (
+                "safe read cat ls echo status inspect harmless query benign test check verify "
+                "git status dir pwd find ps"
+            ),
+        },
+    },
+    "verification": {
+        "empirical_proof": {
+            "type": "noul",
+            "instructions": "Verify empirical execution receipt and verifiable success outcome",
+            "affirmative_anchor": (
+                "FILE_VERIFIED verified success confirmed passed 200 OK exit 0 created committed running complete"
+            ),
+            "negative_anchor": (
+                "error failed exception traceback blocked Terminal Ready (0 procs) __sonic_obs_ready__ exit 126"
+            ),
+        },
+        "completeness": {
+            "type": "score",
+            "instructions": "Evaluate degree of task completion based on receipts",
+            "criteria": ["incomplete", "partial", "complete"],
+        },
+    },
+    "curiosity": {
+        "novelty": {
+            "type": "score",
+            "instructions": "Evaluate observation novelty and unexpected informational value",
+            "criteria": ["redundant", "moderate", "high"],
+        },
+        "worth_learning": {
+            "type": "noul",
+            "instructions": "Evaluate observation information content and enduring learning value",
+            "affirmative_anchor": (
+                "discovered active service port file version configuration capability novel insight interesting"
+            ),
+            "negative_anchor": "empty idle waiting nothing unchanged error redundant noise repetitive static",
+        },
+    },
+}
+
+
 @dataclass
 class LayaDecisionResult:
     """Typed output returned by a Laya System-1 forward pass."""
@@ -52,6 +147,10 @@ class LayaDecisionResult:
         val = ans.get("score")
         return float(val) if val is not None else default
 
+    def get_label(self, question_key: str, default: str = "") -> str:
+        ans = self.answers.get(question_key, {})
+        return str(ans.get("label") or ans.get("choice") or default)
+
 
 def _detect_script_and_model(text: str, reference_multilingual_vocab: set[str] | None = None) -> tuple[str, str]:
     """Detect script and language routing (`english` vs `multilingual`)."""
@@ -71,6 +170,14 @@ def _detect_script_and_model(text: str, reference_multilingual_vocab: set[str] |
 
 def _has_sufficient_ram_gb(min_free_gb: float = 1.5) -> bool:
     """Check if the host has enough free physical memory before loading PyTorch weights."""
+    try:
+        import psutil  # type: ignore[import-untyped]
+
+        free_gb = psutil.virtual_memory().available / (1024 ** 3)
+        return bool(free_gb >= min_free_gb)
+    except Exception:
+        pass
+
     try:
         if os.name == "nt":
             import ctypes
@@ -92,13 +199,13 @@ def _has_sufficient_ram_gb(min_free_gb: float = 1.5) -> bool:
             stat.dwLength = ctypes.sizeof(stat)
             ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
             free_gb = stat.ullAvailPhys / (1024 ** 3)
-            return free_gb >= min_free_gb
+            return bool(free_gb >= min_free_gb)
         elif os.path.exists("/proc/meminfo"):
             with open("/proc/meminfo", encoding="utf-8") as f:
                 for line in f:
                     if line.startswith("MemAvailable:"):
                         kb = int(line.split()[1])
-                        return (kb / (1024 ** 2)) >= min_free_gb
+                        return bool((kb / (1024 ** 2)) >= min_free_gb)
     except Exception:
         pass
     return True
@@ -110,6 +217,9 @@ class LayaSystem1Engine:
 
     Evaluates structured questions (`choice`, `score`, `noul`) over any state.
     """
+
+    PRESET_QUESTIONS = PRESET_QUESTIONS
+    DEFAULT_SCALE_ANCHORS = DEFAULT_SCALE_ANCHORS
 
     _ROMAN_HI_VOCAB = frozenset({
         "karo", "kholo", "banao", "chalao", "dekho", "likho", "hatao",
@@ -222,8 +332,13 @@ class LayaSystem1Engine:
                     "probabilities": {k: round(v, 4) for k, v in probs.items()},
                 }
             elif q_type == "score":
-                labels = list(criteria) if isinstance(criteria, (list, tuple)) and criteria else ["low", "medium", "high"]
-                score_val, label = self._project_scale_vectors(state_text, state_vec, state_tokens, instructions, labels)
+                if isinstance(criteria, dict):
+                    scale_spec: list[str] | dict[str, str] = criteria
+                elif isinstance(criteria, (list, tuple)) and criteria:
+                    scale_spec = list(criteria)
+                else:
+                    scale_spec = ["low", "medium", "high"]
+                score_val, label = self._project_scale_vectors(state_text, state_vec, state_tokens, instructions, scale_spec)
                 answers[q_key] = {
                     "score": round(score_val, 4),
                     "label": label,
@@ -251,6 +366,94 @@ class LayaSystem1Engine:
                 "backend": "laya_vector_projection",
             },
         )
+
+    def predict_preset(self, state: str, preset: str = "triage") -> LayaDecisionResult:
+        """Evaluate a built-in Laya question preset ('triage', 'guard', 'verification', 'curiosity')."""
+        if preset not in PRESET_QUESTIONS:
+            raise ValueError(f"Unknown preset '{preset}'. Supported presets: {list(PRESET_QUESTIONS.keys())}")
+        return self.predict(state=state, questions=PRESET_QUESTIONS[preset])
+
+    def predict_batch(
+        self,
+        states: list[str],
+        questions: dict[str, dict[str, Any]],
+    ) -> list[LayaDecisionResult]:
+        """Evaluate questions across a batch of states in System-1 single-pass."""
+        if not states:
+            return []
+        return [self.predict(state=st, questions=questions) for st in states]
+
+    def assess_action_safety(self, command_or_target: str) -> dict[str, Any]:
+        """
+        Assess operational safety and risk tier of a command or target using the 'guard' preset.
+
+        Returns:
+            {"risk_tier": str, "score": float, "is_dangerous_prob": float}
+        """
+        res = self.predict_preset(command_or_target, preset="guard")
+        risk_tier = res.get_label("risk_tier")
+        score = res.get_score("risk_tier", default=0.0)
+        if not risk_tier:
+            if score >= 0.66:
+                risk_tier = "destructive"
+            elif score >= 0.33:
+                risk_tier = "needs_approval"
+            else:
+                risk_tier = "safe"
+        return {
+            "risk_tier": risk_tier,
+            "score": score,
+            "is_dangerous_prob": res.get_noul("is_dangerous", default=0.0),
+        }
+
+    def detect_loop_stagnation(self, goal: str, trace_summary: str) -> dict[str, Any]:
+        """
+        Detect whether an execution loop is stagnant, repeating identical errors, or stuck without progress.
+
+        Returns:
+            {"should_replan": bool, "stuck_prob": float}
+        """
+        state = f"Goal: {goal}\nTrace: {trace_summary}"
+        res = self.predict(
+            state=state,
+            questions={
+                "stagnation": {
+                    "type": "noul",
+                    "instructions": "Determine if execution loop is stagnant, repeating errors, or stuck without progress",
+                    "affirmative_anchor": (
+                        "stagnant stuck loop repeating error failure identical retry unprogressed "
+                        "dead-end same output blocked failed crash loop timeout unchanged"
+                    ),
+                    "negative_anchor": (
+                        "progress advancing success completed novel state resolved next step "
+                        "productive output passed verified working moving forward"
+                    ),
+                }
+            },
+        )
+        stuck_prob = res.get_noul("stagnation", default=0.0)
+        return {
+            "should_replan": stuck_prob >= 0.5,
+            "stuck_prob": stuck_prob,
+        }
+
+    def status(self) -> dict[str, Any]:
+        """Return clean telemetry status of the Laya System-1 Decision Engine."""
+        has_ram = bool(_has_sufficient_ram_gb(1.5))
+        if self.api_url:
+            backend = "laya_remote"
+        elif self.enable_local_model and (self._local_router is not None or has_ram):
+            backend = "laya_local"
+        else:
+            backend = "laya_vector_projection"
+
+        return {
+            "backend": backend,
+            "api_url_configured": bool(self.api_url),
+            "local_model_enabled": bool(self.enable_local_model),
+            "sufficient_ram": has_ram,
+            "supported_presets": list(PRESET_QUESTIONS.keys()),
+        }
 
     def _project_choice_vectors(
         self,
@@ -283,13 +486,21 @@ class LayaSystem1Engine:
         state_vec: list[float],
         state_tokens: list[str],
         instructions: str,
-        labels: list[str],
+        labels: list[str] | dict[str, str],
     ) -> tuple[float, str]:
         """Project state onto ordered scale anchors in [0.0, 1.0]."""
-        criteria_map = {lbl: f"{lbl} {instructions}" for lbl in labels}
+        if isinstance(labels, dict):
+            criteria_map = labels
+            label_keys = list(labels.keys())
+        else:
+            label_keys = list(labels)
+            criteria_map = {
+                lbl: f"{lbl} {self.DEFAULT_SCALE_ANCHORS.get(lbl.lower(), '')} {instructions}".strip()
+                for lbl in label_keys
+            }
         probs = self._project_choice_vectors(state_text, state_vec, state_tokens, instructions, criteria_map)
-        n = max(1, len(labels) - 1)
-        expected_val = sum((i / n) * probs.get(lbl, 0.0) for i, lbl in enumerate(labels))
+        n = max(1, len(label_keys) - 1)
+        expected_val = sum((i / n) * probs.get(lbl, 0.0) for i, lbl in enumerate(label_keys))
         best_label = max(probs.items(), key=lambda kv: kv[1])[0]
         return max(0.0, min(1.0, expected_val)), best_label
 
@@ -302,8 +513,8 @@ class LayaSystem1Engine:
     ) -> float:
         """Compute calibrated binary probability P(Yes) via bipolar anchor projection."""
         s_lower = state_text.lower()
-        pos_tokens = {t.lower() for t in _TOKEN_RE.findall(affirmative_anchor) if len(t) > 2}
-        neg_tokens = {t.lower() for t in _TOKEN_RE.findall(negative_anchor) if len(t) > 2}
+        pos_tokens = {t.lower() for t in _TOKEN_RE.findall(affirmative_anchor) if len(t) >= 2}
+        neg_tokens = {t.lower() for t in _TOKEN_RE.findall(negative_anchor) if len(t) >= 2}
         state_tokens = [t.lower() for t in _TOKEN_RE.findall(s_lower)]
 
         pos_vec = self._vectorizer.encode(affirmative_anchor)
@@ -313,7 +524,9 @@ class LayaSystem1Engine:
 
         pos_hits = sum(1.0 for t in state_tokens if t in pos_tokens)
         neg_hits = sum(1.8 for t in state_tokens if t in neg_tokens)
-        if "terminal ready (0 procs)" in s_lower or "__sonic_obs_ready__" in s_lower:
+        if ("terminal ready (0 procs)" in s_lower or "__sonic_obs_ready__" in s_lower) and any(
+            t in neg_tokens for t in ("terminal", "ready", "procs", "__sonic_obs_ready__")
+        ):
             neg_hits += 4.0
 
         delta = (sim_pos - sim_neg) * 4.0 + (pos_hits - neg_hits) * 0.9
@@ -321,17 +534,7 @@ class LayaSystem1Engine:
 
     def decide_execution_plane(self, goal: str, criteria: dict[str, str] | None = None) -> tuple[str, float]:
         """Decide execution plane (`gui` vs `headless`) across English, Hindi, and Hinglish."""
-        plane_criteria = criteria or {
-            "gui": (
-                "gui visual visually screen screenshot desktop window browser click button "
-                "scroll drag ui page website open kholo dikhao ब्राउज़र स्क्रीन विंडो खोलो दिखाओ"
-            ),
-            "headless": (
-                "headless terminal cli command bash shell script directory mkdir author "
-                "source code file curl netstat ss port ports endpoints background git "
-                "pytest test audit server likho banao टर्मिनल कोड फाइल कमांड"
-            ),
-        }
+        plane_criteria = criteria or PRESET_QUESTIONS["triage"]["plane"]["criteria"]
         res = self.predict(
             state=goal,
             questions={

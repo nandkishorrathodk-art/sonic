@@ -56,6 +56,8 @@ class CuriosityState:
     cycle: int = 0
     consecutive_dead_ends: int = 0
     history: list[CuriosityCycleResult] = field(default_factory=list)
+    last_affect_telemetry: dict[str, float] = field(default_factory=dict)
+    affect_telemetry_history: list[dict[str, float]] = field(default_factory=list)
 
 
 class CuriosityLoop:
@@ -84,6 +86,7 @@ class CuriosityLoop:
         self.max_cycles = max_cycles
         self.exploration_steps = exploration_steps
         self.state = CuriosityState()
+        self.last_affect_telemetry: dict[str, float] = {}
         if self.vector_memory is not None:
             try:
                 docs: list[Any] = []
@@ -144,9 +147,28 @@ class CuriosityLoop:
                 rationale = line.split(":", 1)[1].strip()
         return goal, rationale
 
-    def measure_novelty(self, outcome: str) -> float:
+    def measure_novelty(self, observation_text: str = "", outcome: str | None = None) -> float:
         """Information gain of an outcome relative to known facts (0..1)."""
-        return NoveltyEngine.compute_novelty(outcome, self.state.known_facts)
+        target = outcome if outcome is not None else observation_text
+        return NoveltyEngine.compute_novelty(target, self.state.known_facts)
+
+    def evaluate_laya_curiosity(self, observation_text: str) -> dict[str, float]:
+        """Evaluate System-1 curiosity affect and record telemetry."""
+        from sonic.llm.laya_engine import get_laya_engine
+
+        engine = get_laya_engine()
+        telemetry = engine.evaluate_curiosity_affect(observation_text, self.state.known_facts)
+        self.state.last_affect_telemetry = telemetry
+        self.state.affect_telemetry_history.append(telemetry)
+        self.last_affect_telemetry = telemetry
+        logger.info(
+            "curiosity_laya_affect",
+            observation=str(observation_text)[:120],
+            novelty_score=telemetry.get("novelty_score", 0.0),
+            worth_learning_prob=telemetry.get("worth_learning_prob", 0.0),
+            telemetry=telemetry,
+        )
+        return telemetry
 
     def persist_fact(self, fact: str) -> bool:
         """Record a newly-learned fact to persistent vector memory (Phase 1).
@@ -184,6 +206,10 @@ class CuriosityLoop:
         goal, rationale = await self.propose_curious_goal(observation_summary)
         outcome = await pursue(goal, self.exploration_steps)
         info_gain = self.measure_novelty(outcome)
+        try:
+            self.evaluate_laya_curiosity(str(outcome or ""))
+        except Exception as e:
+            logger.debug("curiosity_laya_affect_cycle_failed", error=str(e))
         was_novel = info_gain >= self.DEAD_END_NOVELTY
         outcome_clean = str(outcome or "").strip()
         if outcome_clean.lower().startswith("safety blocked:"):
