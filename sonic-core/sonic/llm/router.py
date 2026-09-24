@@ -254,7 +254,8 @@ class ModelRouter:
             return False
         p = self.providers[provider_name]
         if p.name == "local":
-            return True
+            import os
+            return bool(os.environ.get("LOCAL_LLM_URL"))
         return bool(p.api_key)
 
     def _resolve_provider(
@@ -298,7 +299,6 @@ class ModelRouter:
         if (
             self.default_provider
             and self._is_provider_ready(self.default_provider)
-            and self.default_provider != "nvidia"
         ):
             target_model = None
             if task_type and task_type in self.routing_rules:
