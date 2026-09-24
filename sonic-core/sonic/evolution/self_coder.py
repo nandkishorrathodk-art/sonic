@@ -61,15 +61,6 @@ _TODO_RE = re.compile(r"#\s*(TODO|FIXME|HACK|XXX)\b[:\s]*(.*)", re.IGNORECASE)
 # real comment line so documentation mentioning the marker is not a signal.
 _NOOP_STUB_RE = re.compile(r"(?m)^[ \t]*#\s*\[SONIC-EVOLUTION\][^\n]*")
 
-_DEFAULT_TEST_MAP = {
-    "evolution": "sonic-core/tests/test_evolution_strategy_and_engine.py",
-    "self_coder": "sonic-core/tests/test_self_coder.py",
-    "llm": "sonic-core/tests/test_ai_and_control_upgrade.py",
-    "agents": "sonic-core/tests/test_ai_and_control_upgrade.py",
-    "computer_use": "sonic-core/tests/test_phase8_visual_computer_use.py",
-    "safety": "sonic-core/tests/test_p0_security_hardening.py",
-    "api": "sonic-core/tests/test_phase17_api_routes.py",
-}
 
 
 def _now() -> str:
@@ -410,22 +401,55 @@ class SelfCoder:
                 logger.warning("self_coder_restore_failed", file=rel, error=str(exc))
 
     def _test_paths_for(self, target_file: str) -> list[str] | None:
-        """Pick the causal test subset for the changed file (best-effort).
+        """Dynamically discover tests relevant to `target_file` from the repository filesystem.
 
-        Falls back to the director's configured test paths (e.g. a caller that
-        pinned a specific suite) so verification never silently falls back to a
-        default file that does not exist.
+        Zero hardcoded keyword dictionaries. Discovers tests by:
+        1. Explicit caller/director configured paths.
+        2. Exact test file match (`test_<stem>.py`).
+        3. Scanning test files for imports or references to the target module.
         """
-        slugs = [s for s in _DEFAULT_TEST_MAP if s in target_file.lower()]
-        paths = [_DEFAULT_TEST_MAP[s] for s in slugs]
-        base = "sonic-core/tests/test_evolution_strategy_and_engine.py"
-        if base not in paths:
-            paths.append(base)
-        existing = [p for p in paths if (self.repo_root / p).exists()]
-        if existing:
-            return existing
-        if self.director.test_paths:
+        if self.director and self.director.test_paths:
             return self.director.test_paths
+
+        target_path = Path(target_file)
+        stem = target_path.stem
+
+        tests_dirs = [
+            self.repo_root / "sonic-core" / "tests",
+            self.repo_root / "tests",
+        ]
+
+        matched_tests: list[str] = []
+
+        for t_dir in tests_dirs:
+            if not t_dir.exists():
+                continue
+
+            # 1. Direct name match: test_<stem>.py
+            direct = t_dir / f"test_{stem}.py"
+            if direct.exists():
+                matched_tests.append(str(direct.relative_to(self.repo_root)).replace("\\", "/"))
+
+            # 2. Dynamic inspection of test files for module imports or references
+            for tf in sorted(t_dir.glob("test_*.py")):
+                rel_tf = str(tf.relative_to(self.repo_root)).replace("\\", "/")
+                if rel_tf in matched_tests:
+                    continue
+                try:
+                    txt = tf.read_text(encoding="utf-8", errors="ignore")
+                    if stem in txt:
+                        matched_tests.append(rel_tf)
+                except Exception:
+                    continue
+
+        if matched_tests:
+            return matched_tests[:5]
+
+        # Default evolution engine test if available
+        base = self.repo_root / "sonic-core" / "tests" / "test_evolution_strategy_and_engine.py"
+        if base.exists():
+            return [str(base.relative_to(self.repo_root)).replace("\\", "/")]
+
         return None
 
     # ------------------------------------------------------------------

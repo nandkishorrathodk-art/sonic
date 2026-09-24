@@ -277,6 +277,14 @@ class CodebaseEvolver:
                     # Fallback to direct replacement if unified diff failed
                     return False, f"git apply failed: {res.stderr or res.stdout}", 0, 0
 
+                # Validate AST on target file after applying unified diff
+                if target_path.exists() and target_path.suffix == ".py":
+                    content = target_path.read_text(encoding="utf-8")
+                    ast_ok, ast_msg = self.validate_ast(target_path, content)
+                    if not ast_ok:
+                        self.rollback_snapshots()
+                        return False, f"AST SyntaxError in patched file: {ast_msg}", 0, 0
+
                 # Count diff lines
                 added = sum(1 for line in code_diff_or_content.splitlines() if line.startswith("+") and not line.startswith("+++"))
                 removed = sum(1 for line in code_diff_or_content.splitlines() if line.startswith("-") and not line.startswith("---"))
@@ -304,6 +312,50 @@ class CodebaseEvolver:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_text(new_text, encoding="utf-8")
             return True, "File content written and validated", added, removed
+
+    def apply_patch_multi(
+        self,
+        target_files_rel: list[str],
+        multi_diff: str,
+    ) -> tuple[bool, str]:
+        """
+        Applies a multi-file unified diff across multiple target files.
+        Validates AST on all touched files. If any file fails AST validation
+        or git apply fails, atomically rolls back all files to their original snapshots.
+        """
+        for f_rel in target_files_rel:
+            if self.is_protected(f_rel):
+                raise SafetyInvariantViolation(
+                    f"Forbidden: '{f_rel}' is a protected safety component and cannot be self-modified."
+                )
+
+        target_paths = [(self.repo_root / f_rel).resolve() for f_rel in target_files_rel]
+        for p in target_paths:
+            self._record_snapshot(p)
+
+        with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as tf:
+            tf.write(multi_diff)
+            temp_patch_path = tf.name
+
+        try:
+            cmd = ["git", "apply", "--whitespace=fix", temp_patch_path]
+            res = subprocess.run(cmd, cwd=str(self.repo_root), capture_output=True, text=True, timeout=30)
+            if res.returncode != 0:
+                self.rollback_snapshots()
+                return False, f"git apply failed: {res.stderr or res.stdout}"
+
+            for p in target_paths:
+                if p.exists() and p.suffix == ".py":
+                    content = p.read_text(encoding="utf-8")
+                    ast_ok, ast_msg = self.validate_ast(p, content)
+                    if not ast_ok:
+                        self.rollback_snapshots()
+                        return False, f"AST SyntaxError in {p.name}: {ast_msg}"
+
+            return True, "Multi-file patch applied and AST validated successfully"
+        finally:
+            if os.path.exists(temp_patch_path):
+                os.unlink(temp_patch_path)
 
     # ------------------------------------------------------------------
     # 5. Test Suite Verification
@@ -365,13 +417,58 @@ class CodebaseEvolver:
             )
 
     def run_security_regression(self) -> bool:
-        """Verifies that no security invariants are broken by the proposed change."""
+        """Verifies that no security invariants are broken by the proposed change (fail-closed)."""
         sec_tests = ["sonic-core/tests/test_p0_security_hardening.py"]
         existing = [t for t in sec_tests if (self.repo_root / t).exists()]
         if not existing:
-            return True
+            logger.warning("security_regression_suite_missing_fail_closed", repo_root=str(self.repo_root))
+            return False
         res = self.run_tests(existing)
         return res.passed
+
+    def run_import_checks(self, file_paths_rel: list[str]) -> tuple[bool, str]:
+        """
+        Validates that all specified Python files can be imported cleanly without top-level ImportError
+        or ModuleNotFoundError.
+        """
+        repo = Path(self.repo_root).resolve()
+        sonic_core = (repo / "sonic-core").resolve()
+        sonic_cli = (repo / "sonic-cli").resolve()
+
+        for f_rel in file_paths_rel:
+            p = (repo / f_rel).resolve()
+            if not p.exists() or p.suffix != ".py":
+                continue
+
+            mod_name = ""
+            if p.is_relative_to(sonic_core):
+                rel_parts = p.relative_to(sonic_core).with_suffix("").parts
+                mod_name = ".".join(rel_parts)
+            elif p.is_relative_to(sonic_cli):
+                rel_parts = p.relative_to(sonic_cli).with_suffix("").parts
+                mod_name = ".".join(rel_parts)
+            elif p.is_relative_to(repo):
+                rel_parts = p.relative_to(repo).with_suffix("").parts
+                mod_name = ".".join(rel_parts)
+
+            code = (
+                f"import sys; "
+                f"sys.path.insert(0, {str(sonic_core)!r}); "
+                f"sys.path.insert(0, {str(sonic_cli)!r}); "
+                f"sys.path.insert(0, {str(repo)!r}); "
+            )
+            if mod_name:
+                code += f"import importlib; importlib.import_module({mod_name!r})"
+            else:
+                code += f"import runpy; runpy.run_path({str(p)!r})"
+
+            cmd = [sys.executable, "-c", code]
+            res = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, timeout=30)
+            if res.returncode != 0:
+                err = res.stderr or res.stdout
+                return False, f"Import integrity check failed for {f_rel}: {err}"
+
+        return True, "All import checks passed"
 
     # ------------------------------------------------------------------
     # 6. Git Commit & Push (Auto-Promotion)
