@@ -1,24 +1,40 @@
-# SONIC-REDA
-### Next-Generation Autonomous AI Bug Hunting System
-# ⚡ SONIC-REDA (A-SEA)
-### Autonomous Self-Evolving Penetration Architect & Cyber Workstation
+# ⚡ SONIC-REDA
+### Autonomous AI-Human Digital Being & Cyber Workstation
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
-[![License: Proprietary](https://img.shields.io/badge/license-Proprietary-red.svg)]()
+[![Three.js](https://img.shields.io/badge/Three.js-3D%20WebGL-black.svg)](https://threejs.org/)
 
-> **Codename:** SONIC A-SEA (Autonomous Self-Evolving Penetration Architect)  
-> **Status:** Phase 22 — Native Docker Cyber Workstation & Autonomous Reasoning  
-> **Identity:** A-SEA (Autonomous Self-Evolving Penetration Architect)  
-> **Core Concept:** An autonomous AI-Human Hacker Being operating its own dedicated personal computer workstation with full graphical desktop agency, headless terminal execution, persistent cognitive mind, and an immutable safety envelope. Every finding is backed by empirical receipts — zero success-by-decree.
+> **Codename:** SONIC (Autonomous AI-Human Digital Being)  
+> **Status:** Full Dual-Plane Workstation Agency & 3D Cognitive Memory Graph  
+> **Core Concept:** An autonomous AI-Human Digital Being operating its own dedicated personal computer workstation (`DISPLAY=:99` full graphical desktop + dedicated headless terminal). Combines human workstation fluency, persistent cognitive affect, toolsmithing, and verified empirical receipts — zero success-by-decree.
 
-## What is SONIC-REDA?
 ---
 
-The most powerful, self-evolving, multi-agent AI red-team system that combines:
+## 📸 Live Visual Showcase
+
+<div align="center">
+
+### 🖥️ 1. SONIC Cyber Workstation (Dual-Plane Desktop + Headless Terminal)
+*Real-time AI workstation: Operating the full X11 graphical desktop (`DISPLAY=:99`) concurrently with a dedicated headless sandbox terminal.*
+
+<img src="docs/assets/sonic_cyber_workstation.png" alt="SONIC Cyber Workstation" width="900" />
+
+<br/><br/>
+
+### 🧠 2. SONIC Cognitive Memory & System Architecture Graph (Interactive 3D WebGL)
+*Interactive 3D Force-Directed Graph: Visualizing persistent Being identity, BeingMind cognitive affect curves, internalized facts, dual execution planes, toolsmith scripts, and empirical SHA-256 evidence.*
+
+<img src="docs/assets/sonic_cognitive_memory_graph.png" alt="SONIC Cognitive Memory & System Architecture Graph" width="900" />
+
+</div>
+
+---
+
 ## 📑 Table of Contents
+- [Live Visual Showcase](#-live-visual-showcase)
 - [Overview](#-overview)
 - [Core Architecture: The AI Being & Workstation](#-core-architecture-the-ai-being--workstation)
 - [Key Capabilities & Subsystems](#-key-capabilities--subsystems)
@@ -27,7 +43,6 @@ The most powerful, self-evolving, multi-agent AI red-team system that combines:
 - [Quick Start Guide](#-quick-start-guide)
 - [The Strict Core Invariants](#-the-strict-core-invariants)
 - [Testing & Quality Assurance](#-testing--quality-assurance)
-- [License](#-license)
 
 - 🖥️ **Devin-style** full virtual computer control
 - 🔴 **RedAmon-level** autonomous kill-chain power
@@ -130,6 +145,7 @@ SONIC does not silo itself into a terminal-only script or a sluggish GUI-only re
 | **Evidence Engine** | `sonic/evidence/` | Verifies and cryptographically hashes reproduction receipts for all findings. |
 | **Research Swarm** | `sonic/researcher/` | 6+1 concurrent specialist agents auditing attack surfaces in parallel. |
 | **Graph & Vector Memory** | `sonic/memory/` | Dual Neo4j / SQLite property graph and embedding vector storage. |
+| **3D Cognitive Memory Graph** | `sonic-dashboard/app/graph/` | Interactive WebGL 3D force-directed graph visualizing Being mind, affect curves, dual planes, toolsmith craft, and empirical evidence. |
 
 ---
 
