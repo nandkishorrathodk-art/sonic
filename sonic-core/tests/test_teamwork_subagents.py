@@ -197,3 +197,83 @@ async def test_display_lease_serializes_concurrent_gui_access():
     lock_a = DisplayLeaseManager.get_lock("ws-shared-99")
     lock_b = DisplayLeaseManager.get_lock("ws-shared-99")
     assert lock_a is lock_b
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_subagent_default_separate_workspace_and_dual_plane_gui_and_terminal(tmp_path: Path):
+    """Proves that when a subagent is launched:
+    1. It gets its own separate workspace by default (`workspace_mode="branch"`).
+    2. It operates BOTH planes (`GUI Desktop :99` via `APP_LAUNCH` AND `Terminal/File Sandbox` via `FILE_WRITE`).
+    """
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+    ws = await provider.create(tenant_id="t-dual", engagement_id="e-dual")
+    ws_id = ws.id
+    ws_dir = provider._get_workspace_dir(ws_id)
+    policy = ActionPolicy(workspace_root=str(ws_dir), allow_private_networks=True, max_actions_per_minute=200)
+
+    llm = _AdaptiveFakeLLM([
+        # Step 1 (Plane 1 - GUI Desktop :99): Launch desktop application
+        (
+            "THOUGHT: Launch graphical desktop tool on DISPLAY=:99.\n"
+            "ACTION: APP_LAUNCH\n"
+            "TARGET: x-www-browser\n"
+            'PAYLOAD: {"app_name": "x-www-browser"}\n'
+            "EXPECTED: desktop window opened"
+        ),
+        # Step 2 (Plane 2 - Isolated Terminal/File Sandbox): Write artifact in separate workspace
+        (
+            "THOUGHT: Save output in isolated subagent workspace.\n"
+            "ACTION: FILE_WRITE\n"
+            "TARGET: dual_plane_result.txt\n"
+            'PAYLOAD: {"path": "dual_plane_result.txt", "content": "GUI + Terminal Dual-Plane Verified"}\n'
+            "EXPECTED: file written"
+        ),
+        # Step 3: Complete
+        (
+            "THOUGHT: Both GUI and Terminal steps verified.\n"
+            "ACTION: GOAL_COMPLETE\n"
+            "TARGET: dual_plane_result.txt\n"
+            'PAYLOAD: {"summary": "Completed GUI + Terminal tasks"}\n'
+            "EXPECTED: done"
+        ),
+    ])
+
+    parent_agent = ComputerUseAgent(
+        computer_provider=provider,
+        llm_router=llm,
+        safety=policy,
+        tenant_id="t-dual",
+    )
+    mgr = SubagentTeamworkManager(
+        parent_agent=parent_agent,
+        computer_provider=provider,
+        llm_router=None,
+        safety=policy,
+        tenant_id="t-dual",
+    )
+    mgr.llm_router = llm
+
+    # Notice we do NOT pass workspace_mode — it must default to "branch" (separate workspace)!
+    convs = await mgr.invoke_subagents(
+        ws_id,
+        [
+            {
+                "type_name": "self",
+                "role": "Dual-Plane Subagent",
+                "prompt": "Open a desktop tool on :99 and write dual_plane_result.txt.",
+                "max_steps": 3,
+            }
+        ],
+    )
+    assert len(convs) == 1
+    conv = convs[0]
+    assert conv.workspace_mode == "branch"
+    assert conv.effective_workspace_id != ws_id
+    assert conv.agent_instance.observe_desktop is True
+    assert conv.agent_instance.gui_only is False
+    assert conv.agent_instance.execution_plane == "gui"
+    assert conv.verified is True
+    assert "dual_plane_result.txt" in conv.merged_files
+    assert (ws_dir / "dual_plane_result.txt").read_text(encoding="utf-8") == "GUI + Terminal Dual-Plane Verified"
+
