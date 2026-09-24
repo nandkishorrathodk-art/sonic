@@ -1,4 +1,4 @@
-// SONIC-REDA — Frontend Authentication Helper
+// SONIC — Frontend Authentication Helper
 
 const TOKEN_KEY = "sonic_auth_token";
 const USER_KEY = "sonic_auth_user";

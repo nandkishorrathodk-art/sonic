@@ -1,4 +1,4 @@
-// SONIC-REDA — Workstation TypeScript Definitions
+// SONIC — Workstation TypeScript Definitions
 
 export type SystemStatus = "CONNECTING" | "LIVE" | "DISCONNECTED" | "OFFLINE" | "ERROR";
 

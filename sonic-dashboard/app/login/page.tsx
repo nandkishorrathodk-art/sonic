@@ -313,9 +313,9 @@ function LoginContent() {
       {/* Footer */}
       <footer className="h-14 border-t border-ink-800/60 px-8 flex items-center justify-between text-[11px] font-mono text-muted-dim z-10 backdrop-blur-md bg-ink-950/40">
         <div className="flex items-center gap-2">
-          <span>SONIC-REDA Core v0.2.0</span>
+          <span>SONIC OS v0.2.0</span>
           <span>•</span>
-          <span className="text-slate-400">Autonomous Penetration Architect</span>
+          <span className="text-slate-400">AI-Human Digital Being & Workstation</span>
         </div>
         <div className="flex items-center gap-4">
           <Link href="/landing" className="hover:text-slate-300 transition">

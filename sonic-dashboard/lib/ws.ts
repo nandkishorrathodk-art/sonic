@@ -1,4 +1,4 @@
-// SONIC-REDA — Authenticated WebSocket Client
+// SONIC — Authenticated WebSocket Client
 
 import { getAuthToken } from "./auth";
 import { API_BASE } from "./api";

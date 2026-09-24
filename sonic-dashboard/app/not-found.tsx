@@ -7,7 +7,7 @@ export default function NotFound() {
         <div className="text-7xl font-black text-gradient">404</div>
         <h1 className="text-xl font-semibold text-white">Page not found</h1>
         <p className="text-sm text-muted max-w-md mx-auto">
-          The route you requested does not exist in the SONIC-REDA workstation.
+          The route you requested does not exist in the SONIC workstation.
         </p>
         <Link href="/" className="btn-primary !px-6 !py-2.5 text-xs inline-flex">
           Return to Workstation

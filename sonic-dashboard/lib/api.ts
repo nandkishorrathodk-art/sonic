@@ -1,4 +1,4 @@
-// SONIC-REDA — Unified API Client
+// SONIC — Unified API Client
 
 import { getAuthToken, ensureAuthToken, clearAuth } from "./auth";
 import { SessionItem, normalizeSessionList } from "../types/workstation";
