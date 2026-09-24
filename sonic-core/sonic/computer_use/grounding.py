@@ -282,16 +282,24 @@ def resolve_ui_target(
     allow_landmarks: bool = True,
     screen_width: int | None = None,
     screen_height: int | None = None,
+    perception_bus: Any | None = None,
 ) -> tuple[int, int] | None:
     """Resolves a natural language UI target query to absolute screen coordinates (x, y).
 
     Resolution pipeline:
+    0. In-memory fast path via PerceptionBus if available (< 0.1ms).
     1. Direct numeric coordinate check (if query is already "640,400").
     2. Dynamic Multimodal Grounding Function (vision LLM / ShowUI / OS-Atlas) if provided.
     Strictly forbids falling back to arbitrary mock percentage landmarks or blind clicking.
     """
     if not query:
         return None
+
+    # 0. High-speed in-memory resolution via PerceptionBus
+    if perception_bus is not None and hasattr(perception_bus, "resolve_coordinates"):
+        coords = perception_bus.resolve_coordinates(query)
+        if coords is not None:
+            return coords
 
     if screen_width is not None:
         width = screen_width
@@ -331,10 +339,17 @@ async def resolve_ui_target_async(
     allow_landmarks: bool = False,
     screen_width: int | None = None,
     screen_height: int | None = None,
+    perception_bus: Any | None = None,
 ) -> tuple[int, int] | None:
     """Asynchronous variant of resolve_ui_target supporting coroutine grounding functions."""
     if not query:
         return None
+
+    # 0. High-speed in-memory resolution via PerceptionBus
+    if perception_bus is not None and hasattr(perception_bus, "resolve_coordinates"):
+        coords = perception_bus.resolve_coordinates(query)
+        if coords is not None:
+            return coords
 
     if screen_width is not None:
         width = screen_width

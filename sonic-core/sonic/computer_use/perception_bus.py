@@ -18,6 +18,12 @@ from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Iterable
 
+_RE_SPACES = re.compile(r"\s+")
+_RE_KEBAB = re.compile(r"[\s_]+")
+_RE_SNAKE = re.compile(r"[\s\-]+")
+_RE_COMPACT = re.compile(r"[^a-z0-9]")
+_RE_CAMEL = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?=[A-Z][a-z0-9]|\b)")
+_RE_SEARCH = re.compile(r"\bsearch\b")
 
 ROLE_SYNONYMS: dict[str, tuple[str, ...]] = {
     "button": ("button", "btn", "push-button", "pushbutton", "clickable"),
@@ -267,31 +273,35 @@ class SemanticTargetIndex:
 
         # 1. Exact raw & whitespace-normalized
         results.append((raw, base_conf))
-        norm_spaces = re.sub(r"\s+", " ", raw)
+        norm_spaces = " ".join(raw.split())
         if norm_spaces != raw:
             results.append((norm_spaces, base_conf))
 
         # 2. Slugs
-        kebab = re.sub(r"[\s_]+", "-", norm_spaces)
+        if "_" in norm_spaces:
+            kebab = _RE_KEBAB.sub("-", norm_spaces)
+            snake = _RE_SNAKE.sub("_", norm_spaces)
+        else:
+            kebab = norm_spaces.replace(" ", "-")
+            snake = norm_spaces.replace(" ", "_")
         results.append((kebab, base_conf * 0.98))
-
-        snake = re.sub(r"[\s\-]+", "_", norm_spaces)
         results.append((snake, base_conf * 0.98))
 
-        compact = re.sub(r"[^a-z0-9]", "", norm_spaces)
+        compact = _RE_COMPACT.sub("", norm_spaces)
         if len(compact) >= 2:
             results.append((compact, base_conf * 0.95))
 
         # 3. CamelCase / PascalCase decomposition
-        words = re.findall(r"[A-Z]?[a-z0-9]+|[A-Z]+(?=[A-Z][a-z0-9]|\b)", phrase)
+        words = _RE_CAMEL.findall(phrase)
         if len(words) > 1:
             joined = " ".join(w.lower() for w in words)
-            results.append((joined, base_conf * 0.96))
-            results.append((re.sub(r"[\s_]+", "-", joined), base_conf * 0.95))
-            results.append((re.sub(r"[\s\-]+", "_", joined), base_conf * 0.95))
-            cc_compact = re.sub(r"[^a-z0-9]", "", joined)
-            if len(cc_compact) >= 2:
-                results.append((cc_compact, base_conf * 0.93))
+            if joined != norm_spaces:
+                results.append((joined, base_conf * 0.96))
+                results.append((joined.replace(" ", "-"), base_conf * 0.95))
+                results.append((joined.replace(" ", "_"), base_conf * 0.95))
+                cc_compact = _RE_COMPACT.sub("", joined)
+                if len(cc_compact) >= 2:
+                    results.append((cc_compact, base_conf * 0.93))
 
         # 4. Stripping placeholder / action prefixes
         stripped_variants: list[str] = []
@@ -319,9 +329,9 @@ class SemanticTargetIndex:
                 if stripped:
                     stripped_variants.append(stripped)
                     results.append((stripped, base_conf * 0.95))
-                    results.append((re.sub(r"[\s_]+", "-", stripped), base_conf * 0.94))
-                    results.append((re.sub(r"[\s\-]+", "_", stripped), base_conf * 0.94))
-                    sc = re.sub(r"[^a-z0-9]", "", stripped)
+                    results.append((stripped.replace(" ", "-"), base_conf * 0.94))
+                    results.append((stripped.replace(" ", "_"), base_conf * 0.94))
+                    sc = _RE_COMPACT.sub("", stripped)
                     if len(sc) >= 2:
                         results.append((sc, base_conf * 0.92))
 
@@ -337,8 +347,8 @@ class SemanticTargetIndex:
                 if not base_item.endswith(syn) and not base_item.startswith(syn):
                     q1 = f"{base_item} {syn}"
                     results.append((q1, base_conf * 0.95))
-                    results.append((re.sub(r"[\s_]+", "-", q1), base_conf * 0.94))
-                    results.append((re.sub(r"[\s\-]+", "_", q1), base_conf * 0.94))
+                    results.append((q1.replace(" ", "-"), base_conf * 0.94))
+                    results.append((q1.replace(" ", "_"), base_conf * 0.94))
                     q2 = f"{syn} {base_item}"
                     results.append((q2, base_conf * 0.93))
                 elif base_item.endswith(f" {syn}"):
@@ -349,7 +359,7 @@ class SemanticTargetIndex:
         # 6. Special role aliases
         if role_clean in ("search", "searchbar", "searchbox") or (
             role_clean in ("input", "entry", "textbox", "text", "combobox")
-            and re.search(r"\bsearch\b", norm_spaces)
+            and "search" in norm_spaces
         ):
             for search_alias in (
                 "searchbar",
@@ -384,32 +394,26 @@ class SemanticTargetIndex:
             target_attrs = attributes if attributes is not None else match.attributes
 
             candidates: list[tuple[str, float]] = []
-            primary_query = query or match.query
-            if primary_query:
-                candidates.append((primary_query, match.confidence))
+            seen_phrases: set[str] = set()
+
+            def _add_candidate(text: Any, conf: float) -> None:
+                if text:
+                    s = str(text).strip()
+                    s_lower = s.lower()
+                    if s_lower and s_lower not in seen_phrases:
+                        seen_phrases.add(s_lower)
+                        candidates.append((s, conf))
+
+            _add_candidate(query or match.query, match.confidence)
 
             if target_attrs:
-                aria = target_attrs.get("aria-label") or target_attrs.get("aria_label")
-                if aria:
-                    candidates.append((str(aria), match.confidence * 0.96))
-                ph = target_attrs.get("placeholder")
-                if ph:
-                    candidates.append((str(ph), match.confidence * 0.95))
-                title = target_attrs.get("title")
-                if title:
-                    candidates.append((str(title), match.confidence * 0.93))
-                val = target_attrs.get("value")
-                if val:
-                    candidates.append((str(val), match.confidence * 0.92))
-                cid = target_attrs.get("id")
-                if cid:
-                    candidates.append((str(cid), match.confidence * 0.90))
-                cname = target_attrs.get("name")
-                if cname:
-                    candidates.append((str(cname), match.confidence * 0.90))
-                selector = target_attrs.get("selector")
-                if selector:
-                    candidates.append((str(selector), match.confidence * 0.88))
+                _add_candidate(target_attrs.get("aria-label") or target_attrs.get("aria_label"), match.confidence * 0.96)
+                _add_candidate(target_attrs.get("placeholder"), match.confidence * 0.95)
+                _add_candidate(target_attrs.get("title"), match.confidence * 0.93)
+                _add_candidate(target_attrs.get("value"), match.confidence * 0.92)
+                _add_candidate(target_attrs.get("id"), match.confidence * 0.90)
+                _add_candidate(target_attrs.get("name"), match.confidence * 0.90)
+                _add_candidate(target_attrs.get("selector"), match.confidence * 0.88)
 
             for phrase, conf in candidates:
                 for key_str, k_conf in self._generate_keys_for_phrase(
@@ -826,8 +830,6 @@ class PerceptionBus:
                 state_version=version,
                 source_override=source,
             )
-            for key, match in self._semantic_index.items(state_version=version):
-                self._targets[(version, key)] = match
             return count
 
     def resolve(self, query: str) -> TargetMatch | None:
