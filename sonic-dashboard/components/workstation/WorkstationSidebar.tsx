@@ -5,17 +5,9 @@ import {
   PanelLeftClose,
   Plus,
   GitBranch,
-  Compass,
   Share2,
-  FileCheck2,
-  Dna,
   Trash2,
   Loader2,
-  ShieldCheck,
-  Monitor,
-  BrainCircuit,
-  FlaskConical,
-  Cpu,
 } from "lucide-react";
 import Link from "next/link";
 import { BrandMark } from "../common/BrandMark";
@@ -35,14 +27,7 @@ interface WorkstationSidebarProps {
 
 const NAV = [
   { href: "/", label: "Workstation", icon: <MessageSquare className="w-4 h-4 text-secondary-400" /> },
-  { href: "/missions", label: "Missions", icon: <Compass className="w-4 h-4 text-primary-400" /> },
-  { href: "/computer", label: "Computer", icon: <Monitor className="w-4 h-4 text-secondary-400" /> },
-  { href: "/research", label: "Research", icon: <BrainCircuit className="w-4 h-4 text-accent-400" /> },
-  { href: "/experiments", label: "Experiments", icon: <FlaskConical className="w-4 h-4 text-primary-400" /> },
   { href: "/graph", label: "Graph Memory", icon: <Share2 className="w-4 h-4 text-accent-400" /> },
-  { href: "/evidence", label: "Evidence Board", icon: <FileCheck2 className="w-4 h-4 text-success" /> },
-  { href: "/agents", label: "Agents", icon: <Cpu className="w-4 h-4 text-secondary-400" /> },
-  { href: "/security-lab", label: "Security Lab", icon: <ShieldCheck className="w-4 h-4 text-danger" /> },
 ];
 
 export function WorkstationSidebar({
