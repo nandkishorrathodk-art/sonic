@@ -57,12 +57,12 @@ PRESET_QUESTIONS: dict[str, dict[str, dict[str, Any]]] = {
             "criteria": {
                 "gui": (
                     "gui visual visually screen screenshot desktop window browser click button "
-                    "scroll drag ui page website open kholo dikhao ब्राउज़र स्क्रीन विंडो खोलो दिखाओ"
+                    "scroll drag ui page website open"
                 ),
                 "headless": (
                     "headless terminal cli command bash shell script directory mkdir author "
                     "source code file curl netstat ss port ports endpoints background git "
-                    "pytest test audit server likho banao टर्मिनल कोड फाइल कमांड"
+                    "pytest test audit server"
                 ),
             },
         },
@@ -152,19 +152,14 @@ class LayaDecisionResult:
         return str(ans.get("label") or ans.get("choice") or default)
 
 
-def _detect_script_and_model(text: str, reference_multilingual_vocab: set[str] | None = None) -> tuple[str, str]:
-    """Detect script and language routing (`english` vs `multilingual`)."""
+def _detect_script_and_model(text: str) -> tuple[str, str]:
+    """Detect script family via Unicode character properties (`english` vs `multilingual`)."""
     for ch in text:
-        if ch.isalpha():
+        if ch.isalpha() and ord(ch) > 127:
             name = unicodedata.name(ch, "")
             if "DEVANAGARI" in name:
-                return "hi-Deva", "multilingual"
-            if ord(ch) > 127:
-                return "mul", "multilingual"
-    if reference_multilingual_vocab:
-        tokens = {t.lower() for t in _TOKEN_RE.findall(text)}
-        if tokens & reference_multilingual_vocab:
-            return "hi-Latn", "multilingual"
+                return "hi", "multilingual"
+            return "mul", "multilingual"
     return "en", "english"
 
 
@@ -221,12 +216,6 @@ class LayaSystem1Engine:
     PRESET_QUESTIONS = PRESET_QUESTIONS
     DEFAULT_SCALE_ANCHORS = DEFAULT_SCALE_ANCHORS
 
-    _ROMAN_HI_VOCAB = frozenset({
-        "karo", "kholo", "banao", "chalao", "dekho", "likho", "hatao",
-        "bhai", "kya", "kaise", "mera", "apna", "par", "mein", "se", "ko",
-        "dikhao", "band", "chalu", "naya", "purana",
-    })
-
     def __init__(
         self,
         api_url: str | None = None,
@@ -276,7 +265,7 @@ class LayaSystem1Engine:
         Evaluate typed questions (`choice`, `score`, `noul`) over `state` in a single pass.
         """
         state_text = state if isinstance(state, str) else str(state)
-        lang_code, routed_model = _detect_script_and_model(state_text, self._ROMAN_HI_VOCAB)
+        lang_code, routed_model = _detect_script_and_model(state_text)
         chosen_model = model or routed_model
 
         # 1. Remote HTTP `laya-serve` endpoint (0 MB Laptop RAM)

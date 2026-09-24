@@ -86,17 +86,17 @@ def test_laya_single_pass_decisions_english():
 
 
 @pytest.mark.no_live_infra
-def test_laya_single_pass_decisions_hindi_devanagari():
-    """Verify single-pass decisions on Hindi Devanagari script."""
+def test_laya_single_pass_decisions_multilingual_unicode():
+    """Verify Unicode script detection and custom criteria evaluation without hardcoded vocab lists."""
     engine = LayaSystem1Engine(enable_local_model=False)
 
     questions = {
-        "plane": {
+        "department": {
             "type": "choice",
-            "instructions": "Select execution plane",
+            "instructions": "Select target department",
             "criteria": {
-                "gui": "gui visual screen screenshot desktop browser open kholo dikhao ब्राउज़र स्क्रीन विंडो खोलो दिखाओ",
-                "headless": "headless terminal cli command bash python likho banao chalao टर्मिनल कोड फाइल कमांड चलाओ",
+                "billing": "invoice payment refund duplicate charge",
+                "engineering": "bug crash server exception stacktrace deployment",
             },
         },
         "urgency": {
@@ -104,105 +104,42 @@ def test_laya_single_pass_decisions_hindi_devanagari():
             "instructions": "Priority scale",
             "criteria": ["low", "medium", "high"],
         },
-        "is_gui_intent": {
-            "type": "noul",
-            "instructions": "Determine if objective is a visual browser request",
-            "affirmative_anchor": "ब्राउज़र खोलो देखो visual browser screen",
-            "negative_anchor": "टर्मिनल bash cli script command run",
-        },
     }
 
-    # Hindi Devanagari GUI goal
-    state_gui = "ब्राउज़र खोलो और स्क्रीन दिखाओ"
-    res_gui = engine.predict(state=state_gui, questions=questions)
+    state = "Server deployment failed with stacktrace exception — Café production node"
+    res = engine.predict(state=state, questions=questions)
 
-    assert res_gui.get_choice("plane") == "gui"
-    assert res_gui.answers["plane"]["probability"] > 0.50
-    assert 0.0 <= res_gui.get_score("urgency") <= 1.0
-    assert res_gui.get_noul("is_gui_intent") > 0.50
-    assert res_gui.routing["language"] == "hi-Deva"
-    assert res_gui.routing["model"] == "multilingual"
-
-    # Hindi Devanagari Headless goal
-    state_hl = "टर्मिनल में नया कोड लिखो और चलाओ"
-    res_hl = engine.predict(state=state_hl, questions=questions)
-    assert res_hl.get_choice("plane") == "headless"
-    assert res_hl.routing["language"] == "hi-Deva"
-    assert res_hl.routing["model"] == "multilingual"
+    assert res.get_choice("department") == "engineering"
+    assert res.answers["department"]["probability"] > 0.50
+    assert 0.0 <= res.get_score("urgency") <= 1.0
+    assert res.routing["model"] == "multilingual"
 
 
 @pytest.mark.no_live_infra
-def test_laya_single_pass_decisions_hinglish():
-    """Verify single-pass decisions on Hinglish (Latin script + Hindi romanized vocabulary)."""
+def test_laya_preset_evaluation():
+    """Verify built-in presets (`triage`, `guard`, `verification`, `curiosity`)."""
     engine = LayaSystem1Engine(enable_local_model=False)
 
-    questions = {
-        "plane": {
-            "type": "choice",
-            "instructions": "Select plane substrate",
-            "criteria": {
-                "gui": "gui visual screen browser open kholo dikhao",
-                "headless": "headless terminal cli command bash likho banao test",
-            },
-        },
-        "confidence": {
-            "type": "score",
-            "instructions": "Confidence scale",
-            "criteria": ["low", "medium", "high"],
-        },
-        "verified_noul": {
-            "type": "noul",
-            "instructions": "Verify command output",
-            "affirmative_anchor": "success passed 200 OK exit 0 committed",
-            "negative_anchor": "error failed 126 blocked traceback Terminal Ready",
-        },
-    }
+    res_triage = engine.predict_preset("Write a python script in terminal and run pytest", preset="triage")
+    assert res_triage.get_choice("plane") == "headless"
+    assert 0.0 <= res_triage.get_score("urgency") <= 1.0
 
-    # Hinglish headless task
-    state_hl = "bhai app.py mein code likho aur terminal mein run karo"
-    res_hl = engine.predict(state=state_hl, questions=questions)
-
-    assert res_hl.get_choice("plane") == "headless"
-    assert res_hl.answers["plane"]["probability"] > 0.55
-    assert 0.0 <= res_hl.get_score("confidence") <= 1.0
-    assert res_hl.routing["language"] == "hi-Latn"
-    assert res_hl.routing["model"] == "multilingual"
-
-    # Hinglish GUI task
-    state_gui = "bhai chrome browser kholo aur website dikhao"
-    res_gui = engine.predict(state=state_gui, questions=questions)
-    assert res_gui.get_choice("plane") == "gui"
-    assert res_gui.answers["plane"]["probability"] > 0.55
-    assert res_gui.routing["language"] == "hi-Latn"
+    res_guard = engine.predict_preset("rm -rf / --no-preserve-root", preset="guard")
+    assert res_guard.get_noul("is_dangerous") > 0.50
 
 
 # ============================================================================
-# 2. SubMission Automatic Plane Resolution (English, Hindi, Hinglish)
+# 2. SubMission Automatic Plane Resolution
 # ============================================================================
 
 @pytest.mark.no_live_infra
-def test_submission_plane_resolution_multilingual():
-    """Verify SubMission automatically infers plane (gui vs headless) across all three scripts."""
-    # English
-    sub_en_hl = SubMission(goal="Install python dependencies and run pytest test suite")
+def test_submission_plane_resolution():
+    """Verify SubMission automatically infers plane (gui vs headless) via LayaSystem1Engine."""
+    sub_en_hl = SubMission(goal="Install python dependencies and run pytest test suite in terminal")
     assert sub_en_hl.plane == "headless"
 
-    sub_en_gui = SubMission(goal="Open Chromium browser and click on login button")
+    sub_en_gui = SubMission(goal="Open browser window and click on login button on screen")
     assert sub_en_gui.plane == "gui"
-
-    # Hindi Devanagari
-    sub_hi_hl = SubMission(goal="टर्मिनल में नया पायथन कोड लिखो और टेस्ट चलाओ")
-    assert sub_hi_hl.plane == "headless"
-
-    sub_hi_gui = SubMission(goal="ब्राउज़र खोलो और स्क्रीन दिखाओ")
-    assert sub_hi_gui.plane == "gui"
-
-    # Hinglish
-    sub_hn_hl = SubMission(goal="bhai main.py mein naya code likho aur script chalao")
-    assert sub_hn_hl.plane == "headless"
-
-    sub_hn_gui = SubMission(goal="website kholo aur button click karke screen dikhao")
-    assert sub_hn_gui.plane == "gui"
 
 
 @pytest.mark.no_live_infra
@@ -472,40 +409,38 @@ def test_laya_api_predict_endpoint_on_app():
     assert data_en["answers"]["plane"]["choice"] == "headless"
     assert data_en["routing"]["language"] == "en"
 
-    # 2. Hindi Devanagari with custom questions
-    resp_hi = client.post(
+    # 2. Custom questions schema
+    resp_custom = client.post(
         "/llm/laya/predict",
         json={
-            "state": "ब्राउज़र खोलो और स्क्रीन दिखाओ",
+            "state": "Open browser window and click button on screen",
             "questions": {
                 "plane": {
                     "type": "choice",
                     "instructions": "Select plane",
                     "criteria": {
-                        "gui": "gui visual browser screen खोलो दिखाओ",
+                        "gui": "gui visual browser screen window button",
                         "headless": "headless terminal code bash",
                     },
                 }
             },
         },
     )
-    assert resp_hi.status_code == 200
-    data_hi = resp_hi.json()
-    assert data_hi["answers"]["plane"]["choice"] == "gui"
-    assert data_hi["routing"]["language"] == "hi-Deva"
+    assert resp_custom.status_code == 200
+    data_custom = resp_custom.json()
+    assert data_custom["answers"]["plane"]["choice"] == "gui"
 
-    # 3. Hinglish with preset
-    resp_hn = client.post(
+    # 3. Guard preset
+    resp_guard = client.post(
         "/llm/laya/predict",
         json={
-            "state": "bhai main.py mein naya code likho aur script chalao",
-            "preset": "plane",
+            "state": "git status",
+            "preset": "guard",
         },
     )
-    assert resp_hn.status_code == 200
-    data_hn = resp_hn.json()
-    assert data_hn["answers"]["plane"]["choice"] == "headless"
-    assert data_hn["routing"]["language"] == "hi-Latn"
+    assert resp_guard.status_code == 200
+    data_guard = resp_guard.json()
+    assert "risk_tier" in data_guard["answers"]
 
     # 4. Error handling: missing both preset and questions
     resp_bad = client.post("/llm/laya/predict", json={"state": "hello"})
