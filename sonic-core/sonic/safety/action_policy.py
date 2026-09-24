@@ -104,6 +104,9 @@ class ActionPolicy:
         # Method-invention (Phase B, AIOSR): synthesizes a novel technique and
         # runs its probe in-sandbox (same structural confinement as TOOL_RUN).
         "METHOD_INVENT",
+        # Dynamic Teamwork & Subagent delegation (each spawned subagent inherits a cloned ActionPolicy)
+        "DEFINE_SUBAGENT", "INVOKE_SUBAGENT", "SEND_MESSAGE", "MANAGE_SUBAGENTS",
+        "GOAL_COMPLETE",
     })
 
     def __init__(

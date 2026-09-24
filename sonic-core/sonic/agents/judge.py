@@ -1,19 +1,22 @@
 """
-SONIC-REDA — Judge Agent (Planner-Worker-Judge Swarm)
-======================================================
+SONIC — Independent Judge Agent (Planner-Worker-Judge Verification)
+===================================================================
 Independent Judge Agent that validates worker outputs, reproduction artifacts,
-and claimed findings before the Planner (BossAgent) accepts them.
+and execution receipts before the Planner (BossAgent) or Teamwork Runtime accepts them.
 
-Mandate & Prohibitions:
-    1. Zero Success-by-Decree (Rule 15): No claim is accepted without empirical verification.
-    2. Anti-Self-Attestation (Rule 1): The discovering worker agent cannot judge its own work.
-    3. Independent Falsification: Actively attempts to falsify or reproduce candidate claims
-       in the sandbox environment.
+Strict Mandate & Prohibitions (AGENTS.md):
+    1. Zero Hardcoded Application/Binary Names (Rule 1): Never match or invoke hardcoded
+       vendor or tool binaries. Inspect workspace state via provider APIs (`status()`, `read_file()`).
+    2. Zero Scripted Puppet Heuristics (Rule 2): Never classify goals via keyword-matching trees
+       (`if "pytest" in goal`, `if "create file" in goal`, etc.). Evaluate strictly from typed
+       execution trace receipts (`exit_code`, `status`, `verification_evidence`, `actual_observation`)
+       and independent verification.
+    3. Zero Silent Failure Masking (Rule 6): No `|| true` or `2>/dev/null`.
+    4. Anti-Self-Attestation: A worker cannot self-certify completion without concrete execution proof.
 """
 
 from __future__ import annotations
 
-import re
 from enum import StrEnum
 from typing import Any
 
@@ -21,9 +24,6 @@ from pydantic import BaseModel, Field
 
 from sonic.computer_use.models_boss import SubMission, SubMissionResult
 from sonic.evidence.independent_verifier import AdversarialReviewer, IndependentVerifier
-from sonic.evidence.models import (
-    ProvenancedFinding,
-)
 from sonic.evidence.reproduction_engine import ReproductionEngine
 from sonic.logger import get_logger
 
@@ -53,12 +53,13 @@ class JudgeEvaluation(BaseModel):
     reproduced_output: str = ""
     self_attestation_rejected: bool = False
     evidence_items: list[str] = Field(default_factory=list)
+    remediation_blueprint: dict[str, Any] = Field(default_factory=dict)
 
 
 class JudgeAgent:
-    """
-    Dedicated Judge Agent for the Swarm architecture.
-    Validates SubMissionResult from workers before acceptance by BossAgent.
+    """Independent Judge Agent for the SONIC multi-agent architecture.
+    Validates `SubMissionResult` strictly from empirical execution receipts and provider state,
+    with zero keyword-matching heuristics or hardcoded binary names.
     """
 
     def __init__(
@@ -86,13 +87,10 @@ class JudgeAgent:
         result: SubMissionResult,
         worker_agent_id: str = "worker",
     ) -> JudgeEvaluation:
-        """
-        Independently evaluate a worker's SubMissionResult.
-        Enforces empirical verification and the anti-self-attestation rule.
-        """
-        traces = result.traces or []
+        """Independently evaluate a worker's `SubMissionResult` from ground-truth execution receipts."""
+        traces = list(result.traces or [])
 
-        # 1. Total Failure Detection (All traces failed or exit 126/127/1)
+        # 1. Total Execution Failure Check (Zero successful traces and non-zero exit codes)
         if not result.success and not any(_t_val(t, "exit_code", 1) == 0 for t in traces):
             all_errors = [
                 str(_t_val(t, "actual_observation") or _t_val(t, "observation") or "")
@@ -102,37 +100,44 @@ class JudgeAgent:
             return JudgeEvaluation(
                 verdict=JudgeVerdict.FALSIFIED,
                 confidence=0.95,
-                notes=f"Worker produced no successful execution traces. Errors: {err_summary[:200]}",
+                notes=f"Worker produced no successful execution receipts. Errors: {err_summary[:200]}",
                 self_attestation_rejected=False,
+                remediation_blueprint={
+                    "fix_goal": f"Resolve execution errors for objective: {sub_mission.goal}",
+                    "error_context": err_summary[:300],
+                },
             )
 
-        # 2. Extract Concrete Execution Evidence
+        # 2. Extract Concrete Ground-Truth Receipts from Traces
         worker_self_verified = any(
             str(_t_val(t, "status", "")).upper() in ("VERIFIED", "SUCCESS")
             for t in traces
         ) or bool(result.success)
+
         has_concrete_proof = False
-        valid_commands = []
+        evidence_items: list[str] = []
+        written_files: list[str] = []
+
         for t in traces:
             exit_c = _t_val(t, "exit_code", None)
             obs = str(_t_val(t, "actual_observation") or _t_val(t, "observation") or "").strip()
-            target = str(_t_val(t, "target_resource") or _t_val(t, "target") or "")
-            action = str(_t_val(t, "action_type") or "")
+            target = str(_t_val(t, "target_resource") or _t_val(t, "target") or "").strip()
+            action_raw = _t_val(t, "action_type", "")
+            action = action_raw.value if hasattr(action_raw, "value") else str(action_raw)
             verif_ev = str(_t_val(t, "verification_evidence", "")).strip()
             t_status = str(_t_val(t, "status", "")).upper()
 
-            # Exclude Fail-Closed errors, provider crashes, and failed executions from proof
-            if any(marker in obs for marker in ("FAIL-CLOSED", "Failed to launch GUI", "Exit 126", "Error 126", "ConnectionRefused")):
-                continue
-            if t_status == "FAILED" or (exit_c is not None and exit_c != 0):
+            if t_status in ("FAILED", "BLOCKED") or (exit_c is not None and exit_c != 0):
                 continue
 
-            if (exit_c == 0 and obs) or (exit_c is None and obs):
+            if (exit_c == 0 and (obs or verif_ev)) or (exit_c is None and (obs or verif_ev)):
                 has_concrete_proof = True
-                if "TERMINAL" in action or "EXEC" in action:
-                    valid_commands.append(target)
+                if target:
+                    evidence_items.append(f"{action}:{target[:120]}")
+                if action in ("FILE_WRITE", "FILE_EDIT", "FILE_CREATE") and target:
+                    written_files.append(target)
 
-        # Anti-Self-Attestation Check:
+        # 3. Anti-Self-Attestation Gate
         if worker_self_verified and not has_concrete_proof:
             logger.warning(
                 "judge_self_attestation_rejected",
@@ -142,189 +147,48 @@ class JudgeAgent:
             return JudgeEvaluation(
                 verdict=JudgeVerdict.FALSIFIED,
                 confidence=1.0,
-                notes="Self-attestation rejected: Worker declared status='VERIFIED' without concrete, reproducible sandbox proof.",
+                notes="Self-attestation rejected: Worker claimed completion without concrete execution receipts.",
                 self_attestation_rejected=True,
+                remediation_blueprint={
+                    "fix_goal": f"Produce verifiable execution receipts for: {sub_mission.goal}",
+                },
             )
 
-        # 3. Security Vulnerability Reproduction Check:
-        # If candidate discoveries mention CVE, SQLi, XSS, RCE, IDOR, open ports, etc.
-        vuln_markers = ("sqli", "sql injection", "xss", "rce", "cve-", "idor", "open port", "flag{", "bypass", "vulnerability")
-        combined_findings = (result.findings_summary + " " + " ".join(result.key_discoveries)).lower()
-        if any(m in combined_findings for m in vuln_markers):
-            from sonic.evidence.models import FindingSeverity
-            finding = ProvenancedFinding(
-                tenant_id="default",
-                engagement_id="swarm-eval",
-                target=workspace_id,
-                vulnerability_class="Candidate Swarm Finding",
-                title=result.findings_summary[:120],
-                description=result.findings_summary or "Candidate finding discovered by worker",
-                severity=FindingSeverity.MEDIUM,
-                poc="; ".join(valid_commands[:3]) if valid_commands else "",
-                created_by_agent=worker_agent_id,
-            )
-
-            # If there's an executable PoC command, test re-execution via computer provider
-            if valid_commands and self.computer and hasattr(self.computer, "terminal"):
+        # 4. Independent File Artifact Verification (verify files written during trace actually exist on disk)
+        if written_files and self.computer and hasattr(self.computer, "read_file"):
+            for fpath in written_files:
                 try:
-                    reprod_cmd = valid_commands[-1]
-                    re_exec = await self.computer.terminal(workspace_id, reprod_cmd)
-                    re_exit = getattr(re_exec, "exit_code", 1)
-                    re_obs = str(getattr(re_exec, "stdout", "") or getattr(re_exec, "stderr", ""))
-                    if re_exit == 0:
-                        v_res = self.independent_verifier.process_verification_result(
-                            finding=finding,
-                            verifier_agent_id=self.judge_id,
-                            is_reproduced=True,
-                            notes=f"Re-execution of PoC '{reprod_cmd[:60]}' confirmed exit 0.",
-                        )
-                        return JudgeEvaluation(
-                            verdict=JudgeVerdict.CONFIRMED,
-                            confidence=0.95,
-                            notes=v_res.notes,
-                            reproduction_exit_code=0,
-                            reproduced_output=re_obs[:300],
-                            evidence_items=[reprod_cmd],
-                        )
-                    else:
-                        v_res = self.independent_verifier.process_verification_result(
-                            finding=finding,
-                            verifier_agent_id=self.judge_id,
-                            is_reproduced=False,
-                            notes=f"Independent re-execution of PoC failed (exit {re_exit}).",
-                        )
-                        return JudgeEvaluation(
-                            verdict=JudgeVerdict.FALSIFIED,
-                            confidence=0.85,
-                            notes=v_res.notes,
-                            reproduction_exit_code=re_exit,
-                            reproduced_output=re_obs[:300],
-                        )
-                except Exception as ex:
-                    logger.warning("judge_poc_reproduction_error", error=str(ex))
-
-        # 4. Unit / Integration Test Suite Check:
-        # If the goal explicitly specifies running unit tests (e.g. pytest, unit test)
-        goal_lower = sub_mission.goal.lower()
-        if any(w in goal_lower for w in ("pytest", "unit test", "run tests", "test suite")):
-            test_success = False
-            for t in traces:
-                obs = str(_t_val(t, "actual_observation") or _t_val(t, "observation") or "").lower()
-                exit_c = _t_val(t, "exit_code", None)
-                if exit_c == 0 and bool(re.search(r"\b(passed|ok|success|\d+\s+passed)\b", obs)):
-                    if not any(f in obs for f in ("failed", "error", "traceback", "assertionerror")):
-                        test_success = True
-                        break
-                elif any(f in obs for f in ("failed", "error", "traceback", "assertionerror")):
-                    test_success = False
-
-            if not test_success:
-                return JudgeEvaluation(
-                    verdict=JudgeVerdict.FALSIFIED,
-                    confidence=0.9,
-                    notes="Testing objective unverified: No passing test output (passed/ok) detected in trace observations.",
-                )
-
-        # 5. File Creation / Modification Check:
-        if any(w in goal_lower for w in ("create file", "create folder", "write file", "author", "evidence file")):
-            file_names = re.findall(r'[\w\-./]+\.(?:py|md|txt|json|sh|yaml|yml)', sub_mission.goal)
-            if file_names and self.computer and hasattr(self.computer, "read_file"):
-                for fname in file_names:
-                    try:
-                        content = await self.computer.read_file(workspace_id, fname)
-                        if not content:
-                            return JudgeEvaluation(
-                                verdict=JudgeVerdict.FALSIFIED,
-                                confidence=0.9,
-                                notes=f"Claimed file '{fname}' was not found or is empty in workspace (Rule 15 violation).",
-                            )
-                    except Exception:
+                    content = await self.computer.read_file(workspace_id, fpath)
+                    if content is None or content == "":
                         return JudgeEvaluation(
                             verdict=JudgeVerdict.FALSIFIED,
                             confidence=0.9,
-                            notes=f"Error reading claimed file '{fname}' from workspace.",
+                            notes=f"File artifact '{fpath}' recorded in trace is missing or empty on disk.",
+                            remediation_blueprint={
+                                "fix_goal": f"Ensure '{fpath}' is properly written and non-empty.",
+                            },
                         )
+                except Exception as exc:
+                    return JudgeEvaluation(
+                        verdict=JudgeVerdict.FALSIFIED,
+                        confidence=0.9,
+                        notes=f"Independent verification failed reading '{fpath}': {exc}",
+                        remediation_blueprint={
+                            "fix_goal": f"Fix file path or write error for '{fpath}'.",
+                        },
+                    )
 
-        # 6. Workstation Application & Desktop Window Check (Rule 5 & Rule 7):
-        is_window_inspection_only = any(
-            marker in goal_lower for marker in ("wmctrl", "list windows", "confirm active session windows", "inspect windows", "check windows", "xwininfo")
-        )
-        is_gui_mission = getattr(sub_mission, "plane", "") == "gui" or any(
-            w in goal_lower for w in ("desktop", "browser", "window", "gui", "open application", "launch application")
-        )
-        if is_gui_mission:
-            has_gui_action = any(
-                str(_t_val(t, "action_type", "")).startswith("GUI_")
-                or str(_t_val(t, "action_type", "")) == "APP_LAUNCH"
-                or ("nohup" in str(_t_val(t, "target_resource", "")).lower() and any(app in str(_t_val(t, "target_resource", "")).lower() for app in ("terminal", "mousepad", "chrome", "xterm", "thunar", "editor")))
-                or ("nohup" in str(_t_val(t, "payload", "")).lower() and any(app in str(_t_val(t, "payload", "")).lower() for app in ("terminal", "mousepad", "chrome", "xterm", "thunar", "editor")))
-                for t in traces
-            )
-            has_wmctrl_exec = any(
-                ("wmctrl" in str(_t_val(t, "target_resource", "")).lower() or "wmctrl" in str(_t_val(t, "payload", "")).lower() or "wmctrl" in str(_t_val(t, "actual_observation", "")).lower())
-                and _t_val(t, "exit_code", 0) == 0
-                for t in traces
-            )
-            gui_verified = has_gui_action or (is_window_inspection_only and has_wmctrl_exec)
-            if self.computer and hasattr(self.computer, "terminal"):
-                try:
-                    wm_res = await self.computer.terminal(workspace_id, "DISPLAY=:99 wmctrl -l 2>/dev/null | grep -v ' -1 '")
-                    open_wins = [line for line in (getattr(wm_res, "stdout", "") or "").splitlines() if line.strip()]
-                    if open_wins:
-                        gui_verified = True
-                except Exception:
-                    pass
-
-            if not gui_verified:
-                return JudgeEvaluation(
-                    verdict=JudgeVerdict.FALSIFIED,
-                    confidence=0.85,
-                    notes="GUI desktop interaction unverified: No application window or visual action was detected on Display :99.",
-                )
-
-        # 7. Default Grounded Verdict (with goal-relevance check — H3 audit fix)
+        # 5. Confirmed Grounded Verdict
         if has_concrete_proof and result.success:
-            # Extract meaningful keywords from the goal (>= 3 chars, not stopwords)
-            _stopwords = frozenset({
-                "the", "and", "for", "with", "from", "that", "this", "into",
-                "run", "use", "all", "any", "are", "was", "not", "has", "had",
-                "its", "can", "will", "should", "must", "may", "via", "using",
-            })
-            goal_keywords = {
-                w for w in re.findall(r"[a-z0-9_./:-]+", goal_lower)
-                if len(w) >= 3 and w not in _stopwords
-            }
-            # Check that at least one valid command is related to the goal
-            goal_relevant = False
-            if not goal_keywords:
-                goal_relevant = True  # Degenerate goal — cannot filter
-            else:
-                combined_cmd_text = " ".join(valid_commands).lower()
-                combined_findings = (
-                    result.findings_summary + " " + " ".join(result.key_discoveries)
-                ).lower()
-                for kw in goal_keywords:
-                    if kw in combined_cmd_text or kw in combined_findings:
-                        goal_relevant = True
-                        break
-
-            if goal_relevant:
-                return JudgeEvaluation(
-                    verdict=JudgeVerdict.CONFIRMED,
-                    confidence=0.85,
-                    notes="Empirical execution verified: Non-trivial command executed with exit 0 and observations.",
-                    evidence_items=valid_commands,
-                )
-            else:
-                return JudgeEvaluation(
-                    verdict=JudgeVerdict.INCONCLUSIVE,
-                    confidence=0.6,
-                    notes="Traces contain successful commands but none are relevant to the sub-mission goal.",
-                    evidence_items=valid_commands,
-                )
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.CONFIRMED,
+                confidence=0.9,
+                notes="Independent verification confirmed concrete execution receipts with exit code 0.",
+                evidence_items=evidence_items,
+            )
 
         return JudgeEvaluation(
             verdict=JudgeVerdict.INCONCLUSIVE,
             confidence=0.5,
-            notes="Trace execution lacked sufficient independent reproduction evidence.",
+            notes="Trace execution lacked sufficient independent reproduction receipts.",
         )

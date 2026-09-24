@@ -3143,6 +3143,13 @@ class ComputerUseAgent:
                 self._inject_replan(goal=str(actual_obs_str))
             return trace
 
+        _display_lease_lock = None
+        if str(action_type.value).startswith(("GUI_", "APP_")):
+            from sonic.computer_use.teamwork import DisplayLeaseManager
+
+            _display_lease_lock = DisplayLeaseManager.get_lock(workspace_id)
+            await _display_lease_lock.acquire()
+
         try:
             if action_type == ComputerActionType.GUI_CLICK:
                 if payload.get("x") is None or payload.get("y") is None:
@@ -4520,6 +4527,108 @@ class ComputerUseAgent:
                                 )
                                 recovery_needed = True
 
+            elif action_type == ComputerActionType.DEFINE_SUBAGENT:
+                from sonic.computer_use.teamwork import SubagentTeamworkManager
+
+                if getattr(self, "_teamwork_manager", None) is None:
+                    self._teamwork_manager = SubagentTeamworkManager(
+                        parent_agent=self,
+                        computer_provider=self.computer,
+                        llm_router=self.llm_router,
+                        safety=self.safety,
+                        tenant_id=self.tenant_id,
+                    )
+                sub_name = str(payload.get("name") or target_resource or "").strip()
+                sub_desc = str(payload.get("description") or "")
+                sub_sys = str(payload.get("system_prompt") or "")
+                enable_write = bool(payload.get("enable_write_tools", True))
+                spec = self._teamwork_manager.define_subagent(
+                    name=sub_name,
+                    description=sub_desc,
+                    system_prompt=sub_sys,
+                    enable_write_tools=enable_write,
+                )
+                actual_obs_str = (
+                    f"Defined subagent type '{spec.name}' "
+                    f"(write_tools={spec.enable_write_tools}): {spec.description}"
+                )
+                status = ActionExecutionStatus.VERIFIED
+
+            elif action_type == ComputerActionType.INVOKE_SUBAGENT:
+                from sonic.computer_use.teamwork import SubagentTeamworkManager
+
+                if getattr(self, "_teamwork_manager", None) is None:
+                    self._teamwork_manager = SubagentTeamworkManager(
+                        parent_agent=self,
+                        computer_provider=self.computer,
+                        llm_router=self.llm_router,
+                        safety=self.safety,
+                        tenant_id=self.tenant_id,
+                    )
+                subagents_arg = payload.get("subagents") or payload.get("Subagents")
+                if not subagents_arg:
+                    subagents_arg = [
+                        {
+                            "type_name": str(payload.get("type_name") or "self"),
+                            "role": str(payload.get("role") or target_resource or "Autonomous Subagent"),
+                            "prompt": str(payload.get("prompt") or payload.get("goal") or target_resource or ""),
+                            "requirements": list(payload.get("requirements") or []),
+                            "acceptance_criteria": list(payload.get("acceptance_criteria") or []),
+                            "verification_command": str(payload.get("verification_command") or ""),
+                            "workspace_mode": str(payload.get("workspace_mode") or payload.get("workspace") or "inherit"),
+                            "max_steps": int(payload.get("max_steps") or 12),
+                        }
+                    ]
+                convs = await self._teamwork_manager.invoke_subagents(workspace_id, subagents_arg)
+                summaries = [
+                    f"[{c.conversation_id} | {c.role} | mode={c.workspace_mode} | judge={c.judge_verdict} | rounds={c.correction_rounds_used}]: {c.last_summary}"
+                    for c in convs
+                ]
+                all_verified = all(c.verified for c in convs) if convs else False
+                actual_obs_str = "Subagent Teamwork Results:\n" + "\n".join(summaries)
+                status = ActionExecutionStatus.VERIFIED if all_verified else ActionExecutionStatus.COMPLETED
+
+            elif action_type == ComputerActionType.SEND_MESSAGE:
+                from sonic.computer_use.teamwork import SubagentTeamworkManager
+
+                if getattr(self, "_teamwork_manager", None) is None:
+                    self._teamwork_manager = SubagentTeamworkManager(
+                        parent_agent=self,
+                        computer_provider=self.computer,
+                        llm_router=self.llm_router,
+                        safety=self.safety,
+                        tenant_id=self.tenant_id,
+                    )
+                recipient = str(payload.get("recipient") or payload.get("Recipient") or target_resource or "").strip()
+                msg_text = str(payload.get("message") or payload.get("Message") or "")
+                conv = await self._teamwork_manager.send_message(
+                    conversation_id=recipient,
+                    message=msg_text,
+                    acceptance_criteria=list(payload.get("acceptance_criteria") or []),
+                    verification_command=str(payload.get("verification_command") or ""),
+                )
+                actual_obs_str = (
+                    f"[{conv.conversation_id} | judge={conv.judge_verdict}]: {conv.last_summary}"
+                )
+                status = ActionExecutionStatus.VERIFIED if conv.verified else ActionExecutionStatus.COMPLETED
+
+            elif action_type == ComputerActionType.MANAGE_SUBAGENTS:
+                from sonic.computer_use.teamwork import SubagentTeamworkManager
+
+                if getattr(self, "_teamwork_manager", None) is None:
+                    self._teamwork_manager = SubagentTeamworkManager(
+                        parent_agent=self,
+                        computer_provider=self.computer,
+                        llm_router=self.llm_router,
+                        safety=self.safety,
+                        tenant_id=self.tenant_id,
+                    )
+                m_action = str(payload.get("action") or payload.get("Action") or "list")
+                c_ids = list(payload.get("conversation_ids") or payload.get("ConversationIds") or [])
+                listing = self._teamwork_manager.manage_subagents(action=m_action, conversation_ids=c_ids)
+                actual_obs_str = json.dumps(listing, separators=(",", ":"))
+                status = ActionExecutionStatus.COMPLETED
+
         except Exception as e:
             actual_obs_str = f"Error: {str(e)}"
             recovery_needed = True
@@ -4537,6 +4646,9 @@ class ComputerUseAgent:
                     error_class=err_class,
                     raw_error=str(e),
                 )
+        finally:
+            if _display_lease_lock is not None and _display_lease_lock.locked():
+                _display_lease_lock.release()
 
         # Adaptive Closed-Loop Recovery if needed
         if recovery_needed:

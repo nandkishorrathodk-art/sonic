@@ -652,7 +652,7 @@ After that action executes in the live sandbox, you will receive the updated scr
 
 Respond in this format (no markdown code fences):
 THOUGHT: <Your autonomous chain-of-thought analyzing the live desktop/terminal state and explaining your next action>
-ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_RIGHT_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_HOTKEY|GUI_MOVE|GUI_SCROLL|GUI_DRAG|GUI_SCREENSHOT|GUI_WAIT|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_STATUS|GIT_DIFF|GIT_BRANCH|GIT_COMMIT|GIT_PUSH|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_INSTALL|SERVICE_ACTION|BROWSER_NAVIGATE|BROWSER_CLICK|BROWSER_TYPE|BROWSER_SELECT|BROWSER_KEYPRESS|BROWSER_SCROLL|BROWSER_SCREENSHOT|BROWSER_WAIT|BROWSER_DOWNLOAD|WAIT_FOR_HUMAN|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|METHOD_INVENT|GOAL_COMPLETE>
+ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_RIGHT_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_HOTKEY|GUI_MOVE|GUI_SCROLL|GUI_DRAG|GUI_SCREENSHOT|GUI_WAIT|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_STATUS|GIT_DIFF|GIT_BRANCH|GIT_COMMIT|GIT_PUSH|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_INSTALL|SERVICE_ACTION|BROWSER_NAVIGATE|BROWSER_CLICK|BROWSER_TYPE|BROWSER_SELECT|BROWSER_KEYPRESS|BROWSER_SCROLL|BROWSER_SCREENSHOT|BROWSER_WAIT|BROWSER_DOWNLOAD|WAIT_FOR_HUMAN|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|METHOD_INVENT|DEFINE_SUBAGENT|INVOKE_SUBAGENT|SEND_MESSAGE|MANAGE_SUBAGENTS|GOAL_COMPLETE>
 TARGET: <resource path, application/window name, url, css selector, coordinates, or UI element query>
 PAYLOAD: <json dict, e.g. {{"path": "...", "content": "..."}}, {{"command": "..."}}, {{"url": "..."}}, {{"selector": "...", "text": "..."}}, {{"selector": "...", "value": "..."}}, {{"app_name": "..."}}, {{"key": "..."}}, {{"text": "..."}}>
 For GUI_CLICK/GUI_DOUBLE_CLICK/GUI_RIGHT_CLICK/GUI_MOVE: TARGET can be numeric pixel coordinates like "<x>,<y>" grounded from the current screenshot OR a visual UI element query visible on screen
@@ -672,6 +672,10 @@ For BROWSER_SELECT: TARGET is the <select> css selector and PAYLOAD is {{"select
 For BROWSER_KEYPRESS: PAYLOAD is {{"key": "Enter|Tab|Escape|ArrowDown"}}
 For WAIT_FOR_HUMAN: TARGET is the reason (e.g. "CAPTCHA verification" or "OTP input") and PAYLOAD is {{"reason": "..."}}
 For SECURITY_TOOL: TARGET is the registered tool name and PAYLOAD is {{"tool": "...", "target": "...", "args": "..."}}
+For DEFINE_SUBAGENT: TARGET is the subagent type name and PAYLOAD is {{"name": "...", "description": "...", "system_prompt": "...", "enable_write_tools": true}}
+For INVOKE_SUBAGENT: PAYLOAD is {{"subagents": [{{"type_name": "self", "role": "...", "prompt": "<What is needed, NOT How>", "requirements": ["..."], "acceptance_criteria": ["..."], "verification_command": "...", "workspace_mode": "inherit|branch|share"}}]}}
+For SEND_MESSAGE: TARGET is the subagent `conversationId` and PAYLOAD is {{"recipient": "<conversationId>", "message": "..."}}
+For MANAGE_SUBAGENTS: PAYLOAD is {{"action": "list|kill|kill_all", "conversation_ids": [...]}}
 EXPECTED: <short description of predicted outcome>
 
 EXAMPLE (format and organic thought reference):

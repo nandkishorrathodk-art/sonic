@@ -374,7 +374,11 @@ class ToolsmithLoop:
         try:
             await provider.execute(workspace_id, "mkdir -p /home/sonic/workspace/toolsmith")
             if hasattr(provider, "write_file"):
-                await provider.write_file(workspace_id, path, tool.source)
+                try:
+                    await provider.write_file(workspace_id, path, tool.source)
+                except Exception:
+                    path = f"toolsmith/{tool.name}.py"
+                    await provider.write_file(workspace_id, path, tool.source)
         except Exception as e:
             logger.warning("toolsmith_write_failed", name=tool.name, error=str(e))
             return tool

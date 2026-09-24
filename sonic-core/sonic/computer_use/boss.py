@@ -124,6 +124,8 @@ class BossAgent:
         being_mind: Any = None,
         agent_id: str | None = None,
         requested_plane: str | None = None,
+        tree_depth: int = 0,
+        max_tree_depth: int = 3,
     ):
         self.computer = computer_provider
         self.llm_router = llm_router
@@ -137,6 +139,8 @@ class BossAgent:
         self.being = being
         self.being_mind = being_mind
         self.agent_id = agent_id or (being.being_id if being else f"{tenant_id}-boss")
+        self.tree_depth = max(0, int(tree_depth))
+        self.max_tree_depth = max(1, int(max_tree_depth))
         self.requested_plane = (
             requested_plane.lower().strip()
             if requested_plane
@@ -227,66 +231,12 @@ class BossAgent:
                 logger.debug("task_graph_add_skipped", sub_id=sub.id, error=str(exc))
 
     def _detect_sub_mission_trigger(self, result: SubMissionResult) -> ReplanTrigger | None:
-        """Inspect sub-mission outcome to determine if replanning is warranted.
-
-        Covers full security domain taxonomy (web, API, binary/pwn, network, crypto, CTF flags)
-        with negation guards so phrases like 'not vulnerable to sqli' do not falsely trigger.
-        """
+        """Inspect sub-mission outcome from verified state to determine if replanning is warranted."""
         if not result.success:
             return ReplanTrigger.AGENT_FAILURE
 
-        # Summaries and discovery strings are hypotheses until a worker trace
-        # carries an explicit independent verification status.
-        if not result.evidence_verified:
-            return ReplanTrigger.NEW_ATTACK_SURFACE if any(
-                marker in (result.findings_summary + " " + " ".join(result.key_discoveries)).lower()
-                for marker in ("endpoint", "route", "subdomain", "open port", "service")
-            ) else None
-
-        combined_text = (
-            result.findings_summary + " " + " ".join(result.key_discoveries)
-        ).lower()
-
-        if not combined_text.strip():
-            return None
-
-        vuln_patterns = (
-            # Web & API
-            r"\bsqli\b", r"\bsql injection\b", r"\bxss\b", r"\brce\b", r"\bcve-\d{4}-\d+\b",
-            r"\bssrf\b", r"\bidor\b", r"\bbola\b", r"\bdeserializ", r"\bprototype pollution\b",
-            r"\bpath traversal\b", r"\blfi\b", r"\brfi\b",
-            r"\bauth(?:entication)? bypass\b", r"\bunauthorized access\b",
-            # Binary & Systems
-            r"\bbuffer overflow\b", r"\bmemory corruption\b", r"\brop chain\b",
-            r"\bformat string\b", r"\buse[- ]after[- ]free\b", r"\bheap overflow\b",
-            r"\bprivilege escalation\b", r"\broot shell\b",
-            # Crypto & Secrets
-            r"\bpadding oracle\b", r"\bweak key\b", r"\bprivate key leak\b",
-            r"\bcredential leak\b", r"\bhardcoded secret\b",
-            # Flags & Exploit Confirmation
-            r"\bflag\{[^\}]+\}", r"\bctf\{[^\}]+\}", r"\bhtb\{[^\}]+\}",
-            r"\bexploit confirmed\b", r"\bvulnerability confirmed\b",
-        )
-
-        negation_prefix = r"(?:not|no|never|failed to|unsuccessful|immune to|false positive)\s+(?:\w+\s+){0,3}"
-
-        for pat in vuln_patterns:
-            matches = list(re.finditer(pat, combined_text, flags=re.IGNORECASE))
-            for m in matches:
-                start_idx = m.start()
-                preceding_text = combined_text[max(0, start_idx - 40):start_idx]
-                if re.search(negation_prefix + r"$", preceding_text, flags=re.IGNORECASE):
-                    continue
-                return ReplanTrigger.NEW_HIGH_CONFIDENCE_FINDING
-
-        surface_patterns = (
-            r"\bopen port\b", r"\blistening port\b", r"\bdiscovered service\b",
-            r"\bendpoint\b", r"\broute\b", r"\bsubdomain\b", r"\bapi url\b",
-            r"\blogin page\b", r"\bexported symbol\b", r"\bhidden directory\b",
-        )
-        for sp in surface_patterns:
-            if re.search(sp, combined_text, flags=re.IGNORECASE):
-                return ReplanTrigger.NEW_ATTACK_SURFACE
+        if result.evidence_verified and result.key_discoveries:
+            return ReplanTrigger.NEW_HIGH_CONFIDENCE_FINDING
 
         return None
 
@@ -447,12 +397,27 @@ class BossAgent:
                                 pass
                     break
 
-                # Respect the configured worker budget and execution plane.
-                # GUI/browser tasks require serialized access to the shared display.
-                # Headless tasks (terminal, file audits, toolsmith) fan out concurrently.
-                has_gui_in_wave = any(getattr(s, "plane", "headless") == "gui" for s in unblocked_ready)
-                worker_limit = 1 if (has_gui_in_wave and self._shared_desktop) else self.max_parallel_workers
-                wave_batch = unblocked_ready[:worker_limit]
+                # Respect the configured worker budget, display exclusivity, and owned_paths isolation.
+                # Only tasks explicitly requiring exclusive desktop focus serialize to 1 worker;
+                # parallel workers with disjoint owned_paths fan out concurrently to prevent merge conflicts.
+                has_exclusive_gui = any(
+                    getattr(s, "requires_exclusive_display", False)
+                    for s in unblocked_ready
+                )
+                worker_limit = 1 if (has_exclusive_gui and self._shared_desktop) else self.max_parallel_workers
+                wave_batch: list[SubMission] = []
+                locked_paths: set[str] = set()
+                for cand in unblocked_ready:
+                    if len(wave_batch) >= worker_limit:
+                        break
+                    cand_paths = {p.strip().lower() for p in (getattr(cand, "owned_paths", None) or []) if p.strip()}
+                    if wave_batch and cand_paths and (cand_paths & locked_paths):
+                        # Defer conflicting path owner to the next wave to guarantee <1000 conflict isolation
+                        continue
+                    wave_batch.append(cand)
+                    locked_paths.update(cand_paths)
+                if not wave_batch:
+                    wave_batch = unblocked_ready[:1]
                 for s in wave_batch:
                     pending_subs.remove(s)
 
@@ -963,13 +928,7 @@ Rules:
                     clean = item.strip()
                     if not clean:
                         continue
-                    # Exclude raw strings that are just IP addresses (often from diagnostic commands)
                     if re.match(r"^(?:https?://)?(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/.*)?$", clean):
-                        continue
-                    # Exclude local diagnostic commands/outputs
-                    if any(diag in clean.lower() for diag in (
-                        "ifconfig.me", "icanhazip", "whoami", "uname", "pwd", "hostname", "ip addr", "ip a", "ifconfig", "route"
-                    )):
                         continue
                     valid_discoveries.append(clean)
 
@@ -1167,8 +1126,8 @@ Rules:
 
             req = LLMRequest(
                 messages=[
-                    Message(role=MessageRole.SYSTEM, content="You are an autonomous intelligence officer. Summarize the worker agent's findings accurately and concisely. Focus on concrete facts: open ports, HTTP status codes, server banners, URLs/paths discovered, configuration details, credentials, flags, or error causes."),
-                    Message(role=MessageRole.USER, content=f"Worker goal: {goal}\n\nActions and observations:\n{observations}\n\nSummarize the key findings in 2-4 sentences."),
+                    Message(role=MessageRole.SYSTEM, content="You are an autonomous coordinator. Summarize the subagent's execution results accurately and concisely based on concrete observations, artifacts produced, state changes, and verified outcomes."),
+                    Message(role=MessageRole.USER, content=f"Worker goal: {goal}\n\nActions and observations:\n{observations}\n\nSummarize the key outcomes in 2-4 sentences."),
                 ],
                 task_type="reasoning",
                 max_tokens=500,
@@ -1181,47 +1140,9 @@ Rules:
             return observations[:1000]
 
     def _extract_key_discoveries(self, traces: list[Any]) -> list[str]:
-        """Extract key facts and security discoveries from SubAgent traces."""
-        discoveries = []
-        diag_patterns = (
-            "ifconfig.me",
-            "icanhazip",
-            "whoami",
-            "uname",
-            "pwd",
-            "hostname",
-            "ip addr",
-            "ip a",
-            "ifconfig",
-            "route",
-        )
+        """Extract concrete verified observations from SubAgent traces without hardcoded tool filters."""
+        discoveries: list[str] = []
         for t in traces:
-            # Check for local diagnostic / environment / identity commands
-            target = getattr(t, "target_resource", None) or getattr(t, "target", "") or ""
-            payload = getattr(t, "payload", "") or ""
-            if isinstance(t, dict):
-                target = t.get("target_resource") or t.get("target") or target
-                payload = t.get("payload") or payload
-
-            cmd_text = f"{target} {payload}".strip().lower()
-            is_diag = False
-            for diag in diag_patterns:
-                if diag in ("ifconfig.me", "icanhazip"):
-                    if diag in cmd_text:
-                        is_diag = True
-                        break
-                elif diag in ("ip addr", "ip a"):
-                    if re.search(r"\bip\s+(addr|a)\b", cmd_text) or diag in cmd_text:
-                        is_diag = True
-                        break
-                else:
-                    if re.search(rf"\b{re.escape(diag)}\b", cmd_text):
-                        is_diag = True
-                        break
-
-            if is_diag:
-                continue
-
             if isinstance(t, dict):
                 obs = (t.get("actual_observation") or t.get("observation") or "").strip()
                 status_str = str(t.get("status", ""))
@@ -1234,50 +1155,17 @@ Rules:
             if status_str not in ("COMPLETED", "SUCCESS", "VERIFIED"):
                 continue
 
-            # 1. Search for high-value security entities: open ports
-            port_matches = re.findall(r'\b(\d{1,5}/(?:tcp|udp)\s+open\s+[^\r\n]+)', obs, re.IGNORECASE)
-            for pm in port_matches:
-                clean_pm = f"Open port: {pm.strip()}"
-                if clean_pm not in discoveries:
-                    discoveries.append(clean_pm)
-
-            # 2. Search for flags, keys, tokens
-            flag_matches = re.findall(r'(?:flag|secret|key|token)[\s:=]+([^\s\r\n]{6,})', obs, re.IGNORECASE)
-            for fm in flag_matches:
-                clean_fm = f"Discovered value: {fm.strip(' .,;:\"\'')}"
-                if clean_fm not in discoveries:
-                    discoveries.append(clean_fm)
-
-            # 3. Search for HTTP status and server headers
-            http_matches = re.findall(r'\b(HTTP/[12](?:\.[01])?\s+\d{3}\s+[^\r\n]+)', obs, re.IGNORECASE)
-            for hm in http_matches:
-                clean_hm = hm.strip()
-                if clean_hm not in discoveries:
-                    discoveries.append(clean_hm)
-
-            # 4. Fallback line extraction with banner filtering
             for line in obs.splitlines():
                 line_str = line.strip()
                 if not line_str or len(line_str) < 10:
                     continue
-                lower_line = line_str.lower()
-                # Skip tool noise and startup banners
-                if any(noise in lower_line for noise in (
-                    "starting nmap", "nmap scan report", "reading package lists",
-                    "building dependency tree", "need to get", "after this operation",
-                    "=== test session", "platform win32", "rootdir:", "plugins:",
-                    "collected ", "total duration", "exit 0", "exit 127",
-                    "curl -", "ping -", "ssh ", "nc -", "warning:",
-                )):
-                    continue
-                # Skip if line is a bare IP address
                 if re.match(r"^(?:https?://)?(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/.*)?$", line_str):
                     continue
                 if line_str not in discoveries:
                     discoveries.append(line_str[:200])
                     break
 
-        return discoveries[:10]  # Cap at 10
+        return discoveries[:10]
 
     # ------------------------------------------------------------------
     # Findings Aggregation
