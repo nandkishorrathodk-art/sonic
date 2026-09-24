@@ -1,0 +1,55 @@
+PROPRIETARY AND CONFIDENTIAL SOFTWARE LICENSE
+
+Copyright (c) 2026 Nandkishor Rathod. All Rights Reserved.
+
+NOTICE TO USER: PLEASE READ THIS DOCUMENT CAREFULLY. THIS IS A LEGAL AGREEMENT
+BETWEEN YOU ("LICENSEE" OR "USER") AND NANDKISHOR RATHOD ("AUTHOR" AND "OWNER").
+BY DOWNLOADING, ACCESSING, INSTALLING, COPYING, OR USING THIS SOFTWARE, YOU
+ACCEPT ALL THE TERMS AND CONDITIONS OF THIS AGREEMENT.
+
+1. OWNERSHIP & INTELLECTUAL PROPERTY
+-----------------------------------
+The SONIC software system, including its source code, architecture, algorithms,
+prompts, neural model pipelines, System-1 and System-2 decision modules, 3D WebGL
+graph visualization components, documentation, and associated digital assets
+(collectively, the "Software"), are the exclusive intellectual property and trade
+secrets of Nandkishor Rathod.
+
+All title, ownership rights, patents, copyrights, trademarks, and trade secret
+rights in and to the Software remain solely with Nandkishor Rathod.
+
+2. RESTRICTIONS
+---------------
+You expressly agree that you shall NOT, and shall not permit any third party to:
+a) Copy, distribute, publish, sublicense, rent, lease, or lend the Software;
+b) Reverse engineer, decompile, disassemble, or derive source code from any compiled
+   or binary components of the Software;
+c) Modify, translate, adapt, or create derivative works of the Software without
+   prior written consent from Nandkishor Rathod;
+d) Remove, alter, or obscure any copyright notice, trademark, or other proprietary
+   markings on or in the Software;
+e) Use the Software or any of its proprietary algorithms for commercial deployment,
+   software-as-a-service (SaaS) offerings, or training competitive models without
+   a signed commercial agreement with Nandkishor Rathod.
+
+3. CONFIDENTIALITY
+------------------
+The Software contains highly confidential algorithms, decision paradigms, and
+proprietary architectures. The recipient agrees to maintain the Software in strict
+confidence and exercise the same degree of care to protect the Software as used for
+their own valuable confidential information, but in no case less than reasonable care.
+
+4. DISCLAIMER OF WARRANTIES
+---------------------------
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+NANDKISHOR RATHOD BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF,
+OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+For licensing inquiries, commercial partnerships, or custom permissions, contact:
+Nandkishor Rathod
+GitHub: https://github.com/nandkishorrathodk-art
+-------------------------------------------------------------------------------
