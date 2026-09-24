@@ -393,4 +393,19 @@ export const api = {
 
   getAgent: (agentId: string) =>
     apiClient<any>(`/agents/${encodeURIComponent(agentId)}`),
+
+  // Laya System-1 Decision Engine
+  getLayaStatus: () =>
+    apiClient<any>("/llm/laya/status"),
+
+  predictLaya: (payload: {
+    state: string | Record<string, unknown>;
+    questions?: Record<string, Record<string, unknown>> | null;
+    preset?: string | null;
+    model?: string | null;
+  }) =>
+    apiClient<any>("/llm/laya/predict", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 };

@@ -213,6 +213,18 @@ const DEFAULT_COGNITIVE_NODES: GraphNodeData[] = [
       exit_code: 0,
     },
   },
+  {
+    id: "system1_laya_engine",
+    label: "System-1 Decision Engine (Laya)",
+    type: "RuntimeService",
+    properties: {
+      role: "Fast non-autoregressive triage, safety scoring, and curiosity evaluation",
+      backend: "Remote HTTP → Local laya.Router → DenseVectorizer cosine fallback",
+      presets: "triage, guard, verification, curiosity",
+      ram_guard: "Blocks local model load when free RAM < threshold",
+      api_endpoints: "GET /llm/laya/status, POST /llm/laya/predict",
+    },
+  },
 ];
 
 const DEFAULT_COGNITIVE_EDGES: GraphEdgeData[] = [
@@ -231,6 +243,9 @@ const DEFAULT_COGNITIVE_EDGES: GraphEdgeData[] = [
   { source: "plane_operator_terminal", target: "craft_system_probe", type: "EXECUTES_TOOL" },
   { source: "plane_operator_terminal", target: "ev_sha256_probe", type: "VERIFIED_EVIDENCE" },
   { source: "plane_desktop_gui", target: "ev_desktop_window", type: "VERIFIED_EVIDENCE" },
+  { source: "being_sonic_core", target: "system1_laya_engine", type: "DUAL_BRAIN_SYSTEM1" },
+  { source: "system1_laya_engine", target: "mind_sonic_affect", type: "EVALUATES_CURIOSITY" },
+  { source: "system1_laya_engine", target: "guard_safety_envelope", type: "EVALUATES_RISK" },
 ];
 
 export default function CognitiveMemoryGraphPage() {
