@@ -122,15 +122,14 @@ export default function LandingPage() {
             </div>
 
             <h1 className="text-4xl sm:text-5xl md:text-6xl font-extrabold tracking-tight text-white leading-[1.05]">
-              The Autonomous AI
+              The Autonomous
               <br />
-              <span className="text-gradient">Red Team</span> Workstation
+              <span className="text-gradient">AI-Human Being</span> Workstation
             </h1>
 
             <p className="text-base text-muted max-w-xl font-mono leading-relaxed">
-              A self-evolving multi-agent swarm that observes, reasons, and proves real
-              kill-chains — backed by full Linux GUI streaming, isolated sandboxes, and
-              cryptographic evidence.
+              A persistent autonomous AI-Human Digital Being operating its dedicated personal computer
+              workstation — backed by concurrent dual-plane Linux GUI & terminal agency, cognitive graph memory, and empirical execution receipts.
             </p>
 
             <div className="flex flex-wrap items-center gap-4 pt-1">
@@ -230,11 +229,11 @@ export default function LandingPage() {
             <span>SWARM ARCHITECTURE</span>
           </div>
           <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-white">
-            Six specialists. One autonomous kill-chain.
+            Six cognitive capabilities. One autonomous Digital Being.
           </h2>
           <p className="text-xs text-muted font-mono max-w-2xl mx-auto">
-            Each agent owns a phase of the engagement. The Director orchestrates the task-graph;
-            findings flow through verification before they ever touch a report.
+            Each subsystem powers the Being across dual planes (GUI & Terminal). BossAgent orchestrates the task-graph;
+            every action requires verified execution receipts before milestone completion.
           </p>
         </div>
 
@@ -272,15 +271,15 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Kill-chain pipeline */}
+      {/* Cognitive Convergence pipeline */}
       <section className="relative px-6 md:px-12 py-16 max-w-7xl mx-auto z-10 w-full">
         <div className="glass-card rounded-2xl p-8 animate-fade-in-up">
           <div className="text-center space-y-2 mb-10">
             <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
-              The Evidence-Secured Kill-Chain
+              State-First Cognitive Loop (HDCE)
             </h2>
             <p className="text-xs text-muted font-mono">
-              Observe → Reason → Act → Prove → Evolve. No finding ships without real proof.
+              Observe → Reason → Act → Verify → Evolve. Zero success-by-decree; every action verified with receipts.
             </p>
           </div>
           <div className="flex flex-col md:flex-row items-stretch gap-3">
@@ -394,7 +393,7 @@ export default function LandingPage() {
 
       {/* Footer */}
       <footer className="relative mt-auto border-t border-ink-800/80 px-6 md:px-12 py-6 flex flex-col sm:flex-row items-center justify-between text-xs font-mono text-muted-dim gap-3 z-10">
-        <div>SONIC-REDA Autonomous Workstation Core v1.3.0</div>
+        <div>SONIC Autonomous AI-Human Workstation Core v1.3.0</div>
         <div className="flex items-center gap-4">
           <Link href="/about" className="hover:text-slate-300 transition">About</Link>
           <Link href="/login" className="hover:text-slate-300 transition">Login</Link>

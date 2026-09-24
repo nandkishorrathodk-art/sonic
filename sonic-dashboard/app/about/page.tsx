@@ -183,12 +183,11 @@ export default function AboutPage() {
           <span>{isHealthy ? "SYSTEM ONLINE" : "SYSTEM STATUS UNKNOWN"}</span>
         </div>
         <h1 className="text-4xl sm:text-5xl md:text-6xl font-extrabold tracking-tight text-white mt-6 leading-[1.08] animate-fade-in-up">
-          How <span className="text-gradient">SONIC-REDA</span> works
+          How <span className="text-gradient">SONIC</span> works
         </h1>
         <p className="text-base text-muted mt-6 font-mono leading-relaxed max-w-2xl mx-auto animate-fade-in-up">
-          An autonomous red-team system built around one idea: a finding is only real when it has
-          been proven against the target with captured evidence. Here is the architecture, the
-          agents, the safety model, and the principles that hold it together.
+          An autonomous AI-Human Digital Being operating its dedicated personal computer workstation:
+          dual-plane GUI and terminal agency, persistent cognitive memory (`BeingMind`), and verified execution receipts.
         </p>
       </section>
 
@@ -420,7 +419,7 @@ export default function AboutPage() {
 
       {/* Footer */}
       <footer className="relative mt-auto border-t border-ink-800/80 px-6 md:px-12 py-6 flex flex-col sm:flex-row items-center justify-between text-xs font-mono text-muted-dim gap-3 z-10">
-        <div>SONIC-REDA Autonomous Workstation Core v1.3.0</div>
+        <div>SONIC Autonomous AI-Human Workstation Core v1.3.0</div>
         <div className="flex items-center gap-4">
           <Link href="/landing" className="hover:text-slate-300 transition">Home</Link>
           <Link href="/about" className="hover:text-slate-300 transition">About</Link>

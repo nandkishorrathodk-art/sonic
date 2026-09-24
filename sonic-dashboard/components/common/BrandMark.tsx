@@ -41,10 +41,10 @@ export function BrandMark({ size = 32, withWordmark = false, href, className = "
       {withWordmark && (
         <div className="flex flex-col leading-none">
           <span className="font-extrabold tracking-[0.12em] text-white text-sm">
-            SONIC<span className="text-primary-500">-REDA</span>
+            SONIC<span className="text-primary-500"> OS</span>
           </span>
           <span className="text-[9px] font-mono uppercase tracking-[0.2em] text-muted-dim">
-            Autonomous Red Team
+            AI-Human Digital Being
           </span>
         </div>
       )}

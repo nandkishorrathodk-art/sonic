@@ -5452,7 +5452,9 @@ class ComputerUseAgent:
         # Fail-closed verification: reject dummy/placeholder observations as
         # evidence of goal completion. Only REAL command output counts.
         _DUMMY_MARKERS = (
-            "__sonic_obs_ready__", "generic recovery action",
+            "__sonic_obs_ready__",
+            "generic recovery action",
+            "terminal ready (0 procs)",
         )
         _is_dummy = any(marker in ev_lower for marker in _DUMMY_MARKERS)
         if _is_dummy:
@@ -5460,9 +5462,19 @@ class ComputerUseAgent:
 
         _raw_has_content = bool(evidence.strip())
         if "Re-observed: " in evidence:
+            _has_successful_action = any(
+                getattr(a, "status", None) == ActionExecutionStatus.SUCCESS
+                and getattr(a, "action_type", None)
+                not in (ComputerActionType.WAIT_FOR_HUMAN, ComputerActionType.GOAL_COMPLETE)
+                for a in getattr(self, "action_history", [])
+            )
             _has_concrete_evidence = (
                 "term=" in evidence
                 and not evidence.rstrip().endswith("term=")
+                and (
+                    _has_successful_action
+                    or bool(getattr(obs, "active_application", ""))
+                )
             )
         else:
             _has_concrete_evidence = _raw_has_content

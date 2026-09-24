@@ -169,7 +169,7 @@ function LoginContent() {
               Sign in to SONIC
             </h1>
             <p className="text-xs text-muted leading-relaxed font-mono">
-              Empower your autonomous AI penetration architect with dedicated computer agency.
+              Operate alongside your autonomous AI-Human digital colleague with full dual-plane computer workstation agency.
             </p>
           </div>
 

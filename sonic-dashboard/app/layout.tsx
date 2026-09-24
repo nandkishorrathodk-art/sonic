@@ -3,14 +3,14 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: {
-    default: "SONIC-REDA — Autonomous AI Red Team Workstation",
-    template: "%s · SONIC-REDA",
+    default: "SONIC — Autonomous AI-Human Digital Being & Workstation",
+    template: "%s · SONIC",
   },
   description:
-    "Next-generation autonomous AI red-team agent: full virtual computer control, evidence-backed kill-chains, and self-evolving multi-agent swarm intelligence.",
-  applicationName: "SONIC-REDA",
-  authors: [{ name: "SONIC-REDA" }],
-  keywords: ["autonomous agent", "red team", "security", "AI", "pentest", "evidence"],
+    "Autonomous AI-Human Digital Being operating its dedicated personal computer workstation: dual-plane GUI & terminal agency, persistent cognitive memory, and self-evolving craft.",
+  applicationName: "SONIC",
+  authors: [{ name: "SONIC" }],
+  keywords: ["autonomous agent", "AI-Human digital being", "computer workstation", "cognitive memory", "dual-plane agency", "AI colleague"],
 };
 
 export const viewport: Viewport = {
