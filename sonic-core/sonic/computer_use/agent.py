@@ -1541,14 +1541,13 @@ class ComputerUseAgent:
         init_ctx = getattr(self, "initial_context", {}) or {}
         if init_ctx.get("delegated_plane") == "gui" or getattr(self, "gui_plane_priority", False):
             target_header += (
-                "=== WORKSTATION APPLICATION PLANE (GUI DESKTOP AGENCY) ===\n"
-                "You are an AI-Human Engineer operating your graphical computer desktop on Display :99.\n"
-                "You have full agency to launch and operate multiple GUI applications concurrently:\n"
-                "- Launch any installed GUI application directly with APP_LAUNCH or BROWSER_NAVIGATE.\n"
-                "- Switch focus between open application windows using APP_FOCUS <window_title>, and close windows via APP_CLOSE.\n"
-                "- Interact dynamically with controls, menus, text editors, and web applications using GUI actions (GUI_CLICK, GUI_TYPE, GUI_KEYPRESS, GUI_HOTKEY, GUI_SCREENSHOT).\n"
-                "- You can run background services or commands via TERMINAL_EXEC alongside your graphical applications.\n"
-                "===========================================================\n\n"
+                "=== FULL DUAL-PLANE AGENCY (DESKTOP GUI :99 + TERMINAL/FILE SANDBOX) ===\n"
+                "You are a Senior AI-Human Software Engineer operating BOTH your graphical desktop (:99) and your terminal/file sandbox:\n"
+                "- To create or edit source files/modules (.py, .js, .html, .json, .md), ALWAYS use `FILE_WRITE` (never `APP_LAUNCH python3` or `GUI_TYPE uxterm` to write code files).\n"
+                "- To run CLI commands, tests, python scripts, or inspect git/directory state (`pwd`, `ls`, `git status`, `python3 -c ...`, `pytest`), ALWAYS use `TERMINAL_EXEC`.\n"
+                "- To launch, focus, or interact with graphical desktop applications and web browsers on Display :99, use `APP_LAUNCH`, `APP_FOCUS`, `GUI_CLICK`, `GUI_TYPE`, `GUI_SCREENSHOT`, and `BROWSER_*`.\n"
+                "- To delegate parallel modules into isolated branch workspaces, use `DEFINE_SUBAGENT` and `INVOKE_SUBAGENT`.\n"
+                "========================================================================\n\n"
             )
         elif init_ctx.get("delegated_plane") == "headless":
             target_header += (

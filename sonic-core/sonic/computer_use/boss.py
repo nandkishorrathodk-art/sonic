@@ -746,6 +746,19 @@ Rules:
                 evidence_context=evidence_context,
             ))
 
+        # Filter out non-actionable "summary-only" / "report-only" sub-missions if real execution sub-missions exist,
+        # because BossAgent itself synthesizes the final evidence-backed summary at the end of the run.
+        if len(sub_missions) > 1:
+            filtered = [
+                sm for sm in sub_missions
+                if not (
+                    any(w in sm.goal.lower() for w in ("provide concise", "provide a concise", "write summary", "summarize findings", "final summary", "evidence-backed summary"))
+                    and not any(a in sm.goal.lower() for a in ("create ", "build ", "implement ", "write file", ".py", ".js", ".html", "launch"))
+                )
+            ]
+            if filtered:
+                sub_missions = filtered
+
         # Record thinking
         self.thinking_log.append(BossThinking(
             phase=1,
@@ -1281,13 +1294,23 @@ Rules:
             explicit_evidence = getattr(trace, "verification_evidence", None)
             if explicit_evidence is None and isinstance(trace, dict):
                 explicit_evidence = trace.get("verification_evidence")
+            actual_obs = getattr(trace, "actual_observation", None)
+            if actual_obs is None and isinstance(trace, dict):
+                actual_obs = trace.get("actual_observation") or trace.get("observation")
+            exit_code = getattr(trace, "exit_code", None)
+            if exit_code is None and isinstance(trace, dict):
+                exit_code = trace.get("exit_code")
             status = getattr(trace, "status", None)
             if status is None and isinstance(trace, dict):
                 status = trace.get("status")
             status_text = str(status or "").upper()
+            if status_text == "VERIFIED" and str(explicit_evidence or "").strip():
+                return True
             if (
-                status_text == "VERIFIED"
-                and str(explicit_evidence or "").strip()
+                status_text in ("COMPLETED", "SUCCESS")
+                and exit_code in (0, None)
+                and str(actual_obs or "").strip()
+                and not str(actual_obs or "").strip().startswith(("Error:", "[ACTION LOOP DETECTED]"))
             ):
                 return True
         return False
