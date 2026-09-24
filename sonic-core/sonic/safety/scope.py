@@ -233,10 +233,6 @@ class ScopeChecker:
 
         return RiskLevel.L0_SAFE
 
-    def evaluate_laya_command_safety(self, command: str) -> dict[str, Any]:
-        """Convenience method delegating to evaluate_laya_command_safety."""
-        return evaluate_laya_command_safety(command)
-
     def is_target_in_scope(self, target: str, scope_config: dict) -> bool:
         """
         Check if a target (domain/IP/URL) is within the engagement scope.
@@ -471,65 +467,4 @@ class SandboxTierRouter:
 def classify_command_risk(command: str) -> RiskLevel:
     """Module-level convenience wrapper for ScopeChecker().classify_command_risk."""
     return ScopeChecker().classify_command_risk(command)
-
-
-def evaluate_laya_command_safety(command: str) -> dict[str, Any]:
-    """Evaluate command safety combining deterministic classification with Laya System-1 scoring.
-
-    Returns structured System-1 + deterministic safety telemetry:
-        {
-            "risk_tier": tier.value,
-            "reason": reason,
-            "laya_score": score,
-            "laya_label": label,
-        }
-    """
-    cmd_str = command or ""
-    tier = classify_command_risk(cmd_str)
-    if tier == RiskLevel.L2_FORBIDDEN:
-        reason = f"destructive command blocked: {cmd_str[:80]}"
-    elif tier == RiskLevel.L1_NEEDS_APPROVAL:
-        reason = f"intrusive command needs approval: {cmd_str[:80]}"
-    else:
-        reason = "command risk acceptable"
-
-    score: float = 0.0
-    label: str = "safe"
-    try:
-        from sonic.llm.laya_engine import get_laya_engine
-
-        engine = get_laya_engine()
-        pred_res = engine.predict(
-            state=cmd_str,
-            questions={
-                "safety": {
-                    "type": "score",
-                    "criteria": ["safe", "needs_approval", "destructive"],
-                }
-            },
-        )
-        ans: dict[str, Any] = {}
-        if hasattr(pred_res, "answers") and isinstance(pred_res.answers, dict):
-            ans = pred_res.answers.get("safety") or (next(iter(pred_res.answers.values())) if pred_res.answers else {})
-        elif isinstance(pred_res, dict):
-            ans = pred_res.get("answers", {}).get("safety") or pred_res
-
-        if isinstance(ans, dict):
-            score = float(ans.get("score", 0.0))
-            label = str(ans.get("label", "safe"))
-        elif hasattr(pred_res, "get_score"):
-            score = float(pred_res.get_score("safety", 0.0))
-            label = "safe"
-    except Exception as exc:
-        logger.debug("laya_safety_evaluation_failed", error=str(exc))
-        score = 1.0 if tier == RiskLevel.L2_FORBIDDEN else (0.5 if tier == RiskLevel.L1_NEEDS_APPROVAL else 0.0)
-        label = "destructive" if tier == RiskLevel.L2_FORBIDDEN else ("needs_approval" if tier == RiskLevel.L1_NEEDS_APPROVAL else "safe")
-
-    return {
-        "risk_tier": tier.value,
-        "reason": reason,
-        "laya_score": score,
-        "laya_label": label,
-    }
-
 

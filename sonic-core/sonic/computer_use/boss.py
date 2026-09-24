@@ -234,154 +234,17 @@ class BossAgent:
 
     def _detect_replan_trigger(self, report: Any) -> ReplanTrigger | None:
         """Inspect sub-mission outcome from verified state to determine if replanning is warranted."""
-        is_success = report.get("success", True) if isinstance(report, dict) else getattr(report, "success", True)
-        findings_summary = (
-            report.get("findings_summary", "")
-            if isinstance(report, dict)
-            else getattr(report, "findings_summary", "")
-        )
-
-        # 1. AGENT_FAILURE
-        if not is_success:
-            if findings_summary:
-                try:
-                    from sonic.llm.laya_engine import get_laya_engine
-
-                    engine = get_laya_engine()
-                    summary_text = str(findings_summary)
-                    if hasattr(engine, "detect_loop_stagnation"):
-                        stagnation = engine.detect_loop_stagnation(summary_text)
-                    elif hasattr(engine, "predict"):
-                        res = engine.predict(
-                            state=summary_text,
-                            questions={
-                                "stagnation": {
-                                    "type": "noul",
-                                    "instructions": "Detect loop stagnation or repetitive failure",
-                                    "affirmative_anchor": "stuck loop repeat failed timeout error deadlock unchanged",
-                                    "negative_anchor": "progress novel resolved success recovered",
-                                }
-                            },
-                        )
-                        stagnation = res.get_noul("stagnation", 0.5)
-                    else:
-                        stagnation = 0.5
-                    logger.debug("boss_laya_system1_triage", stagnation=stagnation, summary=summary_text[:120])
-                except Exception as exc:
-                    logger.debug("boss_laya_system1_triage_failed", error=str(exc))
+        if not getattr(report, "success", True):
             return ReplanTrigger.AGENT_FAILURE
 
-        findings_list = list(
-            (report.get("findings") or report.get("key_discoveries") or [])
-            if isinstance(report, dict)
-            else (getattr(report, "findings", None) or getattr(report, "key_discoveries", None) or [])
-        )
-        summary_text = str(
-            (report.get("findings_summary") or report.get("summary") or "")
-            if isinstance(report, dict)
-            else (getattr(report, "findings_summary", "") or getattr(report, "summary", "") or "")
-        )
-        combined_text = (summary_text + " " + " ".join(str(f) for f in findings_list)).lower()
-
-        # 2. NEW_HIGH_CONFIDENCE_FINDING
-        vuln_patterns = (
-            # Web & API
-            r"\bsqli\b", r"\bsql injection\b", r"\bxss\b", r"\brce\b", r"\bcve-\d{4}-\d+\b",
-            r"\bssrf\b", r"\bidor\b", r"\bbola\b", r"\bdeserializ", r"\bprototype pollution\b",
-            r"\bpath traversal\b", r"\blfi\b", r"\brfi\b",
-            r"\bauth(?:entication)? bypass\b", r"\bunauthorized access\b",
-            # Binary & Systems
-            r"\bbuffer overflow\b", r"\bmemory corruption\b", r"\brop chain\b",
-            r"\bformat string\b", r"\buse[- ]after[- ]free\b", r"\bheap overflow\b",
-            r"\bprivilege escalation\b", r"\broot shell\b",
-            # Crypto & Secrets
-            r"\bpadding oracle\b", r"\bweak key\b", r"\bprivate key leak\b",
-            r"\bcredential leak\b", r"\bhardcoded secret\b",
-            # Flags & Exploit Confirmation
-            r"\bflag\{[^\}]+\}", r"\bctf\{[^\}]+\}", r"\bhtb\{[^\}]+\}",
-            r"\bexploit confirmed\b", r"\bvulnerability confirmed\b",
-        )
-        negation_prefix = r"(?:not|no|never|failed to|unsuccessful|immune to|false positive)\s+(?:\w+\s+){0,3}"
-
-        for pat in vuln_patterns:
-            matches = list(re.finditer(pat, combined_text, flags=re.IGNORECASE))
-            matched = False
-            for m in matches:
-                start_idx = m.start()
-                preceding_text = combined_text[max(0, start_idx - 40):start_idx]
-                if re.search(negation_prefix + r"$", preceding_text, flags=re.IGNORECASE):
-                    continue
-                matched = True
-                break
-            if matched:
-                return ReplanTrigger.NEW_HIGH_CONFIDENCE_FINDING
-
-        evidence_verified = (
-            report.get("evidence_verified", False)
-            if isinstance(report, dict)
-            else getattr(report, "evidence_verified", False)
-        )
-        if evidence_verified and findings_list:
-            return ReplanTrigger.NEW_HIGH_CONFIDENCE_FINDING
-
-        # 3. NEW_ATTACK_SURFACE
-        surface_patterns = (
-            r"\bopen port\b", r"\blistening port\b", r"\bdiscovered service\b",
-            r"\bendpoint\b", r"\broute\b", r"\bsubdomain\b", r"\bapi url\b",
-            r"\blogin page\b", r"\bexported symbol\b", r"\bhidden directory\b",
-            r"\bport\b", r"\bparameter\b", r"\bsurface\b", r"\bservice\b",
-        )
-        if any(re.search(sp, combined_text, flags=re.IGNORECASE) for sp in surface_patterns):
+        findings_list = list(getattr(report, "findings", None) or getattr(report, "key_discoveries", None) or [])
+        summary_text = str(getattr(report, "findings_summary", "") or getattr(report, "summary", "") or "")
+        combined_lower = (" ".join(str(f) for f in findings_list) + " " + summary_text).lower()
+        if any(kw in combined_lower for kw in ("endpoint", "port", "surface", "service")):
             return ReplanTrigger.NEW_ATTACK_SURFACE
 
-        # 4. STRATEGY_EXHAUSTION
-        strategy_exhaustion_val = getattr(ReplanTrigger, "STRATEGY_EXHAUSTION", None)
-        if strategy_exhaustion_val is not None:
-            strategy_exhausted = (
-                report.get("strategy_exhausted", False)
-                if isinstance(report, dict)
-                else getattr(report, "strategy_exhausted", False)
-            )
-            status_val = str(
-                report.get("status", "")
-                if isinstance(report, dict)
-                else getattr(report, "status", "")
-            ).upper()
-            if (
-                strategy_exhausted
-                or status_val in ("STRATEGY_EXHAUSTED", "EXHAUSTED")
-                or "strategy exhausted" in combined_text
-                or "exhausted all" in combined_text
-            ):
-                return strategy_exhaustion_val
-
-        # Stagnation triage telemetry before returning None
-        if not is_success and findings_summary:
-            try:
-                from sonic.llm.laya_engine import get_laya_engine
-
-                engine = get_laya_engine()
-                summary_text = str(findings_summary)
-                if hasattr(engine, "detect_loop_stagnation"):
-                    stagnation = engine.detect_loop_stagnation(summary_text)
-                elif hasattr(engine, "predict"):
-                    res = engine.predict(
-                        state=summary_text,
-                        questions={
-                            "stagnation": {
-                                "type": "noul",
-                                "instructions": "Detect loop stagnation or repetitive failure",
-                                "affirmative_anchor": "stuck loop repeat failed timeout error deadlock unchanged",
-                                "negative_anchor": "progress novel resolved success recovered",
-                            }
-                        },
-                    )
-                    stagnation = res.get_noul("stagnation", 0.5)
-                else:
-                    stagnation = 0.5
-                logger.debug("boss_laya_system1_triage", stagnation=stagnation, summary=summary_text[:120])
-            except Exception as exc:
-                logger.debug("boss_laya_system1_triage_failed", error=str(exc))
+        if getattr(report, "evidence_verified", False) and findings_list:
+            return ReplanTrigger.NEW_HIGH_CONFIDENCE_FINDING
 
         return None
 

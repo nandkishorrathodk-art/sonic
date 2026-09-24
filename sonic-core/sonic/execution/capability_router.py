@@ -118,18 +118,11 @@ class CapabilityRouter:
         ):
             return ExecutionSubstrate.COMPUTER
 
-        # Navigation: headless fetch suffices unless full GUI/interactive is explicitly requested
+        # Navigation: routes to COMPUTER by default unless headless_only is explicitly requested
         if val == "BROWSER_NAVIGATE":
-            if payload.get("headless_only") is True:
+            if payload.get("headless_only") is True or payload.get("interactive") is False:
                 return ExecutionSubstrate.HEADLESS
-            if (
-                payload.get("interactive") is True
-                or payload.get("requires_gui") is True
-                or payload.get("render_js") is True
-                or payload.get("browser") is True
-            ):
-                return ExecutionSubstrate.COMPUTER
-            return ExecutionSubstrate.HEADLESS
+            return ExecutionSubstrate.COMPUTER
 
         # Terminal commands, file operations, security scanning, tool synthesis, etc.
         if (
@@ -143,51 +136,6 @@ class CapabilityRouter:
 
         # Default fallback
         return ExecutionSubstrate.HEADLESS
-
-    # -------------------------------------------------------------
-    # 1b. Goal Substrate Resolution
-    # -------------------------------------------------------------
-    def resolve_goal_substrate(
-        self,
-        goal: str = "",
-        requested_plane: str = "auto",
-    ) -> ExecutionSubstrate:
-        """
-        Resolve the execution substrate for a high-level goal based on requested plane or Laya System-1 engine.
-
-        Rules:
-          - If requested_plane == "headless" -> ExecutionSubstrate.HEADLESS
-          - If requested_plane == "gui" -> ExecutionSubstrate.COMPUTER
-          - Otherwise -> query get_laya_engine().decide_execution_plane(goal)
-            and map "headless" -> HEADLESS, "gui" -> COMPUTER.
-        """
-        if isinstance(self, str):
-            actual_goal = self
-            actual_plane = goal or "auto"
-        else:
-            actual_goal = goal
-            actual_plane = requested_plane
-
-        plane_str = (actual_plane or "auto").strip().lower()
-        if plane_str == "headless":
-            return ExecutionSubstrate.HEADLESS
-        if plane_str == "gui":
-            return ExecutionSubstrate.COMPUTER
-
-        try:
-            from sonic.llm.laya_engine import get_laya_engine
-
-            decision = get_laya_engine().decide_execution_plane(actual_goal or "")
-            if isinstance(decision, tuple):
-                chosen_plane = decision[0]
-            else:
-                chosen_plane = str(decision)
-
-            if str(chosen_plane).strip().lower() == "headless":
-                return ExecutionSubstrate.HEADLESS
-            return ExecutionSubstrate.COMPUTER
-        except Exception:
-            return ExecutionSubstrate.COMPUTER
 
     # -------------------------------------------------------------
     # 2. Provider Availability Checks
@@ -319,50 +267,3 @@ class CapabilityRouter:
             return await fallback.execute(workspace_id, command, timeout=timeout)
 
         return res
-
-
-# Graceful HeadlessComputeProvider synthetic observation fallback for unsupported GUI actions
-async def _graceful_headless_gui_action(
-    self: HeadlessComputeProvider,
-    workspace_id: str,
-    action: Any,
-    actor: str = "operator",
-) -> Any:
-    import asyncio
-    from sonic.computer.models import GUIActionType, ScreenObservation
-
-    atype = getattr(action, "action", action)
-    action_name = atype.value if hasattr(atype, "value") else str(atype)
-    if atype == GUIActionType.WAIT:
-        await asyncio.sleep(max(0.1, (getattr(action, "delay_ms", None) or 500) / 1000.0))
-    elif atype in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and getattr(action, "app_name", None):
-        await self.launch_application(workspace_id, action.app_name, actor=actor)
-    elif atype in (GUIActionType.CLOSE_APP, GUIActionType.CLOSE_WINDOW) and (
-        getattr(action, "app_name", None) or getattr(action, "window_id", None)
-    ):
-        target = getattr(action, "app_name", None) or getattr(action, "window_id", None) or ""
-        await self.close_application(workspace_id, target, actor=actor)
-    elif atype == GUIActionType.INSTALL_APP and (
-        getattr(action, "app_name", None) or getattr(action, "text", None)
-    ):
-        await self.install_application(
-            workspace_id, getattr(action, "app_name", None) or getattr(action, "text", None) or "", actor=actor
-        )
-
-    logger.info(
-        "headless_gui_action_intercepted",
-        workspace_id=workspace_id,
-        action=action_name,
-    )
-    return ScreenObservation(
-        screenshot_base64="",
-        width=0,
-        height=0,
-        active_window="Headless",
-        visible_text=f"[HEADLESS SUBSTRATE: GUI action '{action_name}' unsupported in headless mode]",
-        detected_controls=[],
-        desktop_state="HEADLESS",
-    )
-
-
-HeadlessComputeProvider.gui_action = _graceful_headless_gui_action
