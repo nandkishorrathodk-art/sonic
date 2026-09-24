@@ -50,25 +50,12 @@ class SubMission(BaseModel):
                 self.plane = plane_lower
                 return self
 
-        goal_lower = (self.goal or "").lower()
-        has_gui_intent = bool(
-            re.search(
-                r"\b(?:gui|visual|visually|screen|screenshot|desktop|window|browser|click|button|scroll|drag|ui|page)\b",
-                goal_lower,
-            )
-        )
-        has_headless_intent = bool(
-            re.search(
-                r"\b(?:directory|mkdir|author|source\s+code|code|file|script|curl|netstat|ss|port|ports|endpoints|background|git|pytest|terminal|cli|command|audit|server\.py)\b",
-                goal_lower,
-            )
-            or "/home/" in goal_lower
-        )
-        if has_gui_intent:
-            self.plane = "gui"
-        elif has_headless_intent:
-            self.plane = "headless"
-        else:
+        try:
+            from sonic.llm.laya_engine import get_laya_engine
+
+            chosen_plane, prob = get_laya_engine().decide_execution_plane(self.goal or "")
+            self.plane = chosen_plane if prob > 0.50 and chosen_plane in ("gui", "headless") else "gui"
+        except Exception:
             self.plane = "gui"
         return self
 
