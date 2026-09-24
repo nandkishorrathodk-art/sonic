@@ -1384,6 +1384,30 @@ async def execute_desktop_action(
     """Dispatches a real mouse, keyboard, or window action to the graphical desktop."""
     tenant_id = _resolve_tenant_id(user)
     _assert_runtime_execution_enabled(tenant_id)
+    if req.action.strip().lower() == "screenshot":
+        workspace_id = _session_workspace_id(user, req.session_id or "default")
+        if not workspace_id:
+            return {
+                "status": "BLOCKED",
+                "action": req.action,
+                "active_window": "None",
+                "observation": {
+                    "workspace_id": "",
+                    "width": 1280,
+                    "height": 800,
+                    "desktop_state": "NO_DISPLAY",
+                    "screenshot_base64": "",
+                    "active_window": "None",
+                    "timestamp": datetime.now(UTC).isoformat(),
+                },
+            }
+        screen = await get_daytona_computer().screenshot(workspace_id=workspace_id)
+        return {
+            "status": "success",
+            "action": req.action,
+            "active_window": screen.active_window or "None",
+            "observation": screen.model_dump(),
+        }
     try:
         action_type = GUIActionType(req.action.strip().upper())
     except (AttributeError, ValueError) as exc:

@@ -148,6 +148,10 @@ class ModelRouter:
             env.update(env_vars)
 
         config_path = Path(config_path)
+        if not config_path.exists() and not config_path.is_absolute():
+            repo_config = Path(__file__).resolve().parents[3] / config_path
+            if repo_config.exists():
+                config_path = repo_config
         if not config_path.exists():
             logger.warning("config_not_found", path=str(config_path))
             return cls()

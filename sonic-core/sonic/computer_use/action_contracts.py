@@ -11,11 +11,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sonic.computer_use.models import ActionExecutionStatus
-from sonic.kernel.action_broker import ActionBroker
 from sonic.safety.kernel import SafetyAuthorization, SafetyKernel
+
+if TYPE_CHECKING:
+    from sonic.kernel.action_broker import ActionBroker
 
 
 def _frozen(values: Mapping[str, Any] | None) -> Mapping[str, Any]:
