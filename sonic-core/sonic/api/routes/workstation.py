@@ -2271,17 +2271,12 @@ def _is_research_prompt(prompt: str) -> bool:
 
 
 def _is_complex_or_multi_part_objective(prompt: str) -> bool:
-    """Check if an objective explicitly requests Boss Agent multi-phase swarm orchestration.
-
-    Single-application and multi-application desktop GUI + terminal workflows must run in a
-    single unified ComputerUseAgent so X11 window focus, PerceptionBus, and action history
-    remain unbroken across steps (AGENTS.md Rule 2 & Rule 5).
-    """
+    """Check if an objective requests multi-step or Boss Agent subagent orchestration."""
     p_lower = prompt.lower().strip()
     if any(k in p_lower for k in ("[boss]", "subagent", "sub-agent", "multi-phase", "orchestrat", "swarm")):
         return True
     words = p_lower.split()
-    if len(words) > 55:
+    if len(words) >= 25:
         return True
     return False
 
@@ -3187,6 +3182,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 browser=browser_agent,
                                 security_tools=security_tools,
                                 gui_only=False,
+                                compact_prompt=True,
                                 enable_llm_decomposition=False,
                                 observe_desktop=bool(workspace_id),
                                 initial_context={
