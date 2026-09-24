@@ -1,4 +1,6 @@
 import React from "react";
+import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
 
 interface PageHeaderProps {
   icon: React.ReactNode;
@@ -41,7 +43,17 @@ export function PageHeader({ icon, title, badge, subtitle, actions, accent = "pr
           )}
         </div>
       </div>
-      {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
+      <div className="flex items-center gap-2 shrink-0">
+        <Link
+          href="/"
+          className="btn-ghost !px-2.5 !py-1 text-xs font-mono text-muted hover:text-white flex items-center gap-1 border border-ink-700/60 rounded-lg hover:bg-ink-800 transition"
+          title="Return to Workstation"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span>Workstation</span>
+        </Link>
+        {actions}
+      </div>
     </div>
   );
 }

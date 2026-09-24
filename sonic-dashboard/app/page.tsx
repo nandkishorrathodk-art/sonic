@@ -79,6 +79,30 @@ export default function SonicDevinWorkstation() {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get("tab");
+      if (tabParam) {
+        const validTabs: Record<string, WorkstationTab> = {
+          desktop: "desktop",
+          computer: "desktop",
+          code: "code",
+          changes: "changes",
+          research: "research",
+          evidence: "evidence",
+          evolution: "evolution",
+          mission: "mission",
+          missions: "mission",
+        };
+        const mapped = validTabs[tabParam.toLowerCase()];
+        if (mapped) {
+          setActiveTab(mapped);
+        }
+      }
+    }
+  }, []);
+
   const [sessionList, setSessionList] = useState<SessionItem[]>([]);
   const abortPollRef = useRef<boolean>(false);
   const activePromptSessionRef = useRef<string | null>(null);

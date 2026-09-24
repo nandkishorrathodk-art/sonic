@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { RefreshCw } from "lucide-react";
+import Link from "next/link";
+import { RefreshCw, ArrowLeft } from "lucide-react";
 import { api } from "../../lib/api";
 import { ComputerSurface } from "../../components/computer/ComputerSurface";
 import { CommandResult } from "../../types/workstation";
@@ -96,10 +97,19 @@ export default function ComputerWorkspacePage() {
             </p>
           </div>
         </div>
-        <button onClick={fetchStatus} className="btn-secondary !px-3 !py-1.5 text-xs font-mono">
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          <span>Refresh Desktop</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/?tab=desktop"
+            className="btn-ghost !px-3 !py-1.5 text-xs font-mono text-muted hover:text-white flex items-center gap-1.5 border border-ink-700/60 rounded-lg hover:bg-ink-800 transition"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Dual-Plane Workstation</span>
+          </Link>
+          <button onClick={fetchStatus} className="btn-secondary !px-3 !py-1.5 text-xs font-mono">
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            <span>Refresh Desktop</span>
+          </button>
+        </div>
       </div>
 
       {error ? (
