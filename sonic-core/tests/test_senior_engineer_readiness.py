@@ -274,3 +274,4 @@ def test_pillar_9_persistent_being_mind_vault_and_craft_across_restart(monkeypat
     assert b_state is not None and b_state["cookies"][0]["value"] == "xyz"
     notes = craft_2.list_notes()
     assert any(n.title == "architecture_summary" for n in notes)
+
