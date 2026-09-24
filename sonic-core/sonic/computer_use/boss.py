@@ -726,7 +726,7 @@ Rules:
 
         sub_missions = []
         for sm in sub_missions_raw[:5]:  # Cap planning fan-out per phase
-            goal = str(sm.get("goal", "")).strip()
+            goal = str(sm.get("goal") or sm.get("mission") or sm.get("objective") or sm.get("task") or sm.get("title") or "").strip()
             if not goal:
                 continue
             requested_steps = sm.get("max_steps", self.sub_agent_steps)
@@ -1437,7 +1437,7 @@ If the objective is complete or no more work is needed, return:
 
         sub_missions = []
         for sm in sub_missions_raw[:5]:
-            goal = str(sm.get("goal", "")).strip()
+            goal = str(sm.get("goal") or sm.get("mission") or sm.get("objective") or sm.get("task") or sm.get("title") or "").strip()
             if not goal:
                 continue
             try:

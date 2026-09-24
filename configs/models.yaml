@@ -178,44 +178,44 @@ routing_rules:
   planning:
     description: 'High-level planning, task decomposition, strategy'
     provider: nvidia
-    model: openai/gpt-oss-20b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct, groq/qwen/qwen3.8-27b]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
 
   reasoning:
     description: 'Code analysis, dataflow tracing, pattern matching'
     provider: nvidia
-    model: openai/gpt-oss-20b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct, groq/qwen/qwen3.8-27b]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
 
   fast_recon:
     description: 'Quick environment discovery, system inspection, tech detection'
     provider: nvidia
-    model: openai/gpt-oss-20b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct, groq/qwen/qwen3.8-27b]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
 
   coding:
     description: 'Code generation, fix generation, test writing'
     provider: nvidia
-    model: openai/gpt-oss-20b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct, groq/qwen/qwen3.8-27b]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
 
   verification:
     description: 'Evidence checking, confidence scoring, FP filtering'
     provider: nvidia
-    model: openai/gpt-oss-20b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct, groq/qwen/qwen3.8-27b]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
 
   hypothesis:
     description: 'Novel architecture ideation, creative reasoning'
     provider: nvidia
-    model: openai/gpt-oss-20b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct, groq/qwen/qwen3.8-27b]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
 
   classification:
     description: 'Quick labeling, triage, categorization'
     provider: nvidia
-    model: openai/gpt-oss-20b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct, groq/qwen/qwen3.8-27b]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
 
   vision:
     description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
