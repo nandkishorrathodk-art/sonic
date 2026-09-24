@@ -256,13 +256,13 @@ class ReActEngine:
         stop_when: Callable[[int, dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any]:
         """
-        Sustained, multi-round ReAct execution for autonomous pentesting.
+        Sustained, multi-round ReAct execution for general-purpose autonomous tasks.
 
         Unlike ``execute`` (which terminates on the first Final Answer), this
         loop treats each round's Final Answer as a *partial result* and feeds it
-        back as context for the next round — so the agent keeps probing,
-        pivoting, and chaining until:
-          * ``stop_when`` returns True (e.g. a kill-chain is confirmed), or
+        back as context for the next round — so the agent keeps iterating,
+        adapting, and chaining until:
+          * ``stop_when`` returns True (e.g. a milestone or goal is verified), or
           * ``max_rounds`` is exhausted, or
           * ``on_round`` returns a non-empty new task to continue with.
 
@@ -286,7 +286,7 @@ class ReActEngine:
             if round_result.get("success"):
                 final_answer = round_result["answer"]
 
-            # Caller-supplied stop condition (e.g. kill-chain confirmed).
+            # Caller-supplied stop condition (e.g. target milestone verified).
             if stop_when is not None and stop_when(round_idx, round_result):
                 logger.info("react_continuous_stop_when", round=round_idx)
                 break

@@ -11,6 +11,7 @@ Autonomous browser interaction agent using Playwright for:
 from __future__ import annotations
 
 import base64
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -96,24 +97,42 @@ class BrowserAgent:
             raise ValueError(f"browser URL blocked by egress policy: {reason}")
 
     async def launch(self) -> bool:
-        """Launch browser instance."""
+        """Launch or attach to browser instance (prefers visible :99 CDP port 9222 when available)."""
         try:
             from playwright.async_api import async_playwright
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(headless=self.headless)
-            self._context = await self._browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (SONIC-REDA Browser Agent) Chrome/120",
-                # Certificate verification is part of the browser security
-                # boundary.  Lab exceptions must be configured explicitly in
-                # the network client, never enabled globally here.
-                ignore_https_errors=False,
-                accept_downloads=True,
-            )
-            self._page = await self._context.new_page()
+            engine_name = os.environ.get("SONIC_BROWSER_ENGINE", "chromium")
+            browser_engine = getattr(self._playwright, engine_name)
+            cdp_url = os.environ.get("SONIC_BROWSER_CDP_URL", "http://127.0.0.1:9222")
+            connected_cdp = False
+            if not self.headless or os.environ.get("SONIC_ATTACH_VISIBLE_BROWSER") == "1":
+                try:
+                    self._browser = await browser_engine.connect_over_cdp(cdp_url, timeout=2500)
+                    contexts = self._browser.contexts
+                    self._context = contexts[0] if contexts else await self._browser.new_context(
+                        viewport={"width": 1280, "height": 800},
+                        ignore_https_errors=False,
+                        accept_downloads=True,
+                    )
+                    pages = self._context.pages
+                    self._page = pages[0] if pages else await self._context.new_page()
+                    connected_cdp = True
+                    logger.info("browser_agent_attached_cdp", cdp_url=cdp_url)
+                except Exception:
+                    connected_cdp = False
+
+            if not connected_cdp:
+                self._browser = await browser_engine.launch(headless=self.headless)
+                self._context = await self._browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    ignore_https_errors=False,
+                    accept_downloads=True,
+                )
+                self._page = await self._context.new_page()
+
             await self._page.route("**/*", self._guard_request)
             self._using_playwright = True
-            logger.info("browser_agent_launched", engine="playwright")
+            logger.info("browser_agent_launched", engine="playwright", attached_cdp=connected_cdp)
             return True
         except ImportError:
             logger.warning("playwright_not_installed", fallback="httpx")
@@ -124,14 +143,26 @@ class BrowserAgent:
             return False
 
     async def _guard_request(self, route: Any) -> None:
-        """Apply the same scheme/egress guard to redirects and subresources."""
+        """Apply scheme/egress guard to navigations and SSRF guard to subresources."""
         request_url = route.request.url
         parsed = urlparse(request_url)
         if parsed.scheme.lower() in {"data", "blob", "about"}:
             await route.continue_()
             return
         try:
-            self._validate_url(request_url)
+            is_nav = True
+            try:
+                is_nav = bool(route.request.is_navigation_request())
+            except Exception:
+                is_nav = True
+            if is_nav:
+                self._validate_url(request_url)
+            else:
+                # For CDN subresources (scripts, stylesheets, fonts, images),
+                # still enforce SSRF/metadata egress protection without blocking third-party CDNs.
+                allowed, reason = is_target_allowed(request_url)
+                if not allowed:
+                    raise ValueError(reason)
         except ValueError:
             await route.abort("blockedbyclient")
             return
@@ -154,8 +185,8 @@ class BrowserAgent:
             "url": req.url, "method": req.method, "resource_type": req.resource_type,
         }))
 
-        response = await self._page.goto(url, timeout=self.timeout, wait_until="networkidle")
-        status = response.status if response else 0
+        response = await self._page.goto(url, timeout=self.timeout, wait_until="domcontentloaded")
+        status = response.status if response else 200
         final_url = self._page.url or url
         self._validate_url(final_url)
 
@@ -245,6 +276,42 @@ class BrowserAgent:
             logger.debug("type_failed", selector=selector, error=str(e))
             return False
 
+    async def select_option(self, selector: str, value: str) -> bool:
+        """Select an option from a <select> dropdown by value or visible label."""
+        if not self._using_playwright or not self._page:
+            return False
+        try:
+            try:
+                await self._page.select_option(selector, value=value, timeout=5000)
+            except Exception:
+                await self._page.select_option(selector, label=value, timeout=5000)
+            return True
+        except Exception as e:
+            logger.debug("select_option_failed", selector=selector, value=value, error=str(e))
+            return False
+
+    async def press_key(self, key: str) -> bool:
+        """Press a keyboard key or shortcut on the active browser page."""
+        if not self._using_playwright or not self._page:
+            return False
+        try:
+            await self._page.keyboard.press(key)
+            return True
+        except Exception as e:
+            logger.debug("press_key_failed", key=key, error=str(e))
+            return False
+
+    async def scroll(self, delta_x: int = 0, delta_y: int = 500) -> bool:
+        """Scroll the browser viewport."""
+        if not self._using_playwright or not self._page:
+            return False
+        try:
+            await self._page.mouse.wheel(delta_x, delta_y)
+            return True
+        except Exception as e:
+            logger.debug("scroll_failed", delta_x=delta_x, delta_y=delta_y, error=str(e))
+            return False
+
     async def wait_for_element(self, selector: str, timeout_ms: int = 15000) -> bool:
         """Wait until an element matching the selector is visible.
 
@@ -267,7 +334,7 @@ class BrowserAgent:
         Models the human step: click "Download" on the website, wait for the
         file to arrive, then it is on disk ready to run. accept_downloads is
         enabled at context creation so the download stream is captured rather
-        than triggering Chromium's download UI. Returns False if Playwright is
+        than triggering the browser's download UI. Returns False if Playwright is
         unavailable or the download does not complete.
         """
         if not self._using_playwright or not self._page:
@@ -303,10 +370,17 @@ class BrowserAgent:
                             attrs[attr] = val
                     bbox = await el.bounding_box() if visible else None
 
+                    if attrs.get("id"):
+                        selector = f"#{attrs['id']}"
+                    elif attrs.get("name"):
+                        selector = f'{tag}[name="{attrs["name"]}"]'
+                    else:
+                        selector = f"{tag} >> nth={i}"
+
                     elements.append(DOMElement(
                         tag=tag,
                         text=text.strip(),
-                        selector=f"{tag}:nth-of-type({i+1})",
+                        selector=selector,
                         attributes=attrs,
                         is_visible=visible,
                         bbox=(
@@ -486,9 +560,23 @@ class BrowserAgent:
             "text": "",
             "api_endpoints": [],
             "interactive_elements": [],
+            "window_offset": (0, 0),
         }
         if not self._using_playwright or not self._page:
             return observation
+        try:
+            win_metrics = await self._page.evaluate(
+                "() => [window.screenX || 0, window.screenY || 0, "
+                "(window.outerWidth || 0) - (window.innerWidth || 0), "
+                "(window.outerHeight || 0) - (window.innerHeight || 0)]"
+            )
+            if isinstance(win_metrics, (list, tuple)) and len(win_metrics) == 4:
+                sx, sy, dw, dh = (int(v or 0) for v in win_metrics)
+                offset_x = sx + max(0, dw // 2)
+                offset_y = sy + max(0, dh)
+                observation["window_offset"] = (offset_x, offset_y)
+        except Exception as exc:
+            logger.debug("browser_window_offset_failed", error=str(exc))
         try:
             text = await self._page.locator("body").inner_text(timeout=3000)
             observation["text"] = (text or "")[:12000]

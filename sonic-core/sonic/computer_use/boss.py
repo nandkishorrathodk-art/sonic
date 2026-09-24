@@ -47,6 +47,7 @@ from sonic.computer_use.models_boss import (
     BossReport,
     BossThinking,
     Phase,
+    SubAgentReport,
     SubMission,
     SubMissionResult,
 )
@@ -593,6 +594,10 @@ class BossAgent:
                 logger.info("boss_agent_objective_complete", reason=completion_reason[:200])
                 break
 
+            if any(getattr(r, "waiting_for_human", False) for r in current_phase.results):
+                logger.info("boss_agent_waiting_for_human", phase=current_phase.phase_number)
+                break
+
             # Do not manufacture momentum after a phase that produced no
             # execution, evidence, or discoveries. A replan is useful only
             # when the previous attempt exposed something to reason about.
@@ -655,44 +660,41 @@ class BossAgent:
         """
         t_start = time.perf_counter()
 
-        prompt = f"""You are the Boss Agent of an Autonomous Self-Evolving Penetration Architect (A-SEA).
-Your job is to analyze the user's objective from first principles and decompose it into focused, independent sub-missions for worker agents.
+        prompt = f"""You are the Boss Agent of an Autonomous AI-Human Digital Being & Systems Architect (A-SEA).
+Your job is to analyze the user's objective from first principles and decompose it into focused, independent sub-missions for worker agents operating a full personal computer workstation (graphical desktop on DISPLAY=:99 + concurrent headless terminal/developer sandbox).
 
 USER OBJECTIVE: {objective}
 
 Apply target-agnostic first-principles reasoning:
-0. PROGRAM INTAKE:
-   If the objective describes a program, repository, binary, service, or
-   application, first build a verified profile from the supplied details and
-   sandbox observations: modality, entry points, inputs/outputs, trust
-   boundaries, dependencies, runtime behavior, unknowns, and evidence needed.
+0. OBJECTIVE INTAKE:
+   Analyze the user's objective — whether it involves operating desktop GUI applications, browsing the web and signing up/managing profiles, authoring software and pushing Git repositories, expressing digital identity (`Being`), or performing technical system analysis.
    Do not invent a target, tool, vulnerability, or successful execution.
    If the objective does not state what outcome is wanted, ask for the missing
-   analysis objective instead of executing.
+   objective instead of executing.
 1. DOMAIN & MODALITY TRIAGE:
-   Identify the primary target type:
-   - [BINARY / REVERSE ENGINEERING / PWN]: local executable or firmware, code behavior, memory safety.
-   - [NETWORK / INFRASTRUCTURE]: address space, reachable services, routing, and protocol behavior.
-   - [API / MICROSERVICE / HEADLESS]: request/response contracts, auth state, schemas, and parameters.
-   - [CRYPTOGRAPHY]: ciphers, hashes, oracles, key material, and entropy.
-   - [FORENSICS / DATA]: memory, captures, logs, and file artifacts.
-   - [WEB APPLICATION]: HTTP state, cookies, DOM, and client behavior when actually required.
+   Identify the primary domain:
+   - [DESKTOP_APP]: operating graphical desktop applications, editors, media/design tools, or multiple windows.
+   - [WEB_BROWSER]: navigating websites, signing up, filling forms, managing profiles/pages, and interacting with SPAs.
+   - [SOFTWARE_DEV]: writing code, running tests, initializing/committing/pushing Git repositories, building projects.
+   - [DIGITAL_IDENTITY]: authoring profiles, pages, bios, and sharing persistent `Being` identity and `BeingCraft` artifacts.
+   - [SYSTEM_OPS / RESEARCH]: system administration, diagnostics, data processing, or authorized security assessment.
+   - [BINARY / NETWORK / API / CRYPTO / FORENSICS / WEB]: specialized technical engineering or security analysis when requested.
 
 2. METHODOLOGY:
-   - Do not force an application, scanner, protocol, or interaction modality before observing the target.
-   - Each worker must receive a clear, operational task tailored to the specific target modality.
+   - Do not force an application, scanner, protocol, or interaction modality before observing the environment.
+   - Each worker must receive a clear, operational task tailored to the specific modality.
 
 Respond with EXACTLY this JSON format (no extra text):
 {{
-  "domain": "BINARY | NETWORK | API | CRYPTO | FORENSICS | WEB",
-  "thinking": "First-principles analysis: target architecture, hypotheses, and strategy",
-  "phase_name": "Domain-appropriate phase name (e.g., Static Binary Analysis, Service Enumeration, Schema Discovery)",
+  "domain": "DESKTOP_APP | WEB_BROWSER | SOFTWARE_DEV | DIGITAL_IDENTITY | SYSTEM_OPS | RESEARCH | BINARY | NETWORK | API | CRYPTO | FORENSICS | WEB",
+  "thinking": "First-principles analysis: objective requirements, plane selection, and strategy",
+  "phase_name": "Domain-appropriate phase name (e.g., Desktop Application Workflow, Repository Creation & Push, Web Profile Setup)",
   "sub_missions": [
     {{
       "id": "sub-1",
       "goal": "Clear, focused goal for this worker agent with concrete inputs and expected observations.",
-      "plane": "headless",
-      "max_steps": 4,
+      "plane": "gui",
+      "max_steps": 15,
       "priority": 1,
       "depends_on": []
     }}
@@ -700,13 +702,14 @@ Respond with EXACTLY this JSON format (no extra text):
 }}
 
 Rules:
-- Each sub_mission goal must be FOCUSED and SPECIFIC (one clear task per worker)
-- plane: "headless" for terminal/scripts/file audits/tools; "gui" only for desktop browser/window interactions
+- Each sub_mission goal must be FOCUSED and SPECIFIC
+- plane: "gui" for desktop applications, multi-window workflows, browser navigation, signups, and visual + terminal dual-plane workflows; "headless" ONLY for strictly non-visual CLI-only tasks
+- Keep multi-application desktop GUI tasks (launching, focusing, and switching between 1, 2, or more desktop GUI windows alongside terminal commands) inside a SINGLE unified sub_mission with plane="gui" and max_steps=30 so window state and visual grounding remain continuous
 - depends_on: list of sub_mission IDs that must complete before this worker starts
-- max_steps should be 3-5 (workers are efficient, not wasteful)
+- max_steps should be 10-30 depending on task complexity
 - priority: higher number = execute first
-- Create 2-5 sub_missions per phase (not more)
-- If the objective is trivially simple (single command), return {{"thinking": "...", "phase_name": "", "sub_missions": []}}"""
+- Create 1-3 sub_missions per phase
+- If the objective is a single cohesive workflow, return 1 sub_mission covering the full workflow"""
 
         try:
             from sonic.llm.schemas import LLMRequest, Message, MessageRole
@@ -763,21 +766,16 @@ Rules:
 
             sub_id = str(sm.get("id") or "").strip()
             depends_on = [str(d).strip() for d in sm.get("depends_on", []) if str(d).strip()] if isinstance(sm.get("depends_on"), list) else []
-            plane = str(sm.get("plane") or (self.requested_plane or "headless")).strip().lower()
+            plane = str(sm.get("plane") or (self.requested_plane or "gui")).strip().lower()
             if plane not in ("headless", "gui"):
-                if self.requested_plane:
-                    plane = self.requested_plane
-                elif any(w in goal.lower() for w in ("click", "browser", "desktop", "window", "gui", "visual", "screen")):
-                    plane = "gui"
-                else:
-                    plane = "headless"
+                plane = self.requested_plane if self.requested_plane in ("headless", "gui") else "gui"
 
             sub_missions.append(SubMission(
                 id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
                 goal=goal,
                 plane=plane,
                 depends_on=depends_on,
-                max_steps=max(1, min(requested_steps, 8)),
+                max_steps=max(1, min(requested_steps, 30)),
                 priority=max(0, int(sm.get("priority", 1) or 1)),
                 process_mode=process_mode,
                 evidence_context=evidence_context,
@@ -812,7 +810,7 @@ Rules:
         failure path into a scripted puppet.
         """
         budget = max(1, min(int(self.sub_agent_steps), 8))
-        fallback_plane = self.requested_plane or "headless"
+        fallback_plane = self.requested_plane or "gui"
         sub_missions = [
             SubMission(
                 id="adaptive-investigator",
@@ -898,7 +896,7 @@ Rules:
             )
 
             sub_agent_id = f"sub-agent-{sub_agent_num}"
-            execution_plane = getattr(sub_mission, "plane", "headless") or "headless"
+            execution_plane = getattr(sub_mission, "plane", "gui") or "gui"
             scoped_context = dict(self.initial_context)
             scoped_context.update(sub_mission.evidence_context)
             scoped_context["delegated_process_mode"] = sub_mission.process_mode
@@ -1003,9 +1001,26 @@ Rules:
                     findings_summary="SubAgent timed out before objective verification.",
                     success=False, status="TIMED_OUT", evidence_verified=False,
                     actions_taken=len(traces), duration_seconds=round(time.perf_counter() - t_start, 2),
+                    waiting_for_human=bool(getattr(agent, "_waiting_for_human", False)),
+                    waiting_for_human_reason=str(getattr(agent, "_waiting_for_human_reason", "") or ""),
                 )
 
             duration = round(time.perf_counter() - t_start, 2)
+
+            waiting_for_human = bool(getattr(agent, "_waiting_for_human", False))
+            waiting_for_human_reason = str(getattr(agent, "_waiting_for_human_reason", "") or "")
+            if not waiting_for_human:
+                for t in traces:
+                    t_act = _trace_value(t, "action_type", "")
+                    t_act_val = t_act.value if hasattr(t_act, "value") else str(t_act)
+                    t_status = str(_trace_value(t, "status", ""))
+                    if "WAIT_FOR_HUMAN" in t_act_val or "WAITING_FOR_HUMAN" in t_status:
+                        waiting_for_human = True
+                        if not waiting_for_human_reason:
+                            waiting_for_human_reason = str(
+                                _trace_value(t, "actual_observation", "") or _trace_value(t, "target_resource", "")
+                            )
+                        break
 
             # Summarize findings from traces (prefer agent's own self-summary)
             raw_summary = getattr(agent, "mission_summary", "")
@@ -1051,10 +1066,14 @@ Rules:
                 if str(_trace_value(t, "status", "")) in ("COMPLETED", "SUCCESS", "VERIFIED")
             )
 
-            is_successful = has_concrete_evidence and (
-                (has_goal_complete and bool(last_succeeded))
-                or (last_succeeded and success_ratio >= 0.5)
-                or (succeeded > 0 and total == 1)
+            is_successful = (
+                not waiting_for_human
+                and has_concrete_evidence
+                and (
+                    (has_goal_complete and bool(last_succeeded))
+                    or (last_succeeded and success_ratio >= 0.5)
+                    or (succeeded > 0 and total == 1)
+                )
             )
 
             sub_result = SubMissionResult(
@@ -1067,11 +1086,13 @@ Rules:
                 actions_taken=total,
                 duration_seconds=duration,
                 evidence_verified=False,
-                status="SUCCESS" if is_successful else "FAILED",
+                status="WAITING_FOR_HUMAN" if waiting_for_human else ("SUCCESS" if is_successful else "FAILED"),
+                waiting_for_human=waiting_for_human,
+                waiting_for_human_reason=waiting_for_human_reason,
             )
 
             # Independent Judge Agent evaluation (Anti-Self-Attestation)
-            if hasattr(self, "judge") and self.judge:
+            if hasattr(self, "judge") and self.judge and not waiting_for_human:
                 try:
                     judge_eval = await self.judge.evaluate_sub_mission(
                         workspace_id=workspace_id,
@@ -1106,6 +1127,8 @@ Rules:
                 success=False,
                 duration_seconds=round(time.perf_counter() - t_start, 2),
             )
+
+    _run_subagent = _dispatch_sub_agent
 
     async def _summarize_sub_agent_traces(
         self, goal: str, traces: list[Any]
@@ -1406,7 +1429,7 @@ Rules:
                 if planes:
                     effective_plane = planes[0]
                     break
-        effective_plane = effective_plane or "headless"
+        effective_plane = effective_plane or "gui"
 
         try:
             from sonic.llm.schemas import LLMRequest, Message, MessageRole
@@ -1496,11 +1519,13 @@ If the objective is complete or no more work is needed, return:
                 plane = self.requested_plane
             raw_deps = sm.get("depends_on", [])
             depends_on = [str(x).strip() for x in raw_deps if str(x).strip()] if isinstance(raw_deps, list) else []
+            sub_id = str(sm.get("id") or "").strip()
             sub_missions.append(SubMission(
+                id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
                 goal=goal,
                 plane=plane,
                 depends_on=depends_on,
-                max_steps=max(1, min(requested_steps, 8)),
+                max_steps=max(1, min(requested_steps, 30)),
                 priority=priority,
             ))
 
@@ -1541,7 +1566,22 @@ If the objective is complete or no more work is needed, return:
             for r in p.results
         ) if self.phases and any(p.results for p in self.phases) else False
 
-        if all_success and all_verified:
+        any_waiting_for_human = any(
+            getattr(r, "waiting_for_human", False)
+            for p in self.phases
+            for r in p.results
+        )
+        waiting_reasons = [
+            str(getattr(r, "waiting_for_human_reason", "")).strip()
+            for p in self.phases
+            for r in p.results
+            if getattr(r, "waiting_for_human", False) and str(getattr(r, "waiting_for_human_reason", "")).strip()
+        ]
+        waiting_reason_str = "; ".join(dict.fromkeys(waiting_reasons))
+
+        if any_waiting_for_human:
+            status = "WAITING_FOR_HUMAN"
+        elif all_success and all_verified:
             status = "COMPLETE"
         elif any_success:
             status = "PARTIAL"
@@ -1552,7 +1592,9 @@ If the objective is complete or no more work is needed, return:
 
         # LLM synthesis of final summary (strictly empirically grounded)
         final_summary = ""
-        if not any_success:
+        if any_waiting_for_human:
+            final_summary = f"WAITING_FOR_HUMAN: {waiting_reason_str or 'Human assistance requested'}"
+        elif not any_success:
             failed_goals = [
                 f"- {r.goal}: {r.findings_summary or 'Execution failed'}"
                 for p in self.phases for r in p.results
@@ -1628,6 +1670,8 @@ If the objective is complete or no more work is needed, return:
                 and replay_metrics.evidence_completeness >= 0.5
                 and replay_metrics.verification_rate > 0.0
             ),
+            waiting_for_human=any_waiting_for_human,
+            waiting_for_human_reason=waiting_reason_str,
         )
 
     # ------------------------------------------------------------------

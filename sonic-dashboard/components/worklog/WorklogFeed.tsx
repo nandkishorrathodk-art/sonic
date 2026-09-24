@@ -46,6 +46,8 @@ interface WorklogFeedProps {
   currentAction?: string;
   loading: boolean;
   status?: string;
+  waitingForHuman?: boolean;
+  waitingForHumanReason?: string;
   onSendPrompt: (prompt: string, mode: Mode) => Promise<void>;
   onInterrupt?: () => Promise<void> | void;
   onSelectFile?: (filePath: string) => void;
@@ -321,6 +323,8 @@ export function WorklogFeed({
   currentAction,
   loading,
   status,
+  waitingForHuman,
+  waitingForHumanReason,
   onSendPrompt,
   onInterrupt,
   onSelectFile,
@@ -335,6 +339,8 @@ export function WorklogFeed({
   const [activeMode, setActiveMode] = useState<Mode>("Normal");
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [resumeNote, setResumeNote] = useState("");
+  const [resuming, setResuming] = useState(false);
   const worklogEndRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const shouldFollowTailRef = useRef(true);
@@ -343,13 +349,28 @@ export function WorklogFeed({
   const displayItems: WorklogItem[] = worklog || [];
 
   const normalizedStatus = (status || "").toUpperCase();
+  const isWaitingForHuman = Boolean(waitingForHuman || normalizedStatus === "WAITING_FOR_HUMAN");
   const isFinished =
     normalizedStatus === "IDLE" ||
     normalizedStatus === "PAUSED" ||
+    normalizedStatus === "WAITING_FOR_HUMAN" ||
     normalizedStatus === "BLOCKED" ||
     normalizedStatus === "COMPLETED" ||
     normalizedStatus === "ERROR" ||
     (!loading && normalizedStatus !== "RUNNING");
+
+  const handleResumeWorkstation = async () => {
+    setResuming(true);
+    try {
+      await api.resumeWorkstation(resumeNote, sessionId);
+      setResumeNote("");
+      onRefreshState?.();
+    } catch (err) {
+      console.error("Failed to resume workstation:", err);
+    } finally {
+      setResuming(false);
+    }
+  };
 
   // Only backend lifecycle state can end the active work indicator. A response
   // event is content, not proof that execution has completed.
@@ -771,6 +792,37 @@ export function WorklogFeed({
 
         <div ref={worklogEndRef} />
       </div>
+
+      {/* WAITING_FOR_HUMAN Banner */}
+      {isWaitingForHuman && (
+        <div className="mx-3 mt-2 rounded-xl border border-amber-500/50 bg-amber-500/10 p-3 text-xs space-y-2 shadow-lg">
+          <div className="flex items-center gap-2 text-amber-400 font-mono font-semibold">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>WAITING_FOR_HUMAN — Operator Verification / Assistance Needed</span>
+          </div>
+          <p className="text-[11.5px] text-slate-200 leading-relaxed">
+            {waitingForHumanReason || "Complete the required verification (CAPTCHA / OTP / 2FA) on the live desktop or enter the verification code/note below, then click Resume."}
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={resumeNote}
+              onChange={(e) => setResumeNote(e.target.value)}
+              placeholder="Enter OTP, verification code, or note (optional)..."
+              className="flex-1 bg-ink-950 border border-amber-500/40 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white outline-none focus:border-amber-400"
+            />
+            <button
+              type="button"
+              disabled={resuming}
+              onClick={handleResumeWorkstation}
+              className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-ink-950 font-mono font-bold text-xs flex items-center gap-1.5 transition disabled:opacity-50"
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              <span>{resuming ? "Resuming..." : "Resume"}</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Prompt Area */}
       <div className="p-3 border-t border-ink-800 bg-ink-900 space-y-2">

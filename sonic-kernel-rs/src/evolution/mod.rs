@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn test_evolution_canary_and_operator_approval() {
         let mut pipe = EvolutionPipeline::new();
-        let (prop, accepted) = pipe.submit_proposal("src/tools/nmap.rs", "Faster port scan");
+        let (prop, accepted) = pipe.submit_proposal("src/tools/net_probe.rs", "Faster diagnostic probe");
         assert!(accepted);
         assert_eq!(prop.stage, EvolutionStage::IsolatedBranch);
 

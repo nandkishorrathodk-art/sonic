@@ -117,50 +117,14 @@ class MissionDirector:
     # =============================================================
     @staticmethod
     def _derive_hypothesis_from_objective(goal: str, target: str) -> tuple[str, str, str, str]:
-        """Derive hypothesis statement, counter-statement, vulnerability class, and claim type organically from the target objective."""
-        g = goal.strip()
-        g_lower = g.lower()
-
-        if any(k in g_lower for k in ("sqli", "sql injection", "sql", "injection")):
-            return (
-                f"Target '{target}' is susceptible to SQL injection: {g}",
-                f"Target '{target}' properly sanitizes/parametrizes database queries: {g}",
-                "sql_injection",
-                "vulnerability",
-            )
-        if any(k in g_lower for k in ("jwt", "token", "auth", "login", "credential", "session", "bypass")):
-            return (
-                f"Target '{target}' exhibits authentication or authorization vulnerability: {g}",
-                f"Target '{target}' enforces robust authentication and access controls: {g}",
-                "authentication_authorization",
-                "permission",
-            )
-        if any(k in g_lower for k in ("recon", "scan", "enumerate", "discover", "map")):
-            return (
-                f"Target '{target}' exposes reachable services and attack surfaces: {g}",
-                f"Target '{target}' has minimal or restricted external attack surface: {g}",
-                "attack_surface",
-                "architectural",
-            )
-        if any(k in g_lower for k in ("remediate", "fix", "patch")):
-            return (
-                f"Remediation on target '{target}' successfully resolves the defect: {g}",
-                f"Defect persists or remediation causes regressions on target '{target}': {g}",
-                "remediation_verification",
-                "behavioral",
-            )
-        if any(k in g_lower for k in ("xss", "cross-site", "csrf", "ssrf", "rce", "traversal", "leak")):
-            return (
-                f"Target '{target}' exhibits vulnerability: {g}",
-                f"Target '{target}' securely mitigates vulnerability: {g}",
-                "web_vulnerability",
-                "vulnerability",
-            )
+        """Derive domain-neutral state-convergence hypothesis pair organically from the target objective."""
+        g = goal.strip() or "complete objective"
+        tgt = target.strip() or "workstation"
         return (
-            f"Target '{target}' satisfies mission objective: {g}",
-            f"Target '{target}' does not satisfy mission objective: {g}",
+            f"Target '{tgt}' state converges to satisfy objective with verified execution receipts: {g}",
+            f"Target '{tgt}' state fails to converge or lacks empirical verification for objective: {g}",
             "objective_fulfillment",
-            "behavioral",
+            "state_convergence",
         )
 
     async def create_mission(
@@ -178,15 +142,10 @@ class MissionDirector:
         mission_id = _new_id("msn")
 
         if success_criteria is None:
-            g_lower = goal.lower()
-            if any(k in g_lower for k in ("remediate", "fix", "patch")):
-                crit = ["Remediate vulnerability", "100% unit tests passing", "Clean git commit created"]
-            elif any(k in g_lower for k in ("recon", "scan", "discover", "enumerate", "map")):
-                crit = ["Asset and attack surface mapped", "Discovery evidence recorded"]
-            elif any(k in g_lower for k in ("test", "audit", "verify", "pentest")):
-                crit = ["Security posture evaluated", "Verified findings and evidence produced"]
-            else:
-                crit = [f"Objective satisfied: {goal[:60]}", "Evidence package verified"]
+            crit = [
+                f"Target state converged for objective: {goal[:60]}",
+                "ActionContract postconditions and evidence package verified",
+            ]
         else:
             crit = success_criteria
 
@@ -210,7 +169,7 @@ class MissionDirector:
             objective=objective,
             current_phase=MissionPhase.DISCOVERY,
             status=MissionStatus.PLANNING,
-            current_next_action="Decompose mission objective into research and engineering plan",
+            current_next_action="Decompose mission objective into state-convergence plan",
         )
 
         self.missions[mission_id] = state
@@ -226,158 +185,48 @@ class MissionDirector:
         return state
 
     # =============================================================
-    # 2. Objective Decomposition & Adaptive Planning
+    # 2. Objective Decomposition & Adaptive State-Convergence Planning
     # =============================================================
     async def decompose_mission(self, mission_id: str) -> MissionPlan:
-        """Decomposes a high-level goal into structured phases, questions, tracks, and milestones organically derived from the objective."""
+        """Decomposes a high-level goal into domain-neutral state-convergence phases, questions, tracks, and milestones."""
         state = self._require_mission(mission_id)
         goal = state.objective.goal
-        g_lower = goal.lower()
 
-        if any(k in g_lower for k in ("remediate", "fix", "patch")):
-            questions = [
-                f"What is the root cause of the issue described in: '{goal}'?",
-                "Which source files and test fixtures define this system behavior?",
-                "What security boundaries or side-effects exist for remediation candidate?",
-            ]
-            tracks = [
-                "Track-A: Source Code & Repository Analysis",
-                "Track-B: Test Fixture & Defect Reproduction",
-                "Track-C: Patch Formulation & Verification",
-            ]
-            milestones = [
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 1: Repository & Defect Inspection",
-                    objective="Locate failing functionality and vulnerable code pathways",
-                    success_conditions=["Vulnerable code file identified", "Test failure reproduced"],
-                    status=MilestoneStatus.ACTIVE,
-                ),
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 2: Remediation & Unit Test Validation",
-                    objective="Apply fix and verify test suite passes without regressions",
-                    success_conditions=["Patch written to disk", "All unit tests passing"],
-                    dependencies=["Milestone 1"],
-                    status=MilestoneStatus.PENDING,
-                ),
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 3: Git Commit & Deliverable Finalization",
-                    objective="Create commit and export verified deliverable report",
-                    success_conditions=["Git commit created", "Evidence custody chain signed"],
-                    dependencies=["Milestone 2"],
-                    status=MilestoneStatus.PENDING,
-                ),
-            ]
-        elif any(k in g_lower for k in ("recon", "scan", "discover", "enumerate", "map")):
-            questions = [
-                f"What reachable assets, endpoints, and services exist for: '{goal}'?",
-                "What configuration surfaces and open interfaces are exposed?",
-                "What architecture or boundaries govern the target environment?",
-            ]
-            tracks = [
-                "Track-A: Repository & Target Surface Mapping",
-                "Track-B: Service & Endpoint Enumeration",
-                "Track-C: Exposure Analysis & Evidence Synthesis",
-            ]
-            milestones = [
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 1: Repository & Surface Discovery",
-                    objective="Map target architecture and discover exposed assets",
-                    success_conditions=["Target asset identified", "Initial surface mapped"],
-                    status=MilestoneStatus.ACTIVE,
-                ),
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 2: Target Exploration & Verification",
-                    objective="Inspect target endpoints and record accessibility",
-                    success_conditions=["Target inspected", "Evidence gathered"],
-                    dependencies=["Milestone 1"],
-                    status=MilestoneStatus.PENDING,
-                ),
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 3: Git Commit & Deliverable Finalization",
-                    objective="Consolidate discovery evidence and deliverable report",
-                    success_conditions=["Git commit created", "Evidence package verified"],
-                    dependencies=["Milestone 2"],
-                    status=MilestoneStatus.PENDING,
-                ),
-            ]
-        elif any(k in g_lower for k in ("test", "audit", "probe", "pentest", "inject", "auth", "bypass", "rate limiter", "anomaly")):
-            questions = [
-                f"What potential security weaknesses or behavior anomalies exist in: '{goal}'?",
-                "What empirical evidence confirms or falsifies the security hypothesis?",
-                "What impact or exposure results from the observed target behavior?",
-            ]
-            tracks = [
-                "Track-A: Repository & Attack Surface Inspection",
-                "Track-B: Empirical Hypothesis Testing",
-                "Track-C: Impact Verification & Evidence Packaging",
-            ]
-            milestones = [
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 1: Repository & Vector Inspection",
-                    objective="Inspect target vectors and attack surface",
-                    success_conditions=["Target vector identified", "Inspection completed"],
-                    status=MilestoneStatus.ACTIVE,
-                ),
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 2: Hypothesis Testing & Verification",
-                    objective="Empirically evaluate security posture against target",
-                    success_conditions=["Hypothesis tested", "Findings verified"],
-                    dependencies=["Milestone 1"],
-                    status=MilestoneStatus.PENDING,
-                ),
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 3: Git Commit & Deliverable Finalization",
-                    objective="Document verified findings and finalize evidence report",
-                    success_conditions=["Git commit created", "Evidence custody chain signed"],
-                    dependencies=["Milestone 2"],
-                    status=MilestoneStatus.PENDING,
-                ),
-            ]
-        else:
-            questions = [
-                f"What are the core operational requirements to achieve: '{goal}'?",
-                "What target components, configs, and constraints govern execution?",
-                "What verifiable outcomes indicate successful completion?",
-            ]
-            tracks = [
-                "Track-A: Repository & Context Analysis",
-                "Track-B: Target Interaction & Execution",
-                "Track-C: Outcome Verification & Deliverables",
-            ]
-            milestones = [
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 1: Repository & Target Orientation",
-                    objective=f"Orient and assess target context for {goal[:50]}",
-                    success_conditions=["Target context identified", "Orientation complete"],
-                    status=MilestoneStatus.ACTIVE,
-                ),
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 2: Execution & Verification",
-                    objective="Execute actions autonomously to achieve the objective",
-                    success_conditions=["Objective executed", "Verification completed"],
-                    dependencies=["Milestone 1"],
-                    status=MilestoneStatus.PENDING,
-                ),
-                MissionMilestone(
-                    mission_id=mission_id,
-                    name="Milestone 3: Git Commit & Deliverable Finalization",
-                    objective="Consolidate results and finalize deliverable package",
-                    success_conditions=["Git commit created", "Evidence custody chain signed"],
-                    dependencies=["Milestone 2"],
-                    status=MilestoneStatus.PENDING,
-                ),
-            ]
+        questions = [
+            f"What is the initial observable state and context required to achieve: '{goal}'?",
+            "Which state transitions (StateDelta) and execution planes (GUI / terminal) are optimal?",
+            "What empirical receipts confirm that ActionContract postconditions are satisfied?",
+        ]
+        tracks = [
+            "Track-A: Repository & Target Surface State Discovery",
+            "Track-B: Dual-Plane State-Convergence Execution",
+            "Track-C: ActionContract Postcondition Verification & Deliverables",
+        ]
+        milestones = [
+            MissionMilestone(
+                mission_id=mission_id,
+                name="Milestone 1: Repository Surface Discovery & Vector Inspection",
+                objective=f"Observe initial state, repository context, and target surface for {goal[:60]}",
+                success_conditions=["Initial state snapshot captured", "Target context and surface identified"],
+                status=MilestoneStatus.ACTIVE,
+            ),
+            MissionMilestone(
+                mission_id=mission_id,
+                name="Milestone 2: State-Convergence Execution & Verification",
+                objective="Execute actions autonomously across GUI and terminal planes to converge state toward objective",
+                success_conditions=["StateDelta transitions validated", "Empirical execution receipts verified"],
+                dependencies=["Milestone 1"],
+                status=MilestoneStatus.PENDING,
+            ),
+            MissionMilestone(
+                mission_id=mission_id,
+                name="Milestone 3: Git Commit & Deliverable Finalization",
+                objective="Verify postconditions, persist artifacts, and finalize deliverable report",
+                success_conditions=["Git commit created", "Evidence custody chain signed"],
+                dependencies=["Milestone 2"],
+                status=MilestoneStatus.PENDING,
+            ),
+        ]
 
         plan = MissionPlan(
             mission_id=mission_id,
@@ -385,7 +234,7 @@ class MissionDirector:
             research_questions=questions,
             investigation_tracks=tracks,
             milestones=milestones,
-            stop_conditions=["Goal satisfied with verified tests", "Budget exhausted"],
+            stop_conditions=["Goal satisfied with verified receipts", "Budget exhausted"],
             version=1,
         )
 
@@ -394,15 +243,204 @@ class MissionDirector:
         state.active_tracks = list(tracks)
         state.remaining_unknowns = [
             f"Verification of: {state.objective.goal[:60]}",
-            "Downstream impact and blast radius",
+            "StateDelta postcondition validation",
         ] if state.objective and state.objective.goal else [
-            "Root cause analysis",
-            "Remediation verification",
+            "Initial state discovery",
+            "Postcondition verification",
         ]
         state.status = MissionStatus.ACTIVE
 
         self._record_event(mission_id, "PlanDecomposed", {"version": 1, "milestones": len(milestones)})
         return plan
+
+    # =============================================================
+    # 2b. Milestone Execution with Being, Toolsmith, MethodLab & LessonsLedger
+    # =============================================================
+    async def execute_milestone(
+        self,
+        mission_id: str,
+        milestone: Any = None,
+        workspace_id: str | None = None,
+        steps: int = 12,
+    ) -> dict[str, Any]:
+        """Execute a single mission milestone with Being, ToolsmithLoop, MethodLab,
+        LessonsLedger, and HDCE ActionContract state-delta verification wired in."""
+        from sonic.being.craft import BeingCraft
+        from sonic.being.identity import get_being_store, get_or_create_being
+        from sonic.being.lessons import LessonsLedger
+        from sonic.being.method_lab import MethodLab
+        from sonic.being.toolsmith import ToolsmithLoop
+        from sonic.computer_use.models import ActionExecutionStatus
+        from sonic.evolution.engine import EvolutionEngine
+        from sonic.evolution.strategy import DynamicStrategyEngine
+        from sonic.memory.vector import get_vector_memory
+        from sonic.mission_engine.hdce import (
+            ActionContract,
+            ActionContractValidator,
+            ActionReceipt,
+            StateDelta,
+        )
+        from sonic.safety.sealed import seal_default
+        from sonic.tools.computer_as_compute_provider import ComputerAsComputeProvider
+        from sonic.tools.registry import get_default_registry
+
+        state = self._require_mission(mission_id)
+        if state.current_plan is None:
+            await self.decompose_mission(mission_id)
+
+        target_ms: MissionMilestone | None = None
+        if isinstance(milestone, MissionMilestone):
+            target_ms = milestone
+        elif isinstance(milestone, str) and state.current_plan:
+            for m in state.current_plan.milestones:
+                if m.milestone_id == milestone or m.name == milestone:
+                    target_ms = m
+                    break
+        if target_ms is None and state.current_plan and state.current_plan.milestones:
+            for m in state.current_plan.milestones:
+                if m.status in (MilestoneStatus.ACTIVE, MilestoneStatus.PENDING):
+                    target_ms = m
+                    break
+            if target_ms is None:
+                target_ms = state.current_plan.milestones[0]
+
+        ws_id = workspace_id
+        if not ws_id:
+            if state.computer_workspaces:
+                ws_id = state.computer_workspaces[0]
+            else:
+                ws = await self.computer.create(
+                    tenant_id=state.tenant_id,
+                    engagement_id=state.mission_id,
+                    workspace_type=ComputerWorkspaceType.MISSION_COMPUTER,
+                )
+                ws_id = getattr(ws, "id", getattr(ws, "workspace_id", str(ws)))
+                state.computer_workspaces.append(ws_id)
+                self.resource_mgr.allocate_sandbox(mission_id, ws_id)
+
+        being = get_or_create_being(state.tenant_id)
+        being_store = get_being_store()
+        being_mind = being_store.get_mind(being.being_id)
+        craft = BeingCraft(being_id=being.being_id)
+        security_registry = get_default_registry(ComputerAsComputeProvider(self.computer))
+        sec_tools = security_registry.as_dict()
+        toolsmith = ToolsmithLoop(
+            craft=craft,
+            llm=self.model_router,
+            registry=security_registry,
+        )
+        method_lab = MethodLab(
+            llm=self.model_router,
+            vector_memory=get_vector_memory(),
+            toolsmith=toolsmith,
+        )
+        lessons_ledger = LessonsLedger(tenant_id=state.tenant_id, agent_id=being.being_id)
+        evolution_engine = EvolutionEngine(
+            strategy_engine=DynamicStrategyEngine(),
+            method_lab=method_lab,
+            toolsmith=toolsmith,
+            lessons_ledger=lessons_ledger,
+        )
+
+        workspace_root = "/home/sonic/workspace"
+        if getattr(state, "objective", None) and getattr(state.objective, "scope", None):
+            for s in state.objective.scope:
+                if s.startswith("/"):
+                    workspace_root = s
+                    break
+        safety_policy = seal_default(workspace_root=workspace_root)
+
+        before_snapshot = {
+            "milestone_status": str(target_ms.status.value if target_ms else "PENDING"),
+            "workspace_id": ws_id,
+            "verified": False,
+        }
+        contract = ActionContract(
+            action_type="TERMINAL_EXEC",
+            preconditions={"workspace_id": ws_id},
+            postconditions={"verified": True},
+        )
+        validator = ActionContractValidator()
+
+        agent = ComputerUseAgent(
+            computer_provider=self.computer,
+            llm_router=self.model_router,
+            security_tools=sec_tools,
+            autonomy_level=self.autonomy_level,
+            mode=EngineeringMissionMode.ENGINEERING_MODE,
+            browser=None,
+            gui_only=False,
+            observe_desktop=True,
+            tenant_id=state.tenant_id,
+            agent_id=being.being_id,
+            being_mind=being_mind,
+            safety=safety_policy,
+            toolsmith=toolsmith,
+            method_lab=method_lab,
+            lessons_ledger=lessons_ledger,
+            evolution_engine=evolution_engine,
+        )
+
+        ms_goal = (
+            f"{target_ms.name}: {target_ms.objective} (Mission Goal: {state.objective.goal})"
+            if target_ms is not None
+            else state.objective.goal
+        )
+        traces = await agent.run_mission(
+            workspace_id=ws_id,
+            goal=ms_goal,
+            steps=steps,
+        )
+        existing_traces = list(getattr(state, "_last_traces", []) or [])
+        existing_traces.extend(traces)
+        self.stash_traces(mission_id, existing_traces)
+
+        successful = sum(
+            1 for t in traces if str(getattr(t, "status", "")).upper() in ("SUCCESS", "SUCCEEDED", "RECOVERED")
+        )
+        converged = successful > 0
+        if target_ms is not None:
+            target_ms.status = MilestoneStatus.COMPLETED if converged else MilestoneStatus.FAILED
+
+        after_snapshot = {
+            "milestone_status": str(target_ms.status.value if target_ms else ("COMPLETED" if converged else "FAILED")),
+            "workspace_id": ws_id,
+            "verified": converged,
+        }
+        delta = StateDelta.from_states(before_snapshot, after_snapshot)
+        receipt = ActionReceipt(
+            action_type="TERMINAL_EXEC",
+            status=ActionExecutionStatus.SUCCEEDED if converged else ActionExecutionStatus.FAILED,
+            state_delta=delta,
+            before=before_snapshot,
+            after=after_snapshot,
+            exit_code=0 if converged else 1,
+            evidence=f"Executed {len(traces)} steps ({successful} succeeded) for milestone.",
+        )
+        contract_validation = validator.validate_receipt(contract, receipt)
+
+        self._record_event(
+            mission_id,
+            "MilestoneExecuted",
+            {
+                "milestone": target_ms.name if target_ms else "default",
+                "status": after_snapshot["milestone_status"],
+                "being_id": being.being_id,
+                "traces": len(traces),
+                "contract_valid": contract_validation.valid,
+            },
+        )
+        await self._persist_mission(mission_id)
+        return {
+            "mission_id": mission_id,
+            "milestone": target_ms,
+            "being_id": being.being_id,
+            "traces": traces,
+            "state_delta": delta,
+            "receipt": receipt,
+            "contract_valid": contract_validation.valid,
+            "status": after_snapshot["milestone_status"],
+        }
 
     # =============================================================
     # 3. Execution Coordination & Computer Operation
@@ -864,7 +902,7 @@ class MissionDirector:
         goal_str = getattr(objective, "goal", str(objective)).lower()
         complex_markers = (
             " and ", " then ", ";", "\n", "step", "phase",
-            "remediate", "investigate", "reproduce", "exploit",
+            "remediate", "investigate", "reproduce", "implement",
             "audit", "recon", "verify", "patch", "multi-step",
             "multistep", "end-to-end", "pipeline",
         )

@@ -176,7 +176,7 @@ export function MissionView({ workstationState, sessionId = "default" }: Mission
           />
           <button
             onClick={startMission}
-            disabled={busy || !targetSandbox?.workspace_id || !objective.trim()}
+            disabled={busy || !objective.trim()}
             className="btn-secondary !px-3 !py-1.5 text-xs font-mono disabled:opacity-50"
           >
             Start Mission

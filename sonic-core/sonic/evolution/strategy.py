@@ -24,6 +24,7 @@ Core Principles:
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -383,8 +384,11 @@ class DynamicStrategyEngine:
                 if hasattr(lessons_ledger, "record"):
                     from sonic.being.lessons import Lesson as BeingLesson
                     from sonic.being.lessons import LessonKind
+                    lesson_hash = hashlib.sha256(
+                        f"{tool}:{target}:{signal.value}".encode("utf-8")
+                    ).hexdigest()[:10]
                     lesson = BeingLesson(
-                        lesson_id=f"dyn-lsn-{abs(hash(tool + target + signal.value)) % 10**8}",
+                        lesson_id=f"dyn-lsn-{lesson_hash}",
                         kind=LessonKind.AVOID,
                         goal=goal,
                         approach=f"{tool} on {target}",

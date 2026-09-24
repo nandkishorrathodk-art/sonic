@@ -41,6 +41,7 @@ class ActionExecutionStatus(StrEnum):
     RECOVERED = "RECOVERED"
     VERIFIED = "VERIFIED"
     UNVERIFIED = "UNVERIFIED"
+    WAITING_FOR_HUMAN = "WAITING_FOR_HUMAN"
 
     def __eq__(self, other: object) -> bool:
         if super().__eq__(other):
@@ -178,55 +179,40 @@ class ComputerActionType(StrEnum):
     GUI_RIGHT_CLICK = "GUI_RIGHT_CLICK"
     GUI_TYPE = "GUI_TYPE"
     GUI_KEYPRESS = "GUI_KEYPRESS"
+    GUI_HOTKEY = "GUI_HOTKEY"
     GUI_MOVE = "GUI_MOVE"
     GUI_SCROLL = "GUI_SCROLL"
     GUI_SCREENSHOT = "GUI_SCREENSHOT"
-    # Press-move-release drag (a human file drag-drop or wizard slider). Maps
-    # to GUIActionType.DRAG; source is (x,y), destination is (x2,y2).
     GUI_DRAG = "GUI_DRAG"
-    # Wait for a UI change before acting again. A human installing an app
-    # waits for the "Next" button or the progress bar to finish; without this
-    # the agent re-screenshots a still-loading page and clicks stale coords.
     GUI_WAIT = "GUI_WAIT"
     TERMINAL_EXEC = "TERMINAL_EXEC"
     FILE_READ = "FILE_READ"
     FILE_WRITE = "FILE_WRITE"
     APP_LAUNCH = "APP_LAUNCH"
     APP_CLOSE = "APP_CLOSE"
-    # Toggle focus between desktop windows (e.g. Chromium ↔ a terminal app)
-    # without relaunching. Maps to GUIActionType.SELECT_WINDOW.
     APP_FOCUS = "APP_FOCUS"
-    # Install a package/application via the provider's install_application(),
-    # which enforces the ApplicationPolicy allowlist (forbidden packages like
-    # cryptominer/tor-relay/ddos-bot are blocked). This MUST be used instead of
-    # a raw TERMINAL_EXEC `apt-get install`, which would bypass that gate.
     APP_INSTALL = "APP_INSTALL"
     SERVICE_ACTION = "SERVICE_ACTION"
+    GIT_STATUS = "GIT_STATUS"
+    GIT_DIFF = "GIT_DIFF"
     GIT_BRANCH = "GIT_BRANCH"
     GIT_COMMIT = "GIT_COMMIT"
+    GIT_PUSH = "GIT_PUSH"
     # Unified computer-use: browser actions share the same reasoning loop.
     BROWSER_NAVIGATE = "BROWSER_NAVIGATE"
     BROWSER_CLICK = "BROWSER_CLICK"
     BROWSER_TYPE = "BROWSER_TYPE"
+    BROWSER_SELECT = "BROWSER_SELECT"
+    BROWSER_KEYPRESS = "BROWSER_KEYPRESS"
+    BROWSER_SCROLL = "BROWSER_SCROLL"
     BROWSER_SCREENSHOT = "BROWSER_SCREENSHOT"
-    # Wait for a page element to appear/be ready before clicking it — a human
-    # waits for a download button or "Next" to render. Pairs with BROWSER_CLICK.
     BROWSER_WAIT = "BROWSER_WAIT"
-    # Trigger a file download from a link/button (human: click download, save
-    # file). The downloaded file lands in the sandbox workspace for later use.
     BROWSER_DOWNLOAD = "BROWSER_DOWNLOAD"
-    # Security-tool execution: structured, in-sandbox, fail-closed scanning.
+    WAIT_FOR_HUMAN = "WAIT_FOR_HUMAN"
     SECURITY_TOOL = "SECURITY_TOOL"
-    # Toolsmith: the being authors a NEW tool for an observation gap (Phase A,
-    # AIOSR). TOOL_AUTHOR proposes+persists the source; TOOL_RUN executes a
-    # previously-authored tool in-sandbox. Neither claims success by decree.
     TOOL_AUTHOR = "TOOL_AUTHOR"
     TOOL_RUN = "TOOL_RUN"
-    # Method-invention (Phase B, AIOSR): the being synthesizes a NOVEL offensive
-    # technique (a new method, not just a new tool) from observation + failure +
-    # the known-technique ledger. Confirmed only on real in-sandbox reproduction.
     METHOD_INVENT = "METHOD_INVENT"
-    # Sentinel action indicating mission objective completion
     GOAL_COMPLETE = "GOAL_COMPLETE"
 
 

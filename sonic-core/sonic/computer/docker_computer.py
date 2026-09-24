@@ -107,7 +107,7 @@ class DockerComputerProvider(ComputerProvider):
                 tenant_id=tenant_id,
                 engagement_id=engagement_id,
                 workspace_type=ComputerWorkspaceType.MISSION_COMPUTER,
-                profile=ComputerProfile.KALI_SECURITY,
+                profile=ComputerProfile.DEBIAN_ENGINEERING,
                 provider_type="DockerComputerProvider",
                 image="sonic-workstation:latest",
                 status=ComputerWorkspaceStatus.READY,
@@ -252,7 +252,7 @@ class DockerComputerProvider(ComputerProvider):
         tenant_id: str,
         engagement_id: str,
         workspace_type: ComputerWorkspaceType = ComputerWorkspaceType.MISSION_COMPUTER,
-        profile: ComputerProfile = ComputerProfile.KALI_SECURITY,
+        profile: ComputerProfile = ComputerProfile.DEBIAN_ENGINEERING,
     ) -> ComputerWorkspace:
         if self._workspace_owner and self._workspace_owner != tenant_id:
             raise RuntimeError(
@@ -263,6 +263,7 @@ class DockerComputerProvider(ComputerProvider):
         self._workspace_owner = tenant_id
         ws.tenant_id = tenant_id
         ws.engagement_id = engagement_id
+        ws.profile = profile
         if not await self._container_is_running():
             provisioned = await self._provision_workstation()
             if not provisioned:
@@ -390,7 +391,7 @@ class DockerComputerProvider(ComputerProvider):
         ws.status = ComputerWorkspaceStatus.RUNNING
         disp = self._get_display(workspace_id)
         active_window = "Desktop"
-        open_windows: list[str] = ["Desktop", "Terminal"]  # Default fallback for running container
+        open_windows: list[str] = ["Desktop"]
 
         # Check real open windows via wmctrl
         code, out, _ = await self._docker_exec(f"DISPLAY={disp} wmctrl -l 2>/dev/null", timeout=5)
@@ -411,7 +412,7 @@ class DockerComputerProvider(ComputerProvider):
         if code == 0 and out.strip():
             active_window = out.strip()
         else:
-            active_window = open_windows[-1] if len(open_windows) > 2 else "Desktop"
+            active_window = open_windows[-1] if len(open_windows) > 1 else "Desktop"
 
         # Check running processes
         procs = await self.process_list(workspace_id)
@@ -450,9 +451,9 @@ class DockerComputerProvider(ComputerProvider):
             f"DISPLAY={disp} import -window root {tmp_path} 2>/dev/null; "
             f"base64 -w0 {tmp_path} 2>/dev/null && rm -f {tmp_path} && "
             f"echo '___ACTIVE_WINDOW___' && "
-            f"DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null && "
+            f"(DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null || echo 'Desktop') && "
             f"echo '___OPEN_WINDOWS___' && "
-            f"DISPLAY={disp} wmctrl -l 2>/dev/null || true"
+            f"DISPLAY={disp} wmctrl -l 2>/dev/null"
         )
         code, out, _ = await self._docker_exec(scr_cmd, timeout=15)
         b64 = ""
@@ -497,6 +498,32 @@ class DockerComputerProvider(ComputerProvider):
     # Graphical Actions (Human Takeover & Agent GUI Actions)
     # -------------------------------------------------------------
 
+    @staticmethod
+    def _normalize_x11_keysym(raw_key: str) -> str:
+        """Normalize common key aliases into valid X11 keysyms for xdotool."""
+        key_map = {
+            "enter": "Return",
+            "return": "Return",
+            "esc": "Escape",
+            "escape": "Escape",
+            "backspace": "BackSpace",
+            "space": "space",
+            "tab": "Tab",
+            "del": "Delete",
+            "delete": "Delete",
+            "pgup": "Prior",
+            "pageup": "Prior",
+            "pgdn": "Next",
+            "pagedown": "Next",
+            "up": "Up",
+            "down": "Down",
+            "left": "Left",
+            "right": "Right",
+        }
+        tokens = [t.strip() for t in (raw_key or "").split("+") if t.strip()]
+        normalized = [key_map.get(t.lower(), t) for t in tokens]
+        return "+".join(normalized) if normalized else raw_key
+
     async def gui_action(
         self,
         workspace_id: str,
@@ -536,35 +563,59 @@ class DockerComputerProvider(ComputerProvider):
 
             elif atype == GUIActionType.TYPE and action.text:
                 safe_text = shlex.quote(action.text)
-                await exec_gui(f"DISPLAY={disp} xdotool type --delay 25 --clearmodifiers {safe_text}")
+                await exec_gui(f"DISPLAY={disp} xdotool type --delay 25 --clearmodifiers -- {safe_text}")
 
-            elif atype == GUIActionType.KEYPRESS and action.key:
-                safe_key = shlex.quote(action.key)
-                await exec_gui(f"DISPLAY={disp} xdotool key {safe_key}")
+            elif atype in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
+                norm_key = self._normalize_x11_keysym(action.key or action.text or "")
+                safe_key = shlex.quote(norm_key)
+                await exec_gui(f"DISPLAY={disp} xdotool key --clearmodifiers {safe_key}")
 
             elif atype == GUIActionType.SCROLL:
                 btn = 5 if action.scroll_delta < 0 else 4
                 times = abs(action.scroll_delta) if action.scroll_delta != 0 else 3
-                await exec_gui(f"DISPLAY={disp} xdotool click --repeat {times} {btn}")
+                move_prefix = (
+                    f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} && "
+                    if action.x is not None and action.y is not None
+                    else ""
+                )
+                await exec_gui(f"{move_prefix}DISPLAY={disp} xdotool click --repeat {times} {btn}")
 
-            elif atype == GUIActionType.OPEN_APP and action.app_name:
-                clean_app = action.app_name.strip()
-                app_query, args_list = self._split_app_and_args(clean_app)
-                resolved_bin = await self._resolve_app_binary(app_query)
-                if resolved_bin:
-                    parts = shlex.split(resolved_bin) + args_list
-                    spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 &"
-                    await exec_gui(spawn)
-                    self._active_windows[workspace_id] = parts[0]
+            elif atype in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
+                launched = await self.launch_application(workspace_id, action.app_name, actor=actor)
+                if not launched:
+                    raise RuntimeError(f"GUI launch_application failed for '{action.app_name}'")
+
+            elif atype == GUIActionType.CLOSE_WINDOW:
+                target = action.window_id or action.app_name
+                if target:
+                    safe_target = shlex.quote(target)
+                    await exec_gui(
+                        f"export DISPLAY={disp}; "
+                        f"wmctrl -c {safe_target} 2>/dev/null || "
+                        f"wmctrl -ic {safe_target} 2>/dev/null || "
+                        f"xdotool search --onlyvisible --name {safe_target} windowclose 2>/dev/null || "
+                        f"pkill -f -- {safe_target}"
+                    )
+                else:
+                    await exec_gui(f"DISPLAY={disp} xdotool getactivewindow windowclose")
 
             elif atype == GUIActionType.CLOSE_APP and action.app_name:
                 await exec_gui(f"pkill -f -- {shlex.quote(action.app_name)}")
+
+            elif atype == GUIActionType.INSTALL_APP and (action.app_name or action.text):
+                pkg = action.app_name or action.text or ""
+                ok, err = await self.install_application(workspace_id, pkg, actor=actor)
+                if not ok:
+                    raise RuntimeError(f"GUI install_application failed for '{pkg}': {err}")
+
+            elif atype == GUIActionType.WAIT:
+                await asyncio.sleep(max(0.1, (action.delay_ms or 500) / 1000.0))
 
             elif atype == GUIActionType.SELECT_WINDOW:
                 target = action.window_id or action.app_name
                 if target:
                     focus_code, _, focus_err = await self._docker_exec(
-                        f"DISPLAY={disp} (wmctrl -i -a {shlex.quote(target)} 2>/dev/null || "
+                        f"export DISPLAY={disp}; (wmctrl -i -a {shlex.quote(target)} 2>/dev/null || "
                         f"wmctrl -x -a {shlex.quote(target)} 2>/dev/null || "
                         f"wmctrl -a {shlex.quote(target)} 2>/dev/null || "
                         f"xdotool search --onlyvisible --class {shlex.quote(target)} windowactivate 2>/dev/null || "
@@ -574,6 +625,7 @@ class DockerComputerProvider(ComputerProvider):
                         raise RuntimeError(
                             f"window focus failed for '{target}': {focus_err.strip()}"
                         )
+                    self._active_windows[workspace_id] = target
 
             # Invalidate 2-second cache so fresh post-action screen is captured
             self._last_screenshot_time = 0.0
@@ -842,7 +894,7 @@ class DockerComputerProvider(ComputerProvider):
     @staticmethod
     def _split_app_and_args(clean_app: str) -> tuple[str, list[str]]:
         """Separates an application command string into application query and arguments.
-        Handles flags, URLs, and multi-word application names safely."""
+        Handles flags, URLs, file paths, and multi-word application names safely."""
         try:
             parts = shlex.split(clean_app)
         except Exception:
@@ -850,10 +902,21 @@ class DockerComputerProvider(ComputerProvider):
         if not parts:
             return "", []
 
-        # Find the index of the first argument (flag, URL, or option)
+        # Find the index of the first argument (flag, URL, or file path)
         arg_idx = None
         for idx, part in enumerate(parts):
-            if part.startswith("-") or "://" in part or part.startswith("www."):
+            if idx == 0:
+                continue
+            if (
+                part.startswith("-")
+                or "://" in part
+                or part.startswith("www.")
+                or part.startswith("/")
+                or part.startswith("./")
+                or part.startswith("../")
+                or part.startswith("~")
+                or ("." in part and not part.endswith(".desktop"))
+            ):
                 arg_idx = idx
                 break
 
@@ -861,11 +924,7 @@ class DockerComputerProvider(ComputerProvider):
             app_part = " ".join(parts[:arg_idx])
             args_part = parts[arg_idx:]
             return app_part, args_part
-        elif arg_idx == 0:
-            return parts[0], parts[1:]
-        else:
-            # If no flags or URLs, if multiple words, return the entire string as the query
-            return clean_app, []
+        return clean_app, []
 
 
     async def _resolve_app_binary(self, app_query: str) -> str:
@@ -881,7 +940,7 @@ class DockerComputerProvider(ComputerProvider):
         if code == 0 and out.strip():
             return out.strip().splitlines()[0]
 
-        # 2. Try hyphenated version (e.g. 'google chrome' -> 'google-chrome')
+        # 2. Try hyphenated version for multi-word display names
         if " " in app_clean:
             hyphenated = app_clean.replace(" ", "-").lower()
             code, out, _ = await self._docker_exec(f"which {shlex.quote(hyphenated)} 2>/dev/null")
@@ -895,8 +954,9 @@ class DockerComputerProvider(ComputerProvider):
             f"  [ -f \"$d\" ] || continue; "
             f"  name=$(grep -i '^Name=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
             f"  gname=$(grep -i '^GenericName=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
+            f"  cats=$(grep -i '^Categories=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
             f"  base=$(basename \"$d\" .desktop 2>/dev/null | tr '[:upper:]' '[:lower:]'); "
-            f"  if echo \"$name $gname $base\" | grep -q \"{search_esc}\"; then "
+            f"  if echo \"$name $gname $cats $base\" | grep -q \"{search_esc}\"; then "
             f"    exec_line=$(grep '^Exec=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2-); "
             f"    bin=$(echo \"$exec_line\" | awk '{{print $1}}'); "
             f"    if which \"$bin\" >/dev/null 2>&1; then which \"$bin\"; exit 0; fi; "
@@ -911,17 +971,17 @@ class DockerComputerProvider(ComputerProvider):
         # 4. Fallback to POSIX standard alternatives if querying a generic role (browser, editor, terminal)
         role_lower = app_clean.lower()
         if any(role in role_lower for role in ("browser", "web")):
-            for alt in ("x-www-browser", "sensible-browser", "google-chrome", "chromium", "firefox", "xdg-open"):
+            for alt in ("x-www-browser", "sensible-browser", "xdg-open"):
                 code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
                 if code == 0 and out.strip():
                     return out.strip().splitlines()[0]
-        elif any(role in role_lower for role in ("terminal", "console", "shell", "xterm")):
-            for alt in ("x-terminal-emulator", "xfce4-terminal", "xterm", "sensible-terminal"):
+        elif any(role in role_lower for role in ("terminal", "console", "shell")):
+            for alt in ("x-terminal-emulator", "sensible-terminal"):
                 code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
                 if code == 0 and out.strip():
                     return out.strip().splitlines()[0]
         elif any(role in role_lower for role in ("editor", "text", "notepad")):
-            for alt in ("sensible-editor", "mousepad", "nano", "gedit"):
+            for alt in ("sensible-editor", "xdg-open"):
                 code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
                 if code == 0 and out.strip():
                     return out.strip().splitlines()[0]
@@ -982,7 +1042,7 @@ class DockerComputerProvider(ComputerProvider):
         disp = self._get_display(workspace_id)
         clean_cmd = (
             f"for wid in $(DISPLAY={disp} wmctrl -l 2>/dev/null | grep -v ' -1 ' | cut -d' ' -f1); do "
-            f"  DISPLAY={disp} wmctrl -ic \"$wid\" 2>/dev/null || true; "
+            f"  DISPLAY={disp} wmctrl -ic \"$wid\" 2>/dev/null; "
             f"done"
         )
         await self._docker_exec(clean_cmd)

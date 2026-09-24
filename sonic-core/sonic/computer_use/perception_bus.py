@@ -347,7 +347,10 @@ class SemanticTargetIndex:
                         results.append((base_without_role, base_conf * 0.96))
 
         # 6. Special role aliases
-        if role_clean in ("search", "searchbar", "searchbox") or "search" in norm_spaces:
+        if role_clean in ("search", "searchbar", "searchbox") or (
+            role_clean in ("input", "entry", "textbox", "text", "combobox")
+            and re.search(r"\bsearch\b", norm_spaces)
+        ):
             for search_alias in (
                 "searchbar",
                 "search-bar",

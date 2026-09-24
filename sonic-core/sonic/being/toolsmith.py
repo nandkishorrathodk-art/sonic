@@ -107,6 +107,73 @@ class ToolsmithLoop:
         self.llm = llm
         self.registry = registry
         self.authored: list[AuthoredTool] = []
+        self._hydrate_from_craft()
+
+    def _hydrate_from_craft(self) -> None:
+        """Re-hydrate previously authored tools from BeingCraft notes so tools survive restart."""
+        if self.craft is None or not hasattr(self.craft, "list_notes"):
+            return
+        try:
+            notes = self.craft.list_notes() or []
+        except Exception as e:
+            logger.warning("toolsmith_craft_hydration_failed", error=str(e))
+            return
+
+        seen_names = {t.name for t in self.authored}
+        for note in notes:
+            tags = getattr(note, "tags", None) or []
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",") if t.strip()]
+            kind = str(getattr(note, "kind", "") or "").lower()
+            title = str(getattr(note, "title", "") or "").strip()
+            body = str(getattr(note, "body", "") or "")
+            is_toolsmith_note = (
+                "toolsmith" in [str(t).lower() for t in tags]
+                or kind in ("tool", "toolsmith")
+                or title.lower().startswith("tool:")
+                or "toolsmith" in body.lower()
+            )
+            if not is_toolsmith_note:
+                continue
+
+            raw_name = getattr(note, "name", None)
+            if not raw_name and ":" in title:
+                raw_name = title.split(":", 1)[1].strip()
+            elif not raw_name:
+                raw_name = title
+            clean_name = re.sub(r"[^a-z0-9_]", "_", str(raw_name or "").strip().lower()).strip("_")
+            if not clean_name or not re.match(r"^[a-z]", clean_name):
+                clean_name = f"tool_{clean_name}" if clean_name else "hydrated_tool"
+            if clean_name in seen_names:
+                continue
+
+            # Extract source from fenced code block or # source section or full body
+            source = ""
+            fence_match = re.search(r"```(?:python|py)?\s*\n(.*?)```", body, flags=re.DOTALL | re.IGNORECASE)
+            if fence_match:
+                source = fence_match.group(1).strip()
+            elif "# source" in body.lower():
+                idx = body.lower().index("# source")
+                source = body[idx + len("# source"):].strip()
+            else:
+                source = body.strip()
+
+            # Extract rationale if present
+            rationale = f"Re-hydrated tool {clean_name}"
+            rat_match = re.search(r"#\s*rationale\s*\n(.*?)(?:\n#\s*source|\n```|$)", body, flags=re.DOTALL | re.IGNORECASE)
+            if rat_match and rat_match.group(1).strip():
+                rationale = rat_match.group(1).strip()
+
+            if source:
+                hydrated = AuthoredTool(
+                    name=clean_name,
+                    source=source,
+                    rationale=rationale,
+                    craft_note_id=getattr(note, "note_id", None),
+                    authored_at=str(getattr(note, "created_at", "") or ""),
+                )
+                self.authored.append(hydrated)
+                seen_names.add(clean_name)
 
     # ------------------------------------------------------------------
     def _existing_tool_names(self) -> set[str]:
@@ -248,11 +315,20 @@ class ToolsmithLoop:
         )
         # Persist the authored source as a durable craft note (host-side).
         if self.craft is not None and hasattr(self.craft, "author"):
-            note = self.craft.author(
-                title=f"Tool: {tool.name}",
-                body=f"# rationale\n{tool.rationale}\n\n# source\n```python\n{tool.source}\n```\n",
-                kind="tool",
-            )
+            note_body = f"# tags: toolsmith\n# rationale\n{tool.rationale}\n\n# source\n```python\n{tool.source}\n```\n"
+            try:
+                note = self.craft.author(
+                    title=f"Tool: {tool.name}",
+                    body=note_body,
+                    kind="tool",
+                    tags=["toolsmith"],
+                )
+            except TypeError:
+                note = self.craft.author(
+                    title=f"Tool: {tool.name}",
+                    body=note_body,
+                    kind="tool",
+                )
             tool.craft_note_id = getattr(note, "note_id", None)
         self.authored.append(tool)
         logger.info("toolsmith_tool_authored", name=tool.name, confirmed=False)
@@ -296,6 +372,7 @@ class ToolsmithLoop:
             return tool  # nothing to run against — stays unconfirmed
         path = f"/home/sonic/workspace/toolsmith/{tool.name}.py"
         try:
+            await provider.execute(workspace_id, "mkdir -p /home/sonic/workspace/toolsmith")
             if hasattr(provider, "write_file"):
                 await provider.write_file(workspace_id, path, tool.source)
         except Exception as e:

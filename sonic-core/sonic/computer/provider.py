@@ -57,7 +57,7 @@ class ComputerProvider(ABC):
         tenant_id: str,
         engagement_id: str,
         workspace_type: ComputerWorkspaceType = ComputerWorkspaceType.MISSION_COMPUTER,
-        profile: ComputerProfile = ComputerProfile.KALI_SECURITY,
+        profile: ComputerProfile = ComputerProfile.DEBIAN_ENGINEERING,
     ) -> ComputerWorkspace:
         """Create and initialize a computer workspace."""
         pass
@@ -191,7 +191,7 @@ class UnifiedComputerProvider(ComputerProvider):
         tenant_id: str,
         engagement_id: str,
         workspace_type: ComputerWorkspaceType = ComputerWorkspaceType.MISSION_COMPUTER,
-        profile: ComputerProfile = ComputerProfile.KALI_SECURITY,
+        profile: ComputerProfile = ComputerProfile.DEBIAN_ENGINEERING,
     ) -> ComputerWorkspace:
         workspace_id = _new_id("ws")
         config = WorkspaceConfig(

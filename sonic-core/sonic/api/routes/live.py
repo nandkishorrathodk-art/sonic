@@ -110,7 +110,7 @@ async def get_live_stats(user: User = Depends(require_auth)):
     memory = get_memory_sync()
     if hasattr(memory, "get_stats"):
         try:
-            mem_stats = await memory.get_stats(tenant_id=user.email)
+            mem_stats = await memory.get_stats(tenant_id=getattr(user, "tenant_id", None) or "default")
         except TypeError:
             # Backends that cannot apply tenant filtering must not contribute
             # global counts to a tenant-scoped response.
@@ -118,7 +118,7 @@ async def get_live_stats(user: User = Depends(require_auth)):
     else:
         mem_stats = {}
 
-    t_id = _resolve_tenant_id(user)
+    t_id = getattr(user, "tenant_id", None) or "default"
     findings = [f for f in _system_state["findings"] if f.get("tenant_id") == t_id]
     assets = [a for a in _system_state["assets"] if a.get("tenant_id") == t_id]
     agents = [a for a in _system_state["agents"] if a.get("tenant_id") == t_id]
@@ -148,20 +148,23 @@ async def get_live_stats(user: User = Depends(require_auth)):
 @router.get("/agents")
 async def get_live_agents(user: User = Depends(require_auth)):
     """Live agent status scoped to tenant."""
-    return {"agents": [a for a in _system_state["agents"] if a.get("tenant_id") == user.email]}
+    t_id = getattr(user, "tenant_id", None) or "default"
+    return {"agents": [a for a in _system_state["agents"] if a.get("tenant_id") == t_id]}
 
 
 @router.get("/findings")
 async def get_live_findings(user: User = Depends(require_auth)):
     """Live findings feed scoped to tenant."""
-    findings = [f for f in _system_state["findings"] if f.get("tenant_id") == user.email]
+    t_id = getattr(user, "tenant_id", None) or "default"
+    findings = [f for f in _system_state["findings"] if f.get("tenant_id") == t_id]
     return {"findings": findings}
 
 
 @router.get("/assets")
 async def get_live_assets(user: User = Depends(require_auth)):
     """Live discovered assets scoped to tenant."""
-    assets = [a for a in _system_state["assets"] if a.get("tenant_id") == user.email]
+    t_id = getattr(user, "tenant_id", None) or "default"
+    assets = [a for a in _system_state["assets"] if a.get("tenant_id") == t_id]
     return {"assets": assets}
 
 
@@ -185,6 +188,7 @@ async def launch_scan(request: ScanRequest, user: User = Depends(require_auth)):
         raise HTTPException(status_code=403, detail="Target is outside the supplied engagement scope")
 
     runner = get_swarm_runner()
+    t_id = getattr(user, "tenant_id", None) or "default"
 
     # Register tenant-scoped agent activities
     agent_names = [
@@ -195,7 +199,7 @@ async def launch_scan(request: ScanRequest, user: User = Depends(require_auth)):
         ("Verifier", "verifier", "Awaiting findings to verify"),
     ]
     for name, atype, task in agent_names:
-        register_agent(name, atype, "Configured LLM", "active", task, tenant_id=user.email)
+        register_agent(name, atype, "Configured LLM", "active", task, tenant_id=getattr(user, "tenant_id", None) or "default")
 
     scan = {
         "target": request.target,
@@ -203,22 +207,22 @@ async def launch_scan(request: ScanRequest, user: User = Depends(require_auth)):
         "launched_by": user.email,
         "status": "running",
     }
-    _system_state["active_scans"][user.email] = scan
+    _system_state["active_scans"][t_id] = scan
 
     try:
         # Keep the legacy synchronous pipeline until the director worker is
         # attached; explicitly passing the tenant prevents accidental global
         # state if the runner changes its default mode.
-        results = await runner.run_engagement(request.target, request.scope, tenant_id=user.email, use_director=False)
+        results = await runner.run_engagement(request.target, request.scope, tenant_id=getattr(user, "tenant_id", None) or "default", use_director=False)
 
         for f in results.get("findings", []):
-            record_finding(f, tenant_id=user.email)
+            record_finding(f, tenant_id=getattr(user, "tenant_id", None) or "default")
 
         for a in results.get("assets", []):
-            record_asset(a, tenant_id=user.email)
+            record_asset(a, tenant_id=getattr(user, "tenant_id", None) or "default")
 
         for name, atype, _ in agent_names:
-            register_agent(name, atype, "Configured LLM", "idle", "Scan completed", tenant_id=user.email)
+            register_agent(name, atype, "Configured LLM", "idle", "Scan completed", tenant_id=getattr(user, "tenant_id", None) or "default")
 
         scan["status"] = "completed"
         scan["completed_at"] = datetime.now(UTC).isoformat()
@@ -235,14 +239,15 @@ async def launch_scan(request: ScanRequest, user: User = Depends(require_auth)):
         logger.error("scan_failed", target=request.target, user=user.email, error=str(e))
         scan["status"] = "failed"
         for name, atype, _ in agent_names:
-            register_agent(name, atype, "Configured LLM", "error", str(e)[:100], tenant_id=user.email)
+            register_agent(name, atype, "Configured LLM", "error", str(e)[:100], tenant_id=getattr(user, "tenant_id", None) or "default")
         return {"status": "error", "error": str(e)}
 
 
 @router.get("/scan/status")
 async def get_scan_status(user: User = Depends(require_auth)):
     """Get current scan status."""
-    return {"scan": _system_state.get("active_scans", {}).get(user.email)}
+    t_id = getattr(user, "tenant_id", None) or "default"
+    return {"scan": _system_state.get("active_scans", {}).get(t_id)}
 
 
 # ============================================
@@ -254,14 +259,14 @@ async def get_live_graph(user: User = Depends(require_auth)):
     """Retrieve graph memory nodes & relationships."""
     from sonic.memory.router import get_smart_memory
     memory = await get_smart_memory()
+    t_id = getattr(user, "tenant_id", None) or "default"
     if hasattr(memory, "get_all_graph_data"):
-        nodes, edges = await memory.get_all_graph_data(user.email)
-        return {"nodes": nodes, "edges": edges, "backend": "SqliteGraph", "tenant_id": user.email}
+        nodes, edges = await memory.get_all_graph_data(t_id)
+        return {"nodes": nodes, "edges": edges, "backend": "SqliteGraph", "tenant_id": t_id}
     elif hasattr(memory, "_nodes"):
         raw_nodes = memory._nodes
         raw_rels = memory._relationships
         nodes = []
-        t_id = _resolve_tenant_id(user)
         for uid, data in raw_nodes.items():
             if data.get("tenant_id") != t_id:
                 continue
@@ -280,14 +285,13 @@ async def get_live_graph(user: User = Depends(require_auth)):
         ]
         return {"nodes": nodes, "edges": edges, "backend": "InMemoryGraph", "tenant_id": t_id}
     else:
-        t_id = _resolve_tenant_id(user)
         return {"nodes": [], "edges": [], "backend": "Neo4j", "tenant_id": t_id}
 
 
 @router.get("/evidence")
 async def get_live_evidence(user: User = Depends(require_auth)):
     """Retrieve full verified evidence packages."""
-    t_id = _resolve_tenant_id(user)
+    t_id = getattr(user, "tenant_id", None) or "default"
     findings = [f for f in _system_state["findings"] if f.get("tenant_id") == t_id]
 
     # Aggregate session evidence from all workstation sessions
@@ -349,7 +353,7 @@ async def run_benchmark(user: User = Depends(require_auth)):
     workspace = None
     try:
         workspace = await provider.create(
-            tenant_id=user.email,
+            tenant_id=getattr(user, "tenant_id", None) or "default",
             engagement_id="self-developer",
             workspace_type=ComputerWorkspaceType.RESEARCH_LAB,
             profile=ComputerProfile.KALI_SECURITY,

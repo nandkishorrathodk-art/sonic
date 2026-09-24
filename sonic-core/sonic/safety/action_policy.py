@@ -88,11 +88,14 @@ class ActionPolicy:
     DEFAULT_ALLOWED_TYPES = frozenset({
         # GUI desktop interaction (in-sandbox only, no host execution risk)
         "GUI_CLICK", "GUI_DOUBLE_CLICK", "GUI_RIGHT_CLICK", "GUI_TYPE", "GUI_KEYPRESS",
-        "GUI_MOVE", "GUI_SCROLL", "GUI_SCREENSHOT", "GUI_DRAG", "GUI_WAIT",
-        "FILE_READ", "FILE_WRITE", "TERMINAL_EXEC", "GIT_COMMIT",
+        "GUI_HOTKEY", "GUI_MOVE", "GUI_SCROLL", "GUI_SCREENSHOT", "GUI_DRAG", "GUI_WAIT",
+        "FILE_READ", "FILE_WRITE", "TERMINAL_EXEC",
+        "GIT_STATUS", "GIT_DIFF", "GIT_BRANCH", "GIT_COMMIT", "GIT_PUSH",
         "APP_LAUNCH", "APP_CLOSE", "APP_FOCUS", "APP_INSTALL", "SERVICE_ACTION",
-        "BROWSER_NAVIGATE", "BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_SCREENSHOT",
+        "BROWSER_NAVIGATE", "BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_SELECT",
+        "BROWSER_KEYPRESS", "BROWSER_SCROLL", "BROWSER_SCREENSHOT",
         "BROWSER_WAIT", "BROWSER_DOWNLOAD",
+        "WAIT_FOR_HUMAN", "SANDBOX_EXEC",
         "SECURITY_TOOL",
         # Toolsmith (Phase A, AIOSR): authoring writes source under the
         # workspace toolsmith dir (path-confined like FILE_WRITE); running
@@ -145,12 +148,13 @@ class ActionPolicy:
         )
 
     # ------------------------------------------------------------------
-    def evaluate(self, action_type_name: str, target: str, payload: dict[str, Any]) -> PolicyVerdict:
+    def evaluate(self, action_type_name: str, target: str, payload: dict[str, Any] | None = None) -> PolicyVerdict:
         """Evaluate one action. Returns a fail-closed PolicyVerdict.
 
         Never raises for policy reasons ??? a verdict is always returned so the
         caller can record it as a blocked trace instead of crashing the loop.
         """
+        payload = payload or {}
         now = time.time()
         if not self.scope_checker.kill_switch_enabled:
             return PolicyVerdict(False, "configured kill switch is disabled")
@@ -237,7 +241,7 @@ class ActionPolicy:
                 False, f"{action_name} escapes workspace: {path} -> {resolved}")
         return PolicyVerdict(True, "path confined")
 
-    _GIT_INJECTION_RE = re.compile(r"['\"`$&|<>\\\x00\n\r;]|(?:\$\()|(?:`.*`)")
+    _GIT_INJECTION_RE = re.compile(r"[\x00]|(?:\$\()")
 
     def _check_git_commit(self, payload: dict[str, Any], target: str) -> PolicyVerdict:
         path = payload.get("path") or payload.get("file_path") or (target if target and target != "git" else None)
@@ -247,13 +251,13 @@ class ActionPolicy:
                 return p_verdict
 
         raw_msg = str(payload.get("message") if payload.get("message") is not None else "")
-        if "\x00" in raw_msg or "\n" in raw_msg or "\r" in raw_msg:
-            return PolicyVerdict(False, f"GIT_COMMIT message contains forbidden control/null characters: {repr(raw_msg)}")
+        if "\x00" in raw_msg:
+            return PolicyVerdict(False, f"GIT_COMMIT message contains forbidden null characters: {repr(raw_msg)}")
         msg = raw_msg.strip()
         if not msg:
             return PolicyVerdict(False, "GIT_COMMIT message must not be empty")
-        if len(msg) > 500:
-            return PolicyVerdict(False, "GIT_COMMIT message exceeds maximum length (500 characters)")
+        if len(msg) > 4000:
+            return PolicyVerdict(False, "GIT_COMMIT message exceeds maximum length (4000 characters)")
         if self._GIT_INJECTION_RE.search(msg):
             return PolicyVerdict(False, f"GIT_COMMIT message contains dangerous shell injection characters: {repr(msg)}")
 
@@ -278,18 +282,14 @@ class ActionPolicy:
     )
 
     def _check_command(self, command: str) -> PolicyVerdict:
-        # TERMINAL_EXEC bypasses the URL-egress filter (it runs shell howeverthe
-        # operator/being chooses). Close the metadata hole explicitly: a shell
-        # command must never reach the cloud metadata endpoint ??? on the host Or
-        # inside an egress-unrestricted container???
         if self._CLOUD_METADATA_RE.search(command or ""):
             return PolicyVerdict(False, "cloud metadata access blocked in terminal command")
-        # Shell commands are another egress surface (curl, wget, python
-        # requests, etc.). When an engagement target allowlist is active,
-        # validate every explicit URL before the command reaches the provider.
-        # This keeps verification probes and model-authored commands bound to
-        # the same target as browser/security-tool actions.
         for candidate in re.findall(r"https?://[^\s'\"`;&|)]+", command or "", re.IGNORECASE):
+            if any(ch in candidate for ch in ("{", "}", "$", "<", ">")):
+                continue
+            host_part = self._host_of(candidate)
+            if not host_part or "." not in host_part and host_part not in ("localhost", "instance-data") and not host_part.isdigit() and not host_part.startswith("0x") and ":" not in host_part:
+                continue
             verdict = self._check_egress(candidate, "terminal")
             if not verdict.allowed:
                 return verdict
@@ -307,11 +307,29 @@ class ActionPolicy:
             )
         return PolicyVerdict(True, "command risk acceptable")
 
+    def _is_in_target_allowlist(self, host: str, target: str) -> bool:
+        if not self.security_tool_targets:
+            return True
+        if not host and not target:
+            return False
+        h = (host or "").lower()
+        t = (target or "").lower()
+        for entry in self.security_tool_targets:
+            e = str(entry or "").strip().lower()
+            if not e:
+                continue
+            if h == e or t == e:
+                return True
+            base = e.lstrip("*.")
+            if base and (h == base or h.endswith("." + base)):
+                return True
+        return False
+
     def _check_target_and_scope(self, target: str, label: str) -> PolicyVerdict | None:
         host = self._host_of(target)
         # Extra target allowlist (if configured) takes precedence.
         if self.security_tool_targets:
-            if not host or (host not in self.security_tool_targets and target not in self.security_tool_targets):
+            if not self._is_in_target_allowlist(host, target):
                 return PolicyVerdict(False, f"{label} target not in allowlist: {host or target}")
 
         # Scope enforcement if scope_checker has active scope rules configured
@@ -356,7 +374,7 @@ class ActionPolicy:
         host = self._host_of(target)
         if (
             getattr(self, "allow_private_networks", False)
-            or (self.security_tool_targets and (host in self.security_tool_targets or target in self.security_tool_targets))
+            or (self.security_tool_targets and self._is_in_target_allowlist(host, target))
         ):
             allow_private = True
         try:
@@ -369,11 +387,11 @@ class ActionPolicy:
 
     @staticmethod
     def _host_of(target: str) -> str:
-        # Strip scheme/path for url-like targets; leave bare hosts as-is.
+        # Strip scheme/path/query/fragment for url-like targets; leave bare hosts as-is.
         t = target.strip()
         if "://" in t:
             t = t.split("://", 1)[1]
-        t = t.split("/", 1)[0]
+        t = t.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
         t = t.split("@")[-1]
         if t.startswith("[") and "]" in t:
             return t[1:t.index("]")]

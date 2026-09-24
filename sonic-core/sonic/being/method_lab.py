@@ -39,6 +39,7 @@ Integration:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -71,12 +72,12 @@ _TECHNIQUE_DOC_PREFIX = "technique-"
 
 @dataclass
 class InventedTechnique:
-    """A technique the being synthesized itself (method + probe + run state)."""
+    """A method/workflow or diagnostic technique the being synthesized itself."""
     technique_id: str
     name: str
-    family: str               # e.g. "auth-bypass", "parser-confusion", "fuzz-mutation"
+    family: str               # e.g. "workflow-automation", "state-convergence", "system-diagnostics", "auth-verification"
     hypothesis: str           # the novel idea: what it tries and why it's new
-    probe_source: str         # the Python that implements/tests the technique
+    probe_source: str         # the Python that implements/tests the method
     target_hint: str = ""    # what the probe should be aimed at (for re-runs)
     discovered_by: str = "self_invented"
     confirmed: bool = False
@@ -96,10 +97,10 @@ def _is_valid_name(name: str) -> bool:
 
 
 class MethodLab:
-    """Synthesize + confirm + persist novel offensive techniques.
+    """Synthesize + confirm + persist novel general-purpose workflows and diagnostic techniques.
 
     Args:
-        llm:          an LLM router (ModelRouter) used to synthesize techniques.
+        llm:          an LLM router (ModelRouter) used to synthesize methods/techniques.
         vector_memory: VectorMemory holding the known-technique ledger.
         toolsmith:    the ToolsmithLoop used to author + run the probe (Phase A).
         ledger_namespace: doc_id prefix for technique records (default
@@ -121,17 +122,19 @@ class MethodLab:
 
     # ------------------------------------------------------------------
     def _ledger_facts(self) -> list[str]:
-        """The list of known technique descriptions (for novelty bias)."""
+        """The list of known method/technique descriptions (for novelty bias)."""
         if self.vector_memory is None:
             return [t.hypothesis for t in self.invented if t.confirmed]
         try:
             results = self.vector_memory.search(
-                "offensive technique method attack", top_k=10, score_threshold=0.0,
+                "workflow method synthesis technique diagnostic automation",
+                top_k=10,
+                score_threshold=0.0,
             )
             facts = []
             for r in results:
                 meta = r.get("metadata", {}) or {}
-                if meta.get("kind") == "technique":
+                if meta.get("kind") in ("technique", "method", "workflow"):
                     facts.append(r.get("text", ""))
             # Also include in-session confirmed techniques not yet persisted.
             facts.extend(t.hypothesis for t in self.invented if t.confirmed)
@@ -145,24 +148,31 @@ class MethodLab:
         from sonic.researcher.anomaly_engine import NoveltyEngine
         return NoveltyEngine.compute_novelty(hypothesis, known) if known else 1.0
 
-    async def _llm_synthesize(
+    async def _llm_propose_technique(
         self,
         observation: str,
-        failure: str,
-        known_techniques: list[str],
+        failure: str = "",
+        known_techniques: list[str] | None = None,
     ) -> dict[str, str] | None:
-        """Ask the LLM to synthesize a NOVEL technique away from the ledger.
+        """Ask the LLM to synthesize a NOVEL general-purpose workflow, engineering method,
+        or diagnostic technique distinct from the known ledger without offensive lock-in.
 
         Returns ``{name, family, hypothesis, probe_source, target_hint}`` or
-        ``None`` if the LLM declines / proposes a known technique.
+        ``None`` if the LLM declines / proposes a known duplicate.
         """
         from sonic.llm.schemas import LLMRequest, Message, MessageRole
 
-        known_str = "\n".join(f"- {t}" for t in known_techniques[:8]) or "(no known techniques yet)"
-        system = method_lab_system_prompt(known_str)
+        known_list = known_techniques if known_techniques is not None else self._ledger_facts()
+        known_str = "\n".join(f"- {t}" for t in known_list[:8]) or "(no known methods yet)"
+        system = (
+            method_lab_system_prompt(known_str)
+            + "\nScope: Synthesize general-purpose workstation workflows, software engineering "
+            "automation, state-convergence algorithms, or system/security diagnostics as needed "
+            "by the observation (zero offensive lock-in)."
+        )
         user = (
             f"Observation:\n{observation}\n\n"
-            f"Failed attempt (what did NOT work):\n{failure or '(none)'}\n"
+            f"Prior attempt or gap (what did NOT work):\n{failure or '(none)'}\n"
         )
         request = LLMRequest(
             messages=[
@@ -180,7 +190,20 @@ class MethodLab:
         text = getattr(response, "content", "") or ""
         if text.strip().splitlines()[0:1] and "DECLINE" in text.strip().splitlines()[0]:
             return None
-        return self._parse_synthesis(text, known_techniques)
+        return self._parse_synthesis(text, known_list)
+
+    async def _llm_synthesize(
+        self,
+        observation: str,
+        failure: str,
+        known_techniques: list[str],
+    ) -> dict[str, str] | None:
+        """Synthesize a novel method/technique via _llm_propose_technique."""
+        return await self._llm_propose_technique(
+            observation=observation,
+            failure=failure,
+            known_techniques=known_techniques,
+        )
 
     @staticmethod
     def _parse_synthesis(text: str, known: list[str]) -> dict[str, str] | None:
@@ -211,7 +234,7 @@ class MethodLab:
             return None
         return {
             "name": name,
-            "family": fields.get("FAMILY", "other"),
+            "family": fields.get("FAMILY", "general_workflow"),
             "hypothesis": hypothesis,
             "target_hint": fields.get("TARGET_HINT", ""),
             "probe_source": probe_source,
@@ -223,7 +246,7 @@ class MethodLab:
         observation: str,
         failure: str = "",
     ) -> InventedTechnique | None:
-        """Synthesize a novel technique for the observation+failure.
+        """Synthesize a novel method/technique for the observation+failure.
 
         The technique is recorded (in-memory + persisted to the ledger) but
         ``confirmed`` stays False until ``confirm()`` runs the probe. Returns
@@ -236,8 +259,11 @@ class MethodLab:
             return None
 
         novelty = self._novelty(spec["hypothesis"], known)
+        tech_hash = hashlib.sha256(
+            (spec["name"] + spec["hypothesis"]).encode("utf-8")
+        ).hexdigest()[:10]
         technique = InventedTechnique(
-            technique_id=f"tech-{abs(hash(spec['name'] + spec['hypothesis'])) % 10**8}",
+            technique_id=f"tech-{tech_hash}",
             name=spec["name"],
             family=spec["family"],
             hypothesis=spec["hypothesis"],
@@ -293,6 +319,7 @@ class MethodLab:
                 return technique
             path = f"/home/sonic/workspace/toolsmith/{technique.name}.py"
             try:
+                await provider.execute(workspace_id, "mkdir -p /home/sonic/workspace/toolsmith")
                 if hasattr(provider, "write_file"):
                     await provider.write_file(workspace_id, path, technique.probe_source)
                 command = f"python {shlex.quote(path)} {shlex.quote(str(run_target))}"
@@ -370,12 +397,12 @@ class MethodLab:
             logger.warning("method_lab_ledger_persist_failed", error=str(e))
 
 # ---------------------------------------------------------------------------
-# NEXUS L6 -- Offense-Generative Vulnerability Researcher
+# NEXUS L6 -- Method & Diagnostic Hypothesis Generator
 # ---------------------------------------------------------------------------
 
 @dataclass
 class OffenseHypothesis:
-    """A mutated vulnerability-class hypothesis generated from known patterns."""
+    """A mutated workflow, engineering, or diagnostic hypothesis generated from known patterns."""
     hypothesis_id: str
     family: str                 # mutation lineage
     source_patterns: list[str]
@@ -400,8 +427,26 @@ class OffenseHypothesis:
         }
 
 
-# Known vulnerability-pattern genome. Each carries deterministic mutation hooks.
-KNOWN_VULN_PATTERNS: dict[str, list[str]] = {
+# Known method, workflow, and diagnostic pattern genome (general-purpose + security diagnostics).
+KNOWN_METHOD_PATTERNS: dict[str, list[str]] = {
+    "workflow_automation": [
+        "idempotent multi-step orchestration",
+        "state-delta checkpoint verification",
+        "cross-application clipboard/file handoff",
+        "structured output schema normalization",
+    ],
+    "state_convergence": [
+        "precondition-postcondition contract validation",
+        "exponential backoff with state polling",
+        "atomic file transaction staging",
+        "deterministic environment reconciliation",
+    ],
+    "system_diagnostics": [
+        "dependency and runtime health verification",
+        "log anomaly and stack-trace isolation",
+        "port and socket readiness probe",
+        "configuration drift detection",
+    ],
     "sql_injection": [
         "parameterized query boundary",
         "boolean-based differential",
@@ -451,6 +496,7 @@ KNOWN_VULN_PATTERNS: dict[str, list[str]] = {
         "config-delegate leak",
     ],
 }
+KNOWN_VULN_PATTERNS = KNOWN_METHOD_PATTERNS
 
 _MUTATORS = (
     "transpose_to_domain",     # carry the trick into another class (cross-domain)

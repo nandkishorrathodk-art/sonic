@@ -25,20 +25,21 @@ from sonic.logger import get_logger
 
 logger = get_logger(__name__)
 
-# UI targets must be resolved from the current DOM/accessibility tree or screenshot pixels.
-_COMMON_UI_LANDMARKS: dict[str, Any] = {}
-
 
 def extract_bbox_midpoint(
     bbox_response: Any,
     width: int = 1280,
     height: int = 800,
     is_normalized_1000: bool | None = None,
+    *,
+    screen_width: int | None = None,
+    screen_height: int | None = None,
 ) -> tuple[int, int] | None:
     """Extract (x, y) pixel midpoint from multimodal model grounding output.
     
     Supports:
     - Direct (x, y) tuple or list of numbers
+    - JSON objects: {"x": 500, "y": 400} or {"point": [500, 400]}
     - Box tags: <|box_start|>(x1, y1, x2, y2)<|box_end|>
     - Normalized coordinates [0, 1000] (standard UI grounding format)
     - Normalized floats [0.0, 1.0]
@@ -46,6 +47,10 @@ def extract_bbox_midpoint(
     """
     if not bbox_response:
         return None
+    if screen_width is not None:
+        width = screen_width
+    if screen_height is not None:
+        height = screen_height
 
     if isinstance(bbox_response, str):
         upper_resp = bbox_response.upper()
@@ -67,6 +72,30 @@ def _extract_bbox_midpoint_impl(
     if not bbox_response:
         return None
 
+    if isinstance(bbox_response, str) and "{" in bbox_response and "}" in bbox_response:
+        try:
+            import json
+            json_match = re.search(r"\{.*?\}", bbox_response, re.DOTALL)
+            if json_match:
+                parsed_obj = json.loads(json_match.group(0))
+                if isinstance(parsed_obj, dict):
+                    if "x" in parsed_obj and "y" in parsed_obj:
+                        return _extract_bbox_midpoint_impl(
+                            (float(parsed_obj["x"]), float(parsed_obj["y"])),
+                            width,
+                            height,
+                            is_normalized_1000,
+                        )
+                    if "point" in parsed_obj and isinstance(parsed_obj["point"], (list, tuple)) and len(parsed_obj["point"]) >= 2:
+                        return _extract_bbox_midpoint_impl(
+                            (float(parsed_obj["point"][0]), float(parsed_obj["point"][1])),
+                            width,
+                            height,
+                            is_normalized_1000,
+                        )
+        except Exception:
+            pass
+
     if isinstance(bbox_response, (tuple, list)):
         try:
             if len(bbox_response) >= 4:
@@ -74,7 +103,9 @@ def _extract_bbox_midpoint_impl(
                 if max(x1, y1, x2, y2) <= 1.0:
                     mid_x = int(((x1 + x2) / 2.0) * width)
                     mid_y = int(((y1 + y2) / 2.0) * height)
-                elif is_normalized_1000 or (is_normalized_1000 is not False and max(x1, y1, x2, y2) <= 1000):
+                elif is_normalized_1000 is True or (
+                    is_normalized_1000 is None and max(x1, y1, x2, y2) <= 1000 and (x2 > width or y2 > height)
+                ):
                     mid_x = int(((x1 + x2) / 2.0 / 1000.0) * width)
                     mid_y = int(((y1 + y2) / 2.0 / 1000.0) * height)
                 else:
@@ -87,7 +118,7 @@ def _extract_bbox_midpoint_impl(
                 if max(x, y) <= 1.0:
                     px = int(x * width)
                     py = int(y * height)
-                elif is_normalized_1000 or (is_normalized_1000 is None and (x > width or y > height)):
+                elif is_normalized_1000 is True or (is_normalized_1000 is None and (x > width or y > height)):
                     px = int((x / 1000.0) * width)
                     py = int((y / 1000.0) * height)
                 else:
@@ -112,8 +143,10 @@ def _extract_bbox_midpoint_impl(
         if max(x1, y1, x2, y2) <= 1.0:
             mid_x = int(((x1 + x2) / 2.0) * width)
             mid_y = int(((y1 + y2) / 2.0) * height)
-        elif is_normalized_1000 or (is_normalized_1000 is not False and max(x1, y1, x2, y2) <= 1000 and (x2 > width or y2 > height or match is not None)):
-            # Model grounding bounding box tags or normalized scale use [0, 1000]
+        elif is_normalized_1000 is True or (
+            is_normalized_1000 is None and max(x1, y1, x2, y2) <= 1000 and (x2 > width or y2 > height)
+        ):
+            # Explicitly normalized [0, 1000] scale
             mid_x = int(((x1 + x2) / 2.0 / 1000.0) * width)
             mid_y = int(((y1 + y2) / 2.0 / 1000.0) * height)
         else:
@@ -127,7 +160,9 @@ def _extract_bbox_midpoint_impl(
         if max(x, y) <= 1.0:
             px = int(x * width)
             py = int(y * height)
-        elif is_normalized_1000 or (match is not None and max(x, y) <= 1000) or x > width or y > height:
+        elif is_normalized_1000 is True or (
+            is_normalized_1000 is None and max(x, y) <= 1000 and (x > width or y > height)
+        ):
             px = int((x / 1000.0) * width)
             py = int((y / 1000.0) * height)
         else:
@@ -180,6 +215,31 @@ def draw_action_marker(
         return image_b64
 
 
+def _invoke_grounding_fn(
+    grounding_fn: Any,
+    query: str,
+    screenshot_b64: str,
+    width: int,
+    height: int,
+) -> Any:
+    import inspect
+    try:
+        sig = inspect.signature(grounding_fn)
+        params = [
+            p for p in sig.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
+        if has_varargs or len(params) >= 4:
+            return grounding_fn(query, screenshot_b64, width, height)
+        return grounding_fn(query, screenshot_b64)
+    except (ValueError, TypeError):
+        try:
+            return grounding_fn(query, screenshot_b64, width, height)
+        except TypeError:
+            return grounding_fn(query, screenshot_b64)
+
+
 def resolve_ui_target(
     query: str,
     screenshot_b64: str | None = None,
@@ -187,6 +247,8 @@ def resolve_ui_target(
     height: int = 800,
     grounding_fn: Any | None = None,
     allow_landmarks: bool = True,
+    screen_width: int | None = None,
+    screen_height: int | None = None,
 ) -> tuple[int, int] | None:
     """Resolves a natural language UI target query to absolute screen coordinates (x, y).
 
@@ -197,6 +259,11 @@ def resolve_ui_target(
     """
     if not query:
         return None
+
+    if screen_width is not None:
+        width = screen_width
+    if screen_height is not None:
+        height = screen_height
 
     clean_query = query.strip().lower()
 
@@ -209,7 +276,7 @@ def resolve_ui_target(
     # 2. Dynamic Grounding function (multimodal vision model callback)
     if grounding_fn and screenshot_b64:
         try:
-            grounding_output = grounding_fn(query, screenshot_b64)
+            grounding_output = _invoke_grounding_fn(grounding_fn, query, screenshot_b64, width, height)
             if grounding_output:
                 if isinstance(grounding_output, (tuple, list)) and len(grounding_output) >= 2:
                     return int(grounding_output[0]), int(grounding_output[1])
@@ -228,11 +295,18 @@ async def resolve_ui_target_async(
     width: int = 1280,
     height: int = 800,
     grounding_fn: Any | None = None,
-    allow_landmarks: bool = True,
+    allow_landmarks: bool = False,
+    screen_width: int | None = None,
+    screen_height: int | None = None,
 ) -> tuple[int, int] | None:
     """Asynchronous variant of resolve_ui_target supporting coroutine grounding functions."""
     if not query:
         return None
+
+    if screen_width is not None:
+        width = screen_width
+    if screen_height is not None:
+        height = screen_height
 
     clean_query = query.strip().lower()
 
@@ -246,7 +320,7 @@ async def resolve_ui_target_async(
     if grounding_fn and screenshot_b64:
         try:
             import inspect
-            res = grounding_fn(query, screenshot_b64)
+            res = _invoke_grounding_fn(grounding_fn, query, screenshot_b64, width, height)
             if inspect.isawaitable(res):
                 grounding_output = await res
             else:

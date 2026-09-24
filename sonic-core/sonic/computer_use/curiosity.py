@@ -26,6 +26,7 @@ territory. A dead-end (repeated zero novelty) triggers a pivot.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,6 +84,22 @@ class CuriosityLoop:
         self.max_cycles = max_cycles
         self.exploration_steps = exploration_steps
         self.state = CuriosityState()
+        if self.vector_memory is not None:
+            try:
+                docs: list[Any] = []
+                if hasattr(self.vector_memory, "list_documents") and callable(self.vector_memory.list_documents):
+                    docs = list(self.vector_memory.list_documents() or [])
+                elif hasattr(self.vector_memory, "documents"):
+                    raw_docs = self.vector_memory.documents
+                    docs = list(raw_docs.values()) if isinstance(raw_docs, dict) else list(raw_docs or [])
+                for doc in docs:
+                    meta = doc.get("metadata", {}) if isinstance(doc, dict) else getattr(doc, "metadata", {}) or {}
+                    text = doc.get("text", "") if isinstance(doc, dict) else getattr(doc, "text", "") or ""
+                    source = meta.get("source") if isinstance(meta, dict) else getattr(doc, "source", None)
+                    if source == "curiosity_loop" and text and text not in self.state.known_facts:
+                        self.state.known_facts.append(str(text))
+            except Exception as e:
+                logger.warning("curiosity_init_known_facts_failed", error=str(e))
 
     async def propose_curious_goal(self, observation_summary: str) -> tuple[str, str]:
         """Ask the LLM to propose the most informative self-directed goal.
@@ -143,7 +160,8 @@ class CuriosityLoop:
                 dup, _ = self.vector_memory.is_duplicate(fact, threshold=0.88)
                 if dup:
                     return False
-                doc_id = f"curiosity-{self.state.cycle}-{abs(hash(fact)) % 10**8}"
+                digest = hashlib.sha256(fact.encode()).hexdigest()[:8]
+                doc_id = f"curiosity-{self.state.cycle}-{digest}"
                 self.vector_memory.index_document(
                     doc_id, fact, metadata={"source": "curiosity_loop", "cycle": self.state.cycle}
                 )
@@ -167,6 +185,9 @@ class CuriosityLoop:
         outcome = await pursue(goal, self.exploration_steps)
         info_gain = self.measure_novelty(outcome)
         was_novel = info_gain >= self.DEAD_END_NOVELTY
+        outcome_clean = str(outcome or "").strip()
+        if outcome_clean.lower().startswith("safety blocked:"):
+            was_novel = False
 
         learned: str | None = None
         if was_novel:

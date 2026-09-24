@@ -64,12 +64,17 @@ class GUIActionType(StrEnum):
     RIGHT_CLICK = "RIGHT_CLICK"
     TYPE = "TYPE"
     KEYPRESS = "KEYPRESS"
+    HOTKEY = "HOTKEY"
     SCROLL = "SCROLL"
     MOVE = "MOVE"
     DRAG = "DRAG"
     SELECT_WINDOW = "SELECT_WINDOW"
     OPEN_APP = "OPEN_APP"
+    LAUNCH_APP = "LAUNCH_APP"
     CLOSE_APP = "CLOSE_APP"
+    CLOSE_WINDOW = "CLOSE_WINDOW"
+    INSTALL_APP = "INSTALL_APP"
+    WAIT = "WAIT"
 
 
 class ComputerRiskLevel(StrEnum):
@@ -89,7 +94,7 @@ class ComputerWorkspace(BaseModel):
     tenant_id: str
     engagement_id: str
     workspace_type: ComputerWorkspaceType = ComputerWorkspaceType.MISSION_COMPUTER
-    profile: ComputerProfile = ComputerProfile.KALI_SECURITY
+    profile: ComputerProfile = ComputerProfile.DEBIAN_ENGINEERING
     provider_type: str = "DockerProvider"  # DockerProvider, DaytonaProvider, LocalDevProvider
     image: str = "sonic-workstation:latest"
     status: ComputerWorkspaceStatus = ComputerWorkspaceStatus.READY
@@ -178,7 +183,7 @@ class ApplicationPolicy(BaseModel):
     """
     allowed_packages: list[str] = Field(default_factory=list)
     forbidden_packages: list[str] = Field(default_factory=lambda: [
-        "wireshark-root", "tor-relay", "cryptominer", "kernel-mod", "ddos-bot"
+        "privileged-packet-sniffer-root", "tor-relay", "cryptominer", "kernel-mod", "ddos-bot"
     ])
     max_install_size_mb: int = 2048
     require_approval: bool = False

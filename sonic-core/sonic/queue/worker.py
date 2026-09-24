@@ -247,12 +247,20 @@ class SonicWorker:
 
         # Create agent with shared resources
         # Note: ModelRouter and GraphMemory are injected at worker init or resolved
+        from pathlib import Path
+        from sonic.config import CONFIGS_DIR
         from sonic.llm.router import ModelRouter
         from sonic.memory.router import get_smart_memory
         from sonic.safety.scope import ScopeChecker
 
         memory = await get_smart_memory()
-        router = ModelRouter()  # Uses globally configured providers
+        config_path = Path("configs/models.yaml")
+        if not config_path.exists() and (CONFIGS_DIR / "models.yaml").exists():
+            config_path = CONFIGS_DIR / "models.yaml"
+        try:
+            router = ModelRouter.from_config(config_path)
+        except Exception:
+            router = ModelRouter()
         scope_checker = ScopeChecker()
 
         agent = agent_cls(

@@ -100,6 +100,7 @@ class SafetyKernel:
                 workspace_root=str(policy.workspace_root),
                 allowed_action_types=set(policy.allowed_types),
                 allow_security_tool_targets=set(policy.security_tool_targets),
+                allow_private_networks=getattr(policy, "allow_private_networks", False),
                 max_actions_per_minute=policy.max_actions_per_minute,
                 require_approval_for_intrusive=policy.require_approval_for_intrusive,
                 scope_checker=policy.scope_checker,

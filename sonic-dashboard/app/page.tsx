@@ -355,6 +355,8 @@ export default function SonicDevinWorkstation() {
                   loading
                 )}
                 status={workstationState?.status}
+                waitingForHuman={Boolean(workstationState?.waiting_for_human || workstationState?.status === "WAITING_FOR_HUMAN")}
+                waitingForHumanReason={workstationState?.waiting_for_human_reason}
                 loading={loading}
                 onSendPrompt={handleSendPrompt}
                 onInterrupt={handleInterrupt}
@@ -406,9 +408,14 @@ export default function SonicDevinWorkstation() {
                   {activeTab === "desktop" && (
                     <ComputerSurface
                       desktopState={workstationState?.desktop}
+                      status={workstationState?.status}
+                      waitingForHuman={Boolean(workstationState?.waiting_for_human || workstationState?.status === "WAITING_FOR_HUMAN")}
+                      waitingForHumanReason={workstationState?.waiting_for_human_reason}
                       onRunCommand={handleRunCommand}
                       commandLogs={combinedCommandLogs}
+                      onProvision={async () => { await api.provisionWorkstation(sessionId); await fetchWorkstationData(sessionId); }}
                       onInterrupt={handleInterrupt}
+                      onRefreshState={() => fetchWorkstationData(sessionId)}
                       sessionId={sessionId}
                     />
                   )}

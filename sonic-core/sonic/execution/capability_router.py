@@ -111,21 +111,26 @@ class CapabilityRouter:
             return ExecutionSubstrate.COMPUTER
 
         # Interactive browser interactions requiring a real DOM / display
-        if val in ("BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_SCREENSHOT", "BROWSER_WAIT", "BROWSER_DOWNLOAD"):
+        if val in (
+            "BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_SELECT",
+            "BROWSER_KEYPRESS", "BROWSER_SCROLL", "BROWSER_SCREENSHOT",
+            "BROWSER_WAIT", "BROWSER_DOWNLOAD",
+        ):
             return ExecutionSubstrate.COMPUTER
 
-        # Navigation: headless fetch suffices unless full GUI/interactive is explicitly requested
+        # Navigation: routes to COMPUTER by default unless headless_only is explicitly requested
         if val == "BROWSER_NAVIGATE":
-            if payload.get("interactive") or payload.get("requires_gui") or payload.get("render_js") or payload.get("browser"):
-                return ExecutionSubstrate.COMPUTER
-            return ExecutionSubstrate.HEADLESS
+            if payload.get("headless_only") is True:
+                return ExecutionSubstrate.HEADLESS
+            return ExecutionSubstrate.COMPUTER
 
         # Terminal commands, file operations, security scanning, tool synthesis, etc.
         if (
             val == "TERMINAL_EXEC"
             or val.startswith("FILE_")
+            or val.startswith("GIT_")
             or val == "SECURITY_TOOL"
-            or val in ("TOOL_AUTHOR", "TOOL_RUN", "METHOD_INVENT", "GIT_BRANCH", "GIT_COMMIT", "SERVICE_ACTION")
+            or val in ("TOOL_AUTHOR", "TOOL_RUN", "METHOD_INVENT", "SERVICE_ACTION")
         ):
             return ExecutionSubstrate.HEADLESS
 
@@ -203,34 +208,24 @@ class CapabilityRouter:
     ) -> Any:
         """
         Resolve the execution provider. If the preferred provider (Docker/Daytona)
-        is unavailable or misconfigured, automatically falls back to HeadlessComputeProvider.
+        is available, always return it; only fall back to HeadlessComputeProvider
+        when preferred_provider is None or unavailable.
         """
-        # Explicit headless task requests
-        if task_type and task_type.upper() in {
-            "HEADLESS",
-            "TERMINAL_ONLY",
-            "PORT_SCAN",
-            "HTTP_PROBE",
-            "RECON",
-        }:
-            return CapabilityRouter._safe_headless()
-
         if preferred_provider is None:
             return CapabilityRouter._safe_headless()
 
         if isinstance(preferred_provider, HeadlessComputeProvider):
             return preferred_provider
 
-        # Check provider availability
-        if not cls.is_provider_available(preferred_provider):
-            logger.warning(
-                "provider_unavailable_falling_back_to_headless",
-                preferred=preferred_provider.__class__.__name__,
-                task_type=task_type,
-            )
-            return CapabilityRouter._safe_headless()
+        if cls.is_provider_available(preferred_provider):
+            return preferred_provider
 
-        return preferred_provider
+        logger.warning(
+            "provider_unavailable_falling_back_to_headless",
+            preferred=preferred_provider.__class__.__name__,
+            task_type=task_type,
+        )
+        return CapabilityRouter._safe_headless()
 
     @staticmethod
     def should_fallback_on_exit(exit_code: int) -> bool:

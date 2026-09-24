@@ -210,13 +210,8 @@ class BeingLifeLoop:
     def mind(self) -> BeingMind:
         return get_being_store().get_mind(self.being.being_id)
 
-    async def tick(self) -> Any:
-        """Run ONE self-directed curiosity cycle as the being.
-
-        Returns the CuriosityCycleResult. The pursuit goes through the agent's
-        real loop, so every action is gated by the ActionPolicy. The outcome is
-        recorded in the BeingMind (mood evolves, facts persist across restart).
-        """
+    async def _run_one_tick(self) -> Any:
+        """Run ONE self-directed curiosity cycle as the being and update BeingMind."""
         for hook in self.before_tick_hooks:
             try:
                 hook()
@@ -225,15 +220,23 @@ class BeingLifeLoop:
         try:
             res = await self.agent.idle_cycle(self.workspace_id, self.curiosity)
             learned = getattr(res, "learned_fact", None)
-            record_idle_cycle(self.being.being_id, learned)
+            was_novel = bool(getattr(res, "was_novel", False))
+            info_gain = float(getattr(res, "info_gain", 0.0) or 0.0)
+            mind = self.mind()
+            mind.record_idle_cycle(
+                was_novel=was_novel,
+                info_gain=info_gain,
+                learned_fact=getattr(res, "learned_fact", None),
+            )
+            get_being_store().save_mind(mind)
             self.cycles_completed += 1
             logger.info(
                 "being_idle_cycle",
                 being_id=self.being.being_id,
                 cycle=self.cycles_completed,
                 goal=getattr(res, "proposed_goal", "")[:80],
-                novel=getattr(res, "was_novel", False),
-                info_gain=getattr(res, "info_gain", 0.0),
+                novel=was_novel,
+                info_gain=info_gain,
             )
             # Publish the cycle outcome onto the continuous-event bus so any
             # subscribed cognition layer can react without a fixed tick.
@@ -241,8 +244,8 @@ class BeingLifeLoop:
                 "being_id": self.being.being_id,
                 "cycle": self.cycles_completed,
                 "goal": getattr(res, "proposed_goal", ""),
-                "was_novel": getattr(res, "was_novel", False),
-                "info_gain": getattr(res, "info_gain", 0.0),
+                "was_novel": was_novel,
+                "info_gain": info_gain,
                 "learned_fact": str(learned),
             })
             await self._maybe_self_improve()
@@ -251,8 +254,14 @@ class BeingLifeLoop:
             # A single failed tick must never kill the being.
             logger.warning("being_idle_cycle_failed",
                            being_id=self.being.being_id, error=str(e))
-            record_idle_cycle(self.being.being_id, None)  # count as dead-end
+            mind = self.mind()
+            mind.record_idle_cycle(was_novel=False, info_gain=0.0, learned_fact=None)
+            get_being_store().save_mind(mind)
             return None
+
+    async def tick(self) -> Any:
+        """Run ONE self-directed curiosity cycle as the being."""
+        return await self._run_one_tick()
 
     async def _maybe_self_improve(self) -> None:
         """Every N ticks, run one honest self-coder cycle on SONIC's own source."""

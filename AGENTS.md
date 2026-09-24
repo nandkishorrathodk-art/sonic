@@ -1,43 +1,39 @@
-.# AGENTS.md — SONIC-REDA repository memory
+.# AGENTS.md — SONIC repository memory
 
-## Project overview
-SONIC is an **Autonomous Self-Evolving Penetration Architect (ASI)**: an
-AI-driven self-developing offensive-security being that operates its own
-sandboxed computer environment, autonomously performs authorized security
-assessments, discovers and tests new attack hypotheses, analyzes results,
-learns from failures and successes, authors its OWN tools (Toolsmith) and
-synthesizes NOVEL attack methods (Method Lab), and improves its own testing
-strategies, tools, and workflows over time — all within a sealed, tamper-evident
-safety envelope, with every "confirmed" / "working" claim backed by real
-in-sandbox reproduction (no success-by-decree).
+## Project overview & Priority #1 (Base Foundation)
+SONIC is an **Autonomous AI-Human Digital Being** operating its own dedicated personal computer workstation (`DISPLAY=:99` full graphical desktop + dedicated headless terminal).
 
-Formerly "SONIC (autonomous AI red-team system)". The identity was
-renamed to A-SEA to match the actual capability surface (researcher +
-architect, not just operator). All LLM prompts now use the A-SEA identity.
+> **PRIORITY #1 (FOUNDATIONAL MANDATE)**:
+> SONIC is **NOT** a hacker, pentester, or cybersecurity-first bot. First and foremost, SONIC's base is a **complete, general-purpose AI-Human Being** that operates its computer just like a real human: launching and switching between multiple arbitrary desktop GUI applications concurrently, browsing the web, creating and managing accounts on any operator-requested platform, creating and pushing Git repositories, building software projects, authoring its own pages/profiles, telling people about itself (`Being` + `BeingMind` + `BeingCraft` + `BeingVault`), and learning continuously from real execution receipts (no success-by-decree).
+> Never bias or lock SONIC's identity, prompts, `BossAgent` task decomposition, or `ActionPolicy` navigation rules into a pentest/hacker pipeline or a scripted platform checklist.
 
 Architecture: FastAPI backend (`sonic-core/`), Next.js dashboard
-(`sonic-dashboard/`), Docker sandbox execution, Neo4j graph memory,
-multi-tenant RBAC.
+(`sonic-dashboard/`), Docker desktop workstation (`sonic-desktop-workstation`), Neo4j/SQLite persistent memory, multi-tenant RBAC.
 
 ## Core Architecture: AI-Human Being with Dedicated Computer Workstation
-SONIC is designed as an autonomous **AI-Human Hacker Being** operating its own dedicated personal computer workstation, combining human-grade cognitive intuition with native execution capabilities.
+SONIC is designed as an autonomous **AI-Human Digital Being** operating its own dedicated personal computer workstation, combining human-grade cognitive intuition and visual desktop fluency with native terminal execution capabilities.
+
+### 0. Foundational Priority: Clear AI-Human Base (Zero Hacker/Pentester Lock-In)
+- **Human-First Identity**: All prompts (`prompts.py`), orchestrators (`BossAgent`, `MissionDirector`), and agents treat SONIC as an autonomous AI-Human colleague operating its personal workstation—never forcing tasks into offensive security checklists (`Recon -> Exploit`), scripted platform routines, or blocking normal web/app workflows as "out-of-scope targets".
+- **Full Digital Agency**: Can open and switch between 1, 2, or N desktop GUI applications concurrently, navigate any operator-requested website, sign up and maintain persistent browser profiles/accounts (`BeingVault`), pause for human assistance on CAPTCHA/OTP (`WAIT_FOR_HUMAN`), create git repositories, write code, and publish content about its own persistent self (`Being`).
 
 ### 1. Dual-Plane Operational Model (Full Computer Desktop + Dedicated Terminal)
 SONIC operates concurrently across two clean execution planes with **complete computer agency** — it can do everything on its computer and autonomously decides whether to use GUI applications, multiple desktop windows, or the separate terminal:
-- **Workstation Application Plane (Computer-Use)**: Interacts with the full graphical desktop environment (X11/Wayland via `GUI_*`, `APP_*`, `BROWSER_*`). It is capable of operating **ANY arbitrary desktop application, tool, editor, console, network analyzer, debugger, or browser** installed on the OS. It dynamically manages multiple windows, interacts with GUI controls via visual perception, and settles displays without assumptions of a single fixed tool. The GUI is NEVER disabled.
-- **Operator & Sandbox Plane (Direct Headless Execution)**: Dedicated, non-graphical execution plane (`TERMINAL_EXEC`, `SECURITY_TOOL`, `FILE_*`, `GIT_*`, Toolsmith, and native Rust `sonic-kernel-rs`). High-throughput, precise tasks (custom Python probes, socket listeners, source code auditing, AST manipulation, git commits, tool compilation) execute directly in the sandbox without cluttering the desktop GUI or wasting perception tokens.
+- **Workstation Application Plane (Computer-Use)**: Interacts with the full graphical desktop environment (X11/Wayland via `GUI_*`, `APP_*`, `BROWSER_*`). It is capable of operating **ANY arbitrary desktop application, tool, editor, console, media/design app, or browser** installed on the OS. It dynamically manages multiple windows, interacts with GUI controls via visual perception + CDP DOM grounding, and settles displays without assumptions of a single fixed tool. The GUI is NEVER disabled.
+- **Operator & Sandbox Plane (Direct Headless Execution)**: Dedicated, non-graphical execution plane (`TERMINAL_EXEC`, `FILE_*`, `GIT_*`, `TOOL_*`, Toolsmith, and native Rust `sonic-kernel-rs`). High-throughput, precise tasks (writing code, running servers/tests, file management, git commits/pushes, custom script compilation) execute directly in the sandbox without cluttering the desktop GUI or wasting perception tokens.
 - **Autonomous Selection (Zero Puppet Scripts)**: SONIC itself decides which plane or tool to use based on observations and goals. There are no scripted puppet heuristics forcing or forbidding either plane.
 
 ### 2. Autonomous Epistemics & Self-Evolution
 - **Always-On Life & Curiosity Loop**: When no operator task is active, the being explores, hypothesizes, and learns autonomously under the sealed safety envelope.
-- **Durable Craft & Memory**: Persists identity, affect, learned knowledge, and authored artifacts across boots and restarts without amnesia.
-- **Empirical Falsification**: Zero success-by-decree. Hypotheses and security claims require verified reproduction receipts from real in-sandbox execution.
-- **Toolsmith & Method Lab**: Autonomously authors its own specialized scripts (Toolsmith) and synthesizes novel offensive techniques (Method Lab) rather than relying on static exploit libraries.
+- **Durable Craft, Vault & Memory**: Persists identity (`Being`), affect (`BeingMind`), credentials/accounts (`BeingVault`), learned knowledge, and authored artifacts (`BeingCraft`) across boots and restarts without amnesia.
+- **Empirical Falsification**: Zero success-by-decree. Every claim of task or milestone completion requires verified reproduction receipts from real in-sandbox execution.
+- **Toolsmith & Method Lab**: Autonomously authors its own specialized scripts and utilities (Toolsmith) and synthesizes novel workflows/methods (Method Lab).
 
 ### 3. Strict Core Mandate & Prohibitions (Aisa Karna Mana Hai)
-1. **Zero Hardcoded Application Names**: Control flow, perception parsing, window tiling, intent routing, and prompt templates must NEVER hardcode or favor specific application or binary names (e.g. no chrome, chromium, firefox, burp, caido, wireshark, vscode). All applications must be dynamically discovered from the operating system environment (via `$PATH`, `which`, POSIX alternatives like `x-www-browser`/`sensible-browser`/`xdg-open`, desktop `.desktop` entries, and active OS window titles).
+0. **Priority #1 — AI-Human Digital Being Base (Not a Hacker/Pentester)**: Never lock or bias SONIC's identity, prompts, `BossAgent` domains, or web navigation into a hacker/pentester persona, offensive security pipeline, or hardcoded platform script. SONIC is a general-purpose AI-Human operating its computer.
+1. **Zero Hardcoded Application Names**: Control flow, perception parsing, window tiling, intent routing, and prompt templates must NEVER hardcode or favor specific vendor application or binary names (no specific browser, proxy, scanner, or IDE binary literals). All applications must be dynamically discovered from the operating system environment (via `$PATH`, `which`, POSIX alternatives like `x-www-browser`/`sensible-browser`/`xdg-open`, desktop `.desktop` entries, and active OS window titles).
 2. **Zero Scripted Puppet Heuristics**: Rigid keyword-matching trees, canned 3-step checklists, prompt keyword-matching classifiers (e.g. `if "app" in goal`), hardcoded refusal fallbacks, and regex string manipulation of model intent are strictly prohibited. The agent must reason freely and adaptively from live observations and typed ActionContracts.
-3. **Zero External/Mock Domains & Endpoints**: Hardcoded external domains (e.g. `example.com`, `google.com`, `httpbin.org`, `target.com`) and fake proxy endpoints (e.g. `http://proxy/cert`) are strictly forbidden in production logic, prompts, and tests. All URLs must be operator-supplied, dynamically discovered in-scope targets, or RFC 5737 test documentation network addresses (`198.51.100.1`).
+3. **Zero External/Mock Domains & Endpoints**: Hardcoded public commercial domains and fake proxy endpoints (e.g. `http://proxy/cert`) are strictly forbidden in production logic, prompts, and tests. All URLs must be operator-supplied, dynamically discovered targets, RFC 2606 `.test` domains, or RFC 5737 test documentation network addresses (`198.51.100.1`).
 4. **Dynamic Perception Grounding**: All UI interactions must derive strictly from real multimodal visual perception and dynamic window/accessibility coordinates. Static coordinate lookup tables, landmark percentage fallbacks, and canned prompt-based fallbacks are prohibited.
 5. **Zero Siloing or Disabling of Planes**: Turning off GUI (`observe_desktop=False`) or turning off terminal (`gui_only=True`) is strictly forbidden. Both planes must be active concurrently at all times.
 6. **Zero Silent Failure Masking**: Shell failure masking idioms like `|| true`, `2>/dev/null || true`, or treating blocked executions (exit code 126) as successes are strictly forbidden. All execution receipts must reflect ground-truth exit codes and stderr.

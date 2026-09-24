@@ -60,6 +60,10 @@ _METADATA_AND_LOOPBACK = (
     ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("::ffff:127.0.0.0/104"),
+    ipaddress.ip_network("::ffff:169.254.0.0/112"),
+    ipaddress.ip_network("64:ff9b::7f00:0/104"),
+    ipaddress.ip_network("64:ff9b::a9fe:0/112"),
 )
 
 # Fields whose values determine a verdict. After sealing these MUST NOT change.
@@ -243,7 +247,7 @@ class SealedActionPolicy(ActionPolicy):
                     False,
                     "safety policy integrity check failed: seal mismatch (policy was tampered)",
                 )
-        return super().evaluate(action_type, target_resource, payload)
+        return super().evaluate(action_type, target_resource, payload or {})
 
     def _clone(self) -> SealedActionPolicy:
         """Create a clone suitable for per-agent rate window isolation."""
@@ -293,7 +297,7 @@ def seal_default(
     scope_checker: Any | None = None,
     tenant_id: str = "default",
     require_approval_for_intrusive: bool = False,
-    max_actions_per_minute: int = 120,
+    max_actions_per_minute: int = 300,
     allowed_action_types: set[str] | None = None,
     **kwargs: Any,
 ) -> SealedActionPolicy:

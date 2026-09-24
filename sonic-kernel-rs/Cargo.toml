@@ -3,7 +3,7 @@ name = "sonic-kernel-rs"
 version = "0.2.0"
 edition = "2021"
 authors = ["SONIC Architecture Team"]
-description = "Core architectural kernel for SONIC v2 (AI Human Pentester) written in Rust"
+description = "Core architectural kernel for SONIC v2 (Autonomous AI-Human Digital Being) written in Rust"
 license = "Apache-2.0"
 
 [dependencies]

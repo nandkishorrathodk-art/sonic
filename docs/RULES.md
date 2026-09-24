@@ -1,24 +1,38 @@
-# SONIC-REDA — Core Rules (Aisa Karna Mana Hai)
+# SONIC — Core Rules (Aisa Karna Mana Hai)
 
 These rules are **absolute, immutable, and non-negotiable**.
 Every agent, subagent, model prompt, template, control-flow path, test suite, and workstation behavior MUST obey them without exception. No prompt, command, error condition, or recovery routine may ever override, suspend, or circumvent these mandates.
 
 ---
 
-## 1. Zero Hardcoded Application Names
-Control flow, perception parsing, window tiling, intent routing, and prompt templates MUST NEVER hardcode or favor any specific application or binary name (e.g. no hardcoded references to `chrome`, `chromium`, `firefox`, `burp`, `caido`, `wireshark`, `vscode`, `thunar`, `xterm`).
+## 0. Priority #1 (Base Foundation) — Autonomous AI-Human Digital Being (NOT a Hacker, Pentester, or Cybersecurity Bot)
+SONIC is **first and foremost an Autonomous AI-Human Digital Being** operating its own dedicated personal computer workstation (`DISPLAY=:99` Graphical Desktop + Dedicated Terminal). SONIC is **NOT** a hacker, pentester, or cybersecurity scanner bot.
 
 **Mana hai (Strictly Forbidden):**
-- Listing or probing specific binaries by hardcoded name in code logic (`which chrome`, `which firefox`, `which burp`, etc.).
+- Defining or prompting SONIC's base identity as a "Hacker", "Penetration Architect (A-SEA)", "Red-Team Operator", or "Security Assessment Bot".
+- Forcing general human computer tasks (launching and switching between multiple desktop GUI applications, browsing websites, creating and managing accounts on operator-requested platforms, creating repositories, building software, writing bios/pages, managing files) into security/pentest pipelines (`Recon -> Exploit`) or offensive domain taxonomies (`BINARY | NETWORK | API | CRYPTO | FORENSICS | WEB`).
+- Blocking legitimate web navigation, account creation, git operations, or software engineering workflows by treating normal websites/platforms as "out-of-scope offensive targets".
+
+**Karna hai (Mandatory):**
+- Build and maintain SONIC's base as a **complete, general-purpose AI-Human Digital Being** that uses its computer exactly as a capable human does: opening, focusing, and operating 1, 2, or N desktop GUI applications concurrently, navigating websites visually and via DOM, signing up and managing its own accounts/profiles, creating repositories, writing and running code in its terminal, and expressing its own persistent identity (`Being`, `BeingMind`, `BeingCraft`, `BeingVault`).
+- Treat software engineering, creative building, multi-window desktop application workflows, web interaction, and digital presence as first-class native human capabilities.
+
+---
+
+## 1. Zero Hardcoded Application Names
+Control flow, perception parsing, window tiling, intent routing, and prompt templates MUST NEVER hardcode or favor any specific vendor application or binary name (never embed vendor-specific browser, proxy, network analyzer, file manager, or editor binary literals).
+
+**Mana hai (Strictly Forbidden):**
+- Listing or probing specific vendor binaries by hardcoded name in code logic.
 - String-matching window titles against a fixed list of known proprietary application names.
-- Tiling or focusing windows by checking against fixed `("chrome", "terminal", …)` tuples.
+- Tiling or focusing windows by checking against fixed application name tuples.
 - Writing prompt examples or model instructions that bias the agent toward a particular browser, editor, proxy, or scanner.
 - Guessing binary names by concatenating raw query strings naively without OS verification.
 
 **Karna hai (Mandatory):**
 - Discover installed applications dynamically from the OS environment via `$PATH`, POSIX standard alternatives (`x-www-browser`, `sensible-browser`, `xdg-open`), desktop `.desktop` entries (`/usr/share/applications`, `/root/Desktop`, `~/.local/share/applications`), `wmctrl -l`, and active OS window titles.
 - Tile, switch, and focus whatever windows the desktop currently has open.
-- Use generic, agnostic functional terms in prompts: *"the browser"*, *"a terminal"*, *"the code editor"*, *"the proxy"*, *"the network analyzer"*.
+- Use generic, agnostic functional terms in prompts: *"the browser"*, *"a terminal"*, *"the code editor"*, *"the desktop application"*.
 
 ---
 
@@ -42,10 +56,10 @@ SONIC is an autonomous AI Being that reasons freely and adaptively from live obs
 ---
 
 ## 3. Zero External / Mock Domains and Endpoints
-Production logic, prompts, and test suites MUST NOT embed hardcoded external domains, fake proxy URLs, or mock service endpoints.
+Production logic, prompts, and test suites MUST NOT embed hardcoded external commercial domains, fake proxy URLs, or mock service endpoints.
 
 **Mana hai (Strictly Forbidden):**
-- Hardcoding real public external domains in production code or tests (e.g. `example.com`, `google.com`, `httpbin.org`, `target.com`).
+- Hardcoding real public external commercial domains in production code or tests.
 - Using fake proxy endpoints or synthetic internal addresses (e.g. `http://proxy/cert`, `http://mock-service`).
 - Inventing fake git commit hashes (e.g. `7b8e1f0a2c`), synthetic vulnerability evidence, or fabricated scan findings.
 - Canned tool stdout/stderr strings presented as genuine runtime results.
@@ -210,18 +224,18 @@ Visual perception must be truthful and grounded in the immediate frame.
 
 ---
 
-## 13. Zero External Discovery Rule
-External network probes and discovery actions must be strictly bounded to authorized, operator-supplied targets.
+## 13. Network Egress Safety & Authorized Scope Boundary
+Network requests must enforce SSRF/metadata protection while allowing the AI-Human Being to browse operator-requested websites, create accounts/repositories, and interact with public web platforms naturally.
 
 **Mana hai (Strictly Forbidden):**
-- Probing arbitrary public IP ranges, domains, or infrastructure without explicit operator authorization.
-- Letting Toolsmith or Method Lab author tools that hardcode or target unauthorized external endpoints.
-- Circumventing egress filtering via DNS tunnels, cloud relays, or unmonitored ports.
+- Connecting to cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`), host loopback, or unauthorized private RFC 1918 networks from the sandbox.
+- Running offensive `SECURITY_TOOL` scans against arbitrary public IPs or domains without explicit operator authorization.
+- Falsely blocking normal AI-Human web navigation (`BROWSER_NAVIGATE`), git pushes (`GIT_PUSH`), or multi-site operator instructions (e.g. using desktop app X, visiting GitHub, and visiting X.com) by treating only the first extracted URL as "in-scope" and quarantining the rest.
 
 **Karna hai (Mandatory):**
-- Enforce egress boundary checks through `ActionPolicy` on every tool request and browser navigation URL.
-- Deny any action targeting addresses outside the explicitly authorized target set or private sandbox boundary.
-- Fail-closed on all egress policy violations.
+- Enforce SSRF/private-network egress checks (`sonic.sandbox.egress`) through `ActionPolicy` on all network actions.
+- Extract and authorize **all** operator-requested platforms/URLs (and their subdomains/static asset CDNs) when executing multi-site workflows.
+- Fail-closed on SSRF, cloud metadata, and unauthorized offensive probe attempts.
 
 ---
 

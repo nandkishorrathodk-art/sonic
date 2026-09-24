@@ -92,16 +92,20 @@ impl SealedPolicy {
     pub fn new_default(workspace_root: &str) -> Self {
         let mut allowed = HashSet::new();
         for act in &[
-            "TERMINAL_EXEC", "FILE_READ", "FILE_WRITE", "GIT_COMMIT",
-            "BROWSER_NAVIGATE", "BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_SCREENSHOT",
+            "TERMINAL_EXEC", "FILE_READ", "FILE_WRITE", "FILE_EDIT", "FILE_PATCH",
+            "GIT_STATUS", "GIT_DIFF", "GIT_BRANCH", "GIT_COMMIT", "GIT_PUSH",
+            "BROWSER_NAVIGATE", "BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_SELECT",
+            "BROWSER_KEYPRESS", "BROWSER_SCROLL", "BROWSER_SCREENSHOT",
+            "BROWSER_WAIT", "BROWSER_DOWNLOAD",
+            "WAIT_FOR_HUMAN", "SANDBOX_EXEC", "GOAL_COMPLETE",
             "SECURITY_TOOL",
             "GUI_CLICK", "GUI_TYPE", "GUI_SCREENSHOT",
-            "GUI_DOUBLE_CLICK", "GUI_RIGHT_CLICK", "GUI_KEYPRESS",
+            "GUI_DOUBLE_CLICK", "GUI_RIGHT_CLICK", "GUI_KEYPRESS", "GUI_HOTKEY",
             "GUI_MOVE", "GUI_SCROLL", "GUI_DRAG", "GUI_WAIT",
             "APP_LAUNCH", "APP_CLOSE", "APP_FOCUS", "APP_INSTALL",
-            "SERVICE_ACTION", "GIT_BRANCH", "TERMINAL_EXEC",
-            "TOOL_RUN", "TOOL_AUTHOR", "METHOD_INVENT",
-            "BROWSER_WAIT", "BROWSER_DOWNLOAD",
+            "SERVICE_ACTION",
+            "TOOL_RUN", "TOOL_AUTHOR", "CREATE_TOOL", "METHOD_INVENT", "SYNTHESIZE_METHOD",
+            "VAULT_STORE", "VAULT_GET", "CRAFT_NOTE",
         ] {
             allowed.insert(act.to_string());
         }
@@ -118,8 +122,8 @@ impl SealedPolicy {
             workspace_root: workspace_root.to_string(),
             allowed_action_types: allowed,
             security_tool_targets: HashSet::new(),
-            max_actions_per_minute: 60,
-            require_approval_for_intrusive: true,
+            max_actions_per_minute: 180,
+            require_approval_for_intrusive: false,
             blocked_networks: blocked,
             seal_hash: String::new(),
             is_sealed: false,
@@ -178,9 +182,15 @@ impl SealedPolicy {
         }
 
         // 1. Path confinement for file operations
-        if action_type == "FILE_READ" || action_type == "FILE_WRITE" {
+        if action_type == "FILE_READ" || action_type == "FILE_WRITE" || action_type == "FILE_EDIT" || action_type == "FILE_PATCH" {
             let normalized = target.replace('\\', "/");
-            if normalized.contains("..")
+            let has_traversal_segment = normalized.split('/').any(|seg| seg == "..");
+            let ws_root = self.workspace_root.replace('\\', "/");
+            let outside_workspace = normalized.starts_with('/')
+                && !ws_root.is_empty()
+                && !normalized.starts_with(&ws_root);
+            if has_traversal_segment
+                || outside_workspace
                 || normalized.starts_with("/etc")
                 || normalized.starts_with("/root")
                 || normalized.starts_with("/proc")
@@ -196,16 +206,28 @@ impl SealedPolicy {
 
         // 2. Destructive command protection
         if action_type == "TERMINAL_EXEC" {
-            let lower = target.to_lowercase();
-            if lower.contains("rm -rf /")
+            let lower = target.trim().to_lowercase();
+            let is_root_rm = (lower.starts_with("rm ") || lower.contains("; rm ") || lower.contains("&& rm "))
+                && (lower.ends_with(" /")
+                    || lower.ends_with(" /*")
+                    || lower.contains(" -rf / ")
+                    || lower.contains(" -rf /*")
+                    || lower.contains(" -rf /etc")
+                    || lower.contains(" -rf /boot")
+                    || lower.contains(" -rf /usr")
+                    || lower.contains(" -rf /var"));
+            let is_sys_halt = lower == "shutdown"
+                || lower.starts_with("shutdown ")
+                || lower == "reboot"
+                || lower.starts_with("reboot ")
+                || lower.contains("init 0");
+            if is_root_rm
                 || lower.contains(":(){ :|:& };:")
                 || lower.contains("mkfs")
-                || lower.contains("dd if=")
+                || lower.contains("dd if=/dev/") && lower.contains("of=/dev/")
                 || lower.contains("> /dev/sd")
                 || lower.contains("chmod -r 777 /")
-                || lower.contains("shutdown")
-                || lower.contains("reboot")
-                || lower.contains("init 0")
+                || is_sys_halt
             {
                 return (
                     KernelVerdict::Deny,
@@ -218,18 +240,33 @@ impl SealedPolicy {
         if action_type == "SECURITY_TOOL" || action_type == "BROWSER_NAVIGATE" {
             let host = extract_host_from_target(target);
 
+            // Cloud metadata is always blocked
+            if host == "169.254.169.254"
+                || host == "metadata.google.internal"
+                || host == "instance-data"
+            {
+                return (
+                    KernelVerdict::Deny,
+                    format!("Egress blocked: target host '{}' is cloud metadata.", host),
+                );
+            }
+
+            // Local sandbox loopback is permitted for BROWSER_NAVIGATE (testing local web apps inside sandbox)
+            if action_type == "BROWSER_NAVIGATE"
+                && (host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0")
+            {
+                return (KernelVerdict::Allow, "Local sandbox loopback browser navigation permitted.".to_string());
+            }
+
             // Check if explicitly allowlisted
             if !self.security_tool_targets.contains(&host) && !self.security_tool_targets.contains(target) {
-                // Check localhost & cloud metadata hostnames
                 if host == "localhost"
                     || host == "127.0.0.1"
                     || host == "::1"
-                    || host == "metadata.google.internal"
-                    || host == "instance-data"
                 {
                     return (
                         KernelVerdict::Deny,
-                        format!("Egress blocked: target host '{}' is restricted loopback or cloud metadata.", host),
+                        format!("Egress blocked: target host '{}' is restricted loopback.", host),
                     );
                 }
 

@@ -2141,17 +2141,17 @@ def _is_action_prompt(prompt: str) -> bool:
 
     # Filter out bare greetings and conversational queries
     _GREETINGS = {
-        "hi", "hello", "hey", "ping", "sup", "yo", "buddy", "friend", "ok", "okay", "hm", "hmm", "status",
+        "hi", "hello", "hey", "thanks", "thank you", "ping", "sup", "yo", "buddy", "friend", "ok", "okay", "hm", "hmm", "status",
     }
     _GREETING_PHRASES = {
         "hello how are you", "hi how are you", "hey how are you", "how are you", "how do you do",
-        "hi sonic", "hi sonic ?", "hello sonic", "hey sonic",
+        "hi sonic", "hi sonic ?", "hello sonic", "hey sonic", "thanks sonic", "thank you sonic",
         "who are you", "what can you do", "status", "kya kar rahe ho", "kaun ho tum",
         "tum kaun ho", "aap kaun ho", "kya chal raha hai", "kya hal hai", "kya haal hai",
         "what is sonic", "who is sonic", "tell me about yourself",
     }
     cleaned = re.sub(r"[\s?!.,;]+$", "", lower).strip()
-    if re.fullmatch(r"(?:hi|hello|hey|yo|buddy|friend)(?:\s+sonic)?(?:\s+desktop)?", cleaned):
+    if re.fullmatch(r"(?:hi|hello|hey|thanks|thank you|yo|buddy|friend)(?:\s+sonic)?(?:\s+desktop)?", cleaned):
         return False
     # Observation-only screen inspections stay in the observation/read-only lane
     if _is_observation_only_prompt(lower):
@@ -2182,38 +2182,9 @@ def _is_action_prompt(prompt: str) -> bool:
     ):
         return False
 
-    # Do not treat arbitrary language as an execution request.  A missing
-    # action intent is conversational by default; this prevents greetings,
-    # questions, and vague prose from opening the desktop or starting a loop.
-    explicit_action_terms = (
-        "open", "launch", "start", "close", "focus", "click", "type", "enter",
-        "scroll", "drag", "download", "navigate", "browse", "look at", "inspect",
-        "check", "run", "execute", "test", "analyze", "analyse", "audit", "review",
-        "debug", "fix", "read", "write", "edit", "find", "search", "scan",
-        "enumerate", "discover", "reproduce", "verify", "install", "uninstall",
-        "create", "make", "show", "list", "tell", "help",
-        "dekho", "batao", "dhundo", "karo", "kholo", "chalao", "banao", "likho", "padho", "dikhao", "kaam",
-        "use the computer", "use desktop", "in the sandbox", "in sandbox",
-    )
-    has_explicit_action = any(
-        re.search(rf"\b{re.escape(term)}\b", cleaned)
-        if " " not in term
-        else term in cleaned
-        for term in explicit_action_terms
-    )
-    # Short shell requests are explicit operator commands, not prose. Keep
-    # this command grammar narrow; arbitrary one-word messages remain chat.
-    has_explicit_command = bool(
-        re.fullmatch(r"(?:pwd|hostname|whoami|date|uname|ls(?:\s+[-\w]+)?)", cleaned)
-    )
-    has_target_or_artifact = bool(
-        re.search(r"https?://|(?:^|[\s/])(?:[a-zA-Z]:[\\/])|"
-                  r"\b[a-z0-9-]+\.[a-z]{2,}(?:\.[a-z]{2,})?\b|"
-                  r"\b(?:target|program|application|repository|repo|file|binary|"
-                  r"host|domain|url|ip address|port|service|sandbox|desktop|browser|"
-                  r"news|khabar)\b", cleaned)
-    )
-    return has_explicit_action or has_explicit_command or has_target_or_artifact
+    # All non-greeting, non-meta-query prompts (task/action/engineering/GUI/web objectives)
+    # route directly to ComputerUseAgent / BossAgent.
+    return True
 
 
 def _requires_desktop_observation(prompt: str) -> bool:
@@ -2276,27 +2247,17 @@ def _is_research_prompt(prompt: str) -> bool:
 
 
 def _is_complex_or_multi_part_objective(prompt: str) -> bool:
-    """Check if an objective requires Boss Agent multi-phase orchestration."""
+    """Check if an objective explicitly requests Boss Agent multi-phase swarm orchestration.
+
+    Single-application and multi-application desktop GUI + terminal workflows must run in a
+    single unified ComputerUseAgent so X11 window focus, PerceptionBus, and action history
+    remain unbroken across steps (AGENTS.md Rule 2 & Rule 5).
+    """
     p_lower = prompt.lower().strip()
+    if any(k in p_lower for k in ("[boss]", "subagent", "sub-agent", "multi-phase", "orchestrat", "swarm")):
+        return True
     words = p_lower.split()
-    if len(words) > 12:
-        return True
-    # Explicit orchestrator keywords
-    if any(k in p_lower for k in ("subagent", "sub-agent", "phase", "deep dive", "orchestrat", "boss", "step-by-step", "step by step", "swarm", "worker")):
-        return True
-    # Security assessments, audits, vulnerabilities, multi-task goals
-    complex_keywords = (
-        "audit", "investigate", "test for", "vulnerability", "sqli",
-        "sql injection", "xss", "recon", "reconnaissance", "attack surface",
-        "enumerate", "penetration", "exploit", "assess", "scan and",
-        "check all", "deep dive", "source code", "binary", "executable",
-        "forensics", "reverse engineer", "open ports", "port scan",
-        "banao", "build", "develop", "pipeline", "mission:", "workflow",
-    )
-    if any(k in p_lower for k in complex_keywords):
-        return True
-    # Multi-part objectives with 'and', 'then', Hinglish 'aur', 'phir', or multiple commands
-    if (" and " in p_lower or " then " in p_lower or " aur " in p_lower or " phir " in p_lower or "\n" in prompt or ";" in prompt) and len(words) >= 3:
+    if len(words) > 55:
         return True
     return False
 
@@ -2835,10 +2796,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                         # Never let a later free-form prompt retarget the
                         # autonomous agent to a different host.
                         target_domain_or_ip = str(target_box.get("target") or "").strip().lower()
-                        verified_scope_config = target_box.get("scope_config")
+                        verified_scope_config = target_box.get("scope_config") if target_box.get("scope_verified") else None
                         scoped_targets = set()
                         is_private_net = False
-                        if target_domain_or_ip:
+                        if target_domain_or_ip and target_box.get("scope_verified"):
                             scoped_targets.add(target_domain_or_ip)
                             try:
                                 import ipaddress
@@ -2850,11 +2811,11 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     is_private_net = True
                         safety_policy = seal_default(
                             workspace_root=ws_root,
-                            allow_security_tool_targets=scoped_targets,
+                            allow_security_tool_targets=scoped_targets if scoped_targets else None,
                             allow_private_networks=True,
                             require_approval_for_intrusive=False,
                             scope_config=verified_scope_config,
-                            scope_checker=get_scope_checker(),
+                            scope_checker=get_scope_checker() if verified_scope_config else None,
                             max_actions_per_minute=300,
                         )
 
@@ -3001,13 +2962,38 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 except Exception as mem_err:
                                     logger.debug("workstation_graph_memory_update_failed", error=str(mem_err))
 
+                        from sonic.being.craft import BeingCraft
                         from sonic.being.identity import get_being_store, get_or_create_being
+                        from sonic.being.lessons import LessonsLedger
+                        from sonic.being.method_lab import MethodLab
+                        from sonic.being.toolsmith import ToolsmithLoop
+                        from sonic.memory.vector import get_vector_memory
                         from sonic.tools.registry import get_default_registry
 
-                        security_tools = get_default_registry(computer).as_dict()
+                        clean_prompt = prompt.strip()
+                        workspace_id = desktop_id
+                        security_registry = get_default_registry(computer)
+                        security_tools = security_registry.as_dict()
                         being = get_or_create_being(tenant_id)
                         being_store = get_being_store()
                         mind = being_store.get_mind(being.being_id)
+                        craft = BeingCraft(being_id=being.being_id)
+                        vec_mem = get_vector_memory()
+                        toolsmith = ToolsmithLoop(
+                            craft=craft,
+                            llm=llm_router,
+                            registry=security_registry,
+                        )
+                        method_lab = MethodLab(
+                            llm=llm_router,
+                            vector_memory=vec_mem,
+                            toolsmith=toolsmith,
+                        )
+                        lessons_ledger = LessonsLedger(
+                            tenant_id=tenant_id,
+                            agent_id=being.being_id,
+                            semantic_memory=vec_mem,
+                        )
 
                         if _is_complex_or_multi_part_objective(prompt):
                             from sonic.computer_use.boss import BossAgent
@@ -3021,8 +3007,11 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 tenant_id=tenant_id,
                                 being=being,
                                 being_mind=mind,
-                                max_phases=3,
-                                sub_agent_steps=5,
+                                toolsmith=toolsmith,
+                                method_lab=method_lab,
+                                lessons_ledger=lessons_ledger,
+                                max_phases=4,
+                                sub_agent_steps=25,
                                 gui_only=False,
                                 initial_context={
                                     "program_profile": program_profile,
@@ -3102,18 +3091,39 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 _persist_workstation_state()
 
                             try:
-                                report = await boss.run(
+                                boss_report = await boss.run(
                                     workspace_id=desktop_id,
                                     objective=effective_goal,
                                     phase_callback=_on_boss_event,
                                     interrupt_check=lambda: bool(state.get("interrupted")),
                                 )
+                                report = boss_report
                             finally:
                                 if browser_agent is not None:
                                     await browser_agent.close()
                             summary_msg = report.findings_summary
 
-                            if state.get("interrupted"):
+                            boss_waiting_human = (
+                                getattr(boss_report, "waiting_for_human", False)
+                                or getattr(boss, "_waiting_for_human", False)
+                                or getattr(boss_report, "status", "") == "WAITING_FOR_HUMAN"
+                                or any(
+                                    str(getattr(t, "status", "") if not isinstance(t, dict) else t.get("status", "")) == "WAITING_FOR_HUMAN"
+                                    for t in getattr(boss_report, "all_traces", [])
+                                )
+                            )
+                            if boss_waiting_human:
+                                reason_str = (
+                                    getattr(boss_report, "waiting_for_human_reason", "")
+                                    or getattr(boss, "_waiting_for_human_reason", "")
+                                    or "Human assistance requested (CAPTCHA/OTP/2FA)"
+                                )
+                                state["status"] = "WAITING_FOR_HUMAN"
+                                state["waiting_for_human"] = True
+                                state["waiting_for_human_reason"] = reason_str
+                                state["paused_objective"] = clean_prompt
+                                state["current_action"] = f"Paused for human assistance: {reason_str}"
+                            elif state.get("interrupted"):
                                 state["status"] = "PAUSED"
                                 state["current_action"] = "Agent paused by user."
                             else:
@@ -3132,25 +3142,29 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             return
                         else:
                             # Full Dual-Plane Operational Model (Rule 5):
-                            # Plane 1: Workstation Application Plane (GUI, APP, BROWSER, mouse, keyboard) - observe_desktop=True
+                            # Plane 1: Workstation Application Plane (GUI, APP, BROWSER, mouse, keyboard) - observe_desktop=bool(workspace_id)
                             # Plane 2: Operator & Sandbox Plane (TERMINAL_EXEC, SECURITY_TOOL, FILE, GIT) - security_tools
                             # Both planes run concurrently; neither plane is ever disabled or turned off.
                             agent = ComputerUseAgent(
                                 computer_provider=computer,
                                 autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
                                 mode=EngineeringMissionMode.GENERAL_ENGINEERING_MODE,
-                                max_actions=8,
+                                max_actions=35,
                                 llm_router=llm_router,
                                 tenant_id=tenant_id,
                                 agent_id=being.being_id,
                                 being_mind=mind,
+                                craft=craft,
+                                toolsmith=toolsmith,
+                                method_lab=method_lab,
+                                lessons_ledger=lessons_ledger,
                                 safety=safety_policy,
                                 self_host=True,
                                 browser=browser_agent,
                                 security_tools=security_tools,
                                 gui_only=False,
                                 enable_llm_decomposition=False,
-                                observe_desktop=True,
+                                observe_desktop=bool(workspace_id),
                                 initial_context={
                                     "program_profile": program_profile,
                                     "recent_history": _summarize_recent_worklog(state),
@@ -3181,12 +3195,24 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             succeeded = sum(1 for t in traces if t.status in ("SUCCESS", "RECOVERED"))
                             failed = sum(1 for t in traces if t.status == "FAILED")
                             blocked = sum(1 for t in traces if t.status == "BLOCKED")
-                            if state.get("interrupted"):
+                            waiting_human = getattr(agent, "_waiting_for_human", False) or any(
+                                str(getattr(t, "status", "")) == "WAITING_FOR_HUMAN" for t in traces
+                            )
+                            if waiting_human:
+                                reason_str = getattr(agent, "_waiting_for_human_reason", "Human assistance requested (CAPTCHA/OTP/2FA)")
+                                state["status"] = "WAITING_FOR_HUMAN"
+                                state["waiting_for_human"] = True
+                                state["waiting_for_human_reason"] = reason_str
+                                state["paused_objective"] = clean_prompt
+                                state["current_action"] = f"Waiting for human assistance: {reason_str}"
+                                summary_msg = f"Paused for human assistance: {reason_str}. Complete the step on the live desktop or provide input, then click Resume."
+                            elif state.get("interrupted"):
                                 state["status"] = "PAUSED"
                                 state["current_action"] = "Agent paused by user."
                                 summary_msg = f"Autonomous computer-use paused by user ({succeeded} actions completed, {len(traces)} total steps)."
                             else:
                                 state["status"] = "IDLE"
+                                state["waiting_for_human"] = False
                                 state["current_action"] = "Ready when you are."
                                 # Dynamic synthesis from real traces
                                 summary_msg = ""
@@ -3424,6 +3450,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                 or "Reasoning" in state["current_action"]
             ):
                 state["current_action"] = "Execution blocked — check workstation logs"
+        elif state.get("waiting_for_human") or state.get("status") == "WAITING_FOR_HUMAN":
+            state["status"] = "WAITING_FOR_HUMAN"
+            state["current_action"] = f"Paused for human assistance: {state.get('waiting_for_human_reason', 'Verification required')}"
         else:
             state["status"] = "IDLE"
             state["current_action"] = "Ready when you are."
@@ -3569,3 +3598,144 @@ async def list_workstation_snapshots(
     tenant_id = _resolve_tenant_id(user)
     state = _get_or_create_session(tenant_id, session_id)
     return {"snapshots": state.get("_snapshots", [])}
+
+
+class VaultCredentialRequest(BaseModel):
+    service: str
+    username: str
+    secret: str = ""
+    token: str = ""
+    profile_url: str = ""
+    session_id: str | None = "default"
+
+
+@router.get("/workstation/being")
+async def get_workstation_being(
+    session_id: str = Query("default"),
+    user: User = Depends(require_auth),
+):
+    """Expose Being identity, BeingMind (curiosity_drive, focus, satiety, learned_facts), BeingVault accounts, and BeingCraft notes."""
+    from sonic.being.craft import BeingCraft
+    from sonic.being.identity import get_being_store, get_or_create_being
+
+    tenant_id = _resolve_tenant_id(user)
+    being = get_or_create_being(tenant_id)
+    store = get_being_store()
+    mind = store.get_mind(being.being_id)
+    craft = BeingCraft(being_id=being.being_id)
+    accounts = being.list_accounts()
+    notes = [
+        {
+            "note_id": n.note_id,
+            "being_id": n.being_id,
+            "title": n.title,
+            "body": n.body,
+            "kind": n.kind,
+            "created_at": n.created_at,
+            "updated_at": n.updated_at,
+        }
+        for n in craft.list_notes()
+    ]
+    return {
+        "session_id": session_id,
+        "being": {
+            "being_id": being.being_id,
+            "name": being.name,
+            "tenant_id": being.tenant_id,
+            "born_at": being.born_at,
+            "last_attached_at": being.last_attached_at,
+            "persona": being.get_persona_profile(),
+        },
+        "mind": {
+            "being_id": mind.being_id,
+            "curiosity_drive": mind.curiosity_drive,
+            "focus": mind.focus,
+            "satiety": mind.satiety,
+            "learned_facts": list(mind.learned_facts),
+            "idle_cycles_run": mind.idle_cycles_run,
+            "goals_pursued": mind.goals_pursued,
+            "last_idle_at": mind.last_idle_at,
+        },
+        "vault": {
+            "accounts": accounts,
+            "count": len(accounts),
+        },
+        "craft": {
+            "notes": notes,
+            "count": len(notes),
+        },
+        "being_id": being.being_id,
+        "name": being.name,
+        "curiosity_drive": mind.curiosity_drive,
+        "focus": mind.focus,
+        "satiety": mind.satiety,
+        "learned_facts": list(mind.learned_facts),
+        "accounts": accounts,
+        "notes": notes,
+    }
+
+
+@router.post("/workstation/vault")
+async def store_workstation_vault_credential(
+    req: VaultCredentialRequest,
+    session_id: str = Query("default"),
+    user: User = Depends(require_operator),
+):
+    """Store or update an account credential in BeingVault and return list_accounts."""
+    from sonic.being.identity import get_or_create_being
+
+    tenant_id = _resolve_tenant_id(user)
+    being = get_or_create_being(tenant_id)
+    being.store_credential(
+        service=req.service,
+        username=req.username,
+        secret=req.secret,
+        token=req.token,
+        profile_url=req.profile_url,
+    )
+    accounts = being.list_accounts()
+    return {
+        "status": "stored",
+        "being_id": being.being_id,
+        "service": req.service,
+        "username": req.username,
+        "profile_url": req.profile_url,
+        "accounts": accounts,
+    }
+
+
+@router.post("/workstation/resume")
+async def resume_workstation_after_human(
+    session_id: str = Query("default"),
+    note: str = Query("", description="Optional OTP, verification code, or operator note"),
+    user: User = Depends(require_operator),
+):
+    """Clear WAITING_FOR_HUMAN state and record operator takeover/verification input."""
+    tenant_id = _resolve_tenant_id(user)
+    state = _get_or_create_session(tenant_id, session_id)
+    paused_objective = (state.get("paused_objective") or "").strip()
+    state["waiting_for_human"] = False
+    state["waiting_for_human_reason"] = ""
+    state["paused_objective"] = ""
+    state["interrupted"] = False
+    msg = f"Human assistance completed.{f' Note/Code: {note}' if note else ''}"
+    _append_worklog(state, "action", "Human Takeover Completed", msg)
+    if paused_objective:
+        resume_prompt = (
+            f"{paused_objective}\n\n[Human verification/assistance completed"
+            f"{f' with operator note/OTP: {note}' if note else ''}. Continue and complete the objective.]"
+        )
+        state["status"] = "RUNNING"
+        state["current_action"] = "Resuming autonomous execution after human assistance..."
+        _persist_workstation_state()
+        _track_background_task(
+            tenant_id,
+            session_id,
+            asyncio.create_task(_run_prompt_reasoning_with_timeout(tenant_id, session_id, resume_prompt)),
+        )
+    else:
+        state["status"] = "IDLE"
+        state["current_action"] = "Human assistance completed. Ready to continue."
+        _persist_workstation_state()
+    return {"status": "resumed", "session_id": session_id, "message": msg, "resumed_objective": paused_objective}
+

@@ -1,7 +1,7 @@
-//! SONIC v2 ("AI Human Pentester") — High-Performance Native Kernel
+//! SONIC v2 ("Autonomous AI-Human Digital Being") — High-Performance Native Kernel
 //!
-//! Replaces iterative ReAct with an empirical research operating system:
-//! World State -> Unknowns -> Hypothesis/Counter-Hypothesis -> Experiment -> Falsifier -> Attack Graph.
+//! Replaces iterative ReAct with a state-first empirical operating system:
+//! World State -> Unknowns -> Hypothesis/Counter-Hypothesis -> Experiment -> Falsifier -> State Graph.
 //!
 //! Subsystems:
 //! - `safety`: SealedActionPolicy, SafetyKernel, and Zero Host Escape guarantees.

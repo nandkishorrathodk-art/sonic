@@ -48,7 +48,10 @@ export interface WorkstationState {
   session_id: string;
   tenant_id: string;
   mission_name: string;
-  status: "IDLE" | "RUNNING" | "PAUSED" | "COMPLETED" | "ERROR";
+  status: "IDLE" | "RUNNING" | "PAUSED" | "WAITING_FOR_HUMAN" | "BLOCKED" | "COMPLETED" | "ERROR";
+  waiting_for_human?: boolean;
+  waiting_for_human_reason?: string;
+  paused_objective?: string;
   target_repo: string;
   git_branch: string;
   latest_commit?: string;

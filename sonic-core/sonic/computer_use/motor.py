@@ -346,38 +346,23 @@ class MotorReflexes:
 
     async def enforce_tab_budget(self, workspace_id: str, max_tabs: int = 3) -> int:
         """
-        Checks open browser windows/tabs. If count > max_tabs, closes excess tabs via Ctrl + W.
+        Checks open browser tabs via explicit `get_open_tab_count` API on `self.computer`.
+        Never counts general X11 windows from `wmctrl -l` or `status.open_applications`
+        and never sends `Ctrl+1` + `Ctrl+W` to close arbitrary desktop windows.
         Returns the number of excess tabs closed.
         """
         count = 0
         if hasattr(self.computer, "get_open_tab_count"):
             res = self.computer.get_open_tab_count(workspace_id)
-            count = await res if asyncio.iscoroutine(res) else res
+            count = await res if asyncio.iscoroutine(res) else int(res or 0)
         elif hasattr(self.computer, "open_tabs"):
             val = self.computer.open_tabs
-            count = len(val) if isinstance(val, (list, tuple, set)) else int(val)
+            count = len(val) if isinstance(val, (list, tuple, set)) else int(val or 0)
         elif hasattr(self.computer, "tab_count"):
             val = self.computer.tab_count
-            count = val() if callable(val) else int(val)
+            count = val() if callable(val) else int(val or 0)
         else:
-            disp = self._get_display(workspace_id)
-            code, out, _ = await self._exec_cmd(
-                f"DISPLAY={disp} wmctrl -l 2>/dev/null || wmctrl -l 2>/dev/null", workspace_id
-            )
-            if code == 0 and out.strip():
-                for line in out.splitlines():
-                    line_lower = line.lower()
-                    # Discard desktop backgrounds / system panels
-                    if any(ignored in line_lower for ignored in ("desktop", "panel", "dock")):
-                        continue
-                    count += 1
-            if count == 0 and hasattr(self.computer, "status"):
-                try:
-                    st = await self.computer.status(workspace_id)
-                    if hasattr(st, "open_applications"):
-                        count = len([app for app in st.open_applications if str(app).lower() not in ("desktop", "panel")])
-                except Exception:
-                    pass
+            return 0
 
         excess = max(0, count - max_tabs)
         for _ in range(excess):
@@ -424,8 +409,8 @@ class MotorReflexes:
         disp = self._get_display(workspace_id)
         # Stage 1: Focus/raise window
         focus_cmd = (
-            f"DISPLAY={disp} wmctrl -a {safe_target} 2>/dev/null || "
-            f"DISPLAY={disp} xdotool search --name {safe_target} windowactivate --sync 2>/dev/null || true"
+            f"DISPLAY={disp} wmctrl -a {safe_target} || "
+            f"DISPLAY={disp} xdotool search --name {safe_target} windowactivate --sync"
         )
         await self._exec_cmd(focus_cmd, workspace_id)
 

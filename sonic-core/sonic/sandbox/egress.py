@@ -41,8 +41,9 @@ BLOCKED_NETWORKS = [
     # generally so any mapped private/metadata address is blocked.
     ipaddress.ip_network("::ffff:0:0/96"),        # All IPv4-mapped IPv6
     ipaddress.ip_network("::ffff:169.254.169.254/128"),  # v6-mapped metadata
-    ipaddress.ip_network("64:ff9b::/96"),        # NAT64 well-known prefix
 ]
+
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
 
 
 def _to_standard_ip_str(raw_host: str) -> str:
@@ -117,6 +118,15 @@ def is_target_allowed(
     if "://" in raw_host:
         parsed = urlparse(raw_host)
         raw_host = parsed.hostname or raw_host
+    else:
+        raw_host = raw_host.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        if "@" in raw_host:
+            raw_host = raw_host.rsplit("@", 1)[-1]
+            # Handle SCP-style git@github.com:org/repo.git where :org is not a numeric port
+            if ":" in raw_host and not raw_host.startswith("["):
+                host_part, _, after_colon = raw_host.partition(":")
+                if not after_colon.isdigit():
+                    raw_host = host_part
 
     # Strip IPv6 brackets if present (guard for non-urlparse paths)
     if raw_host.startswith("[") and "]" in raw_host:
@@ -218,9 +228,12 @@ def _ip_blocked(
     for blocked_net in nets:
         if ip_obj in blocked_net:
             return blocked_net
-    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped is not None:
-        mapped_v4 = ip_obj.ipv4_mapped
-        for blocked_net in nets:
-            if mapped_v4 in blocked_net:
-                return blocked_net
+    if isinstance(ip_obj, ipaddress.IPv6Address):
+        embedded_v4 = ip_obj.ipv4_mapped
+        if embedded_v4 is None and ip_obj in _NAT64_PREFIX:
+            embedded_v4 = ipaddress.IPv4Address(int(ip_obj) & 0xFFFFFFFF)
+        if embedded_v4 is not None:
+            for blocked_net in nets:
+                if embedded_v4 in blocked_net:
+                    return blocked_net
     return None

@@ -120,7 +120,7 @@ class MissionPlanner:
             ),
             PlannedAction(
                 tool="target_shell_readonly",
-                input={"command": "git status --short 2>/dev/null || true"},
+                input={"command": "git status --short"},
                 risk=ToolRisk.READ_ONLY,
             ),
             PlannedAction(
@@ -143,7 +143,6 @@ class MissionPlanner:
                     tool="target_shell_readonly",
                     input={
                         "command": (
-                            f"ls -ld {shlex.quote(target.strip())} 2>/dev/null || "
                             f"find . -path {shlex.quote(f'*{target_clean}*')} | head -50"
                         )
                     },
@@ -268,19 +267,19 @@ class MissionPlanner:
         if intent == "db":
             follow_up.append(PlannedAction(
                 tool="target_shell_readonly",
-                input={"command": "grep -rnE 'unions?|select .* from|insert into|where .*=' . --include='*.py' --include='*.js' | head -40 || true"},
+                input={"command": "grep -rnE 'unions?|select .* from|insert into|where .*=' . --include='*.py' --include='*.js' | head -40"},
                 risk=ToolRisk.READ_ONLY,
             ))
         if intent == "web" or any(k in evidence_text for k in ("http", "endpoint", "route", "api")):
             follow_up.append(PlannedAction(
                 tool="target_shell_readonly",
-                input={"command": "grep -rnE '(app|router)\\.(get|post|put|delete)\\(|@(app|router)\\.(get|post|put|delete)' . --include='*.py' --include='*.js' --include='*.ts' --include='*.go' | head -40 || true"},
+                input={"command": "grep -rnE '(app|router)\\.(get|post|put|delete)\\(|@(app|router)\\.(get|post|put|delete)' . --include='*.py' --include='*.js' --include='*.ts' --include='*.go' | head -40"},
                 risk=ToolRisk.READ_ONLY,
             ))
         if "secret" in evidence_text or "token" in evidence_text or bool(re.search(r"api[_-]?key", evidence_text)):
             follow_up.append(PlannedAction(
                 tool="target_shell_readonly",
-                input={"command": "grep -rnE 'sk-[a-zA-Z0-9]{10,}|password\\s*=|secret\\s*=' . --include='*.py' --include='*.js' --include='*.env*' | head -20 || true"},
+                input={"command": "grep -rnE 'sk-[a-zA-Z0-9]{10,}|password\\s*=|secret\\s*=' . --include='*.py' --include='*.js' --include='*.env*' | head -20"},
                 risk=ToolRisk.READ_ONLY,
             ))
 
@@ -288,7 +287,7 @@ class MissionPlanner:
         # history. Kept bounded and read-only so the agent never spins forever.
         follow_up.append(PlannedAction(
             tool="target_shell_readonly",
-            input={"command": "git log -5 --oneline 2>/dev/null || true"},
+            input={"command": "git log -5 --oneline"},
             risk=ToolRisk.READ_ONLY,
         ))
         follow_up.append(PlannedAction(
@@ -306,23 +305,16 @@ class MissionPlanner:
         target_workspace_id: str,
         available_capabilities: set[str] | None = None,
     ) -> MissionActionPlan:
-        """Decompose an objective into a 10-20 step ordered chain.
+        """Decompose an objective into a 10-20 step ordered domain-neutral verification chain.
 
-        Long-horizon planning — the human-like quality "10-20 steps aage soch
-        sake". Instead of the shallow baseline (3-6 read-only commands), this
-        builds a multi-stage pipeline:
-
-            stage 0 orient → stage 1 surface map → stage 2 deep map →
-            stage 3 hypothesize → stage 4 active test (approval-gated) →
-            stage 5 verify → stage 6 report
+        Builds a multi-stage state-convergence pipeline:
+            stage 0 orient → stage 1 structural map → stage 2 component & config inspection →
+            stage 3 state hypothesis → stage 4 capability execution gate (approval-gated) →
+            stage 5 empirical state verification → stage 6 deliverable synthesis
 
         Every action's ``depends_on`` points at the prior stage's anchor action
         so the executor can order and gate the chain. All stages before the
-        approval-gated active-test stage are read-only (honouring the safety
-        envelope); the active test is APPROVAL_REQUIRED and never auto-run.
-
-        Deterministic, allowlist-only, no unconstrained model command
-        generation — same discipline as ``build_plan``.
+        approval-gated stage are read-only (honouring the safety envelope).
         """
         if not objective.strip() or not target.strip() or not target_workspace_id.strip():
             raise ValueError("Mission objective, target, and target workspace are required")
@@ -345,7 +337,7 @@ class MissionPlanner:
 
         # Stage 0 — orient: locate the target working set and orient toward target asset.
         add_stage("target_shell_readonly", "pwd", 0)
-        add_stage("target_shell_readonly", "git status --short 2>/dev/null || true", 0)
+        add_stage("target_shell_readonly", "git status --short", 0)
         target_clean = target.strip()
         if "://" in target_clean:
             target_clean = target_clean.split("://", 1)[1]
@@ -356,19 +348,17 @@ class MissionPlanner:
                 f"find . -maxdepth 3 -name {shlex.quote(f'*{target_clean}*')} | head -50",
                 0,
             )
-        # Stage 1 — surface map: top-level file tree + config landmarks.
+        # Stage 1 — structural map: top-level file tree + source modules.
         add_stage("target_shell_readonly", "find . -maxdepth 2 -type f | head -120", 1)
         add_stage("target_shell_readonly", "find . -maxdepth 3 -type f \\( -name '*.py' -o -name '*.js' -o -name '*.go' -o -name '*.rb' \\) | head -120", 1)
-        # Stage 2 — deep map: intent-specific endpoints/routes/secrets surface.
+        # Stage 2 — deep component & configuration inspection.
         intent = _intent_of(objective)
         for cmd in _INTENT_COMMANDS.get(intent, []):
             add_stage("target_shell_readonly", cmd, 2)
-        add_stage("target_shell_readonly", "grep -rnE 'password|secret|token|api[_-]?key' . --include='*.py' --include='*.js' | head -40 || true", 2)
-        # Stage 3 — hypothesize: collect TODO/FIXME and auth/entry surface for leads.
-        add_stage("target_shell_readonly", "grep -rnE 'TODO|FIXME|HACK|XXX|auth|login|session' . --include='*.py' --include='*.js' | head -50 || true", 3)
-        # Stage 4 — active test: approval-gated, never auto-run. The concrete
-        # probe actions (not a dummy echo) are the stage payload; the probe
-        # generator and the executor keep them operator-gated.
+        add_stage("target_shell_readonly", "grep -rnE 'config|setting|endpoint|interface|route' . --include='*.py' --include='*.js' | head -40", 2)
+        # Stage 3 — state & behavioral hypothesis: collect entrypoints, handlers, and open items.
+        add_stage("target_shell_readonly", "grep -rnE 'TODO|FIXME|def |class |handler' . --include='*.py' --include='*.js' | head -50", 3)
+        # Stage 4 — capability gate: approval-gated when active capabilities are requested.
         active = any(w in objective.lower() for w in ("scan", "test", "probe", "audit", "pentest"))
         if active:
             for probe in self.build_probe_actions(
@@ -381,9 +371,10 @@ class MissionPlanner:
                 probe.depends_on = prev_id
                 actions.append(probe)
                 prev_id = probe.action_id
-        # Stage 5 — verify: re-confirm the active-test outcome is reproducible.
-        add_stage("target_shell_readonly", "git status --short 2>/dev/null || true", 5)
-        # Stage 6 — report: summarise what the chain found (read-only gather).
+        # Stage 5 — empirical state verification: confirm repository and workspace state.
+        add_stage("target_shell_readonly", "git status --short", 5)
+        add_stage("target_shell_readonly", "git diff --stat", 5)
+        # Stage 6 — deliverable synthesis: summarize workspace artifact inventory.
         add_stage("target_shell_readonly", "find . -maxdepth 3 -type f | wc -l", 6)
 
         for a in actions:

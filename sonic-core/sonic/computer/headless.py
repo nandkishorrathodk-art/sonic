@@ -544,7 +544,20 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
         action: GUIAction,
         actor: str = "operator",
     ) -> ScreenObservation:
-        action_name = action.action.value if hasattr(action.action, "value") else str(action.action)
+        atype = action.action
+        action_name = atype.value if hasattr(atype, "value") else str(atype)
+        if atype == GUIActionType.WAIT:
+            await asyncio.sleep(max(0.1, (action.delay_ms or 500) / 1000.0))
+        elif atype in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
+            await self.launch_application(workspace_id, action.app_name, actor=actor)
+        elif atype in (GUIActionType.CLOSE_APP, GUIActionType.CLOSE_WINDOW):
+            target = action.app_name or action.window_id or ""
+            if target:
+                await self.close_application(workspace_id, target, actor=actor)
+        elif atype == GUIActionType.INSTALL_APP and (action.app_name or action.text):
+            await self.install_application(workspace_id, action.app_name or action.text or "", actor=actor)
+        elif atype in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY):
+            pass
         logger.info(
             "headless_gui_action_intercepted",
             workspace_id=workspace_id,
@@ -664,7 +677,7 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
             msg = kwargs.get("message", "chore: headless automated commit")
             res = await self.execute(
                 workspace_id,
-                f"git add -A && git commit -m '{msg}' || true",
+                f"git add -A && git commit -m '{msg}'",
                 cwd=str(ws_dir),
             )
             return res.exit_code == 0

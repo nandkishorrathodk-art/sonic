@@ -100,7 +100,9 @@ def kill(
         headers["Authorization"] = f"Bearer {token}"
     try:
         with httpx.Client(base_url=server, timeout=10) as client:
-            res = client.post("/engagements/kill", headers=headers)
+            res = client.post("/api/v1/workstation/stop", headers=headers)
+            if res.status_code != 200:
+                res = client.post("/api/v1/engagements/kill", headers=headers)
             if res.status_code == 200:
                 console.print("[bold green]✓ Emergency Stop confirmed. All active agents halted safely.[/bold green]")
             else:

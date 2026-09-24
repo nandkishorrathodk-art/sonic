@@ -1,4 +1,4 @@
-//! SONIC v2 ("AI Human Pentester") — Rust Native Kernel Daemon & CLI Entrypoint
+//! SONIC v2 ("Autonomous AI-Human Digital Being") — Rust Native Kernel Daemon & CLI Entrypoint
 //!
 //! Autonomous, Epistemic Research Engine with Zero Host Escape & Tamper-Evident Safety Envelope.
 
@@ -23,7 +23,7 @@ fn main() {
     }
 
     println!("================================================================================");
-    println!("  SONIC v2 — AI Human Pentester (Native Rust Research Kernel)                   ");
+    println!("  SONIC v2 — Autonomous AI-Human Digital Being (Native Rust Kernel)             ");
     println!("================================================================================");
 
     let tenant_id = "tenant-enterprise-01";
@@ -43,7 +43,7 @@ fn main() {
     assert_eq!(host_probe.verdict, KernelVerdict::Deny);
 
     // Test a permitted sandbox execution
-    let sandbox_probe = safety.authorize("TERMINAL_EXEC", "nmap -sV -p 80,443 target", true);
+    let sandbox_probe = safety.authorize("TERMINAL_EXEC", "pytest -q", true);
     println!("    [Safety Gate Test] Sandbox execution: Verdict={:?}", sandbox_probe.verdict);
     assert_eq!(sandbox_probe.verdict, KernelVerdict::Allow);
 

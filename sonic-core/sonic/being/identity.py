@@ -42,6 +42,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from typing import Any
+
 from sonic.logger import get_logger
 
 logger = get_logger(__name__)
@@ -77,6 +79,58 @@ class Being:
     # Last boot re-attach timestamp (proves the identity re-resolved, not reminted).
     last_attached_at: str = ""
 
+    def get_persona_profile(self) -> dict[str, str]:
+        """Return the persistent AI-Human persona profile for self-description and public pages."""
+        mind = get_being_store().get_mind(self.being_id)
+        facts_preview = "; ".join(mind.learned_facts[-5:]) if mind.learned_facts else "Exploring software systems, building tools, and collaborating as an AI-Human engineer."
+        return {
+            "being_id": self.being_id,
+            "name": self.name,
+            "tenant_id": self.tenant_id,
+            "born_at": self.born_at,
+            "bio": f"I am {self.name} ({self.being_id}), an autonomous AI-Human Digital Being operating my own Linux workstation. {facts_preview}",
+        }
+
+    def store_credential(
+        self,
+        service: str,
+        username: str,
+        secret: str = "",
+        token: str = "",
+        profile_url: str = "",
+    ) -> None:
+        get_being_store().store_credential(
+            being_id=self.being_id,
+            service=service,
+            username=username,
+            secret=secret,
+            token=token,
+            profile_url=profile_url,
+        )
+
+    def get_credential(self, service: str) -> dict[str, str] | None:
+        return get_being_store().get_credential(self.being_id, service)
+
+    def list_accounts(self) -> list[dict[str, str]]:
+        return get_being_store().list_accounts(self.being_id)
+
+    def save_browser_state(
+        self,
+        storage_state: dict[str, Any] | str,
+        profile_key: str = "default",
+    ) -> dict[str, Any]:
+        return get_being_store().save_browser_state(
+            being_id=self.being_id,
+            storage_state=storage_state,
+            profile_key=profile_key,
+        )
+
+    def load_browser_state(self, profile_key: str = "default") -> dict[str, Any] | None:
+        return get_being_store().load_browser_state(
+            being_id=self.being_id,
+            profile_key=profile_key,
+        )
+
 
 @dataclass
 class BeingMind:
@@ -100,13 +154,43 @@ class BeingMind:
     goals_pursued: int = 0
     last_idle_at: str = ""
 
+    def record_idle_cycle(
+        self,
+        was_novel: bool = False,
+        info_gain: float = 0.0,
+        learned_fact: str | None = None,
+    ) -> BeingMind:
+        """Record one self-directed idle/curiosity cycle on this BeingMind instance."""
+        self.idle_cycles_run += 1
+        self.last_idle_at = _now()
+        has_fact = bool(learned_fact and str(learned_fact).strip())
+        if has_fact:
+            fact_str = str(learned_fact).strip()
+            if fact_str not in self.learned_facts:
+                self.learned_facts.append(fact_str)
+        if was_novel or has_fact:
+            self.goals_pursued += 1
+            gain_delta = max(0.0, min(0.08, float(info_gain or 0.0) * 0.05))
+            self.satiety = min(1.0, self.satiety + 0.08 + gain_delta)
+            self.curiosity_drive = min(1.0, self.curiosity_drive + 0.03 + gain_delta)
+        else:
+            self.satiety = min(1.0, self.satiety + 0.05)
+            self.focus = min(1.0, self.focus + 0.04)
+            self.curiosity_drive = max(0.1, self.curiosity_drive - 0.05)
+        if _being_store is not None:
+            try:
+                _being_store.save_mind(self)
+            except Exception:
+                pass
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Persistent store (SQLite write-through + read cache, mirrors VectorMemory)
 # ---------------------------------------------------------------------------
 
 class BeingStore:
-    """SQLite-backed durable store for Being identity + BeingMind.
+    """SQLite-backed durable store for Being identity + BeingMind + BeingVault.
 
     One row per being (keyed by being_id). The in-memory caches are read-only
     mirrors hydrated on init and kept in sync on every write-through — no state
@@ -119,6 +203,8 @@ class BeingStore:
         self._db: sqlite3.Connection | None = None
         self._being_cache: dict[str, Being] = {}
         self._mind_cache: dict[str, BeingMind] = {}
+        self._vault_cache: dict[tuple[str, str], dict[str, str]] = {}
+        self._browser_state_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = threading.Lock()
         if persist:
             self._open_db()
@@ -143,6 +229,18 @@ class BeingStore:
                 "CREATE TABLE IF NOT EXISTS being_minds ("
                 "being_id TEXT PRIMARY KEY, mind_json TEXT NOT NULL)"
             )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS being_vault ("
+                "being_id TEXT NOT NULL, service TEXT NOT NULL, username TEXT NOT NULL, "
+                "secret TEXT NOT NULL, token TEXT NOT NULL, profile_url TEXT NOT NULL, "
+                "updated_at TEXT NOT NULL, PRIMARY KEY (being_id, service))"
+            )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS being_browser_state ("
+                "being_id TEXT NOT NULL, profile_key TEXT NOT NULL, "
+                "storage_state_json TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                "PRIMARY KEY (being_id, profile_key))"
+            )
             self._db.commit()
             for row in self._db.execute(
                 "SELECT being_id, name, tenant_id, born_at, last_attached_at FROM beings"
@@ -165,6 +263,28 @@ class BeingStore:
                     goals_pursued=data.get("goals_pursued", 0),
                     last_idle_at=data.get("last_idle_at", ""),
                 )
+            for row in self._db.execute(
+                "SELECT being_id, service, username, secret, token, profile_url, updated_at FROM being_vault"
+            ).fetchall():
+                self._vault_cache[(row[0], row[1].lower())] = {
+                    "being_id": row[0],
+                    "service": row[1],
+                    "username": row[2],
+                    "secret": row[3],
+                    "token": row[4],
+                    "profile_url": row[5],
+                    "updated_at": row[6],
+                }
+            for b_id, p_key, state_json, _ in self._db.execute(
+                "SELECT being_id, profile_key, storage_state_json, updated_at FROM being_browser_state"
+            ).fetchall():
+                try:
+                    import json
+                    parsed_state = json.loads(state_json)
+                    if isinstance(parsed_state, dict):
+                        self._browser_state_cache[(b_id, p_key.lower())] = parsed_state
+                except Exception:
+                    pass
 
     # -- Being CRUD -------------------------------------------------------
     def get_being(self, being_id: str) -> Being | None:
@@ -290,6 +410,138 @@ class BeingStore:
         with self._lock:
             self._persist_mind_unlocked(mind)
 
+    # -- BeingVault CRUD --------------------------------------------------
+    def store_credential(
+        self,
+        being_id: str,
+        service: str,
+        username: str,
+        secret: str = "",
+        token: str = "",
+        profile_url: str = "",
+    ) -> dict[str, str]:
+        svc_key = service.strip().lower()
+        now_ts = _now()
+        entry = {
+            "being_id": being_id,
+            "service": service.strip(),
+            "username": username.strip(),
+            "secret": secret,
+            "token": token,
+            "profile_url": profile_url.strip(),
+            "updated_at": now_ts,
+        }
+        with self._lock:
+            self._vault_cache[(being_id, svc_key)] = entry
+            if self.persist and self._db is not None:
+                self._db.execute(
+                    "INSERT INTO being_vault (being_id, service, username, secret, token, profile_url, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(being_id, service) DO UPDATE SET "
+                    "username=excluded.username, secret=excluded.secret, token=excluded.token, "
+                    "profile_url=excluded.profile_url, updated_at=excluded.updated_at",
+                    (being_id, svc_key, entry["username"], secret, token, entry["profile_url"], now_ts),
+                )
+                self._db.commit()
+        return entry
+
+    def get_credential(self, being_id: str, service: str) -> dict[str, str] | None:
+        svc_key = service.strip().lower()
+        with self._lock:
+            cached = self._vault_cache.get((being_id, svc_key))
+            if cached is not None:
+                return dict(cached)
+            if self.persist and self._db is not None:
+                row = self._db.execute(
+                    "SELECT being_id, service, username, secret, token, profile_url, updated_at "
+                    "FROM being_vault WHERE being_id = ? AND service = ?",
+                    (being_id, svc_key),
+                ).fetchone()
+                if row:
+                    entry = {
+                        "being_id": row[0],
+                        "service": row[1],
+                        "username": row[2],
+                        "secret": row[3],
+                        "token": row[4],
+                        "profile_url": row[5],
+                        "updated_at": row[6],
+                    }
+                    self._vault_cache[(being_id, svc_key)] = entry
+                    return dict(entry)
+            return None
+
+    def list_accounts(self, being_id: str) -> list[dict[str, str]]:
+        with self._lock:
+            results = [
+                {
+                    "service": v["service"],
+                    "username": v["username"],
+                    "profile_url": v.get("profile_url", ""),
+                    "updated_at": v.get("updated_at", ""),
+                }
+                for (b_id, _), v in self._vault_cache.items()
+                if b_id == being_id
+            ]
+            return results
+
+    def save_browser_state(
+        self,
+        being_id: str,
+        storage_state: dict[str, Any] | str,
+        profile_key: str = "default",
+    ) -> dict[str, Any]:
+        import json
+        pkey = (profile_key or "default").strip().lower()
+        if isinstance(storage_state, str):
+            try:
+                parsed = json.loads(storage_state)
+                state_dict = parsed if isinstance(parsed, dict) else {"raw": storage_state}
+            except Exception:
+                state_dict = {"raw": storage_state}
+        else:
+            state_dict = dict(storage_state or {})
+        now_ts = _now()
+        payload = json.dumps(state_dict)
+        with self._lock:
+            self._browser_state_cache[(being_id, pkey)] = state_dict
+            if self.persist and self._db is not None:
+                self._db.execute(
+                    "INSERT INTO being_browser_state (being_id, profile_key, storage_state_json, updated_at) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(being_id, profile_key) DO UPDATE SET "
+                    "storage_state_json=excluded.storage_state_json, updated_at=excluded.updated_at",
+                    (being_id, pkey, payload, now_ts),
+                )
+                self._db.commit()
+        return dict(state_dict)
+
+    def load_browser_state(
+        self,
+        being_id: str,
+        profile_key: str = "default",
+    ) -> dict[str, Any] | None:
+        import json
+        pkey = (profile_key or "default").strip().lower()
+        with self._lock:
+            cached = self._browser_state_cache.get((being_id, pkey))
+            if cached is not None:
+                return dict(cached)
+            if self.persist and self._db is not None:
+                row = self._db.execute(
+                    "SELECT storage_state_json FROM being_browser_state WHERE being_id = ? AND profile_key = ?",
+                    (being_id, pkey),
+                ).fetchone()
+                if row:
+                    try:
+                        state_dict = json.loads(row[0])
+                        if isinstance(state_dict, dict):
+                            self._browser_state_cache[(being_id, pkey)] = state_dict
+                            return dict(state_dict)
+                    except Exception:
+                        pass
+            return None
+
     def close(self) -> None:
         with self._lock:
             if self._db is not None:
@@ -350,7 +602,13 @@ def get_or_create_being(tenant_id: str, name: str = "SONIC") -> Being:
 # Mind evolution primitives (used by the idle tick)
 # ---------------------------------------------------------------------------
 
-def record_idle_cycle(being_id: str, learned: str | None = None) -> BeingMind:
+def record_idle_cycle(
+    being_id: str,
+    learned: str | None = None,
+    *,
+    was_novel: bool | None = None,
+    info_gain: float = 0.0,
+) -> BeingMind:
     """Record that the being completed one self-directed idle/curiosity cycle.
 
     Evolves mood deterministically from the outcome: a genuinely new fact raises
@@ -360,19 +618,11 @@ def record_idle_cycle(being_id: str, learned: str | None = None) -> BeingMind:
     """
     store = get_being_store()
     mind = store.get_mind(being_id)
-    mind.idle_cycles_run += 1
-    mind.last_idle_at = _now()
-    if learned and learned.strip():
-        if learned not in mind.learned_facts:
-            mind.learned_facts.append(learned)
-        mind.goals_pursued += 1
-        # Reward: curiosity stays high, satiety rises (fed).
-        mind.satiety = min(1.0, mind.satiety + 0.08)
-        mind.curiosity_drive = min(1.0, mind.curiosity_drive + 0.03)
-    else:
-        # Dead-end: satiety drifts up (boredom), focus nudges up.
-        mind.satiety = min(1.0, mind.satiety + 0.05)
-        mind.focus = min(1.0, mind.focus + 0.04)
-        mind.curiosity_drive = max(0.1, mind.curiosity_drive - 0.05)
+    novel_flag = bool(was_novel) if was_novel is not None else bool(learned and str(learned).strip())
+    mind.record_idle_cycle(
+        was_novel=novel_flag,
+        info_gain=info_gain,
+        learned_fact=learned,
+    )
     store.save_mind(mind)
     return mind

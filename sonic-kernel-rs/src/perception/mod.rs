@@ -283,7 +283,7 @@ impl PerceptionFusion {
             let text_re = get_text_re();
             for cap in text_re.captures_iter(html).take(30) {
                 let snippet = cap[1].trim();
-                if !snippet.is_empty() && (!snippet.contains(';') || snippet.to_lowercase().contains("flag{")) {
+                if !snippet.is_empty() {
                     visible_text.push(snippet.to_string());
                 }
             }

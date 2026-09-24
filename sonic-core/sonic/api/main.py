@@ -138,8 +138,9 @@ async def _maybe_start_being_life_loop(settings):
         # for defensive postures where existing tools fail.
         from sonic.being.method_lab import MethodLab
         method_lab = MethodLab(
-            craft=BeingCraft(being_id=being.being_id),
-            llm=router, registry=security_registry,
+            llm=router,
+            vector_memory=get_vector_memory(),
+            toolsmith=toolsmith,
         )
         # Lessons Ledger (Phase C, AIOSR): the being learns from experience
         # and adapts testing strategies across missions.
@@ -295,7 +296,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SONIC-REDA API",
-    description="Next-Generation Autonomous AI Bug Hunting System",
+    description="Autonomous AI-Human Digital Being & Dual-Plane Computer Workstation Engine",
     version=__version__,
     docs_url="/docs",
     redoc_url="/redoc",

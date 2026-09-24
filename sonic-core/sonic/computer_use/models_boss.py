@@ -31,67 +31,20 @@ class SubMission(BaseModel):
     max_steps: int = 5
     priority: int = 1  # Higher = execute first within a phase
     depends_on: list[str] = Field(default_factory=list)
-    plane: str = "headless"  # "headless" (terminal/files/toolsmith) | "gui" (desktop/browser)
+    plane: str = "gui"  # "gui" (dual-plane desktop + terminal) | "headless" (CLI-only)
     process_mode: str = "deep"
     evidence_context: dict[str, Any] = Field(default_factory=dict)
     status: str = "PENDING"  # PENDING -> RUNNING -> COMPLETED -> FAILED
 
     @model_validator(mode="after")
     def _infer_plane_from_goal(self) -> SubMission:
-        # If plane was explicitly specified (and not "auto"), preserve it unconditionally.
+        # Preserve explicit plane ("gui" or "headless"), otherwise default to "gui" (dual-plane).
         if "plane" in self.model_fields_set and self.plane:
             plane_lower = str(self.plane).lower().strip()
             if plane_lower in ("gui", "headless"):
                 self.plane = plane_lower
                 return self
-
-        goal_lower = self.goal.lower()
-
-        # Explicit GUI indicators: tasks that genuinely require X11 display / browser interaction
-        # Strictly target-agnostic and binary-free (complies with AGENTS.md Rule 1)
-        gui_indicators = (
-            "open browser", "launch browser", "browser navigation", "browser click",
-            "browser window", "browser tab", "web browser", "browser",
-            "visually verify", "visual verification", "visual inspection", "visually inspect",
-            "visual completion", "gui_click", "gui_type", "gui_action", "gui_screenshot",
-            "app_launch", "launch app", "click icon", "click button", "click on",
-            "desktop application", "graphical window", "graphical interface", "graphical application",
-            "desktop screen", "desktop view", "active window", "display :99", ":99",
-        )
-
-        # Headless indicators: tasks executed directly in the container sandbox without GUI
-        headless_indicators = (
-            "terminal", "bash", "shell", "mkdir", "script", "python", "probe",
-            "file", "curl", "sha256", "grep", "ps ", "ss ", "netstat", "wmctrl",
-            "directory", "tool_author", "toolsmith", "audit", "find ", "cat ",
-            "server", "service", "author", "write", "endpoint", "api", "pip ",
-            "background", "listen", "port", "compile", "clone", "git ",
-        )
-
-        # If goal clearly specifies a headless execution task and does not explicitly require browser/GUI interaction
-        has_headless = any(h in goal_lower for h in headless_indicators)
-        has_gui = any(g in goal_lower for g in gui_indicators)
-
-        if has_gui and not has_headless:
-            self.plane = "gui"
-        elif has_headless and not has_gui:
-            self.plane = "headless"
-        elif has_headless and has_gui:
-            # Ambiguous / compound: if it mentions browser or visual verification, check if primary intent is GUI
-            if any(b in goal_lower for b in (
-                "open browser", "launch browser", "visually verify",
-                "visual verification", "visual inspection", "visual completion",
-            )):
-                self.plane = "gui"
-            else:
-                self.plane = "headless"
-        elif any(
-            w in goal_lower for w in ("browser", "gui_", "desktop application", "graphical window", "visual")
-        ):
-            self.plane = "gui"
-        else:
-            self.plane = "headless"
-
+        self.plane = "gui"
         return self
 
 
@@ -109,7 +62,12 @@ class SubMissionResult(BaseModel):
     evidence_verified: bool = False
     judge_verdict: str = "UNVERIFIED"  # CONFIRMED | FALSIFIED | BENIGN | INCONCLUSIVE | UNVERIFIED
     judge_notes: str = ""
-    status: str = "FAILED"  # SUCCESS | FAILED | TIMED_OUT | BLOCKED
+    status: str = "FAILED"  # SUCCESS | FAILED | TIMED_OUT | BLOCKED | WAITING_FOR_HUMAN
+    waiting_for_human: bool = False
+    waiting_for_human_reason: str = ""
+
+
+SubAgentReport = SubMissionResult
 
 
 class Phase(BaseModel):
@@ -141,7 +99,7 @@ class BossReport(BaseModel):
     """Final structured report from the Boss Agent after orchestration completes."""
 
     objective: str
-    status: str = "INCOMPLETE"  # COMPLETE | INCOMPLETE | PARTIAL
+    status: str = "INCOMPLETE"  # COMPLETE | INCOMPLETE | PARTIAL | WAITING_FOR_HUMAN
     phases: list[Phase] = Field(default_factory=list)
     thinking_log: list[BossThinking] = Field(default_factory=list)
     all_traces: list[Any] = Field(default_factory=list)
@@ -152,3 +110,5 @@ class BossReport(BaseModel):
     duration_seconds: float = 0.0
     replay_metrics: dict[str, Any] = Field(default_factory=dict)
     replay_quality_gate_passed: bool = False
+    waiting_for_human: bool = False
+    waiting_for_human_reason: str = ""

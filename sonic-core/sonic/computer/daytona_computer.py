@@ -13,6 +13,7 @@ Integrates Daytona Cloud Sandboxes with full graphical Linux workstation capabil
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
@@ -54,8 +55,8 @@ logger = get_logger(__name__)
 
 
 def _get_display(workspace_id: str | None = None) -> str:
-    """Check if environment has DISPLAY, default to :0 for Daytona."""
-    return os.environ.get("DISPLAY") or ":0"
+    """Check if environment has DISPLAY, default to :99 for Daytona/Docker Xvfb."""
+    return os.environ.get("DISPLAY") or ":99"
 
 
 class DaytonaComputerProvider(ComputerProvider):
@@ -65,7 +66,7 @@ class DaytonaComputerProvider(ComputerProvider):
     """
 
     def _get_display(self, workspace_id: str | None = None) -> str:
-        """Check if environment has DISPLAY, default to :0 for Daytona."""
+        """Check if environment has DISPLAY, default to :99 for Daytona/Docker Xvfb."""
         return _get_display(workspace_id)
 
     def __init__(
@@ -663,7 +664,7 @@ class DaytonaComputerProvider(ComputerProvider):
                         f"if [ $? -eq 0 ] && [ -n \"$LOC\" ]; then eval \"$LOC\"; "
                         f"DISPLAY={disp} convert /tmp/sonic_screen.png -stroke black -strokewidth 1 -fill '#00ffcc' "
                         f"-draw \"polygon $X,$Y $(($X+15)),$(($Y+12)) $(($X+9)),$(($Y+12)) $(($X+14)),$(($Y+22)) $(($X+10)),$(($Y+24)) $(($X+5)),$(($Y+14)) $(($X)),$(($Y+18))\" "
-                        f"/tmp/sonic_screen.png 2>/dev/null || true; fi) && "
+                        f"/tmp/sonic_screen.png 2>/dev/null; fi) && "
                         f"base64 -w0 /tmp/sonic_screen.png"
                     )
                     res = await sandbox.process.exec(scr_cmd)
@@ -766,6 +767,32 @@ class DaytonaComputerProvider(ComputerProvider):
     # 3. Real GUI Action Dispatch (Mouse, Keyboard, Window Management)
     # -------------------------------------------------------------
 
+    @staticmethod
+    def _normalize_x11_keysym(raw_key: str) -> str:
+        """Normalize common key aliases into valid X11 keysyms for xdotool."""
+        key_map = {
+            "enter": "Return",
+            "return": "Return",
+            "esc": "Escape",
+            "escape": "Escape",
+            "backspace": "BackSpace",
+            "space": "space",
+            "tab": "Tab",
+            "del": "Delete",
+            "delete": "Delete",
+            "pgup": "Prior",
+            "pageup": "Prior",
+            "pgdn": "Next",
+            "pagedown": "Next",
+            "up": "Up",
+            "down": "Down",
+            "left": "Left",
+            "right": "Right",
+        }
+        tokens = [t.strip() for t in (raw_key or "").split("+") if t.strip()]
+        normalized = [key_map.get(t.lower(), t) for t in tokens]
+        return "+".join(normalized) if normalized else raw_key
+
     async def gui_action(
         self,
         workspace_id: str,
@@ -791,12 +818,17 @@ class DaytonaComputerProvider(ComputerProvider):
             GUIActionType.RIGHT_CLICK,
             GUIActionType.TYPE,
             GUIActionType.KEYPRESS,
+            GUIActionType.HOTKEY,
             GUIActionType.MOVE,
             GUIActionType.SCROLL,
             GUIActionType.DRAG,
             GUIActionType.SELECT_WINDOW,
             GUIActionType.OPEN_APP,
+            GUIActionType.LAUNCH_APP,
             GUIActionType.CLOSE_APP,
+            GUIActionType.CLOSE_WINDOW,
+            GUIActionType.INSTALL_APP,
+            GUIActionType.WAIT,
         }
         if action_type not in supported_actions:
             raise RuntimeError(f"Daytona GUI action {action_type.value} is not supported by this provider")
@@ -825,8 +857,8 @@ class DaytonaComputerProvider(ComputerProvider):
                         await cu.mouse.up()
                 elif action_type == GUIActionType.TYPE and action.text:
                     await cu.keyboard.type(action.text)
-                elif action_type == GUIActionType.KEYPRESS and action.key:
-                    await cu.keyboard.press(action.key)
+                elif action_type in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
+                    await cu.keyboard.press(action.key or action.text)
             else:
                 # Direct X11 dispatch via xdotool on DISPLAY={disp}
                 disp = self._get_display(workspace_id)
@@ -843,10 +875,11 @@ class DaytonaComputerProvider(ComputerProvider):
                         await sandbox.process.exec(f"DISPLAY={disp} xdotool mousemove {sx} {sy} mousedown 1 mousemove {dx} {dy} mouseup 1")
                 elif action_type == GUIActionType.TYPE and action.text:
                     safe_text = shlex.quote(action.text)
-                    await sandbox.process.exec(f"DISPLAY={disp} xdotool type --clearmodifiers {safe_text}")
-                elif action_type == GUIActionType.KEYPRESS and action.key:
-                    safe_key = shlex.quote(action.key)
-                    await sandbox.process.exec(f"DISPLAY={disp} xdotool key {safe_key}")
+                    await sandbox.process.exec(f"DISPLAY={disp} xdotool type --delay 25 --clearmodifiers -- {safe_text}")
+                elif action_type in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
+                    norm_key = self._normalize_x11_keysym(action.key or action.text or "")
+                    safe_key = shlex.quote(norm_key)
+                    await sandbox.process.exec(f"DISPLAY={disp} xdotool key --clearmodifiers {safe_key}")
 
             # Common handlers for SCROLL, APPS, WINDOWS
             disp = self._get_display(workspace_id)
@@ -862,7 +895,7 @@ class DaytonaComputerProvider(ComputerProvider):
                 scroll_cmd = " && ".join(cmd_parts)
                 await sandbox.process.exec(scroll_cmd)
 
-            elif action_type == GUIActionType.OPEN_APP and action.app_name:
+            elif action_type in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
                 raw_name = action.app_name.strip(" *_\n\r\t`\"'")
                 if "\n" in raw_name:
                     raw_name = raw_name.split("\n")[0].strip(" *_\n\r\t`\"'")
@@ -875,13 +908,29 @@ class DaytonaComputerProvider(ComputerProvider):
                         wm_check = await sandbox.process.exec(f"DISPLAY={disp} wmctrl -l")
                         is_already_open = wm_check.result and binary.lower() in wm_check.result.lower()
                         if is_already_open:
-                            await sandbox.process.exec(f"DISPLAY={disp} (wmctrl -a {shlex.quote(binary)} 2>/dev/null || xdotool search --onlyvisible --class {shlex.quote(binary)} windowactivate 2>/dev/null) || true")
+                            await sandbox.process.exec(f"export DISPLAY={disp}; (wmctrl -a {shlex.quote(binary)} 2>/dev/null || xdotool search --onlyvisible --class {shlex.quote(binary)} windowactivate 2>/dev/null)")
                         else:
                             spawn_cmd = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/dev/null 2>&1 &"
                             await sandbox.process.exec(spawn_cmd)
                     except Exception:
                         spawn_cmd = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/dev/null 2>&1 &"
                         await sandbox.process.exec(spawn_cmd)
+
+            elif action_type == GUIActionType.CLOSE_WINDOW:
+                target = action.window_id or action.app_name
+                if target:
+                    safe_target = shlex.quote(target)
+                    await sandbox.process.exec(
+                        f"export DISPLAY={disp}; "
+                        f"wmctrl -c {safe_target} 2>/dev/null || "
+                        f"wmctrl -ic {safe_target} 2>/dev/null || "
+                        f"xdotool search --onlyvisible --name {safe_target} windowclose 2>/dev/null || "
+                        f"pkill -f -- {safe_target}"
+                    )
+                    if self._active_windows.get(workspace_id) == target:
+                        self._active_windows[workspace_id] = "XFCE Desktop"
+                else:
+                    await sandbox.process.exec(f"DISPLAY={disp} xdotool getactivewindow windowclose")
 
             elif action_type == GUIActionType.CLOSE_APP and action.app_name:
                 raw_name = action.app_name.strip(" *_\n\r\t`\"'")
@@ -890,13 +939,22 @@ class DaytonaComputerProvider(ComputerProvider):
                 if self._active_windows.get(workspace_id) in (clean_app, action.app_name):
                     self._active_windows[workspace_id] = "XFCE Desktop"
 
+            elif action_type == GUIActionType.INSTALL_APP and (action.app_name or action.text):
+                pkg = action.app_name or action.text or ""
+                ok, err = await self.install_application(workspace_id, pkg, actor=actor)
+                if not ok:
+                    raise RuntimeError(f"Daytona GUI install_application failed for '{pkg}': {err}")
+
+            elif action_type == GUIActionType.WAIT:
+                await asyncio.sleep(max(0.1, (action.delay_ms or 500) / 1000.0))
+
             elif action_type == GUIActionType.SELECT_WINDOW:
                 title = action.app_name or action.window_id or ""
                 if title:
                     safe = shlex.quote(title)
                     await sandbox.process.exec(
-                        f"DISPLAY={disp} (wmctrl -a {safe} 2>/dev/null || "
-                        f"xdotool search --name {safe} windowactivate 2>/dev/null) || true"
+                        f"export DISPLAY={disp}; (wmctrl -a {safe} 2>/dev/null || "
+                        f"xdotool search --name {safe} windowactivate 2>/dev/null)"
                     )
                     self._active_windows[workspace_id] = title
 
@@ -904,7 +962,7 @@ class DaytonaComputerProvider(ComputerProvider):
             logger.error("daytona_gui_action_dispatch_error", error=str(e))
             raise RuntimeError(f"Daytona GUI action failed: {e}") from e
 
-        if action.app_name:
+        if action.app_name and action.action not in (GUIActionType.CLOSE_APP, GUIActionType.CLOSE_WINDOW):
             self._active_windows[workspace_id] = action.app_name
 
         ws = self.workspaces.get(workspace_id)

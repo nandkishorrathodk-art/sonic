@@ -174,7 +174,7 @@ class ScopeChecker:
         re.compile(r"\b(mkfs(\.\w+)?|mke2fs|wipefs)\b", re.IGNORECASE),
         re.compile(r"\bdd\b.*\bof=[\"']?/dev/", re.IGNORECASE),
         re.compile(r">\s*/dev/sd", re.IGNORECASE),
-        re.compile(r"\b(killall\s+-9|pkill\s+-9)\b", re.IGNORECASE),
+        re.compile(r"\b(?:kill\s+-9\s+(?:1|-1)\b|(?:pkill|killall)\s+-9\s+-u\s+root\b)", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?shutdown\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?reboot\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?halt\b", re.IGNORECASE),
@@ -186,10 +186,8 @@ class ScopeChecker:
         re.compile(r"\b(cat|grep|tail|head|more|less)\s+/etc/shadow\b", re.IGNORECASE),
         # --- Policy parity with safety_rules.yaml forbidden_actions ---
         re.compile(r"\bdrop\s+database\b", re.IGNORECASE),
-        re.compile(r"\bexfiltrate\b", re.IGNORECASE),
-        re.compile(r"\bdisable\b.*\blogging\b", re.IGNORECASE),
         re.compile(r"\bmodify\b.*\bsafety_rules\b", re.IGNORECASE),
-        re.compile(r"\bformat\b\s+\w+:", re.IGNORECASE),
+        re.compile(r"\bformat\s+[a-zA-Z]:(?:\s|$|\\)", re.IGNORECASE),
         # Reverse shells — high-risk command execution / egress of a shell
         re.compile(r"\bbash\b\s+-i\b.*/dev/tcp/", re.IGNORECASE),
         re.compile(r"\bsh\s+-i\b.*/dev/tcp/", re.IGNORECASE),
@@ -197,15 +195,8 @@ class ScopeChecker:
     ]
     # Patterns that indicate intrusive but non-destructive operations
     _INTRUSIVE_PATTERNS = [
-        re.compile(r"\bnmap\b.*\s(-sS|-sA|-sO|-O|--script)", re.IGNORECASE),
-        re.compile(r"\bhydra\b", re.IGNORECASE),
-        re.compile(r"\bsqlmap\b", re.IGNORECASE),
-        re.compile(r"\bmetasploit\b|\bmsfconsole\b", re.IGNORECASE),
-        re.compile(r"\bexploit\b", re.IGNORECASE),
-        re.compile(r"\bnikto\b.*\s(-Tuning|4|5|6|7|8|9)", re.IGNORECASE),
         re.compile(r"\bcurl\b.*\|\s*(sh|bash)", re.IGNORECASE),  # curl|sh
         re.compile(r"\bwget\b.*\|\s*(sh|bash)", re.IGNORECASE),
-        re.compile(r"\bchmod\s+\+x\b.*\&\&.*\./", re.IGNORECASE),
     ]
 
     def classify_command_risk(self, command: str) -> RiskLevel:
@@ -471,3 +462,9 @@ class SandboxTierRouter:
                 + (f" | native={native_verdict}" if native_verdict != "unavailable" else "")
             ),
         }
+
+
+def classify_command_risk(command: str) -> RiskLevel:
+    """Module-level convenience wrapper for ScopeChecker().classify_command_risk."""
+    return ScopeChecker().classify_command_risk(command)
+

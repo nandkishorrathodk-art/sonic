@@ -109,6 +109,36 @@ export const api = {
       timeout: 120000,
     }),
 
+  provisionWorkstation: (sessionId = "default") =>
+    apiClient<any>(`/workstation/desktop/provision?session_id=${encodeURIComponent(sessionId)}`, {
+      method: "POST",
+      timeout: 120000,
+    }),
+
+  resumeWorkstation: (note = "", sessionId = "default") =>
+    apiClient<any>(
+      `/workstation/resume?session_id=${encodeURIComponent(sessionId)}&note=${encodeURIComponent(note)}`,
+      { method: "POST" }
+    ),
+
+  getBeingState: (sessionId = "default") =>
+    apiClient<any>(`/workstation/being?session_id=${encodeURIComponent(sessionId)}`),
+
+  addVaultCredential: (
+    payload: {
+      service: string;
+      username: string;
+      secret?: string;
+      token?: string;
+      profile_url?: string;
+    },
+    sessionId = "default"
+  ) =>
+    apiClient<any>(`/workstation/vault?session_id=${encodeURIComponent(sessionId)}`, {
+      method: "POST",
+      body: JSON.stringify({ ...payload, session_id: sessionId }),
+    }),
+
   provisionResearchLab: (sessionId = "default") =>
     apiClient<any>(`/workstation/research-lab/provision?session_id=${encodeURIComponent(sessionId)}`, {
       method: "POST",

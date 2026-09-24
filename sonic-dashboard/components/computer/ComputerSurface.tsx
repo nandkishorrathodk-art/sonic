@@ -28,19 +28,27 @@ interface ComputerSurfaceProps {
     active_services?: Array<{ name: string; status: string; port: number }>;
     vnc_url?: string;
   };
+  status?: string;
+  waitingForHuman?: boolean;
+  waitingForHumanReason?: string;
   onRunCommand: (cmd: string) => Promise<CommandResult | null>;
   commandLogs: string[];
   onProvision?: () => Promise<void>;
   onInterrupt?: () => Promise<void> | void;
+  onRefreshState?: () => void;
   sessionId?: string;
 }
 
 export function ComputerSurface({
   desktopState,
+  status,
+  waitingForHuman,
+  waitingForHumanReason,
   onRunCommand,
   commandLogs,
   onProvision,
   onInterrupt,
+  onRefreshState,
   sessionId = "default",
 }: ComputerSurfaceProps) {
   const [screenshotBase64, setScreenshotBase64] = useState<string | null>(null);
@@ -55,11 +63,28 @@ export function ComputerSurface({
   const [cmdRunning, setCmdRunning] = useState(false);
   const [takeoverPending, setTakeoverPending] = useState(false);
   const [useStream, setUseStream] = useState(true);
+  const [resumeNote, setResumeNote] = useState("");
+  const [resuming, setResuming] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const cmdLogRef = useRef<HTMLDivElement>(null);
   const followCommandTailRef = useRef(true);
   const isFetchingScreenshot = useRef(false);
+
+  const isWaitingForHuman = Boolean(waitingForHuman || (status || "").toUpperCase() === "WAITING_FOR_HUMAN");
+
+  const handleResumeWorkstation = async () => {
+    setResuming(true);
+    try {
+      await api.resumeWorkstation(resumeNote, sessionId);
+      setResumeNote("");
+      onRefreshState?.();
+    } catch (err) {
+      console.error("Failed to resume workstation:", err);
+    } finally {
+      setResuming(false);
+    }
+  };
 
   const streamUrl = desktopState?.novnc_url || (desktopState as any)?.vnc_url || "";
 
@@ -160,7 +185,12 @@ export function ComputerSurface({
     setTimeout(() => setClickRipples((prev) => prev.filter((r) => r.id !== rippleId)), 800);
 
     try {
-      await api.postGUIAction(sessionId, { action: "CLICK", x, y });
+      const obs = await api.postGUIAction(sessionId, { action: "CLICK", x, y });
+      if (obs?.screenshot_base64) {
+        setScreenshotBase64(obs.screenshot_base64);
+      } else if (obs?.image_base64) {
+        setScreenshotBase64(obs.image_base64);
+      }
     } catch (err) {
       console.error("Failed to dispatch GUI click:", err);
     }
@@ -171,8 +201,18 @@ export function ComputerSurface({
     if (!inputText.trim()) return;
     setSendingInput(true);
     try {
-      await api.postGUIAction(sessionId, { action: "TYPE", text: inputText });
-      await api.postGUIAction(sessionId, { action: "KEYPRESS", key: "Return" });
+      const obsType = await api.postGUIAction(sessionId, { action: "TYPE", text: inputText });
+      if (obsType?.screenshot_base64) {
+        setScreenshotBase64(obsType.screenshot_base64);
+      } else if (obsType?.image_base64) {
+        setScreenshotBase64(obsType.image_base64);
+      }
+      const obs = await api.postGUIAction(sessionId, { action: "KEYPRESS", key: "Return" });
+      if (obs?.screenshot_base64) {
+        setScreenshotBase64(obs.screenshot_base64);
+      } else if (obs?.image_base64) {
+        setScreenshotBase64(obs.image_base64);
+      }
       setInputText("");
     } catch (err) {
       console.error("Failed to type text:", err);
@@ -183,7 +223,12 @@ export function ComputerSurface({
 
   const handleSendKey = async (key: string) => {
     try {
-      await api.postGUIAction(sessionId, { action: "KEYPRESS", key });
+      const obs = await api.postGUIAction(sessionId, { action: "KEYPRESS", key });
+      if (obs?.screenshot_base64) {
+        setScreenshotBase64(obs.screenshot_base64);
+      } else if (obs?.image_base64) {
+        setScreenshotBase64(obs.image_base64);
+      }
     } catch (err) {
       console.error("Failed to press key:", err);
     }
@@ -299,6 +344,34 @@ export function ComputerSurface({
           </button>
         </div>
       </div>
+
+      {/* WAITING_FOR_HUMAN Banner */}
+      {isWaitingForHuman && (
+        <div className="border-b border-amber-500/50 bg-amber-500/15 px-3 py-2.5 text-xs space-y-2 shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-mono font-semibold text-amber-400">
+              WAITING_FOR_HUMAN — {waitingForHumanReason || "Human verification required (CAPTCHA / OTP / 2FA)"}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={resumeNote}
+              onChange={(e) => setResumeNote(e.target.value)}
+              placeholder="Enter OTP, verification code, or note (optional)..."
+              className="flex-1 bg-ink-950 border border-amber-500/40 rounded px-2.5 py-1 text-xs font-mono text-white outline-none focus:border-amber-400"
+            />
+            <button
+              type="button"
+              disabled={resuming}
+              onClick={handleResumeWorkstation}
+              className="px-3 py-1 rounded bg-amber-500 hover:bg-amber-400 text-ink-950 font-mono font-bold text-xs transition disabled:opacity-50"
+            >
+              {resuming ? "Resuming..." : "Resume"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Surface body */}
       <div
