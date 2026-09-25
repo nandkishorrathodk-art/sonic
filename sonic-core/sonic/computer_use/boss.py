@@ -464,12 +464,13 @@ class BossAgent:
                             workspace_id, sub_m, phase_callback, sub_agent_num=agent_num
                         )
                     except Exception as e:
-                        logger.error("boss_dispatch_sub_agent_error", sub_id=sub_m.id, error=str(e))
+                        safe_err = str(e).encode("ascii", errors="replace").decode("ascii")
+                        logger.error("boss_dispatch_sub_agent_error", sub_id=sub_m.id, error=safe_err)
                         res = SubMissionResult(
                             sub_mission_id=sub_m.id,
                             goal=sub_m.goal,
                             success=False,
-                            findings_summary=f"Subagent execution failed: {e}",
+                            findings_summary=f"Subagent execution failed: {safe_err}",
                             key_discoveries=[],
                             actions_taken=0,
                             duration_seconds=0.0,

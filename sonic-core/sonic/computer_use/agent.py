@@ -1620,13 +1620,13 @@ class ComputerUseAgent:
             "================================================================================\n\n"
         )
         init_ctx = getattr(self, "initial_context", {}) or {}
-        if init_ctx.get("delegated_plane") == "gui" or getattr(self, "gui_plane_priority", False):
+        if init_ctx.get("delegated_plane") != "headless":
             target_header += (
                 "=== FULL DUAL-PLANE AGENCY (DESKTOP GUI :99 + TERMINAL/FILE SANDBOX) ===\n"
-                "You are a Senior AI-Human Software Engineer operating BOTH your graphical desktop (:99) and your terminal/file sandbox:\n"
-                "- To create or edit source files/modules (.py, .js, .html, .json, .md), ALWAYS use `FILE_WRITE` (never `APP_LAUNCH python3` or `GUI_TYPE uxterm` to write code files).\n"
-                "- To run CLI commands, tests, python scripts, or inspect git/directory state (`pwd`, `ls`, `git status`, `python3 -c ...`, `pytest`), ALWAYS use `TERMINAL_EXEC`.\n"
-                "- To launch, focus, or interact with graphical desktop applications and web browsers on Display :99, use `APP_LAUNCH`, `APP_FOCUS`, `GUI_CLICK`, `GUI_TYPE`, `GUI_SCREENSHOT`, and `BROWSER_*`.\n"
+                "You are an AI-Human Being & Engineer operating BOTH your graphical desktop (:99) and your terminal/file sandbox:\n"
+                "- When the mission asks to operate desktop GUI applications, browse websites, or interact with visual tools, actively use your graphical desktop plane (`APP_LAUNCH`, `APP_FOCUS`, `GUI_CLICK`, `GUI_TYPE`, `GUI_MOVE`, `GUI_KEYPRESS`, `BROWSER_*`).\n"
+                "- When the mission asks for source code, build scripts, tests, or CLI commands (`pwd`, `ls`, `git`, `pytest`), use `TERMINAL_EXEC` and `FILE_WRITE`.\n"
+                "- Both planes work together: you can launch apps on screen and verify them with commands or inspect files while interacting with GUI windows.\n"
                 "- To delegate parallel modules into isolated branch workspaces, use `DEFINE_SUBAGENT` and `INVOKE_SUBAGENT`.\n"
                 "========================================================================\n\n"
             )

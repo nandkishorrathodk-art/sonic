@@ -45,6 +45,63 @@ EOF
     chmod +x /usr/local/bin/chrome
 fi
 
+# Ensure smooth human-like mouse cursor glide helper exists for visible VNC cursor movement
+cat << 'EOF' > /usr/local/bin/sonic_cursor.py
+import sys, subprocess, time, math
+
+def get_mouse():
+    out = subprocess.check_output(['xdotool', 'getmouselocation'], env={'DISPLAY': ':99'}).decode()
+    parts = dict(p.split(':') for p in out.strip().split() if ':' in p)
+    return int(parts['x']), int(parts['y'])
+
+def smooth_move(tx, ty, steps=25, duration=0.25):
+    sx, sy = get_mouse()
+    dt = max(0.005, duration / steps)
+    for i in range(1, steps + 1):
+        t = i / steps
+        ease = 0.5 - 0.5 * math.cos(t * math.pi)
+        cx = int(sx + (tx - sx) * ease)
+        cy = int(sy + (ty - sy) * ease)
+        subprocess.run(['xdotool', 'mousemove', str(cx), str(cy)], env={'DISPLAY': ':99'})
+        time.sleep(dt)
+
+def click(button=1, repeat=1):
+    subprocess.run(['xdotool', 'click', '--repeat', str(repeat), str(button)], env={'DISPLAY': ':99'})
+
+def move_and_click(tx, ty, button=1, repeat=1, steps=25, duration=0.25):
+    smooth_move(tx, ty, steps, duration)
+    time.sleep(0.05)
+    click(button, repeat)
+
+def type_text(text, delay=40):
+    subprocess.run(['xdotool', 'type', '--delay', str(delay), text], env={'DISPLAY': ':99'})
+
+def key(k):
+    subprocess.run(['xdotool', 'key', k], env={'DISPLAY': ':99'})
+
+if __name__ == '__main__':
+    cmd = sys.argv[1] if len(sys.argv) > 1 else 'help'
+    if cmd == 'move':
+        smooth_move(int(sys.argv[2]), int(sys.argv[3]))
+    elif cmd == 'click':
+        if len(sys.argv) >= 4:
+            move_and_click(int(sys.argv[2]), int(sys.argv[3]))
+        else:
+            click()
+    elif cmd == 'double_click':
+        if len(sys.argv) >= 4:
+            move_and_click(int(sys.argv[2]), int(sys.argv[3]), repeat=2)
+        else:
+            click(repeat=2)
+    elif cmd == 'type':
+        type_text(sys.argv[2])
+    elif cmd == 'key':
+        key(sys.argv[2])
+    elif cmd == 'pos':
+        print(get_mouse())
+EOF
+chmod +x /usr/local/bin/sonic_cursor.py
+
 # Ensure workspace and /home/sonic/workspace exist and link together
 ln -sfn /workspace /home/sonic/workspace
 

@@ -954,20 +954,23 @@ while True:
                 repeat = 2 if atype == GUIActionType.DOUBLE_CLICK else 1
                 if action.x is not None and action.y is not None:
                     _validate_coords(action.x, action.y)
-                    await exec_gui(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} click --repeat {repeat} {button}")
+                    move_cmd = f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} || xdotool mousemove {action.x} {action.y})"
+                    await exec_gui(f"DISPLAY={disp} {move_cmd} && DISPLAY={disp} xdotool click --repeat {repeat} {button}")
                 else:
                     await exec_gui(f"DISPLAY={disp} xdotool click --repeat {repeat} {button}")
 
             elif atype == GUIActionType.RIGHT_CLICK:
                 if action.x is not None and action.y is not None:
                     _validate_coords(action.x, action.y)
-                    await exec_gui(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} click 3")
+                    move_cmd = f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} || xdotool mousemove {action.x} {action.y})"
+                    await exec_gui(f"DISPLAY={disp} {move_cmd} && DISPLAY={disp} xdotool click 3")
                 else:
                     await exec_gui(f"DISPLAY={disp} xdotool click 3")
 
             elif atype == GUIActionType.MOVE and action.x is not None and action.y is not None:
                 _validate_coords(action.x, action.y)
-                await exec_gui(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y}")
+                move_cmd = f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} || xdotool mousemove {action.x} {action.y})"
+                await exec_gui(f"DISPLAY={disp} {move_cmd}")
 
             elif atype == GUIActionType.DRAG:
                 sx, sy = action.x or 0, action.y or 0
@@ -982,7 +985,11 @@ while True:
                     raise ValueError("GUIActionType.TYPE requires non-empty text")
                 delay = max(0, int(action.delay_ms)) if action.delay_ms is not None else 25
                 safe_text = shlex.quote(action.text)
-                await exec_gui(f"DISPLAY={disp} xdotool type --clearmodifiers --delay {delay} -- {safe_text}")
+                focus_prefix = ""
+                if action.x is not None and action.y is not None:
+                    _validate_coords(action.x, action.y)
+                    focus_prefix = f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py click {action.x} {action.y} || (xdotool mousemove {action.x} {action.y} && xdotool click 1)) && sleep 0.05 && "
+                await exec_gui(f"DISPLAY={disp} {focus_prefix}xdotool type --clearmodifiers --delay {delay} -- {safe_text}")
 
             elif atype in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
                 norm_key = self._normalize_x11_keysym(action.key or action.text or "")
@@ -993,11 +1000,11 @@ while True:
                 btn = 5 if action.scroll_delta < 0 else 4
                 times = abs(action.scroll_delta) if action.scroll_delta != 0 else 3
                 move_prefix = (
-                    f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} && "
+                    f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} || xdotool mousemove {action.x} {action.y}) && "
                     if action.x is not None and action.y is not None
                     else ""
                 )
-                await exec_gui(f"{move_prefix}DISPLAY={disp} xdotool click --repeat {times} {btn}")
+                await exec_gui(f"DISPLAY={disp} {move_prefix}xdotool click --repeat {times} {btn}")
 
             elif atype in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
                 launched = await self.launch_application(workspace_id, action.app_name, actor=actor)
@@ -1483,7 +1490,23 @@ while True:
 
         parts = [resolved_bin] + args
         disp = self._get_display(workspace_id)
-        bin_base = shlex.quote(os.path.basename(resolved_bin))
+        bin_base_str = os.path.basename(resolved_bin)
+        bin_base = shlex.quote(bin_base_str)
+
+        # If application is already open and no specific arguments/files were requested,
+        # reuse and focus the existing window instead of spawning duplicate instances
+        if not args:
+            focus_existing = (
+                f"DISPLAY={disp} wmctrl -x -a {bin_base} 2>/dev/null || "
+                f"DISPLAY={disp} wmctrl -a {bin_base} 2>/dev/null"
+            )
+            fcode, _, _ = await self._docker_exec(focus_existing)
+            if fcode == 0:
+                self._active_windows[workspace_id] = bin_base_str
+                self._last_screenshot = None
+                self._last_screenshot_time = 0.0
+                return True
+
         spawn = (
             f"DISPLAY={disp} xdotool key Escape 2>/dev/null; "
             f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 & "
