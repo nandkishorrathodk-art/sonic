@@ -13,5 +13,5 @@ Modules:
     - api: FastAPI REST API
 """
 
-__version__ = "0.1.0"
-__codename__ = "SONIC-REDA"
+__version__ = "0.3.0"
+__codename__ = "SONIC"

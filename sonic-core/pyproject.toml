@@ -1,7 +1,7 @@
 [project]
 name = "sonic-core"
-version = "0.1.0"
-description = "SONIC-REDA Core Backend — Agents, LLM Router, Graph Memory, Evidence Engine"
+version = "0.3.0"
+description = "SONIC Core Backend — Autonomous AI-Human Digital Being"
 requires-python = ">=3.12"
 license = {text = "Proprietary"}
 

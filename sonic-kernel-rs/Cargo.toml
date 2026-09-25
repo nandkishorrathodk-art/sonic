@@ -1,6 +1,6 @@
 [package]
 name = "sonic-kernel-rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["SONIC Architecture Team"]
 description = "Core architectural kernel for SONIC v2 (Autonomous AI-Human Digital Being) written in Rust"

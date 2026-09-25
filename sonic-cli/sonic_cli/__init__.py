@@ -1,3 +1,3 @@
-"""SONIC-REDA CLI — Command-line interface."""
+"""SONIC CLI — Command-line interface for Autonomous AI-Human Digital Being."""
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

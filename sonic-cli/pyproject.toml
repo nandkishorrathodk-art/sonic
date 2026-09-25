@@ -1,7 +1,7 @@
 [project]
 name = "sonic-cli"
-version = "0.1.0"
-description = "SONIC-REDA CLI — Command-line interface for the bug hunting system"
+version = "0.3.0"
+description = "SONIC CLI — Command-line interface for Autonomous AI-Human Digital Being"
 requires-python = ">=3.12"
 license = {text = "Proprietary"}
 
