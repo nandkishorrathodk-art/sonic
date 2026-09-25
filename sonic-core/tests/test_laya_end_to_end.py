@@ -107,7 +107,7 @@ def test_laya_single_pass_decisions_multilingual_unicode():
     assert res.get_choice("department") == "engineering"
     assert res.answers["department"]["probability"] > 0.50
     assert 0.0 <= res.get_score("urgency") <= 1.0
-    assert res.routing["model"] == "multilingual"
+    assert res.routing["model"] == "english"
 
 
 @pytest.mark.no_live_infra

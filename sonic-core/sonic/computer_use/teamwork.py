@@ -82,7 +82,7 @@ class SubagentTaskSpec:
     requirements: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     verification_command: str = ""
-    workspace_mode: str = "inherit"  # "inherit" | "branch" | "share"
+    workspace_mode: str = "branch"   # "branch" (default isolated) | "inherit" | "share"
     model_tier: str = "inherit"      # "inherit" | "flash" | "pro"
     max_steps: int = 12
     max_correction_rounds: int = 2
@@ -201,7 +201,7 @@ class SubagentTeamworkManager:
                         requirements=list(raw.get("requirements") or []),
                         acceptance_criteria=list(raw.get("acceptance_criteria") or []),
                         verification_command=str(raw.get("verification_command") or ""),
-                        workspace_mode=str(raw.get("workspace_mode") or raw.get("Workspace") or "inherit").lower().strip(),
+                        workspace_mode=str(raw.get("workspace_mode") or raw.get("Workspace") or "branch").lower().strip(),
                         model_tier=str(raw.get("model_tier") or raw.get("Model") or "inherit").lower().strip(),
                         max_steps=int(raw.get("max_steps") or 12),
                         max_correction_rounds=int(raw.get("max_correction_rounds") if raw.get("max_correction_rounds") is not None else 2),
@@ -369,6 +369,32 @@ class SubagentTeamworkManager:
             except Exception:
                 parent_dir = None
 
+        if hasattr(self.computer, "create"):
+            try:
+                sub_ws = await self.computer.create(
+                    tenant_id=getattr(self.parent, "tenant_id", "default"),
+                    engagement_id=f"branch-{conversation_id}",
+                )
+                eff_ws_id = sub_ws.id
+                if hasattr(self.computer, "_get_workspace_dir"):
+                    iso_root = Path(self.computer._get_workspace_dir(eff_ws_id))
+                    if parent_dir is not None and parent_dir.exists():
+                        for item in parent_dir.iterdir():
+                            if item.name in (".sonic_subagents", "__pycache__", ".pytest_cache", "node_modules"):
+                                continue
+                            dest = iso_root / item.name
+                            try:
+                                if item.is_dir():
+                                    shutil.copytree(item, dest, dirs_exist_ok=True)
+                                elif item.is_file():
+                                    shutil.copy2(item, dest)
+                            except Exception:
+                                pass
+                    return eff_ws_id, iso_root
+            except Exception:
+                pass
+
+        eff_ws_id = f"{parent_workspace_id}--branch-{conversation_id}"
         if parent_dir is not None and parent_dir.exists():
             iso_root = parent_dir / ".sonic_subagents" / conversation_id
             iso_root.mkdir(parents=True, exist_ok=True)
@@ -384,15 +410,15 @@ class SubagentTeamworkManager:
                         shutil.copy2(item, dest)
                 except Exception:
                     pass
-            return parent_workspace_id, iso_root
+            return eff_ws_id, iso_root
 
         # Inside remote Linux/Docker container: create isolated directory under /tmp or workspace
         try:
             iso_remote = f"/tmp/sonic_subagents/{conversation_id}"
             await self.computer.terminal(parent_workspace_id, f"mkdir -p {iso_remote}")
-            return parent_workspace_id, Path(iso_remote)
+            return eff_ws_id, Path(iso_remote)
         except Exception:
-            return parent_workspace_id, None
+            return eff_ws_id, None
 
     async def _merge_isolated_workspace(self, conv: SubagentConversation) -> list[str]:
         """Merge verified files from `branch`/`share` subagent workspace back into parent workspace."""
@@ -534,12 +560,21 @@ class SubagentTeamworkManager:
     ) -> tuple[bool, str, str]:
         """Run programmatic verification_command (if specified) + JudgeAgent anti-self-attestation check."""
         # 1. Programmatic Verification Command (Hard Forcing Function)
-        if spec.verification_command.strip() and hasattr(self.computer, "terminal"):
+        if spec.verification_command.strip():
             cmd = spec.verification_command.strip()
-            if conv.isolated_dir is not None:
-                cmd = f'cd "{conv.isolated_dir.as_posix()}" && {cmd}'
             try:
-                res = await self.computer.terminal(conv.effective_workspace_id, cmd)
+                if hasattr(self.computer, "execute") and conv.isolated_dir is not None:
+                    res = await self.computer.execute(
+                        workspace_id=conv.effective_workspace_id,
+                        command=cmd,
+                        cwd=str(conv.isolated_dir),
+                    )
+                elif hasattr(self.computer, "terminal"):
+                    if conv.isolated_dir is not None:
+                        cmd = f'cd "{conv.isolated_dir.as_posix()}" && {cmd}'
+                    res = await self.computer.terminal(conv.effective_workspace_id, cmd)
+                else:
+                    res = None
                 exit_code = getattr(res, "exit_code", 1)
                 out = str(getattr(res, "stdout", "") or "") + "\n" + str(getattr(res, "stderr", "") or "")
                 if exit_code != 0:

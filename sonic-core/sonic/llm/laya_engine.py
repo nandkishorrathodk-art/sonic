@@ -35,13 +35,7 @@ from sonic.logger import get_logger
 
 logger = get_logger(__name__)
 
-_TOKEN_RE = re.compile(r"[\w\u0900-\u097F]+", re.UNICODE)
-_DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
-_HINGLISH_MARKERS = frozenset({
-    "karo", "kholo", "banao", "chalao", "dekho", "likho", "hatao",
-    "bhai", "kya", "kaise", "mera", "apna", "par", "mein", "se", "ko",
-    "dikhao", "check", "band", "chalu", "naya", "purana",
-})
+_TOKEN_RE = re.compile(r"\w+")
 
 
 @dataclass
@@ -67,14 +61,7 @@ class LayaDecisionResult:
 
 
 def _detect_script_and_model(text: str) -> tuple[str, str]:
-    """Detect whether input is English, Hindi (Devanagari), or Hinglish."""
-    if _DEVANAGARI_RE.search(text):
-        return "hi-Deva", "multilingual"
-    tokens = {t.lower() for t in _TOKEN_RE.findall(text)}
-    if tokens & _HINGLISH_MARKERS:
-        return "hi-Latn", "multilingual"
-    if any(ord(c) > 127 for c in text):
-        return "mul", "multilingual"
+    """Laya System-1 default routing — English model and 'en' language."""
     return "en", "english"
 
 
@@ -229,7 +216,9 @@ class LayaSystem1Engine:
                     "label": label,
                 }
             elif q_type == "noul":
-                prob_yes = self._score_noul(state_text, instructions)
+                aff = str(q_spec.get("affirmative_anchor", ""))
+                neg = str(q_spec.get("negative_anchor", ""))
+                prob_yes = self._score_noul(state_text, instructions, affirmative_anchor=aff, negative_anchor=neg)
                 answers[q_key] = {
                     "noul": round(prob_yes, 4),
                     "answer": prob_yes >= 0.5,
@@ -240,7 +229,7 @@ class LayaSystem1Engine:
             routing={
                 "model": chosen_model,
                 "language": lang_code,
-                "backend": "laya_calibrated_system1",
+                "backend": "laya_vector_projection",
             },
         )
 
@@ -255,20 +244,18 @@ class LayaSystem1Engine:
         state_token_set = set(state_tokens)
         state_lower = state_text.lower()
 
-        # Multilingual concept expansion (English + Hindi + Hinglish)
-        multilingual_concepts: dict[str, set[str]] = {
+        # English concept expansion
+        english_concepts: dict[str, set[str]] = {
             "gui": {
                 "gui", "visual", "visually", "screen", "screenshot", "desktop", "window",
                 "browser", "click", "button", "scroll", "drag", "ui", "page", "open",
-                "website", "login", "signup", "profile", "kholo", "dikhao", "screen",
-                "ब्राउज़र", "स्क्रीन", "विंडो", "खोलो", "दिखाओ",
+                "website", "login", "signup", "profile", "view", "display", "render",
             },
             "headless": {
                 "headless", "terminal", "cli", "command", "bash", "shell", "script",
                 "directory", "mkdir", "file", "code", "source", "git", "commit", "push",
                 "pytest", "test", "server", "port", "ports", "curl", "netstat", "ss",
-                "endpoints", "background", "audit", "compile", "run", "likho", "banao",
-                "टर्मिनल", "कोड", "फाइल", "कमांड",
+                "endpoints", "background", "audit", "compile", "run", "python",
             },
         }
 
@@ -276,7 +263,7 @@ class LayaSystem1Engine:
         for key, desc in criteria.items():
             key_lower = key.lower()
             desc_tokens = {t.lower() for t in _TOKEN_RE.findall(f"{key} {desc}")}
-            expanded = desc_tokens | multilingual_concepts.get(key_lower, set())
+            expanded = desc_tokens | english_concepts.get(key_lower, set())
 
             overlap = sum(1.0 for tok in state_tokens if tok in expanded)
             exact_phrase_bonus = sum(
@@ -306,20 +293,173 @@ class LayaSystem1Engine:
         best_label = max(probs.items(), key=lambda kv: kv[1])[0]
         return max(0.0, min(1.0, expected_val)), best_label
 
-    def _score_noul(self, state_text: str, instructions: str) -> float:
+    PRESET_QUESTIONS: dict[str, dict[str, Any]] = {
+        "triage": {
+            "plane": {
+                "type": "choice",
+                "instructions": "Which execution plane substrate should execute this task?",
+                "criteria": {
+                    "gui": "visual desktop application browser navigation clicking buttons scrolling screenshot UI window",
+                    "headless": "terminal command bash script file creation source code editing git commit pytest ports CLI",
+                },
+            },
+            "urgency": {
+                "type": "score",
+                "instructions": "Task urgency and execution priority",
+                "criteria": ["low", "medium", "high"],
+            },
+        },
+        "plane": {
+            "plane": {
+                "type": "choice",
+                "instructions": "Which execution plane substrate should execute this task?",
+                "criteria": {
+                    "gui": "visual desktop application browser navigation clicking buttons scrolling screenshot UI window",
+                    "headless": "terminal command bash script file creation source code editing git commit pytest ports CLI",
+                },
+            },
+        },
+        "guard": {
+            "is_dangerous": {
+                "type": "noul",
+                "instructions": "Is this action dangerous, destructive, or violating the safety envelope?",
+                "affirmative_anchor": "rm -rf drop delete format truncate destroy wipe kill bypass dangerous exploit attack",
+                "negative_anchor": "ls pwd git status echo read inspect cat test compile check verify status ok safe",
+            },
+            "risk_tier": {
+                "type": "choice",
+                "instructions": "Classify risk tier",
+                "criteria": {
+                    "l0": "safe read only inspect check status echo cat ls git status",
+                    "l1": "standard write modification build execute test script python",
+                    "l2": "destructive rm -rf drop format dangerous delete destroy kill",
+                },
+            },
+        },
+        "verification": {
+            "empirical_proof": {
+                "type": "noul",
+                "instructions": "Does this execution output provide concrete empirical proof that the goal succeeded without errors?",
+                "affirmative_anchor": "FILE_VERIFIED verified success passed 200 OK exit 0 created committed running",
+                "negative_anchor": "error traceback exception failed Terminal Ready (0 procs) __sonic_obs_ready__ exit 126 blocked",
+            }
+        },
+        "curiosity": {
+            "novelty": {
+                "type": "score",
+                "instructions": "How novel and informative is this observation compared to known facts?",
+                "criteria": ["redundant duplicate", "partially new", "highly novel discovery"],
+            },
+            "worth_learning": {
+                "type": "noul",
+                "instructions": "Does this observation contain a concrete, verifiable new fact about the workstation or project?",
+                "affirmative_anchor": "discovered active service port file version configuration capability novel",
+                "negative_anchor": "empty idle waiting nothing unchanged error",
+            },
+        },
+    }
+    PRESET_QUESTIONS["execution_plane"] = PRESET_QUESTIONS["plane"]
+    PRESET_QUESTIONS["receipt"] = PRESET_QUESTIONS["verification"]
+    PRESET_QUESTIONS["verify_receipt"] = PRESET_QUESTIONS["verification"]
+    PRESET_QUESTIONS["empirical_proof"] = PRESET_QUESTIONS["verification"]
+    PRESET_QUESTIONS["safety"] = PRESET_QUESTIONS["guard"]
+    PRESET_QUESTIONS["risk"] = PRESET_QUESTIONS["guard"]
+    PRESET_QUESTIONS["affect"] = PRESET_QUESTIONS["curiosity"]
+    PRESET_QUESTIONS["novelty"] = PRESET_QUESTIONS["curiosity"]
+    PRESET_QUESTIONS["worth_learning"] = PRESET_QUESTIONS["curiosity"]
+
+    def status(self) -> dict[str, Any]:
+        """Return runtime diagnostic telemetry for the Laya System-1 engine."""
+        ram_ok = _has_sufficient_ram_gb(1.5)
+        if self.api_url:
+            backend = "laya_remote"
+        elif self.enable_local_model and ram_ok:
+            backend = "laya_local"
+        else:
+            backend = "laya_vector_projection"
+
+        return {
+            "status": "ready",
+            "backend": backend,
+            "api_url": self.api_url or None,
+            "api_url_configured": bool(self.api_url),
+            "local_model_enabled": bool(self.enable_local_model),
+            "sufficient_ram": ram_ok,
+            "has_ram_headroom": ram_ok,
+            "ram_check": {"sufficient": ram_ok, "min_free_gb": 1.5},
+            "language_support": ["en"],
+            "languages": ["en"],
+            "presets": ["triage", "guard", "verification", "curiosity"],
+            "supported_presets": ["triage", "guard", "verification", "curiosity"],
+        }
+
+    def predict_preset(
+        self,
+        state: str | dict[str, Any],
+        preset: str = "triage",
+        model: str | None = None,
+    ) -> LayaDecisionResult:
+        """
+        Evaluate built-in presets (`triage`, `guard`, `verification`, `curiosity`).
+        """
+        p_lower = preset.strip().lower()
+        if p_lower not in self.PRESET_QUESTIONS:
+            raise ValueError(f"Unknown preset: {preset}")
+        questions = self.PRESET_QUESTIONS[p_lower]
+        return self.predict(state=state, questions=questions, model=model)
+
+    def _score_noul(
+        self,
+        state_text: str,
+        instructions: str,
+        affirmative_anchor: str = "",
+        negative_anchor: str = "",
+    ) -> float:
         """Compute calibrated binary `noul` probability P(Yes | state, instructions)."""
         s_lower = state_text.lower()
         inst_lower = instructions.lower()
 
-        if "verify" in inst_lower or "empirical proof" in inst_lower or "succeeded" in inst_lower:
+        # 1. Anchor-based score if affirmative or negative anchor provided
+        if affirmative_anchor or negative_anchor:
+            state_tokens = set(_TOKEN_RE.findall(s_lower))
+            aff_tokens = set(_TOKEN_RE.findall(affirmative_anchor.lower()))
+            neg_tokens = set(_TOKEN_RE.findall(negative_anchor.lower()))
+
+            aff_hits = len(state_tokens & aff_tokens)
+            neg_hits = len(state_tokens & neg_tokens)
+
+            # Substring checks for multi-token markers
+            for phrase in ("terminal ready (0 procs)", "__sonic_obs_ready__", "exit 126", "traceback", "assertionerror"):
+                if phrase in negative_anchor.lower() and phrase in s_lower:
+                    neg_hits += 5
+            for phrase in ("rm -rf", "drop table", "mkfs"):
+                if phrase in affirmative_anchor.lower() and phrase in s_lower:
+                    aff_hits += 5
+            for phrase in ("file_verified", "200 ok", "exit 0", "passed", "running"):
+                if phrase in affirmative_anchor.lower() and phrase in s_lower:
+                    aff_hits += 5
+
+            if aff_hits > 0 or neg_hits > 0:
+                diff = aff_hits - neg_hits
+                prob = 1.0 / (1.0 + math.exp(-1.4 * diff))
+                return max(0.05, min(0.95, prob))
+
+        # 2. Instruction-based fallback heuristics
+        if any(w in inst_lower for w in ("dangerous", "harmful", "destructive", "risk")):
+            dangerous_markers = ("rm -rf", "drop", "delete", "format", "truncate", "destroy", "kill -9", "mkfs", "dd if=")
+            if any(m in s_lower for m in dangerous_markers):
+                return 0.92
+            return 0.15
+
+        if any(w in inst_lower for w in ("verify", "empirical proof", "succeeded", "proof")):
             neg_markers = ("error", "traceback", "exception", "failed", "terminal ready (0 procs)", "__sonic_obs_ready__", "exit 126", "blocked")
-            pos_markers = ("verified", "success", "passed", "created", "committed", "exit 0", "200 ok", "running")
+            pos_markers = ("verified", "success", "passed", "created", "committed", "exit 0", "200 ok", "running", "file_verified")
             if any(m in s_lower for m in neg_markers):
                 return 0.12
             pos_hits = sum(1 for m in pos_markers if m in s_lower)
             return min(0.96, 0.58 + 0.12 * pos_hits) if s_lower.strip() else 0.20
 
-        if "stuck" in inst_lower or "loop" in inst_lower or "repeating" in inst_lower:
+        if any(w in inst_lower for w in ("stuck", "loop", "repeating")):
             err_hits = sum(s_lower.count(w) for w in ("error", "failed", "blocked", "timeout"))
             return min(0.95, 0.25 + 0.22 * err_hits)
 
@@ -363,6 +503,8 @@ class LayaSystem1Engine:
                 "empirical_proof": {
                     "type": "noul",
                     "instructions": "Does this execution output provide concrete empirical proof that the goal succeeded without errors?",
+                    "affirmative_anchor": "FILE_VERIFIED verified success passed 200 OK exit 0 created committed running",
+                    "negative_anchor": "error traceback exception failed Terminal Ready (0 procs) __sonic_obs_ready__ exit 126 blocked",
                 }
             },
         )
@@ -372,6 +514,16 @@ class LayaSystem1Engine:
         """
         Evaluate semantic novelty and affect shift for `BeingMind` and `CuriosityLoop`.
         """
+        obs_clean = observation.strip().lower()
+        known_clean = [f.strip().lower() for f in known_facts]
+
+        # Duplicate match check: if observation is already in known_facts
+        if any(obs_clean == k or (len(k) > 10 and k in obs_clean) for k in known_clean):
+            return {
+                "novelty_score": 0.10,
+                "worth_learning_prob": 0.10,
+            }
+
         known_preview = " | ".join(known_facts[-5:]) if known_facts else "none"
         res = self.predict(
             state=f"Observation: {observation}\nKnown: {known_preview}",
@@ -384,6 +536,8 @@ class LayaSystem1Engine:
                 "worth_learning": {
                     "type": "noul",
                     "instructions": "Does this observation contain a concrete, verifiable new fact about the workstation or project?",
+                    "affirmative_anchor": "discovered active service port file version configuration capability novel",
+                    "negative_anchor": "empty idle waiting nothing unchanged error",
                 },
             },
         )

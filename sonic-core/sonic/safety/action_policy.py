@@ -101,6 +101,8 @@ class ActionPolicy:
         # Method-invention (Phase B, AIOSR): synthesizes a novel technique and
         # runs its probe in-sandbox (same structural confinement as TOOL_RUN).
         "METHOD_INVENT",
+        # Subagent teamwork and dynamic lifecycle actions
+        "DEFINE_SUBAGENT", "INVOKE_SUBAGENT", "SEND_MESSAGE", "MANAGE_SUBAGENTS",
     })
 
     def __init__(
@@ -179,6 +181,47 @@ class ActionPolicy:
             verdict = self._check_path(path, action_type_name)
             if not verdict.allowed:
                 return verdict
+
+        # 2b. Confinement and injection defense for GIT_COMMIT
+        if action_type_name == "GIT_COMMIT":
+            # Confinement check on path
+            commit_path = (
+                payload.get("path")
+                or payload.get("file_path")
+                or payload.get("filepath")
+                or payload.get("directory")
+            )
+            if commit_path:
+                verdict = self._check_path(commit_path, "GIT_COMMIT")
+                if not verdict.allowed:
+                    return verdict
+
+            # Commit message validation
+            msg = payload.get("message")
+            if msg is None or not str(msg).strip():
+                return PolicyVerdict(False, "commit message cannot be empty")
+            msg_str = str(msg)
+            if len(msg_str) > 500:
+                return PolicyVerdict(False, "commit message exceeds 500 character limit")
+            if "\0" in msg_str or "\n" in msg_str or "\r" in msg_str:
+                return PolicyVerdict(False, "commit message contains illegal control characters")
+            if any(ch in msg_str for ch in ("`", "$(", "${", ";", "&&", "||")):
+                return PolicyVerdict(False, "commit message contains shell metacharacters")
+            if re.search(r"['\"].*?[;&|]", msg_str) or re.search(r"[;&|].*?['\"]", msg_str):
+                return PolicyVerdict(False, "commit message contains shell injection")
+
+            # Branch name validation
+            branch = payload.get("branch")
+            if branch:
+                b_str = str(branch).strip()
+                if b_str.startswith("-"):
+                    return PolicyVerdict(False, "branch name cannot start with a hyphen")
+                if ".." in b_str:
+                    return PolicyVerdict(False, "branch name cannot contain traversal")
+                if any(ch in b_str for ch in (";", "$", "`", "\n", "\r", "\0", " ", "\t", "&", "|", "(", ")", "{", "}")):
+                    return PolicyVerdict(False, "branch name contains illegal characters or metacharacters")
+                if not re.match(r"^[a-zA-Z0-9_\-\.\/]+$", b_str):
+                    return PolicyVerdict(False, "branch name contains invalid characters")
 
         # 3. Destructive-command gating for terminal execution + tool runs.
         #    TOOL_RUN executes a hardcoded `python <workspace-toolsmith-path>`,

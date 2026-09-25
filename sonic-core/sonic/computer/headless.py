@@ -298,6 +298,17 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
                 sandbox_id=workspace_id,
             )
 
+        # Windows cmd.exe quote-stripping normalization for python -c inline scripts
+        if os.name == "nt" and isinstance(cmd_str, str):
+            stripped = cmd_str.strip()
+            for prefix in ("python -c \"", "python3 -c \""):
+                if stripped.startswith(prefix) and stripped.endswith('"'):
+                    inner = stripped[len(prefix):-1]
+                    if '"' in inner:
+                        normalized_inner = inner.replace('\\"', "'").replace('"', "'")
+                        cmd_str = f'{prefix[:-1]}"{normalized_inner}"'
+                    break
+
         start_time = datetime.now(UTC)
         try:
             process = await asyncio.create_subprocess_shell(
