@@ -175,12 +175,13 @@ class ActionPolicy:
         # source under a hardcoded workspace-subdir (toolsmith hardcodes
         # /home/sonic/workspace/toolsmith/<name>.py), so confinement is
         # structural ??? it does not need a payload path to validate.
-        if action_type_name in ("FILE_READ", "FILE_WRITE"):
+        if action_type_name in ("FILE_READ", "FILE_WRITE", "BROWSER_DOWNLOAD"):
             path = (
                 payload.get("path")
                 or payload.get("file_path")
                 or payload.get("filepath")
                 or payload.get("filename")
+                or payload.get("save_path")
                 or target
             )
             verdict = self._check_path(path, action_type_name)
@@ -198,6 +199,15 @@ class ActionPolicy:
 
         # 4. Egress + target-allowlist for security tools, tool runs, method invent, and browser navigation.
         if action_type_name in ("SECURITY_TOOL", "TOOL_RUN", "METHOD_INVENT"):
+            # Gate tool candidate command to prevent arbitrary shell bypass
+            tool_cmd = str(payload.get("tool") or payload.get("command") or target or "").strip()
+            args = str(payload.get("args") or "").strip()
+            full_candidate = f"{tool_cmd} {args}".strip()
+            if full_candidate:
+                cmd_verdict = self._check_command(full_candidate)
+                if not cmd_verdict.allowed:
+                    return cmd_verdict
+
             scan_target = payload.get("target") or payload.get("target_url") or target
             if scan_target:
                 verdict = self._check_egress(scan_target, action_type_name.lower())
@@ -219,6 +229,10 @@ class ActionPolicy:
             verdict = self._check_git_commit(payload, target)
             if not verdict.allowed:
                 return verdict
+        elif action_type_name in ("GIT_BRANCH", "GIT_CHECKOUT"):
+            branch = str(payload.get("branch") or payload.get("branch_name") or target or "").strip()
+            if any(char in branch for char in (";", "&", "|", "`", "$", "(", ")", "<", ">", "\n", "\r", "'", '"')) or branch.startswith("-"):
+                return PolicyVerdict(False, f"git branch name contains forbidden shell characters: {branch}")
 
         return PolicyVerdict(True, "allowed")
 

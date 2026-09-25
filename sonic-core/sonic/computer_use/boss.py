@@ -330,7 +330,6 @@ class BossAgent:
             r"\bopen port\b", r"\blistening port\b", r"\bdiscovered service\b",
             r"\bendpoint\b", r"\broute\b", r"\bsubdomain\b", r"\bapi url\b",
             r"\blogin page\b", r"\bexported symbol\b", r"\bhidden directory\b",
-            r"\bport\b", r"\bparameter\b", r"\bsurface\b", r"\bservice\b",
         )
         if any(re.search(sp, combined_text, flags=re.IGNORECASE) for sp in surface_patterns):
             return ReplanTrigger.NEW_ATTACK_SURFACE
@@ -364,7 +363,8 @@ class BossAgent:
                 engine = get_laya_engine()
                 summary_text = str(findings_summary)
                 if hasattr(engine, "detect_loop_stagnation"):
-                    stagnation = engine.detect_loop_stagnation(summary_text)
+                    rep_goal = report.get("goal", "") if isinstance(report, dict) else getattr(report, "goal", "")
+                    stagnation = engine.detect_loop_stagnation(str(rep_goal or "sub_mission"), summary_text)
                 elif hasattr(engine, "predict"):
                     res = engine.predict(
                         state=summary_text,
@@ -1021,15 +1021,19 @@ Rules:
             if phase_submissions is None:
                 phase_submissions = self.phases[-1].sub_missions if self.phases else []
 
-            effective_computer = (
-                _ScopedSubagentProviderProxy(
+            if len(phase_submissions) > 1:
+                effective_computer = _ScopedSubagentProviderProxy(
                     self.computer,
                     subagent_id=sub.id,
                     workspace_mode="branch",
                 )
-                if len(phase_submissions) > 1
-                else self.computer
-            )
+                try:
+                    iso_dir = getattr(effective_computer, "isolated_dir", f"/home/sonic/workspace/.sonic_subagents/{sub.id}")
+                    await self.computer.terminal(workspace_id, f"mkdir -p '{iso_dir}'")
+                except Exception as e:
+                    logger.debug("boss_ensure_subagent_dir_failed", error=str(e))
+            else:
+                effective_computer = self.computer
 
             safety_policy = (
                 self.safety.clone_for_agent(f"sub-{sub_agent_num}")
@@ -1106,7 +1110,7 @@ Rules:
                     clean = item.strip()
                     if not clean:
                         continue
-                    if re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/\S*)?\b", clean):
+                    if re.search(r"\b(?:169\.254\.169\.254|metadata\.google\.internal)\b", clean.lower()):
                         continue
                     if re.search(r"\b(?:whoami|pwd|hostname|uname|ifconfig|ip\s+a|route(?:\s+-n)?)\b", clean.lower()):
                         continue
@@ -1245,12 +1249,23 @@ Rules:
                     sub_result.judge_notes = judge_eval.notes
                     if judge_eval.verdict == JudgeVerdict.CONFIRMED:
                         sub_result.evidence_verified = True
+                    elif judge_eval.verdict == JudgeVerdict.INCONCLUSIVE:
+                        sub_result.evidence_verified = False
                     elif judge_eval.verdict == JudgeVerdict.FALSIFIED:
                         sub_result.evidence_verified = False
                         sub_result.success = False
                         sub_result.status = "FAILED"
                 except Exception as judge_err:
                     logger.warning("boss_judge_evaluation_failed", error=str(judge_err))
+            if sub_result.success and len(phase_submissions) > 1:
+                iso_dir = f"/home/sonic/workspace/.sonic_subagents/{sub_mission.id}"
+                try:
+                    await self.computer.terminal(
+                        workspace_id,
+                        f"find '{iso_dir}' -mindepth 1 -maxdepth 1 ! -name '.sonic_subagents' -exec cp -r {{}} /home/sonic/workspace/ \\;",
+                    )
+                except Exception as e:
+                    logger.debug("boss_subagent_workspace_merge_error", error=str(e))
 
             return sub_result
 

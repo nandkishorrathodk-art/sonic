@@ -60,6 +60,9 @@ _PROTECTED_COMPONENTS = frozenset([
     "sonic/evolution/coding_agent",
     "sonic-core/tests/test_p0_security_hardening",
     "sonic-kernel-rs/src/safety",
+    "configs/safety_rules.yaml",
+    "configs/safety_rules",
+    "configs",
 ])
 
 

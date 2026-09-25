@@ -287,6 +287,11 @@ class LayaSystem1Engine:
                             answers=data.get("answers", {}),
                             routing=data.get("routing", {"model": chosen_model, "backend": "laya_remote"}),
                         )
+                    logger.warning(
+                        "laya_remote_non_200_response",
+                        status_code=resp.status_code,
+                        body=resp.text[:200],
+                    )
             except Exception as exc:
                 logger.debug("laya_remote_call_failed", error=str(exc))
 

@@ -28,29 +28,29 @@ import { API_BASE } from "../../lib/api";
 import { BrandMark } from "../../components/common/BrandMark";
 
 const SCAN_LINES = [
-  { tag: "recon", text: "Enumerating assets on target.acme.io — HTTP probe + header fingerprint", status: "ok" },
-  { tag: "static", text: "Analyzing response patterns → 3 candidate injection sinks detected", status: "ok" },
-  { tag: "hypothesis", text: "Formulating 5 attack vectors ranked by exploitability", status: "ok" },
-  { tag: "dynamic", text: "Executing PoC #3 in isolated Cyber Workstation sandbox — SSTI confirmed", status: "hit" },
-  { tag: "verifier", text: "Reproducing → captured request + response evidence locked", status: "ok" },
-  { tag: "codefix", text: "Generating regression test + patch diff for verified finding", status: "ok" },
+  { tag: "workstation", text: "Synchronizing DISPLAY=:99 graphical desktop & headless terminal plane", status: "ok" },
+  { tag: "perception", text: "AT-SPI accessibility tree + multimodal visual grounding locked on active window", status: "ok" },
+  { tag: "laya-s1", text: "Laya System-1 intuition engine evaluated action contract & substrate triage", status: "ok" },
+  { tag: "sandbox", text: "Executing full-stack build & verification inside isolated workstation container", status: "hit" },
+  { tag: "verifier", text: "Empirical receipt verified — zero success-by-decree enforcement active", status: "ok" },
+  { tag: "being", text: "Persisting learned craft & cross-session cognitive affect to SQLite/Neo4j", status: "ok" },
 ];
 
 const AGENTS = [
-  { name: "Recon", icon: Radio, color: "secondary", role: "Asset & surface enumeration" },
-  { name: "Static Reasoning", icon: ScanLine, color: "accent", role: "Pattern & sink analysis" },
-  { name: "Hypothesis", icon: Crosshair, color: "primary", role: "Attack vector generation" },
-  { name: "Dynamic Execution", icon: Bot, color: "warning", role: "PoC execution in sandbox" },
-  { name: "Verifier", icon: FileCheck2, color: "success", role: "Evidence reproduction & lock" },
-  { name: "CodeFix", icon: GitBranch, color: "secondary", role: "Patch + regression authoring" },
+  { name: "Desktop Computer-Use", icon: Monitor, color: "secondary", role: "Multi-window GUI & browser fluency" },
+  { name: "Terminal & Sandbox", icon: TerminalIcon, color: "accent", role: "High-speed code, git & CLI execution" },
+  { name: "Boss Orchestrator", icon: Workflow, color: "primary", role: "State-first multi-phase decomposition" },
+  { name: "Laya System-1", icon: Cpu, color: "warning", role: "Sub-10ms cognitive triage & safety intuition" },
+  { name: "Empirical Judge", icon: FileCheck2, color: "success", role: "Independent receipt & reproduction gate" },
+  { name: "Toolsmith & Craft", icon: GitBranch, color: "secondary", role: "Self-authored utilities & persistent memory" },
 ];
 
 const PIPELINE = [
-  { label: "OBSERVE", desc: "Recon & live HTTP probing", icon: Radio },
-  { label: "REASON", desc: "Static analysis + hypotheses", icon: ScanLine },
-  { label: "ACT", desc: "Dynamic PoC in sandbox", icon: Bot },
-  { label: "PROVE", desc: "Verifier locks evidence", icon: FileCheck2 },
-  { label: "EVOLVE", desc: "Canary experiments + patch", icon: Dna },
+  { label: "OBSERVE", desc: "Live desktop & terminal state", icon: Monitor },
+  { label: "INTUIT", desc: "Laya System-1 fast triage", icon: Cpu },
+  { label: "ACT", desc: "Dual-plane GUI + CLI execution", icon: Bot },
+  { label: "PROVE", desc: "Judge verifies empirical receipt", icon: FileCheck2 },
+  { label: "EVOLVE", desc: "BeingMind & Craft persistence", icon: Dna },
 ];
 
 export default function LandingPage() {

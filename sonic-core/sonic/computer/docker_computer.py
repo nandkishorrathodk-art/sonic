@@ -540,29 +540,39 @@ class DockerComputerProvider(ComputerProvider):
                 if code != 0:
                     raise RuntimeError(f"GUI action failed with exit code {code}: {err.strip()}")
 
+            def _validate_coords(cx: int | None, cy: int | None) -> None:
+                if cx is not None and cy is not None:
+                    if int(cx) < 0 or int(cy) < 0 or int(cx) > 10000 or int(cy) > 10000:
+                        raise ValueError(f"GUI coordinates ({cx}, {cy}) out of valid desktop bounds")
+
             if atype in (GUIActionType.CLICK, GUIActionType.DOUBLE_CLICK):
                 if action.button is not None and action.button not in (1, 2, 3):
                     raise ValueError(f"Unsupported mouse button: {action.button}")
                 button = action.button if action.button in (1, 2, 3) else 1
                 repeat = 2 if atype == GUIActionType.DOUBLE_CLICK else 1
                 if action.x is not None and action.y is not None:
+                    _validate_coords(action.x, action.y)
                     await exec_gui(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} click --repeat {repeat} {button}")
                 else:
                     await exec_gui(f"DISPLAY={disp} xdotool click --repeat {repeat} {button}")
 
             elif atype == GUIActionType.RIGHT_CLICK:
                 if action.x is not None and action.y is not None:
+                    _validate_coords(action.x, action.y)
                     await exec_gui(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} click 3")
                 else:
                     await exec_gui(f"DISPLAY={disp} xdotool click 3")
 
             elif atype == GUIActionType.MOVE and action.x is not None and action.y is not None:
+                _validate_coords(action.x, action.y)
                 await exec_gui(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y}")
 
             elif atype == GUIActionType.DRAG:
                 sx, sy = action.x or 0, action.y or 0
                 dx = action.x2 if action.x2 is not None else sx
                 dy = action.y2 if action.y2 is not None else sy
+                _validate_coords(sx, sy)
+                _validate_coords(dx, dy)
                 await exec_gui(f"DISPLAY={disp} xdotool mousemove --sync {sx} {sy} sleep 0.1 mousedown 1 sleep 0.1 mousemove --sync {dx} {dy} sleep 0.1 mouseup 1")
 
             elif atype == GUIActionType.TYPE:
@@ -807,10 +817,10 @@ class DockerComputerProvider(ComputerProvider):
         if action == "status":
             code, out, _ = await self._docker_exec("git -C /home/sonic/workspace status --porcelain 2>/dev/null", timeout=15)
             bcode, bout, _ = await self._docker_exec("git -C /home/sonic/workspace branch --show-current 2>/dev/null", timeout=15)
-            branch = bout.strip() if bcode == 0 and bout.strip() else "main"
-            clean = len(out.strip()) == 0
-            untracked = [line[3:] for line in out.splitlines() if line.startswith("??")]
-            modified = [line[3:] for line in out.splitlines() if not line.startswith("??")]
+            branch = bout.strip() if bcode == 0 and bout.strip() else ("uninitialized" if code != 0 else "main")
+            clean = (code == 0) and (len(out.strip()) == 0)
+            untracked = [line[3:] for line in out.splitlines() if line.startswith("??")] if code == 0 else []
+            modified = [line[3:] for line in out.splitlines() if not line.startswith("??")] if code == 0 else []
             return GitStatusInfo(
                 branch=branch,
                 is_clean=clean,
@@ -820,13 +830,11 @@ class DockerComputerProvider(ComputerProvider):
             )
         elif action == "commit":
             msg = kwargs.get("message", "chore: automated commit")
-            safe_msg = msg.replace("'", "'\\''")
-            code, _, _ = await self._docker_exec(f"git -C /home/sonic/workspace add -A && git -C /home/sonic/workspace commit -m '{safe_msg}'", timeout=15)
+            code, _, _ = await self._docker_exec(f"git -C /home/sonic/workspace add -A && git -C /home/sonic/workspace commit -m {shlex.quote(str(msg))}", timeout=15)
             return code == 0
         elif action in ["branch", "checkout"]:
-            branch_name = kwargs.get("branch_name") or kwargs.get("branch") or "main"
-            safe_branch = branch_name.replace("'", "")
-            code, _, _ = await self._docker_exec(f"git -C /home/sonic/workspace checkout -B '{safe_branch}'", timeout=15)
+            branch_name = str(kwargs.get("branch_name") or kwargs.get("branch") or "main").lstrip("-") or "main"
+            code, _, _ = await self._docker_exec(f"git -C /home/sonic/workspace checkout -B {shlex.quote(branch_name)}", timeout=15)
             return code == 0
         elif action == "diff":
             bcode, bout, _ = await self._docker_exec("git -C /home/sonic/workspace branch --show-current 2>/dev/null", timeout=15)

@@ -1299,13 +1299,15 @@ class DaytonaComputerProvider(ComputerProvider):
             res = await self.terminal(workspace_id, f"git add -A && git commit -m '{safe_msg}'")
             return res.exit_code == 0
         elif action in ["branch", "checkout"]:
-            branch_name = kwargs.get("branch_name") or kwargs.get("branch") or "main"
-            res = await self.terminal(workspace_id, f"git checkout -B '{branch_name}'")
+            raw_branch = str(kwargs.get("branch_name") or kwargs.get("branch") or "main").strip()
+            safe_branch = shlex.quote(raw_branch)
+            res = await self.terminal(workspace_id, f"git checkout -B {safe_branch}")
             return res.exit_code == 0
         elif action == "diff":
             branch_res = await self.terminal(workspace_id, "git branch --show-current")
             branch = branch_res.stdout.strip() if (branch_res.exit_code == 0 and branch_res.stdout.strip()) else "HEAD"
-            res = await self.terminal(workspace_id, f"git diff {branch}")
+            safe_diff_branch = shlex.quote(branch)
+            res = await self.terminal(workspace_id, f"git diff {safe_diff_branch}")
             return res.stdout or "Working tree clean."
         return ""
 

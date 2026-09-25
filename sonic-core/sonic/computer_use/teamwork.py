@@ -120,21 +120,26 @@ class _ScopedSubagentProviderProxy:
             return self._iso_dir
         if p.startswith(self._iso_dir):
             return p
-        if p.startswith("/home/sonic/workspace/"):
-            rel = p[len("/home/sonic/workspace/"):]
+        ws_root = getattr(self._inner, "workspace_root", "/home/sonic/workspace")
+        if p.startswith(ws_root):
+            rel = p[len(ws_root):].lstrip("/\\")
             return f"{self._iso_dir}/{rel}"
         if not p.startswith("/") and ":" not in p[:3]:
-            return f"{self._iso_dir}/{p}"
+            import os
+            clean_rel = os.path.normpath(p).replace("\\", "/").lstrip("/")
+            if clean_rel.startswith("../") or clean_rel == "..":
+                clean_rel = clean_rel.replace("../", "").lstrip("./")
+            return f"{self._iso_dir}/{clean_rel}"
         return p
 
     _resolve_rel_path = _rewrite_path
 
     async def terminal(self, workspace_id: str, command: str, *args: Any, **kwargs: Any) -> Any:
-        scoped_cmd = f'cd "{self._iso_dir}" && {command}'
+        scoped_cmd = f'mkdir -p "{self._iso_dir}" && cd "{self._iso_dir}" && {command}'
         return await self._inner.terminal(workspace_id, scoped_cmd, *args, **kwargs)
 
     async def execute(self, workspace_id: str, command: str, *args: Any, **kwargs: Any) -> Any:
-        scoped_cmd = f'cd "{self._iso_dir}" && {command}'
+        scoped_cmd = f'mkdir -p "{self._iso_dir}" && cd "{self._iso_dir}" && {command}'
         if hasattr(self._inner, "execute"):
             return await self._inner.execute(workspace_id, scoped_cmd, *args, **kwargs)
         return await self._inner.terminal(workspace_id, scoped_cmd, *args, **kwargs)
@@ -154,7 +159,7 @@ class _ScopedSubagentProviderProxy:
             if key in rewritten_kwargs and isinstance(rewritten_kwargs[key], str):
                 rewritten_kwargs[key] = self._rewrite_path(rewritten_kwargs[key])
         if not any(k in rewritten_kwargs for k in ("path", "repo_path", "directory", "cwd", "target_dir")):
-            _ = self._rewrite_path(".")
+            rewritten_kwargs["path"] = self._iso_dir
         return await self._inner.git_action(workspace_id, action, **rewritten_kwargs)
 
 
@@ -733,9 +738,9 @@ class SubagentTeamworkManager:
             except Exception:
                 pass
 
-        if has_ok_trace:
+        if eval_res.verdict == JudgeVerdict.CONFIRMED and has_ok_trace:
             return True, JudgeVerdict.CONFIRMED.value, eval_res.notes or "All acceptance criteria verified."
-        return False, eval_res.verdict.value, eval_res.notes or "No successful execution evidence recorded."
+        return False, eval_res.verdict.value, eval_res.notes or "Independent verification failed or lacked empirical evidence."
 
     @staticmethod
     def _summarize_traces(traces: list[Any]) -> str:
