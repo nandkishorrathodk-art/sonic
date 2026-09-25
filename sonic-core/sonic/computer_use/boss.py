@@ -126,6 +126,9 @@ class BossAgent:
         requested_plane: str | None = None,
         tree_depth: int = 0,
         max_tree_depth: int = 3,
+        craft: Any = None,
+        vault: Any = None,
+        **kwargs: Any,
     ):
         self.computer = computer_provider
         self.llm_router = llm_router
@@ -138,6 +141,8 @@ class BossAgent:
         self.tenant_id = tenant_id
         self.being = being
         self.being_mind = being_mind
+        self.craft = craft
+        self.vault = vault
         self.agent_id = agent_id or (being.being_id if being else f"{tenant_id}-boss")
         self.tree_depth = max(0, int(tree_depth))
         self.max_tree_depth = max(1, int(max_tree_depth))
@@ -904,6 +909,8 @@ Rules:
                 tenant_id=self.tenant_id,
                 agent_id=sub_agent_id,
                 being_mind=self.being_mind,
+                craft=self.craft,
+                vault=self.vault,
                 enable_llm_decomposition=False,
                 browser=self.browser,
                 toolsmith=self.toolsmith,
