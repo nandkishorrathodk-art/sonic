@@ -1,6 +1,7 @@
 # ⚡ SONIC
 ### Autonomous AI-Human Digital Being & Workstation
 
+[![Release](https://img.shields.io/badge/release-v0.3.0-blue.svg)](https://github.com/nandkishorrathodk-art/sonic/releases/tag/v0.3.0)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com/)
@@ -8,6 +9,7 @@
 [![Three.js](https://img.shields.io/badge/Three.js-3D%20WebGL-black.svg)](https://threejs.org/)
 
 > **Codename:** SONIC (Autonomous AI-Human Digital Being)  
+> **Version:** v0.3.0  
 > **Status:** Full Dual-Plane Workstation Agency & 3D Cognitive Memory Graph  
 > **Core Concept:** An autonomous AI-Human Digital Being operating its own dedicated personal computer workstation (`DISPLAY=:99` full graphical desktop + dedicated headless terminal). Combines human workstation fluency, persistent cognitive affect, toolsmithing, and verified empirical receipts — zero success-by-decree.
 
@@ -17,14 +19,21 @@
 
 <div align="center">
 
-### 🖥️ 1. SONIC Workstation (Dual-Plane Desktop + Headless Terminal)
+### 🏛️ 1. Complete System Architecture (v0.3.0)
+*End-to-End Dual-Brain Cognitive Engine, Sealed Safety Envelope, and Dual-Plane Workstation Substrate.*
+
+<img src="docs/assets/architecture.svg" alt="SONIC v0.3.0 Architecture Diagram" width="100%" />
+
+<br/><br/>
+
+### 🖥️ 2. SONIC Workstation (Dual-Plane Desktop + Headless Terminal)
 *Real-time AI workstation: Operating the full X11 graphical desktop (`DISPLAY=:99`) concurrently with a dedicated headless sandbox terminal.*
 
 <img src="docs/assets/sonic_cyber_workstation.png" alt="SONIC Workstation" width="900" />
 
 <br/><br/>
 
-### 🧠 2. SONIC Cognitive Memory & System Architecture Graph (Interactive 3D WebGL)
+### 🧠 3. SONIC Cognitive Memory & System Architecture Graph (Interactive 3D WebGL)
 *Interactive 3D Force-Directed Graph: Visualizing persistent Being identity, BeingMind cognitive affect curves, internalized facts, dual execution planes, toolsmith scripts, and empirical SHA-256 evidence.*
 
 <img src="docs/assets/sonic_cognitive_memory_graph.png" alt="SONIC Cognitive Memory & System Architecture Graph" width="900" />
@@ -98,6 +107,13 @@ SONIC implements a **Dual-Brain cognitive model** inspired by Kahneman's dual-pr
 
 ## 🖥️ Core Architecture: The AI Being & Workstation
 
+<div align="center">
+  <img src="docs/assets/architecture.svg" alt="SONIC Architecture Vector Diagram" width="100%" />
+</div>
+
+<details>
+<summary><b>View Text-Based ASCII Architecture Map</b></summary>
+
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                                    SONIC AI-HUMAN BEING                                │
@@ -131,6 +147,7 @@ SONIC implements a **Dual-Brain cognitive model** inspired by Kahneman's dual-pr
 │  - Real Multimodal Vision Grounding           - Toolsmith compilation & execution      │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+</details>
 
 ### 1. Dual-Plane Operational Model
 SONIC does not silo itself into a terminal-only script or a sluggish GUI-only recorder:
