@@ -224,10 +224,24 @@ class MethodLab:
                 if rest.strip():
                     probe_lines.append(rest)
         probe_source = "\n".join(probe_lines).strip()
+        if probe_source.startswith("```"):
+            fence_lines = probe_source.splitlines()
+            if fence_lines and fence_lines[0].startswith("```"):
+                fence_lines = fence_lines[1:]
+            if fence_lines and fence_lines[-1].strip() == "```":
+                fence_lines = fence_lines[:-1]
+            probe_source = "\n".join(fence_lines).strip()
         name = fields.get("NAME", "").lower()
         hypothesis = fields.get("HYPOTHESIS", "")
         if not _is_valid_name(name) or not hypothesis or not probe_source:
             return None
+        try:
+            from sonic.being.toolsmith import _source_safety_lint
+            ok, _ = _source_safety_lint(probe_source)
+            if not ok:
+                return None
+        except Exception:
+            pass
         # Reject if the hypothesis is (near-)identical to a known technique.
         known_lower = [k.lower() for k in known]
         if any(hypothesis.lower() in k or k in hypothesis.lower() for k in known_lower):

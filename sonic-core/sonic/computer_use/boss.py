@@ -18,7 +18,6 @@ steps, executing on the shared workstation.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import re
 import time
@@ -123,7 +122,6 @@ class BossAgent:
         gui_only: bool = False,
         being: Any = None,
         being_mind: Any = None,
-        craft: Any = None,
         agent_id: str | None = None,
         requested_plane: str | None = None,
         tree_depth: int = 0,
@@ -140,7 +138,6 @@ class BossAgent:
         self.tenant_id = tenant_id
         self.being = being
         self.being_mind = being_mind
-        self.craft = craft
         self.agent_id = agent_id or (being.being_id if being else f"{tenant_id}-boss")
         self.tree_depth = max(0, int(tree_depth))
         self.max_tree_depth = max(1, int(max_tree_depth))
@@ -233,160 +230,26 @@ class BossAgent:
             except Exception as exc:
                 logger.debug("task_graph_add_skipped", sub_id=sub.id, error=str(exc))
 
-    def _detect_replan_trigger(self, report: Any) -> ReplanTrigger | None:
+    def _detect_sub_mission_trigger(self, result: SubMissionResult) -> ReplanTrigger | None:
         """Inspect sub-mission outcome from verified state to determine if replanning is warranted."""
-        is_success = report.get("success", True) if isinstance(report, dict) else getattr(report, "success", True)
-        findings_summary = (
-            report.get("findings_summary", "")
-            if isinstance(report, dict)
-            else getattr(report, "findings_summary", "")
-        )
-
-        # 1. AGENT_FAILURE
-        if not is_success:
-            if findings_summary:
-                try:
-                    from sonic.llm.laya_engine import get_laya_engine
-
-                    engine = get_laya_engine()
-                    summary_text = str(findings_summary)
-                    if hasattr(engine, "detect_loop_stagnation"):
-                        stagnation = engine.detect_loop_stagnation(summary_text)
-                    elif hasattr(engine, "predict"):
-                        res = engine.predict(
-                            state=summary_text,
-                            questions={
-                                "stagnation": {
-                                    "type": "noul",
-                                    "instructions": "Detect loop stagnation or repetitive failure",
-                                    "affirmative_anchor": "stuck loop repeat failed timeout error deadlock unchanged",
-                                    "negative_anchor": "progress novel resolved success recovered",
-                                }
-                            },
-                        )
-                        stagnation = res.get_noul("stagnation", 0.5)
-                    else:
-                        stagnation = 0.5
-                    logger.debug("boss_laya_system1_triage", stagnation=stagnation, summary=summary_text[:120])
-                except Exception as exc:
-                    logger.debug("boss_laya_system1_triage_failed", error=str(exc))
+        if not result.success:
             return ReplanTrigger.AGENT_FAILURE
 
-        findings_list = list(
-            (report.get("findings") or report.get("key_discoveries") or [])
-            if isinstance(report, dict)
-            else (getattr(report, "findings", None) or getattr(report, "key_discoveries", None) or [])
+        summary_lower = (result.findings_summary or "").lower()
+        negated = any(
+            neg in summary_lower
+            for neg in ("not vulnerable", "no sqli", "failed to bypass", "no vulnerability", "nothing found")
         )
-        summary_text = str(
-            (report.get("findings_summary") or report.get("summary") or "")
-            if isinstance(report, dict)
-            else (getattr(report, "findings_summary", "") or getattr(report, "summary", "") or "")
-        )
-        combined_text = (summary_text + " " + " ".join(str(f) for f in findings_list)).lower()
+        if negated:
+            return None
 
-        # 2. NEW_HIGH_CONFIDENCE_FINDING
-        vuln_patterns = (
-            # Web & API
-            r"\bsqli\b", r"\bsql injection\b", r"\bxss\b", r"\brce\b", r"\bcve-\d{4}-\d+\b",
-            r"\bssrf\b", r"\bidor\b", r"\bbola\b", r"\bdeserializ", r"\bprototype pollution\b",
-            r"\bpath traversal\b", r"\blfi\b", r"\brfi\b",
-            r"\bauth(?:entication)? bypass\b", r"\bunauthorized access\b",
-            # Binary & Systems
-            r"\bbuffer overflow\b", r"\bmemory corruption\b", r"\brop chain\b",
-            r"\bformat string\b", r"\buse[- ]after[- ]free\b", r"\bheap overflow\b",
-            r"\bprivilege escalation\b", r"\broot shell\b",
-            # Crypto & Secrets
-            r"\bpadding oracle\b", r"\bweak key\b", r"\bprivate key leak\b",
-            r"\bcredential leak\b", r"\bhardcoded secret\b",
-            # Flags & Exploit Confirmation
-            r"\bflag\{[^\}]+\}", r"\bctf\{[^\}]+\}", r"\bhtb\{[^\}]+\}",
-            r"\bexploit confirmed\b", r"\bvulnerability confirmed\b",
-        )
-        negation_prefix = r"(?:not|no|never|failed to|unsuccessful|immune to|false positive)\s+(?:\w+\s+){0,3}"
-
-        for pat in vuln_patterns:
-            matches = list(re.finditer(pat, combined_text, flags=re.IGNORECASE))
-            matched = False
-            for m in matches:
-                start_idx = m.start()
-                preceding_text = combined_text[max(0, start_idx - 40):start_idx]
-                if re.search(negation_prefix + r"$", preceding_text, flags=re.IGNORECASE):
-                    continue
-                matched = True
-                break
-            if matched:
-                return ReplanTrigger.NEW_HIGH_CONFIDENCE_FINDING
-
-        evidence_verified = (
-            report.get("evidence_verified", False)
-            if isinstance(report, dict)
-            else getattr(report, "evidence_verified", False)
-        )
-        if evidence_verified and findings_list:
+        if result.evidence_verified and (result.key_discoveries or summary_lower.strip()):
             return ReplanTrigger.NEW_HIGH_CONFIDENCE_FINDING
 
-        # 3. NEW_ATTACK_SURFACE
-        surface_patterns = (
-            r"\bopen port\b", r"\blistening port\b", r"\bdiscovered service\b",
-            r"\bendpoint\b", r"\broute\b", r"\bsubdomain\b", r"\bapi url\b",
-            r"\blogin page\b", r"\bexported symbol\b", r"\bhidden directory\b",
-        )
-        if any(re.search(sp, combined_text, flags=re.IGNORECASE) for sp in surface_patterns):
+        if any(tok in summary_lower for tok in ("open port", "new service", "new endpoint", "discovered port")):
             return ReplanTrigger.NEW_ATTACK_SURFACE
 
-        # 4. STRATEGY_EXHAUSTION
-        strategy_exhaustion_val = getattr(ReplanTrigger, "STRATEGY_EXHAUSTION", None)
-        if strategy_exhaustion_val is not None:
-            strategy_exhausted = (
-                report.get("strategy_exhausted", False)
-                if isinstance(report, dict)
-                else getattr(report, "strategy_exhausted", False)
-            )
-            status_val = str(
-                report.get("status", "")
-                if isinstance(report, dict)
-                else getattr(report, "status", "")
-            ).upper()
-            if (
-                strategy_exhausted
-                or status_val in ("STRATEGY_EXHAUSTED", "EXHAUSTED")
-                or "strategy exhausted" in combined_text
-                or "exhausted all" in combined_text
-            ):
-                return strategy_exhaustion_val
-
-        # Stagnation triage telemetry before returning None
-        if not is_success and findings_summary:
-            try:
-                from sonic.llm.laya_engine import get_laya_engine
-
-                engine = get_laya_engine()
-                summary_text = str(findings_summary)
-                if hasattr(engine, "detect_loop_stagnation"):
-                    rep_goal = report.get("goal", "") if isinstance(report, dict) else getattr(report, "goal", "")
-                    stagnation = engine.detect_loop_stagnation(str(rep_goal or "sub_mission"), summary_text)
-                elif hasattr(engine, "predict"):
-                    res = engine.predict(
-                        state=summary_text,
-                        questions={
-                            "stagnation": {
-                                "type": "noul",
-                                "instructions": "Detect loop stagnation or repetitive failure",
-                                "affirmative_anchor": "stuck loop repeat failed timeout error deadlock unchanged",
-                                "negative_anchor": "progress novel resolved success recovered",
-                            }
-                        },
-                    )
-                    stagnation = res.get_noul("stagnation", 0.5)
-                else:
-                    stagnation = 0.5
-                logger.debug("boss_laya_system1_triage", stagnation=stagnation, summary=summary_text[:120])
-            except Exception as exc:
-                logger.debug("boss_laya_system1_triage_failed", error=str(exc))
-
         return None
-
-    _detect_sub_mission_trigger = _detect_replan_trigger
 
     # ------------------------------------------------------------------
     # Main orchestration loop
@@ -864,7 +727,7 @@ Rules:
 
         sub_missions = []
         for sm in sub_missions_raw[:5]:  # Cap planning fan-out per phase
-            goal = str(sm.get("goal") or sm.get("mission") or sm.get("objective") or sm.get("task") or sm.get("title") or "").strip()
+            goal = str(sm.get("goal", "")).strip()
             if not goal:
                 continue
             requested_steps = sm.get("max_steps", self.sub_agent_steps)
@@ -999,7 +862,6 @@ Rules:
         sub_mission: SubMission,
         phase_callback: Callable | None = None,
         sub_agent_num: int = 0,
-        phase_submissions: list[SubMission] | None = None,
     ) -> SubMissionResult:
         """Create a focused ComputerUseAgent and run it on a sub-mission.
 
@@ -1014,26 +876,7 @@ Rules:
                 ComputerAutonomyLevel,
                 EngineeringMissionMode,
             )
-            from sonic.computer_use.teamwork import _ScopedSubagentProviderProxy
             from sonic.safety.action_policy import ActionPolicy
-
-            sub = sub_mission
-            if phase_submissions is None:
-                phase_submissions = self.phases[-1].sub_missions if self.phases else []
-
-            if len(phase_submissions) > 1:
-                effective_computer = _ScopedSubagentProviderProxy(
-                    self.computer,
-                    subagent_id=sub.id,
-                    workspace_mode="branch",
-                )
-                try:
-                    iso_dir = getattr(effective_computer, "isolated_dir", f"/home/sonic/workspace/.sonic_subagents/{sub.id}")
-                    await self.computer.terminal(workspace_id, f"mkdir -p '{iso_dir}'")
-                except Exception as e:
-                    logger.debug("boss_ensure_subagent_dir_failed", error=str(e))
-            else:
-                effective_computer = self.computer
 
             safety_policy = (
                 self.safety.clone_for_agent(f"sub-{sub_agent_num}")
@@ -1050,7 +893,7 @@ Rules:
             scoped_context["delegated_plane"] = execution_plane
             scoped_context["execution_plane"] = execution_plane
             agent = ComputerUseAgent(
-                computer_provider=effective_computer,
+                computer_provider=self.computer,
                 autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
                 mode=EngineeringMissionMode.GENERAL_ENGINEERING_MODE,
                 max_actions=sub_mission.max_steps,
@@ -1061,7 +904,6 @@ Rules:
                 tenant_id=self.tenant_id,
                 agent_id=sub_agent_id,
                 being_mind=self.being_mind,
-                craft=self.craft,
                 enable_llm_decomposition=False,
                 browser=self.browser,
                 toolsmith=self.toolsmith,
@@ -1110,9 +952,7 @@ Rules:
                     clean = item.strip()
                     if not clean:
                         continue
-                    if re.search(r"\b(?:169\.254\.169\.254|metadata\.google\.internal)\b", clean.lower()):
-                        continue
-                    if re.search(r"\b(?:whoami|pwd|hostname|uname|ifconfig|ip\s+a|route(?:\s+-n)?)\b", clean.lower()):
+                    if re.match(r"^(?:https?://)?(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/.*)?$", clean):
                         continue
                     valid_discoveries.append(clean)
 
@@ -1139,14 +979,17 @@ Rules:
             except TimeoutError:
                 logger.warning("sub_agent_timed_out", sub_id=sub_mission.id, agent_num=sub_agent_num)
                 traces = getattr(agent, "history", [])
-                raw_to_wfh_reason = getattr(agent, "_waiting_for_human_reason", "")
                 return SubMissionResult(
                     sub_mission_id=sub_mission.id, goal=sub_mission.goal, traces=traces,
                     findings_summary="SubAgent timed out before objective verification.",
                     success=False, status="TIMED_OUT", evidence_verified=False,
                     actions_taken=len(traces), duration_seconds=round(time.perf_counter() - t_start, 2),
-                    waiting_for_human=getattr(agent, "_waiting_for_human", False) is True,
-                    waiting_for_human_reason=raw_to_wfh_reason if isinstance(raw_to_wfh_reason, str) else "",
+                    waiting_for_human=(getattr(agent, "_waiting_for_human", False) is True),
+                    waiting_for_human_reason=(
+                        getattr(agent, "_waiting_for_human_reason", "")
+                        if isinstance(getattr(agent, "_waiting_for_human_reason", ""), str)
+                        else ""
+                    ),
                 )
 
             duration = round(time.perf_counter() - t_start, 2)
@@ -1249,23 +1092,12 @@ Rules:
                     sub_result.judge_notes = judge_eval.notes
                     if judge_eval.verdict == JudgeVerdict.CONFIRMED:
                         sub_result.evidence_verified = True
-                    elif judge_eval.verdict == JudgeVerdict.INCONCLUSIVE:
-                        sub_result.evidence_verified = False
                     elif judge_eval.verdict == JudgeVerdict.FALSIFIED:
                         sub_result.evidence_verified = False
                         sub_result.success = False
                         sub_result.status = "FAILED"
                 except Exception as judge_err:
                     logger.warning("boss_judge_evaluation_failed", error=str(judge_err))
-            if sub_result.success and len(phase_submissions) > 1:
-                iso_dir = f"/home/sonic/workspace/.sonic_subagents/{sub_mission.id}"
-                try:
-                    await self.computer.terminal(
-                        workspace_id,
-                        f"find '{iso_dir}' -mindepth 1 -maxdepth 1 ! -name '.sonic_subagents' -exec cp -r {{}} /home/sonic/workspace/ \\;",
-                    )
-                except Exception as e:
-                    logger.debug("boss_subagent_workspace_merge_error", error=str(e))
 
             return sub_result
 
@@ -1331,10 +1163,7 @@ Rules:
                 temperature=0.2,
             )
             resp = await self.llm_router.complete(req)
-            content = getattr(resp, "content", "")
-            if inspect.isawaitable(content):
-                content = await content
-            return str(content or "").strip() or observations[:1000]
+            return (resp.content or "").strip() or observations[:1000]
         except Exception:
             # Fallback: return raw observations
             return observations[:1000]
@@ -1346,24 +1175,20 @@ Rules:
             if isinstance(t, dict):
                 obs = (t.get("actual_observation") or t.get("observation") or "").strip()
                 status_str = str(t.get("status", ""))
-                source = f"{t.get('target_resource', '')} {t.get('payload', '')}".lower()
             else:
                 obs = (getattr(t, "actual_observation", None) or getattr(t, "observation", "") or "").strip()
                 status_str = str(getattr(t, "status", ""))
-                source = f"{getattr(t, 'target_resource', '')} {getattr(t, 'payload', '')}".lower()
 
             if not obs or len(obs) < 5:
                 continue
             if status_str not in ("COMPLETED", "SUCCESS", "VERIFIED"):
-                continue
-            if re.search(r"\b(?:whoami|pwd|hostname|uname|ifconfig|ip\s+a|route(?:\s+-n)?)\b", source):
                 continue
 
             for line in obs.splitlines():
                 line_str = line.strip()
                 if not line_str or len(line_str) < 10:
                     continue
-                if re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/\S*)?\b", line_str):
+                if re.match(r"^(?:https?://)?(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/.*)?$", line_str):
                     continue
                 if line_str not in discoveries:
                     discoveries.append(line_str[:200])
@@ -1599,7 +1424,7 @@ If the objective is complete or no more work is needed, return:
 
         sub_missions = []
         for sm in sub_missions_raw[:5]:
-            goal = str(sm.get("goal") or sm.get("mission") or sm.get("objective") or sm.get("task") or sm.get("title") or "").strip()
+            goal = str(sm.get("goal", "")).strip()
             if not goal:
                 continue
             try:

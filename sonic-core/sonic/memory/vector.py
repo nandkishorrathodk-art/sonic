@@ -228,15 +228,15 @@ class VectorMemory:
         """Add or update a document in the vector index (write-through to SQLite)."""
         vector = self.vectorizer.vectorize(text)
         t = tenant_id or "default"
-        self.documents[(t, doc_id)] = VectorDocument(
-            doc_id=doc_id,
-            text=text,
-            metadata=metadata or {},
-            vector=vector,
-            tenant_id=t,
-        )
-        if self._db is not None:
-            with self._lock:
+        with self._lock:
+            self.documents[(t, doc_id)] = VectorDocument(
+                doc_id=doc_id,
+                text=text,
+                metadata=metadata or {},
+                vector=vector,
+                tenant_id=t,
+            )
+            if self._db is not None:
                 self._db.execute(
                     "INSERT INTO vector_documents "
                     "(doc_id, text, metadata_json, vector_json, tenant_id) VALUES (?, ?, ?, ?, ?) "
@@ -259,7 +259,10 @@ class VectorMemory:
         query_vec = self.vectorizer.vectorize(query)
         scored: list[tuple[float, VectorDocument]] = []
 
-        for doc in self.documents.values():
+        with self._lock:
+            docs_snapshot = list(self.documents.values())
+
+        for doc in docs_snapshot:
             if tenant_id is not None and doc.tenant_id != tenant_id:
                 continue
             sim = self.vectorizer.cosine_similarity(query_vec, doc.vector)

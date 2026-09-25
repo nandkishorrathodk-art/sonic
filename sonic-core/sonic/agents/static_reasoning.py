@@ -68,10 +68,9 @@ class StaticReasoningAgent(BaseAgent):
             findings.extend(asset_results.get("findings", []))
             hypotheses.extend(asset_results.get("hypotheses", []))
 
-        # If no specific data, do general analysis based on target
+        # If no specific data, only generate testable hypotheses (never confirmed findings without source/assets)
         if not code and not config and not assets:
             general = await self._general_analysis(target, engagement_id)
-            findings.extend(general.get("findings", []))
             hypotheses.extend(general.get("hypotheses", []))
 
         # Store findings in Graph Memory

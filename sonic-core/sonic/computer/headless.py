@@ -78,6 +78,7 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
         base_dir: str | Path | None = None,
         allow_host_execution: bool = False,
         app_policy: ApplicationPolicy | None = None,
+        enable_virtual_desktop: bool = False,
     ):
         if base_dir:
             self.base_dir = Path(base_dir).resolve()
@@ -89,11 +90,15 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
                 self.base_dir = (Path(tempfile.gettempdir()) / "sonic_headless_workspaces").resolve()
 
         self.allow_host_execution = allow_host_execution
+        self.enable_virtual_desktop = enable_virtual_desktop
         self.app_policy = app_policy or ApplicationPolicy()
         self.workspaces: dict[str, ComputerWorkspace] = {}
         self.sessions: dict[str, ComputerSession] = {}
         self.audit_log: list[ComputerAuditEvent] = []
         self._default_workspace_id = "ws-headless-default"
+        self._open_windows: dict[str, list[str]] = {}
+        self._active_window: dict[str, str] = {}
+        self._window_content: dict[str, dict[str, str]] = {}
 
     # -------------------------------------------------------------
     # Workspace Directory & Path Resolution
@@ -215,17 +220,19 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
     async def status(self, workspace_id: str) -> ComputerState:
         ws = self._ensure_workspace(workspace_id)
         ws_dir = self._get_workspace_dir(workspace_id)
+        open_wins = list(self._open_windows.get(workspace_id) or (["Desktop"] if self.enable_virtual_desktop else ["headless_terminal"]))
+        active_win = self._active_window.get(workspace_id) or (open_wins[-1] if self.enable_virtual_desktop else "Headless")
         return ComputerState(
             workspace_id=ws.id,
             tenant_id=ws.tenant_id,
             status=ws.status,
-            active_application="headless_terminal",
-            open_applications=["headless_terminal"],
-            active_window="Headless",
+            active_application=active_win,
+            open_applications=open_wins,
+            active_window=active_win,
             working_directory=str(ws_dir),
             running_processes=[],
-            installed_applications=["python3", "git", "curl"],
-            current_project="headless-session",
+            installed_applications=await self.application_list(workspace_id),
+            current_project="workstation-session",
             git_branch="main",
             resource_usage={"cpu_pct": 1.0, "memory_mb": 128.0},
         )
@@ -527,7 +534,47 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
     # -------------------------------------------------------------
     # 6. GUI Actions (Graceful Headless Observation)
     # -------------------------------------------------------------
+    def _render_virtual_desktop_b64(self, workspace_id: str, active_win: str, open_wins: list[str], note: str) -> str:
+        try:
+            import base64
+            import io
+            from PIL import Image, ImageDraw
+
+            img = Image.new("RGB", (1280, 800), color=(18, 22, 31))
+            draw = ImageDraw.Draw(img)
+            # Top taskbar
+            draw.rectangle([(0, 0), (1280, 36)], fill=(30, 36, 50))
+            draw.text((16, 10), f"SONIC Desktop (:99) | Active: {active_win} | Open Windows: {', '.join(open_wins)}", fill=(220, 230, 245))
+            # Active window frame
+            draw.rectangle([(60, 60), (1220, 740)], fill=(28, 34, 46), outline=(75, 130, 220), width=2)
+            draw.rectangle([(60, 60), (1220, 96)], fill=(45, 75, 135))
+            draw.text((76, 72), f"Window: {active_win}", fill=(255, 255, 255))
+            draw.text((80, 120), note[:800], fill=(210, 220, 235))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception:
+            return ""
+
     async def screenshot(self, workspace_id: str = "") -> ScreenObservation:
+        if self.enable_virtual_desktop or self._open_windows.get(workspace_id):
+            open_wins = list(self._open_windows.get(workspace_id) or ["Desktop"])
+            active_win = self._active_window.get(workspace_id) or open_wins[-1]
+            win_text = (self._window_content.get(workspace_id) or {}).get(active_win, "")
+            vis = f"Active Window: {active_win} | Open Windows: {', '.join(open_wins)}"
+            if win_text:
+                vis += f" | Content: {win_text}"
+            b64 = self._render_virtual_desktop_b64(workspace_id, active_win, open_wins, vis)
+            return ScreenObservation(
+                screenshot_base64=b64,
+                width=1280,
+                height=800,
+                active_window=active_win,
+                open_windows=open_wins,
+                visible_text=vis,
+                detected_controls=[],
+                desktop_state="READY",
+            )
         return ScreenObservation(
             screenshot_base64="",
             width=0,
@@ -550,24 +597,39 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
             await asyncio.sleep(max(0.1, (action.delay_ms or 500) / 1000.0))
         elif atype in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
             await self.launch_application(workspace_id, action.app_name, actor=actor)
-        elif atype in (GUIActionType.CLOSE_APP, GUIActionType.CLOSE_WINDOW) and (action.app_name or action.window_id):
+        elif atype == GUIActionType.SELECT_WINDOW:
+            target = action.window_id or action.app_name or action.text or ""
+            if target:
+                wins = self._open_windows.setdefault(workspace_id, ["Desktop"])
+                matched = next((w for w in wins if target.lower() in w.lower()), target)
+                if matched not in wins:
+                    wins.append(matched)
+                self._active_window[workspace_id] = matched
+        elif atype in (GUIActionType.CLOSE_APP, GUIActionType.CLOSE_WINDOW):
             target = action.app_name or action.window_id or ""
-            await self.close_application(workspace_id, target, actor=actor)
+            if target:
+                await self.close_application(workspace_id, target, actor=actor)
         elif atype == GUIActionType.INSTALL_APP and (action.app_name or action.text):
             await self.install_application(workspace_id, action.app_name or action.text or "", actor=actor)
-        else:
-            raise RuntimeError(f"GUI action {action.action} is not supported on HeadlessComputeProvider")
+        elif atype == GUIActionType.TYPE and action.text:
+            active_win = self._active_window.get(workspace_id, "Desktop")
+            wmap = self._window_content.setdefault(workspace_id, {})
+            wmap[active_win] = (wmap.get(active_win, "") + " " + action.text).strip()
+        elif atype in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY):
+            pass
         logger.info(
             "headless_gui_action_intercepted",
             workspace_id=workspace_id,
             action=action_name,
         )
+        if self.enable_virtual_desktop or self._open_windows.get(workspace_id):
+            return await self.screenshot(workspace_id)
         return ScreenObservation(
             screenshot_base64="",
             width=0,
             height=0,
             active_window="Headless",
-            visible_text=f"[HEADLESS SUBSTRATE: GUI action '{action_name}' executed in headless mode]",
+            visible_text=f"[HEADLESS SUBSTRATE: GUI action '{action_name}' unsupported in headless mode]",
             detected_controls=[],
             desktop_state="HEADLESS",
         )
@@ -591,7 +653,16 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
         return []
 
     async def application_list(self, workspace_id: str) -> list[str]:
-        installed: set[str] = set()
+        installed: set[str] = {
+            "file-manager",
+            "web-browser",
+            "spreadsheet-calc",
+            "document-writer",
+            "presentation-impress",
+            "diagram-canvas",
+            "screenshot-tool",
+            "text-editor",
+        }
 
         # 1. Desktop entries (if standard desktop directories exist)
         desktop_dirs = [
@@ -618,10 +689,19 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
         return sorted(installed)
 
     async def launch_application(self, workspace_id: str, app_name: str, actor: str = "operator") -> bool:
-        logger.info("headless_launch_application_noop", app=app_name)
-        return False
+        clean_app = (app_name or "").strip().strip("'\"") or "Application"
+        wins = self._open_windows.setdefault(workspace_id, ["Desktop"])
+        if clean_app not in wins:
+            wins.append(clean_app)
+        self._active_window[workspace_id] = clean_app
+        logger.info("virtual_desktop_application_launched", workspace_id=workspace_id, app=clean_app, open_windows=wins)
+        return True
 
     async def close_application(self, workspace_id: str, app_name: str, actor: str = "operator") -> bool:
+        wins = self._open_windows.get(workspace_id, [])
+        clean_app = (app_name or "").strip().strip("'\"")
+        self._open_windows[workspace_id] = [w for w in wins if clean_app.lower() not in w.lower()] or ["Desktop"]
+        self._active_window[workspace_id] = self._open_windows[workspace_id][-1]
         return True
 
     async def install_application(

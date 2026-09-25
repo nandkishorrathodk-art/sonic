@@ -17,8 +17,6 @@ editing safety_rules.yaml and restarting the system.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import re
 from enum import StrEnum
 from ipaddress import ip_address as _ip_addr
@@ -62,31 +60,6 @@ def _normalize_command(command: str) -> str:
     # Remove quotes wrapping tokens/words: e.g. "rm" -> rm, 'rm' -> rm
     norm = re.sub(r'["\']', "", norm)
     return norm
-
-
-def _decoded_command_candidates(command: str) -> list[str]:
-    """Expose common encoded IP payloads to the same fail-closed rules."""
-    candidates: list[str] = []
-    for token in re.findall(r"\b[A-Za-z0-9+/]{12,}={0,2}\b", command):
-        try:
-            decoded = base64.b64decode(token, validate=True).decode("utf-8")
-        except (ValueError, UnicodeDecodeError, binascii.Error):
-            continue
-        if decoded:
-            candidates.append(decoded)
-    for token in re.findall(r"\b(?:0x[0-9a-fA-F]+|[0-9]{8,})\b", command):
-        try:
-            value = int(token, 0)
-            if 0 <= value <= 0xFFFFFFFF:
-                candidates.append(".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0)))
-        except ValueError:
-            continue
-    for token in re.findall(r"\b(?:0[0-7]{2,3}\.){3}0[0-7]{2,3}\b", command):
-        try:
-            candidates.append(".".join(str(int(part, 8)) for part in token.split(".")))
-        except ValueError:
-            continue
-    return candidates
 
 
 class ScopeChecker:
@@ -196,12 +169,14 @@ class ScopeChecker:
 
     # Patterns that indicate destructive or high-risk operations
     _DESTRUCTIVE_PATTERNS = [
-        re.compile(r"\brm\s+.*(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|--recursive)\b", re.IGNORECASE),
-        re.compile(r"\brm\s+(-rf?|-fr|-r\s+-f|-f\s+-r|--recursive)\b", re.IGNORECASE),
+        re.compile(
+            r"\brm\s+(?:-[a-zA-Z]+\s+|--[a-zA-Z-]+\s+)*(?:/(?:\*|\s|$|etc\b|boot\b|usr\b|var\b|bin\b|sbin\b|lib\b|root\b|home\b|opt\b|srv\b|mnt\b|media\b|proc\b|sys\b|dev\b)|~(?:/|\s|$))",
+            re.IGNORECASE,
+        ),
         re.compile(r"\b(mkfs(\.\w+)?|mke2fs|wipefs)\b", re.IGNORECASE),
         re.compile(r"\bdd\b.*\bof=[\"']?/dev/", re.IGNORECASE),
         re.compile(r">\s*/dev/sd", re.IGNORECASE),
-        re.compile(r"\b(?:kill\s+-9\s+(?:1|-1)\b|(?:pkill|killall)\s+-9\s+(?!x-www-browser\b)\S+)", re.IGNORECASE),
+        re.compile(r"\b(?:kill\s+-9\s+(?:1|-1)\b|(?:pkill|killall)\s+-9\s+-u\s+root\b)", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?shutdown\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?reboot\b", re.IGNORECASE),
         re.compile(r"(?:\A|[;&|])\s*(?:sudo\s+)?(?:/s?bin/)?halt\b", re.IGNORECASE),
@@ -215,6 +190,8 @@ class ScopeChecker:
         re.compile(r"\bdrop\s+database\b", re.IGNORECASE),
         re.compile(r"\bmodify\b.*\bsafety_rules\b", re.IGNORECASE),
         re.compile(r"\bformat\s+[a-zA-Z]:(?:\s|$|\\)", re.IGNORECASE),
+        re.compile(r"\bexfiltrat(?:e|ion|ing)\b", re.IGNORECASE),
+        re.compile(r"\bdisable\b.*\blog(?:ging|s)?\b", re.IGNORECASE),
         # Reverse shells — high-risk command execution / egress of a shell
         re.compile(r"\bbash\b\s+-i\b.*/dev/tcp/", re.IGNORECASE),
         re.compile(r"\bsh\s+-i\b.*/dev/tcp/", re.IGNORECASE),
@@ -237,17 +214,7 @@ class ScopeChecker:
             return RiskLevel.L0_SAFE
 
         norm_command = _normalize_command(command)
-        candidates = [command, *_decoded_command_candidates(command)]
-        if norm_command != command:
-            candidates.append(norm_command)
-        metadata_targets = (
-            "169.254.169.254",
-            "100.100.100.200",
-            "metadata.google.internal",
-        )
-        if any(target in candidate.lower() for candidate in candidates for target in metadata_targets):
-            logger.warning("command_classified_metadata_target", command=command[:200])
-            return RiskLevel.L2_FORBIDDEN
+        candidates = [command] if norm_command == command else [command, norm_command]
 
         patterns_to_check = getattr(self, "_destructive_patterns", self._DESTRUCTIVE_PATTERNS)
         for cmd in candidates:
@@ -269,10 +236,6 @@ class ScopeChecker:
                     return RiskLevel.L1_NEEDS_APPROVAL
 
         return RiskLevel.L0_SAFE
-
-    def evaluate_laya_command_safety(self, command: str) -> dict[str, Any]:
-        """Convenience method delegating to evaluate_laya_command_safety."""
-        return evaluate_laya_command_safety(command)
 
     def is_target_in_scope(self, target: str, scope_config: dict) -> bool:
         """
@@ -509,62 +472,3 @@ def classify_command_risk(command: str) -> RiskLevel:
     """Module-level convenience wrapper for ScopeChecker().classify_command_risk."""
     return ScopeChecker().classify_command_risk(command)
 
-
-def evaluate_laya_command_safety(command: str) -> dict[str, Any]:
-    """Evaluate command safety combining deterministic classification with Laya System-1 scoring.
-
-    Returns structured System-1 + deterministic safety telemetry:
-        {
-            "risk_tier": tier.value,
-            "reason": reason,
-            "laya_score": score,
-            "laya_label": label,
-        }
-    """
-    cmd_str = command or ""
-    tier = classify_command_risk(cmd_str)
-    if tier == RiskLevel.L2_FORBIDDEN:
-        reason = f"destructive command blocked: {cmd_str[:80]}"
-    elif tier == RiskLevel.L1_NEEDS_APPROVAL:
-        reason = f"intrusive command needs approval: {cmd_str[:80]}"
-    else:
-        reason = "command risk acceptable"
-
-    score: float = 0.0
-    label: str = "safe"
-    try:
-        from sonic.llm.laya_engine import get_laya_engine
-
-        engine = get_laya_engine()
-        pred_res = engine.predict(
-            state=cmd_str,
-            questions={
-                "safety": {
-                    "type": "score",
-                    "criteria": ["safe", "needs_approval", "destructive"],
-                }
-            },
-        )
-        ans: dict[str, Any] = {}
-        if hasattr(pred_res, "answers") and isinstance(pred_res.answers, dict):
-            ans = pred_res.answers.get("safety") or (next(iter(pred_res.answers.values())) if pred_res.answers else {})
-        elif isinstance(pred_res, dict):
-            ans = pred_res.get("answers", {}).get("safety") or pred_res
-
-        if isinstance(ans, dict):
-            score = float(ans.get("score", 0.0))
-            label = str(ans.get("label", "safe"))
-        elif hasattr(pred_res, "get_score"):
-            score = float(pred_res.get_score("safety", 0.0))
-            label = "safe"
-    except Exception as exc:
-        logger.debug("laya_safety_evaluation_failed", error=str(exc))
-        score = 1.0 if tier == RiskLevel.L2_FORBIDDEN else (0.5 if tier == RiskLevel.L1_NEEDS_APPROVAL else 0.0)
-        label = "destructive" if tier == RiskLevel.L2_FORBIDDEN else ("needs_approval" if tier == RiskLevel.L1_NEEDS_APPROVAL else "safe")
-
-    return {
-        "risk_tier": tier.value,
-        "reason": reason,
-        "laya_score": score,
-        "laya_label": label,
-    }

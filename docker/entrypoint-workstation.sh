@@ -6,11 +6,19 @@ rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 
 # Start virtual framebuffer at 1280x800 with 24-bit color depth
 echo "[*] Starting Xvfb on display :99..."
+mkdir -p /tmp/.X11-unix /usr/local/bin /workspace /home/sonic
 Xvfb :99 -screen 0 1280x800x24 &
-sleep 1
+XVFB_PID=$!
+for _ in $(seq 1 20); do
+    [ -S /tmp/.X11-unix/X99 ] && break
+    sleep 0.2
+done
+kill -0 "$XVFB_PID"
 
 export DISPLAY=:99
-ln -sf /tmp/.X11-unix/X99 /tmp/.X11-unix/X0 2>/dev/null || true
+if [ -S /tmp/.X11-unix/X99 ]; then
+    ln -sf /tmp/.X11-unix/X99 /tmp/.X11-unix/X0
+fi
 
 # Start D-Bus session daemon
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
@@ -18,11 +26,12 @@ if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
 fi
 
 # Ensure the generic Python command name exists
-ln -sf /usr/bin/python3 /usr/local/bin/python 2>/dev/null || true
+if [ -x /usr/bin/python3 ]; then
+    ln -sf /usr/bin/python3 /usr/local/bin/python
+fi
 
 # Ensure workspace and /home/sonic/workspace exist and link together
-mkdir -p /workspace /home/sonic
-ln -sfn /workspace /home/sonic/workspace 2>/dev/null || true
+ln -sfn /workspace /home/sonic/workspace
 
 # Start full XFCE4 desktop session
 echo "[*] Starting XFCE4 desktop session..."

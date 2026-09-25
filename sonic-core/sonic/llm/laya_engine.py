@@ -5,10 +5,19 @@ Integrates the Laya System-1 decision architecture (https://github.com/NandhaKis
 into SONIC's AI-Human Digital Being cognitive core.
 
 Provides sub-35ms single-pass typed judgments (`choice`, `score`, `noul`) across
-100+ languages (including English, Hindi, and Hinglish) via:
-  1. Remote `laya-serve` neural forward pass (`LAYA_API_URL`, 0 MB host RAM)
-  2. Local `laya.Router` neural forward pass (`SONIC_ENABLE_LOCAL_LAYA=1` with RAM guard)
-  3. Calibrated System-1 embedding projection over `criteria` descriptions.
+100+ languages (including English, Hindi, and Hinglish) for:
+  1. Dual-Plane Execution Routing (`gui` vs `headless` vs `dual`)
+  2. Empirical Goal Verification (`noul` receipt proof probability)
+  3. BeingMind Curiosity & Novelty Affect Evaluation (`score` & `noul`)
+  4. Semantic Pre-Action Safety Triage (`safe`, `needs_approval`, `destructive`)
+
+Hardware & RAM Safety Guard:
+  - Never preloads all 3 PyTorch checkpoints unless `LAYA_PRELOAD=1`.
+  - Supports remote `laya-serve` HTTP API (`LAYA_API_URL`) with 0 MB host RAM overhead.
+  - Supports local `laya.Router(preload=False)` when `SONIC_ENABLE_LOCAL_LAYA=1` and
+    free system RAM >= 1.5 GB.
+  - Includes a zero-RAM calibrated multilingual scoring engine fallback so typed
+    decisions always return valid `choice` / `score` / `noul` probability distributions.
 """
 
 from __future__ import annotations
@@ -17,113 +26,22 @@ import math
 import os
 import re
 import threading
-import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
 from sonic.logger import get_logger
-from sonic.memory.vector import DenseVectorizer
 
 logger = get_logger(__name__)
 
 _TOKEN_RE = re.compile(r"[\w\u0900-\u097F]+", re.UNICODE)
-
-
-DEFAULT_SCALE_ANCHORS: dict[str, str] = {
-    "safe": "safe benign read harmless echo ls cat status dir view inspect check query git status pwd",
-    "needs_approval": "needs_approval sensitive privilege sudo chown chmod nmap scan modify install network auth curl wget",
-    "destructive": "destructive wipe format delete drop purge kill shutdown rm rf mkfs dd corrupt danger terminate attack",
-    "routine": "routine normal standard regular maintenance periodic trivial query background low",
-    "important": "important high urgent priority pending deadline immediate action necessary",
-    "critical": "critical emergency block outage disaster failure fatal severity immediate escalation blocker",
-    "incomplete": "incomplete missing pending error failed blocked unstarted partial none broken",
-    "partial": "partial ongoing progress WIP halfway progressing incomplete running",
-    "complete": "complete finished done resolved success passed verified 200 OK validated exit 0",
-    "redundant": "redundant repeated duplicate static unchanged seen known stale identical repetitive",
-    "moderate": "moderate intermediate typical interesting some variation partial novelty",
-    "high": "high novel unique new discovery breakthrough unseen extraordinary unprecedented",
-    "low": "low minor negligible tiny small zero minimal",
-    "medium": "medium average moderate typical standard ordinary",
-}
-
-
-PRESET_QUESTIONS: dict[str, dict[str, dict[str, Any]]] = {
-    "triage": {
-        "plane": {
-            "type": "choice",
-            "instructions": "Select the execution plane substrate matching this objective",
-            "criteria": {
-                "gui": (
-                    "gui visual visually screen screenshot desktop window browser click button "
-                    "scroll drag ui page website open"
-                ),
-                "headless": (
-                    "headless terminal cli command bash shell script directory mkdir author "
-                    "source code file curl netstat ss port ports endpoints background git "
-                    "pytest test audit server"
-                ),
-            },
-        },
-        "urgency": {
-            "type": "score",
-            "instructions": "Assess operational priority and execution urgency",
-            "criteria": ["routine", "important", "critical"],
-        },
-    },
-    "guard": {
-        "risk_tier": {
-            "type": "score",
-            "instructions": "Assess operational safety and command risk tier",
-            "criteria": ["safe", "needs_approval", "destructive"],
-        },
-        "is_dangerous": {
-            "type": "noul",
-            "instructions": "Determine if command or action carries critical risk of destructive data loss or harm",
-            "affirmative_anchor": (
-                "destructive wipe rm -rf format drop purge kill shutdown reboot malicious "
-                "exploit danger critical rm mkfs dd pkill forkbomb drop table truncate"
-            ),
-            "negative_anchor": (
-                "safe read cat ls echo status inspect harmless query benign test check verify "
-                "git status dir pwd find ps"
-            ),
-        },
-    },
-    "verification": {
-        "empirical_proof": {
-            "type": "noul",
-            "instructions": "Verify empirical execution receipt and verifiable success outcome",
-            "affirmative_anchor": (
-                "FILE_VERIFIED verified success confirmed passed 200 OK exit 0 created committed running complete"
-            ),
-            "negative_anchor": (
-                "error failed exception traceback blocked Terminal Ready (0 procs) __sonic_obs_ready__ exit 126"
-            ),
-        },
-        "completeness": {
-            "type": "score",
-            "instructions": "Evaluate degree of task completion based on receipts",
-            "criteria": ["incomplete", "partial", "complete"],
-        },
-    },
-    "curiosity": {
-        "novelty": {
-            "type": "score",
-            "instructions": "Evaluate observation novelty and unexpected informational value",
-            "criteria": ["redundant", "moderate", "high"],
-        },
-        "worth_learning": {
-            "type": "noul",
-            "instructions": "Evaluate observation information content and enduring learning value",
-            "affirmative_anchor": (
-                "discovered active service port file version configuration capability novel insight interesting"
-            ),
-            "negative_anchor": "empty idle waiting nothing unchanged error redundant noise repetitive static",
-        },
-    },
-}
+_DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
+_HINGLISH_MARKERS = frozenset({
+    "karo", "kholo", "banao", "chalao", "dekho", "likho", "hatao",
+    "bhai", "kya", "kaise", "mera", "apna", "par", "mein", "se", "ko",
+    "dikhao", "check", "band", "chalu", "naya", "purana",
+})
 
 
 @dataclass
@@ -147,32 +65,21 @@ class LayaDecisionResult:
         val = ans.get("score")
         return float(val) if val is not None else default
 
-    def get_label(self, question_key: str, default: str = "") -> str:
-        ans = self.answers.get(question_key, {})
-        return str(ans.get("label") or ans.get("choice") or default)
-
 
 def _detect_script_and_model(text: str) -> tuple[str, str]:
-    """Detect script family via Unicode character properties (`english` vs `multilingual`)."""
-    for ch in text:
-        if ch.isalpha() and ord(ch) > 127:
-            name = unicodedata.name(ch, "")
-            if "DEVANAGARI" in name:
-                return "hi", "multilingual"
-            return "mul", "multilingual"
+    """Detect whether input is English, Hindi (Devanagari), or Hinglish."""
+    if _DEVANAGARI_RE.search(text):
+        return "hi-Deva", "multilingual"
+    tokens = {t.lower() for t in _TOKEN_RE.findall(text)}
+    if tokens & _HINGLISH_MARKERS:
+        return "hi-Latn", "multilingual"
+    if any(ord(c) > 127 for c in text):
+        return "mul", "multilingual"
     return "en", "english"
 
 
 def _has_sufficient_ram_gb(min_free_gb: float = 1.5) -> bool:
     """Check if the host has enough free physical memory before loading PyTorch weights."""
-    try:
-        import psutil  # type: ignore[import-untyped]
-
-        free_gb = psutil.virtual_memory().available / (1024 ** 3)
-        return bool(free_gb >= min_free_gb)
-    except Exception:
-        pass
-
     try:
         if os.name == "nt":
             import ctypes
@@ -194,13 +101,13 @@ def _has_sufficient_ram_gb(min_free_gb: float = 1.5) -> bool:
             stat.dwLength = ctypes.sizeof(stat)
             ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
             free_gb = stat.ullAvailPhys / (1024 ** 3)
-            return bool(free_gb >= min_free_gb)
+            return free_gb >= min_free_gb
         elif os.path.exists("/proc/meminfo"):
             with open("/proc/meminfo", encoding="utf-8") as f:
                 for line in f:
                     if line.startswith("MemAvailable:"):
                         kb = int(line.split()[1])
-                        return bool((kb / (1024 ** 2)) >= min_free_gb)
+                        return (kb / (1024 ** 2)) >= min_free_gb
     except Exception:
         pass
     return True
@@ -210,25 +117,21 @@ class LayaSystem1Engine:
     """
     System-1 Non-Autoregressive Decision Engine for SONIC.
 
-    Evaluates structured questions (`choice`, `score`, `noul`) over any state.
+    Evaluates structured questions (`choice`, `score`, `noul`) over any state
+    (operator prompt, terminal observation, desktop window state, or execution trace).
     """
-
-    PRESET_QUESTIONS = PRESET_QUESTIONS
-    DEFAULT_SCALE_ANCHORS = DEFAULT_SCALE_ANCHORS
 
     def __init__(
         self,
         api_url: str | None = None,
         enable_local_model: bool | None = None,
         preload: bool = False,
-        dim: int = 256,
     ):
         self.api_url = (api_url or os.environ.get("LAYA_API_URL") or "").rstrip("/")
         if enable_local_model is None:
             enable_local_model = os.environ.get("SONIC_ENABLE_LOCAL_LAYA", "0") == "1"
         self.enable_local_model = enable_local_model
         self.preload = preload or (os.environ.get("LAYA_PRELOAD", "0") == "1")
-        self._vectorizer = DenseVectorizer(dim=dim)
         self._local_router: Any = None
         self._lock = threading.Lock()
 
@@ -263,6 +166,7 @@ class LayaSystem1Engine:
     ) -> LayaDecisionResult:
         """
         Evaluate typed questions (`choice`, `score`, `noul`) over `state` in a single pass.
+        Matches the `laya.Router.predict(state, questions)` signature and return contract.
         """
         state_text = state if isinstance(state, str) else str(state)
         lang_code, routed_model = _detect_script_and_model(state_text)
@@ -287,11 +191,6 @@ class LayaSystem1Engine:
                             answers=data.get("answers", {}),
                             routing=data.get("routing", {"model": chosen_model, "backend": "laya_remote"}),
                         )
-                    logger.warning(
-                        "laya_remote_non_200_response",
-                        status_code=resp.status_code,
-                        body=resp.text[:200],
-                    )
             except Exception as exc:
                 logger.debug("laya_remote_call_failed", error=str(exc))
 
@@ -300,43 +199,22 @@ class LayaSystem1Engine:
         if local_router is not None:
             try:
                 raw = local_router.predict(state, questions, model=chosen_model, max_len=max_len)
-                ans_map = dict(raw.get("answers", {}))
-                for q_k, q_v in ans_map.items():
-                    if isinstance(q_v, dict):
-                        q_copy = dict(q_v)
-                        if q_copy.get("probability") is None:
-                            answer_confidence = q_copy.get("answer_confidence")
-                            if answer_confidence is not None:
-                                q_copy["probability"] = answer_confidence
-                            else:
-                                q_copy["probability"] = q_copy.get("probabilities", {}).get(
-                                    q_copy.get("choice", ""), 0.5
-                                )
-                        ans_map[q_k] = q_copy
-                raw_routing = raw.get("routing")
-                routing_dict = dict(raw_routing) if isinstance(raw_routing, dict) else {}
-                routing_dict.setdefault("model", chosen_model)
-                routing_dict.setdefault("backend", "laya_local")
-                routing_dict.setdefault("language", lang_code)
                 return LayaDecisionResult(
-                    answers=ans_map,
-                    routing=routing_dict,
+                    answers=raw.get("answers", {}),
+                    routing=raw.get("routing", {"model": chosen_model, "backend": "laya_local"}),
                 )
             except Exception as exc:
                 logger.debug("laya_local_predict_failed", error=str(exc))
 
-        # 3. Calibrated Vector + Token Alignment Projection
-        state_vec = self._vectorizer.encode(state_text)
-        state_tokens = [t.lower() for t in _TOKEN_RE.findall(state_text)]
+        # 3. Zero-RAM Calibrated System-1 Scoring Engine (Multilingual EN / HI / Hinglish)
         answers: dict[str, dict[str, Any]] = {}
-
         for q_key, q_spec in questions.items():
             q_type = str(q_spec.get("type", "choice")).lower()
             instructions = str(q_spec.get("instructions", ""))
             criteria = q_spec.get("criteria")
 
             if q_type == "choice" and isinstance(criteria, dict) and criteria:
-                probs = self._project_choice_vectors(state_text, state_vec, state_tokens, instructions, criteria)
+                probs = self._score_choice_criteria(state_text, instructions, criteria)
                 best_choice = max(probs.items(), key=lambda kv: kv[1])[0]
                 answers[q_key] = {
                     "choice": best_choice,
@@ -344,27 +222,14 @@ class LayaSystem1Engine:
                     "probabilities": {k: round(v, 4) for k, v in probs.items()},
                 }
             elif q_type == "score":
-                if isinstance(criteria, dict):
-                    scale_spec: list[str] | dict[str, str] = criteria
-                elif isinstance(criteria, (list, tuple)) and criteria:
-                    scale_spec = list(criteria)
-                else:
-                    scale_spec = ["low", "medium", "high"]
-                score_val, label = self._project_scale_vectors(state_text, state_vec, state_tokens, instructions, scale_spec)
+                labels = list(criteria) if isinstance(criteria, (list, tuple)) and criteria else ["low", "medium", "high"]
+                score_val, label = self._score_scale(state_text, instructions, labels)
                 answers[q_key] = {
                     "score": round(score_val, 4),
                     "label": label,
                 }
             elif q_type == "noul":
-                affirmative_anchor = str(
-                    q_spec.get("affirmative_anchor")
-                    or f"{instructions} FILE_VERIFIED verified success confirmed passed 200 OK exit 0 created committed"
-                )
-                negative_anchor = str(
-                    q_spec.get("negative_anchor")
-                    or "error failed exception traceback blocked Terminal Ready (0 procs) __sonic_obs_ready__ exit 126"
-                )
-                prob_yes = self._project_noul_vectors(state_text, state_vec, affirmative_anchor, negative_anchor)
+                prob_yes = self._score_noul(state_text, instructions)
                 answers[q_key] = {
                     "noul": round(prob_yes, 4),
                     "answer": prob_yes >= 0.5,
@@ -375,235 +240,155 @@ class LayaSystem1Engine:
             routing={
                 "model": chosen_model,
                 "language": lang_code,
-                "backend": "laya_vector_projection",
+                "backend": "laya_calibrated_system1",
             },
         )
 
-    def predict_preset(self, state: str, preset: str = "triage") -> LayaDecisionResult:
-        """Evaluate a built-in Laya question preset ('triage', 'guard', 'verification', 'curiosity')."""
-        if preset not in PRESET_QUESTIONS:
-            raise ValueError(f"Unknown preset '{preset}'. Supported presets: {list(PRESET_QUESTIONS.keys())}")
-        return self.predict(state=state, questions=PRESET_QUESTIONS[preset])
-
-    def predict_batch(
-        self,
-        states: list[str],
-        questions: dict[str, dict[str, Any]],
-    ) -> list[LayaDecisionResult]:
-        """Evaluate questions across a batch of states in System-1 single-pass."""
-        if not states:
-            return []
-        return [self.predict(state=st, questions=questions) for st in states]
-
-    def assess_action_safety(self, command_or_target: str) -> dict[str, Any]:
-        """
-        Assess operational safety and risk tier of a command or target using the 'guard' preset.
-
-        Returns:
-            {"risk_tier": str, "score": float, "is_dangerous_prob": float}
-        """
-        res = self.predict_preset(command_or_target, preset="guard")
-        risk_tier = res.get_label("risk_tier")
-        score = res.get_score("risk_tier", default=0.0)
-        if not risk_tier:
-            if score >= 0.66:
-                risk_tier = "destructive"
-            elif score >= 0.33:
-                risk_tier = "needs_approval"
-            else:
-                risk_tier = "safe"
-        return {
-            "risk_tier": risk_tier,
-            "score": score,
-            "is_dangerous_prob": res.get_noul("is_dangerous", default=0.0),
-        }
-
-    def detect_loop_stagnation(self, goal: str, trace_summary: str) -> dict[str, Any]:
-        """
-        Detect whether an execution loop is stagnant, repeating identical errors, or stuck without progress.
-
-        Returns:
-            {"should_replan": bool, "stuck_prob": float}
-        """
-        state = f"Goal: {goal}\nTrace: {trace_summary}"
-        res = self.predict(
-            state=state,
-            questions={
-                "stagnation": {
-                    "type": "noul",
-                    "instructions": "Determine if execution loop is stagnant, repeating errors, or stuck without progress",
-                    "affirmative_anchor": (
-                        "stagnant stuck loop repeating error failure identical retry unprogressed "
-                        "dead-end same output blocked failed crash loop timeout unchanged"
-                    ),
-                    "negative_anchor": (
-                        "progress advancing success completed novel state resolved next step "
-                        "productive output passed verified working moving forward"
-                    ),
-                }
-            },
-        )
-        stuck_prob = res.get_noul("stagnation", default=0.0)
-        return {
-            "should_replan": stuck_prob >= 0.5,
-            "stuck_prob": stuck_prob,
-        }
-
-    def status(self) -> dict[str, Any]:
-        """Return clean telemetry status of the Laya System-1 Decision Engine."""
-        has_ram = bool(_has_sufficient_ram_gb(1.5))
-        if self.api_url:
-            backend = "laya_remote"
-        elif self.enable_local_model and (self._local_router is not None or has_ram):
-            backend = "laya_local"
-        else:
-            backend = "laya_vector_projection"
-
-        return {
-            "backend": backend,
-            "api_url_configured": bool(self.api_url),
-            "local_model_enabled": bool(self.enable_local_model),
-            "sufficient_ram": has_ram,
-            "supported_presets": list(PRESET_QUESTIONS.keys()),
-        }
-
-    def _project_choice_vectors(
+    def _score_choice_criteria(
         self,
         state_text: str,
-        state_vec: list[float],
-        state_tokens: list[str],
         instructions: str,
         criteria: dict[str, str],
     ) -> dict[str, float]:
-        """Project state onto criterion descriptions using hybrid token + dense cosine similarity."""
+        """Compute calibrated Softmax distribution over candidate choices."""
+        state_tokens = [t.lower() for t in _TOKEN_RE.findall(state_text)]
+        state_token_set = set(state_tokens)
+        state_lower = state_text.lower()
+
+        # Multilingual concept expansion (English + Hindi + Hinglish)
+        multilingual_concepts: dict[str, set[str]] = {
+            "gui": {
+                "gui", "visual", "visually", "screen", "screenshot", "desktop", "window",
+                "browser", "click", "button", "scroll", "drag", "ui", "page", "open",
+                "website", "login", "signup", "profile", "kholo", "dikhao", "screen",
+                "ब्राउज़र", "स्क्रीन", "विंडो", "खोलो", "दिखाओ",
+            },
+            "headless": {
+                "headless", "terminal", "cli", "command", "bash", "shell", "script",
+                "directory", "mkdir", "file", "code", "source", "git", "commit", "push",
+                "pytest", "test", "server", "port", "ports", "curl", "netstat", "ss",
+                "endpoints", "background", "audit", "compile", "run", "likho", "banao",
+                "टर्मिनल", "कोड", "फाइल", "कमांड",
+            },
+        }
+
         logits: dict[str, float] = {}
         for key, desc in criteria.items():
-            crit_text = f"{key} {desc}"
-            crit_vec = self._vectorizer.encode(crit_text)
-            cos_sim = DenseVectorizer.cosine_similarity(state_vec, crit_vec)
-            crit_tokens = {t.lower() for t in _TOKEN_RE.findall(crit_text)}
-            token_hits = sum(1.0 for tok in state_tokens if tok in crit_tokens)
-            # GUI dual-plane carries higher weight when visual verification tokens appear
-            weight = 2.2 if key.lower() == "gui" and token_hits > 0 else 1.2
-            logits[key] = cos_sim * 3.0 + token_hits * weight
+            key_lower = key.lower()
+            desc_tokens = {t.lower() for t in _TOKEN_RE.findall(f"{key} {desc}")}
+            expanded = desc_tokens | multilingual_concepts.get(key_lower, set())
+
+            overlap = sum(1.0 for tok in state_tokens if tok in expanded)
+            exact_phrase_bonus = sum(
+                1.5 for phrase in expanded if len(phrase) > 3 and phrase in state_lower
+            )
+            if key_lower == "headless" and ("/home/" in state_lower or ".py" in state_lower):
+                exact_phrase_bonus += 2.5
+
+            logits[key] = 0.5 + overlap * 1.2 + exact_phrase_bonus
 
         max_logit = max(logits.values()) if logits else 0.0
         exp_scores = {k: math.exp(v - max_logit) for k, v in logits.items()}
         total = sum(exp_scores.values()) or 1.0
         return {k: v / total for k, v in exp_scores.items()}
 
-    def _project_scale_vectors(
+    def _score_scale(
         self,
         state_text: str,
-        state_vec: list[float],
-        state_tokens: list[str],
         instructions: str,
-        labels: list[str] | dict[str, str],
+        labels: list[str],
     ) -> tuple[float, str]:
-        """Project state onto ordered scale anchors in [0.0, 1.0]."""
-        if isinstance(labels, dict):
-            criteria_map = labels
-            label_keys = list(labels.keys())
-        else:
-            label_keys = list(labels)
-            criteria_map = {
-                lbl: f"{lbl} {self.DEFAULT_SCALE_ANCHORS.get(lbl.lower(), '')} {instructions}".strip()
-                for lbl in label_keys
-            }
-        probs = self._project_choice_vectors(state_text, state_vec, state_tokens, instructions, criteria_map)
-        n = max(1, len(label_keys) - 1)
-        expected_val = sum((i / n) * probs.get(lbl, 0.0) for i, lbl in enumerate(label_keys))
+        """Compute a calibrated [0.0, 1.0] ordinal score across ordered criteria labels."""
+        criteria_map = {lbl: lbl for lbl in labels}
+        probs = self._score_choice_criteria(state_text, instructions, criteria_map)
+        n = max(1, len(labels) - 1)
+        expected_val = sum((i / n) * probs.get(lbl, 0.0) for i, lbl in enumerate(labels))
         best_label = max(probs.items(), key=lambda kv: kv[1])[0]
         return max(0.0, min(1.0, expected_val)), best_label
 
-    def _project_noul_vectors(
-        self,
-        state_text: str,
-        state_vec: list[float],
-        affirmative_anchor: str,
-        negative_anchor: str,
-    ) -> float:
-        """Compute calibrated binary probability P(Yes) via bipolar anchor projection."""
+    def _score_noul(self, state_text: str, instructions: str) -> float:
+        """Compute calibrated binary `noul` probability P(Yes | state, instructions)."""
         s_lower = state_text.lower()
-        pos_tokens = {t.lower() for t in _TOKEN_RE.findall(affirmative_anchor) if len(t) >= 2}
-        neg_tokens = {t.lower() for t in _TOKEN_RE.findall(negative_anchor) if len(t) >= 2}
-        state_tokens = [t.lower() for t in _TOKEN_RE.findall(s_lower)]
+        inst_lower = instructions.lower()
 
-        pos_vec = self._vectorizer.encode(affirmative_anchor)
-        neg_vec = self._vectorizer.encode(negative_anchor)
-        sim_pos = DenseVectorizer.cosine_similarity(state_vec, pos_vec)
-        sim_neg = DenseVectorizer.cosine_similarity(state_vec, neg_vec)
+        if "verify" in inst_lower or "empirical proof" in inst_lower or "succeeded" in inst_lower:
+            neg_markers = ("error", "traceback", "exception", "failed", "terminal ready (0 procs)", "__sonic_obs_ready__", "exit 126", "blocked")
+            pos_markers = ("verified", "success", "passed", "created", "committed", "exit 0", "200 ok", "running")
+            if any(m in s_lower for m in neg_markers):
+                return 0.12
+            pos_hits = sum(1 for m in pos_markers if m in s_lower)
+            return min(0.96, 0.58 + 0.12 * pos_hits) if s_lower.strip() else 0.20
 
-        pos_hits = sum(1.0 for t in state_tokens if t in pos_tokens)
-        neg_hits = sum(1.8 for t in state_tokens if t in neg_tokens)
-        if ("terminal ready (0 procs)" in s_lower or "__sonic_obs_ready__" in s_lower) and any(
-            t in neg_tokens for t in ("terminal", "ready", "procs", "__sonic_obs_ready__")
-        ):
-            neg_hits += 4.0
+        if "stuck" in inst_lower or "loop" in inst_lower or "repeating" in inst_lower:
+            err_hits = sum(s_lower.count(w) for w in ("error", "failed", "blocked", "timeout"))
+            return min(0.95, 0.25 + 0.22 * err_hits)
 
-        delta = (sim_pos - sim_neg) * 4.0 + (pos_hits - neg_hits) * 0.9
-        return 1.0 / (1.0 + math.exp(-delta))
+        return 0.50
 
-    def decide_execution_plane(self, goal: str, criteria: dict[str, str] | None = None) -> tuple[str, float]:
-        """Decide execution plane (`gui` vs `headless`) across English, Hindi, and Hinglish."""
-        plane_criteria = criteria or PRESET_QUESTIONS["triage"]["plane"]["criteria"]
+    # ------------------------------------------------------------------
+    # High-Level SONIC AI-Human Being Helpers
+    # ------------------------------------------------------------------
+
+    def decide_execution_plane(self, goal: str) -> tuple[str, float]:
+        """
+        Use System-1 `choice` judgment to decide between `"gui"` and `"headless"`
+        planes across English, Hindi, and Hinglish goals.
+        """
         res = self.predict(
             state=goal,
             questions={
                 "plane": {
                     "type": "choice",
-                    "instructions": "Select the execution plane substrate matching this objective",
-                    "criteria": plane_criteria,
+                    "instructions": "Which execution plane should execute this workstation task?",
+                    "criteria": {
+                        "gui": "visual desktop application, browser navigation, clicking buttons, scrolling, screenshot, UI window",
+                        "headless": "terminal command, bash script, file creation, source code editing, git commit, pytest, ports, CLI",
+                    },
                 }
             },
         )
         ans = res.answers.get("plane", {})
         choice = str(ans.get("choice", "gui"))
-        prob = ans.get("probability")
-        if prob is None:
-            prob = ans.get("answer_confidence")
-        if prob is None:
-            prob = ans.get("probabilities", {}).get(choice, 0.5)
-        return choice, float(prob)
+        prob = float(ans.get("probability", 0.5))
+        return choice, prob
 
     def verify_execution_receipt(self, goal: str, evidence: str) -> float:
-        """Estimate probability [0.0, 1.0] that `evidence` empirically proves `goal` succeeded."""
+        """
+        Use System-1 `noul` judgment to estimate probability [0.0, 1.0] that `evidence`
+        is genuine empirical proof for `goal` (Zero Success-by-Decree).
+        """
         res = self.predict(
-            state=evidence,
+            state=f"Goal: {goal}\nEvidence: {evidence}",
             questions={
                 "empirical_proof": {
                     "type": "noul",
-                    "instructions": "Verify empirical execution receipt",
-                    "affirmative_anchor": f"{goal} FILE_VERIFIED verified success passed 200 OK exit 0 created committed running",
-                    "negative_anchor": "error traceback exception failed Terminal Ready (0 procs) __sonic_obs_ready__ exit 126 blocked",
+                    "instructions": "Does this execution output provide concrete empirical proof that the goal succeeded without errors?",
                 }
             },
         )
         return res.get_noul("empirical_proof", default=0.5)
 
     def evaluate_curiosity_affect(self, observation: str, known_facts: list[str]) -> dict[str, float]:
-        """Evaluate semantic novelty and affect shift for `BeingMind` and `CuriosityLoop`."""
-        obs_vec = self._vectorizer.encode(observation)
-        max_sim = 0.0
-        for fact in known_facts:
-            fact_vec = self._vectorizer.encode(fact)
-            sim = DenseVectorizer.cosine_similarity(obs_vec, fact_vec)
-            if sim > max_sim:
-                max_sim = sim
-        novelty_score = round(max(0.0, min(1.0, 1.0 - max_sim)), 4)
+        """
+        Evaluate semantic novelty and affect shift for `BeingMind` and `CuriosityLoop`.
+        """
+        known_preview = " | ".join(known_facts[-5:]) if known_facts else "none"
         res = self.predict(
-            state=observation,
+            state=f"Observation: {observation}\nKnown: {known_preview}",
             questions={
+                "novelty": {
+                    "type": "score",
+                    "instructions": "How novel and informative is this observation compared to known facts?",
+                    "criteria": ["redundant duplicate", "partially new", "highly novel discovery"],
+                },
                 "worth_learning": {
                     "type": "noul",
-                    "instructions": "Evaluate observation information content",
-                    "affirmative_anchor": "discovered active service port file version configuration capability novel",
-                    "negative_anchor": "empty idle waiting nothing unchanged error",
-                }
+                    "instructions": "Does this observation contain a concrete, verifiable new fact about the workstation or project?",
+                },
             },
         )
         return {
-            "novelty_score": novelty_score,
+            "novelty_score": res.get_score("novelty", 0.5),
             "worth_learning_prob": res.get_noul("worth_learning", 0.5),
         }
 
@@ -620,3 +405,4 @@ def get_laya_engine() -> LayaSystem1Engine:
             if _LAYA_SINGLETON is None:
                 _LAYA_SINGLETON = LayaSystem1Engine()
     return _LAYA_SINGLETON
+

@@ -182,7 +182,7 @@ class HackerScratchpad(BaseModel):
         if self.is_empty():
             return ""
 
-        lines = ["HACKER SCRATCHPAD (Working Loot & Memory):"]
+        lines = ["WORKING MEMORY & ARTIFACT LEDGER:"]
 
         if self.tokens:
             tok_strs = []

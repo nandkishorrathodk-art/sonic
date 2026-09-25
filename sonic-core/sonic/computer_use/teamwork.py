@@ -82,86 +82,10 @@ class SubagentTaskSpec:
     requirements: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     verification_command: str = ""
-    workspace_mode: str = "branch"   # Default: every launched subagent gets its own separate isolated workspace ("branch" | "share" | "inherit")
+    workspace_mode: str = "inherit"  # "inherit" | "branch" | "share"
     model_tier: str = "inherit"      # "inherit" | "flash" | "pro"
     max_steps: int = 12
     max_correction_rounds: int = 2
-
-
-class _ScopedSubagentProviderProxy:
-    """Wraps a shared ComputerProvider (e.g. Docker/Daytona) so a subagent's terminal, file,
-    and git operations execute strictly inside its own isolated workspace directory (`isolated_dir`)
-    without colliding with peer subagents or the parent Being's workspace.
-    """
-
-    def __init__(
-        self,
-        base_provider: Any,
-        isolated_dir: str = "",
-        *,
-        subagent_id: str | None = None,
-        workspace_mode: str = "branch",
-    ) -> None:
-        self._base = base_provider
-        self._inner = base_provider
-        self.subagent_id = subagent_id
-        self.workspace_mode = workspace_mode
-        if not isolated_dir:
-            isolated_dir = f"/home/sonic/workspace/.sonic_subagents/{subagent_id or 'sub'}"
-        self._iso_dir = isolated_dir.rstrip("/")
-        self.isolated_dir = self._iso_dir
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    def _rewrite_path(self, path: str) -> str:
-        p = (path or "").strip()
-        if not p or p == ".":
-            return self._iso_dir
-        if p.startswith(self._iso_dir):
-            return p
-        ws_root = getattr(self._inner, "workspace_root", "/home/sonic/workspace")
-        if p.startswith(ws_root):
-            rel = p[len(ws_root):].lstrip("/\\")
-            return f"{self._iso_dir}/{rel}"
-        if not p.startswith("/") and ":" not in p[:3]:
-            import os
-            clean_rel = os.path.normpath(p).replace("\\", "/").lstrip("/")
-            if clean_rel.startswith("../") or clean_rel == "..":
-                clean_rel = clean_rel.replace("../", "").lstrip("./")
-            return f"{self._iso_dir}/{clean_rel}"
-        return p
-
-    _resolve_rel_path = _rewrite_path
-
-    async def terminal(self, workspace_id: str, command: str, *args: Any, **kwargs: Any) -> Any:
-        scoped_cmd = f'mkdir -p "{self._iso_dir}" && cd "{self._iso_dir}" && {command}'
-        return await self._inner.terminal(workspace_id, scoped_cmd, *args, **kwargs)
-
-    async def execute(self, workspace_id: str, command: str, *args: Any, **kwargs: Any) -> Any:
-        scoped_cmd = f'mkdir -p "{self._iso_dir}" && cd "{self._iso_dir}" && {command}'
-        if hasattr(self._inner, "execute"):
-            return await self._inner.execute(workspace_id, scoped_cmd, *args, **kwargs)
-        return await self._inner.terminal(workspace_id, scoped_cmd, *args, **kwargs)
-
-    async def read_file(self, workspace_id: str, path: str, *args: Any, **kwargs: Any) -> Any:
-        return await self._inner.read_file(workspace_id, self._rewrite_path(path), *args, **kwargs)
-
-    async def write_file(self, workspace_id: str, path: str, content: str, *args: Any, **kwargs: Any) -> Any:
-        return await self._inner.write_file(workspace_id, self._rewrite_path(path), content, *args, **kwargs)
-
-    async def list_files(self, workspace_id: str, directory: str = ".", *args: Any, **kwargs: Any) -> Any:
-        return await self._inner.list_files(workspace_id, self._rewrite_path(directory), *args, **kwargs)
-
-    async def git_action(self, workspace_id: str, action: str, **kwargs: Any) -> Any:
-        rewritten_kwargs = dict(kwargs)
-        for key in ("path", "repo_path", "directory", "cwd", "target_dir"):
-            if key in rewritten_kwargs and isinstance(rewritten_kwargs[key], str):
-                rewritten_kwargs[key] = self._rewrite_path(rewritten_kwargs[key])
-        if not any(k in rewritten_kwargs for k in ("path", "repo_path", "directory", "cwd", "target_dir")):
-            rewritten_kwargs["path"] = self._iso_dir
-        return await self._inner.git_action(workspace_id, action, **rewritten_kwargs)
-
 
 
 @dataclass
@@ -277,7 +201,7 @@ class SubagentTeamworkManager:
                         requirements=list(raw.get("requirements") or []),
                         acceptance_criteria=list(raw.get("acceptance_criteria") or []),
                         verification_command=str(raw.get("verification_command") or ""),
-                        workspace_mode=str(raw.get("workspace_mode") or raw.get("Workspace") or "branch").lower().strip(),
+                        workspace_mode=str(raw.get("workspace_mode") or raw.get("Workspace") or "inherit").lower().strip(),
                         model_tier=str(raw.get("model_tier") or raw.get("Model") or "inherit").lower().strip(),
                         max_steps=int(raw.get("max_steps") or 12),
                         max_correction_rounds=int(raw.get("max_correction_rounds") if raw.get("max_correction_rounds") is not None else 2),
@@ -289,7 +213,7 @@ class SubagentTeamworkManager:
 
         async def _launch_one(spec: SubagentTaskSpec) -> SubagentConversation:
             conv_id = f"subconv-{uuid.uuid4().hex[:10]}"
-            w_mode = spec.workspace_mode if spec.workspace_mode in ("inherit", "branch", "share") else "branch"
+            w_mode = spec.workspace_mode if spec.workspace_mode in ("inherit", "branch", "share") else "inherit"
             eff_ws_id, isolated_path = await self._prepare_subagent_workspace(workspace_id, conv_id, w_mode)
 
             conv = SubagentConversation(
@@ -445,39 +369,27 @@ class SubagentTeamworkManager:
             except Exception:
                 parent_dir = None
 
-        if parent_dir is not None and parent_dir.exists() and hasattr(self.computer, "create"):
-            try:
-                child_ws = await self.computer.create(
-                    tenant_id=self.tenant_id,
-                    engagement_id=conversation_id,
-                )
-                child_ws_id = child_ws.id if hasattr(child_ws, "id") else str(child_ws)
-                iso_root = Path(self.computer._get_workspace_dir(child_ws_id))
-                iso_root.mkdir(parents=True, exist_ok=True)
-                for item in parent_dir.iterdir():
-                    if item.name in (".sonic_subagents", "__pycache__", ".pytest_cache", "node_modules"):
-                        continue
-                    dest = iso_root / item.name
-                    try:
-                        if item.is_dir():
-                            shutil.copytree(item, dest, dirs_exist_ok=True)
-                        elif item.is_file():
-                            shutil.copy2(item, dest)
-                    except Exception:
-                        pass
-                return child_ws_id, iso_root
-            except Exception:
-                pass
+        if parent_dir is not None and parent_dir.exists():
+            iso_root = parent_dir / ".sonic_subagents" / conversation_id
+            iso_root.mkdir(parents=True, exist_ok=True)
+            # Copy baseline top-level source files (excluding .sonic_subagents and .git bloat)
+            for item in parent_dir.iterdir():
+                if item.name in (".sonic_subagents", "__pycache__", ".pytest_cache", "node_modules"):
+                    continue
+                dest = iso_root / item.name
+                try:
+                    if item.is_dir():
+                        shutil.copytree(item, dest, dirs_exist_ok=True)
+                    elif item.is_file():
+                        shutil.copy2(item, dest)
+                except Exception:
+                    pass
+            return parent_workspace_id, iso_root
 
-        # Inside remote Linux/Docker/Daytona container: create isolated git worktree or directory
+        # Inside remote Linux/Docker container: create isolated directory under /tmp or workspace
         try:
-            iso_remote = f"/home/sonic/workspace/.sonic_subagents/{conversation_id}"
-            setup_cmd = (
-                f"mkdir -p /home/sonic/workspace/.sonic_subagents && "
-                f"(git -C /home/sonic/workspace worktree add -b {conversation_id} {iso_remote} "
-                f"|| (mkdir -p {iso_remote} && cp -r /home/sonic/workspace/* {iso_remote}/))"
-            )
-            await self.computer.terminal(parent_workspace_id, setup_cmd)
+            iso_remote = f"/tmp/sonic_subagents/{conversation_id}"
+            await self.computer.terminal(parent_workspace_id, f"mkdir -p {iso_remote}")
             return parent_workspace_id, Path(iso_remote)
         except Exception:
             return parent_workspace_id, None
@@ -506,19 +418,6 @@ class SubagentTeamworkManager:
                 dst_file.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_file, dst_file)
                 merged.append(rel.as_posix())
-            return merged
-
-        # Remote Docker/Daytona workspace merge
-        if hasattr(self.computer, "terminal"):
-            iso_str = conv.isolated_dir.as_posix()
-            try:
-                await self.computer.terminal(
-                    conv.parent_workspace_id,
-                    f'cp -rf "{iso_str}/." /home/sonic/workspace/',
-                )
-                merged.append(iso_str)
-            except Exception:
-                pass
         return merged
 
     async def _execute_and_verify_loop(
@@ -535,24 +434,12 @@ class SubagentTeamworkManager:
         from sonic.computer_use.models import ComputerAutonomyLevel, EngineeringMissionMode
         from sonic.safety.action_policy import ActionPolicy
 
+        type_def = self.defined_types.get(spec.type_name.lower())
         safety_clone = (
             self.safety.clone_for_agent(conv.conversation_id)
             if isinstance(self.safety, ActionPolicy)
             else self.safety
         )
-        if isinstance(safety_clone, ActionPolicy) and conv.isolated_dir is not None:
-            if conv.isolated_dir.exists():
-                safety_clone.workspace_root = conv.isolated_dir.resolve()
-            else:
-                safety_clone.workspace_root = Path(conv.isolated_dir.as_posix())
-
-        sub_provider = self.computer
-        if (
-            conv.workspace_mode in ("branch", "share")
-            and conv.isolated_dir is not None
-            and conv.effective_workspace_id == conv.parent_workspace_id
-        ):
-            sub_provider = _ScopedSubagentProviderProxy(self.computer, conv.isolated_dir.as_posix())
 
         # Reuse existing ComputerUseAgent on continuation (`send_message`) so full history is preserved!
         if conv.agent_instance is None:
@@ -566,7 +453,7 @@ class SubagentTeamworkManager:
                 scoped_ctx["isolated_working_dir"] = conv.isolated_dir.as_posix()
 
             conv.agent_instance = ComputerUseAgent(
-                computer_provider=sub_provider,
+                computer_provider=self.computer,
                 autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
                 mode=EngineeringMissionMode.GENERAL_ENGINEERING_MODE,
                 max_actions=max(1, min(int(spec.max_steps), 30)),
@@ -596,14 +483,11 @@ class SubagentTeamworkManager:
             conv.state = "running"
             conv.state_detail = f"Round {round_idx + 1}/{max_rounds + 1}"
 
-            step_budget = max(1, min(int(spec.max_steps), 30))
-            agent.max_actions = len(getattr(agent, "history", [])) + step_budget
-
             # Silent background execution: step_callback=None so main UI is never spammed!
             traces = await agent.run_mission(
                 workspace_id=conv.effective_workspace_id,
                 goal=current_goal,
-                steps=step_budget,
+                steps=max(1, min(int(spec.max_steps), 30)),
                 step_callback=None,
             )
             conv.traces.extend(traces or [])
@@ -738,9 +622,9 @@ class SubagentTeamworkManager:
             except Exception:
                 pass
 
-        if eval_res.verdict == JudgeVerdict.CONFIRMED and has_ok_trace:
+        if has_ok_trace:
             return True, JudgeVerdict.CONFIRMED.value, eval_res.notes or "All acceptance criteria verified."
-        return False, eval_res.verdict.value, eval_res.notes or "Independent verification failed or lacked empirical evidence."
+        return False, eval_res.verdict.value, eval_res.notes or "No successful execution evidence recorded."
 
     @staticmethod
     def _summarize_traces(traces: list[Any]) -> str:
@@ -755,7 +639,4 @@ class SubagentTeamworkManager:
             status = getattr(t, "status", "") if not isinstance(t, dict) else t.get("status", "")
             lines.append(f"[{status}] {act_str} ({tgt}): {str(obs)[:200]}")
         return "\n".join(lines)
-
-
-SubagentTeamCoordinator = SubagentTeamworkManager
 

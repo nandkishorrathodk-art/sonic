@@ -51,7 +51,7 @@ export default function SonicDevinWorkstation() {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [activeTab, setActiveTab] = useState<WorkstationTab>("desktop");
   const [connectionStatus, setConnectionStatus] = useState<SystemStatus>("CONNECTING");
-  const [sessionId, setSessionId] = useState("fresh");
+  const [sessionId, setSessionId] = useState("default");
   const [workstationState, setWorkstationState] = useState<WorkstationState | null>(null);
   const [activeFile, setActiveFile] = useState("");
   const [fileContent, setFileContent] = useState<string[]>([]);
@@ -70,9 +70,7 @@ export default function SonicDevinWorkstation() {
       }
     }
     for (const log of commandLogs) {
-      if (!list.includes(log)) {
-        list.push(log);
-      }
+      list.push(log);
     }
     return list;
   }, [workstationState?.worklog, commandLogs]);
@@ -307,7 +305,7 @@ export default function SonicDevinWorkstation() {
   };
 
   const handleRunCommand = async (cmd: string): Promise<CommandResult | null> => {
-    setCommandLogs((prev) => [...prev, `sonic@sandbox-01:~$ ${cmd}`]);
+    setCommandLogs((prev) => [...prev, `sonic@workstation:~$ ${cmd}`]);
     try {
       const res = await api.executeCommand(cmd, sessionId);
       if (res?.output) setCommandLogs((prev) => [...prev, res.output.trim()]);

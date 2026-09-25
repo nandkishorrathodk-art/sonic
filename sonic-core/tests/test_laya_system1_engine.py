@@ -15,37 +15,43 @@ from sonic.llm.laya_engine import (
 
 @pytest.mark.no_live_infra
 def test_laya_language_and_checkpoint_routing():
-    """Verify Unicode script detection routes Latin and non-ASCII scripts appropriately."""
+    """Verify English, Hindi (Devanagari), and Hinglish route to the right Laya checkpoint."""
     lang_en, model_en = _detect_script_and_model("Create a new repository and run pytest")
     assert lang_en == "en"
     assert model_en == "english"
 
-    lang_mul, model_mul = _detect_script_and_model("Vérifier l'état du serveur")
-    assert lang_mul == "mul"
-    assert model_mul == "multilingual"
+    lang_hi, model_hi = _detect_script_and_model("टर्मिनल में नया कोड लिखो और टेस्ट चलाओ")
+    assert lang_hi == "hi-Deva"
+    assert model_hi == "multilingual"
+
+    lang_hinglish, model_hinglish = _detect_script_and_model("bhai naya file banao aur check karo")
+    assert lang_hinglish == "hi-Latn"
+    assert model_hinglish == "multilingual"
 
 
 @pytest.mark.no_live_infra
-def test_laya_plane_decision():
-    """Verify System-1 `choice` decisions for GUI vs Headless execution planes."""
+def test_laya_multilingual_plane_decision():
+    """Verify System-1 `choice` decisions for GUI vs Headless across English, Hindi, and Hinglish."""
     engine = LayaSystem1Engine(enable_local_model=False)
 
-    plane_hl, prob_hl = engine.decide_execution_plane("Write python code in app.py and run pytest in terminal")
+    # Hinglish headless goal
+    plane_hl, prob_hl = engine.decide_execution_plane("bhai app.py mein code likho aur banao")
     assert plane_hl == "headless"
     assert prob_hl > 0.55
 
-    plane_gui, prob_gui = engine.decide_execution_plane("Open browser window and click the visual button on screen")
+    # Hindi Devanagari GUI goal
+    plane_gui, prob_gui = engine.decide_execution_plane("ब्राउज़र खोलो और स्क्रीन दिखाओ")
     assert plane_gui == "gui"
     assert prob_gui > 0.55
 
 
 @pytest.mark.no_live_infra
-def test_laya_submission_plane_inference():
-    """Verify SubMission._infer_plane_from_goal delegates to LayaSystem1Engine."""
-    sub_headless = SubMission(goal="Author main.py script and run pytest in terminal")
+def test_laya_submission_plane_inference_hinglish():
+    """Verify SubMission._infer_plane_from_goal delegates Hinglish tasks to LayaSystem1Engine."""
+    sub_headless = SubMission(goal="bhai main.py mein naya code likho")
     assert sub_headless.plane == "headless"
 
-    sub_gui = SubMission(goal="Navigate browser to website and visually inspect screen UI")
+    sub_gui = SubMission(goal="website kholo aur screen dikhao")
     assert sub_gui.plane == "gui"
 
 
@@ -84,3 +90,4 @@ def test_laya_curiosity_affect_and_ram_guard():
     assert 0.0 <= res["novelty_score"] <= 1.0
     assert 0.0 <= res["worth_learning_prob"] <= 1.0
     assert isinstance(_has_sufficient_ram_gb(0.1), bool)
+

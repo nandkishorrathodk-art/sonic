@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 export interface GraphNodeData {
   id: string;
@@ -180,7 +181,7 @@ export const Cognitive3DGraph = forwardRef<Cognitive3DGraphRef, Cognitive3DGraph
     const sceneRef = useRef<THREE.Scene | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-    const controlsRef = useRef<any>(null);
+    const controlsRef = useRef<OrbitControls | null>(null);
     const animationFrameRef = useRef<number | null>(null);
 
     const internalNodesRef = useRef<Map<string, InternalNode>>(new Map());
@@ -305,18 +306,15 @@ export const Cognitive3DGraph = forwardRef<Cognitive3DGraphRef, Cognitive3DGraph
       container.appendChild(renderer.domElement);
       rendererRef.current = renderer;
 
-      // 4. OrbitControls (loaded dynamically on client side)
-      import("three/examples/jsm/controls/OrbitControls.js").then(({ OrbitControls }) => {
-        if (!containerRef.current) return;
-        const controls = new OrbitControls(camera, renderer.domElement);
-        controls.enableDamping = true;
-        controls.dampingFactor = 0.06;
-        controls.maxDistance = 800;
-        controls.minDistance = 30;
-        controls.autoRotate = autoRotateRef.current;
-        controls.autoRotateSpeed = 0.8;
-        controlsRef.current = controls;
-      });
+      // 4. OrbitControls
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+      controls.maxDistance = 800;
+      controls.minDistance = 30;
+      controls.autoRotate = autoRotateRef.current;
+      controls.autoRotateSpeed = 0.8;
+      controlsRef.current = controls;
 
       // 5. Lights
       const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
@@ -421,9 +419,7 @@ export const Cognitive3DGraph = forwardRef<Cognitive3DGraphRef, Cognitive3DGraph
           }
         }
 
-        if (controlsRef.current) {
-          controlsRef.current.update();
-        }
+        controls.update();
 
         // Run Force-Directed Physics if not paused
         if (!isPausedRef.current) {
@@ -543,9 +539,7 @@ export const Cognitive3DGraph = forwardRef<Cognitive3DGraphRef, Cognitive3DGraph
         renderer.domElement.removeEventListener("mousemove", onPointerMove);
         renderer.domElement.removeEventListener("mousedown", onPointerDown);
         renderer.domElement.removeEventListener("click", onClick);
-        if (controlsRef.current) {
-          controlsRef.current.dispose();
-        }
+        controls.dispose();
         renderer.dispose();
       };
     }, []);

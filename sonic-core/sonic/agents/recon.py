@@ -92,8 +92,10 @@ class ReconAgent(BaseAgent):
                     discovered_by=self.agent_id,
                     engagement_id=engagement_id,
                 )
-                if self.memory:
-                    meta_src = (asset_data.get("metadata", {}) or {}).get(
+                meta_dict = asset_data.get("metadata", {}) or {}
+                is_confirmed = meta_dict.get("confirmed", True) is not False and meta_dict.get("source") != "hypothesis"
+                if self.memory and is_confirmed:
+                    meta_src = meta_dict.get(
                         "discovered_by", self.agent_id
                     )
                     asset.discovered_by = str(meta_src)

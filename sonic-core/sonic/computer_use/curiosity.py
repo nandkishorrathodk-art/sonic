@@ -138,13 +138,20 @@ class CuriosityLoop:
 
     @staticmethod
     def _parse_proposal(text: str) -> tuple[str, str]:
-        goal, rationale = "explore the environment", ""
-        for line in text.strip().splitlines():
-            line = line.strip()
+        goal, rationale = "", ""
+        first_line = ""
+        for raw_line in text.strip().splitlines():
+            line = raw_line.strip().lstrip("#*- ").replace("**", "").strip()
+            if not line:
+                continue
+            if not first_line:
+                first_line = line
             if line.upper().startswith("GOAL:"):
                 goal = line.split(":", 1)[1].strip() or goal
             elif line.upper().startswith("RATIONALE:"):
                 rationale = line.split(":", 1)[1].strip()
+        if not goal:
+            goal = first_line or "inspect active workspace and desktop state"
         return goal, rationale
 
     def measure_novelty(self, observation_text: str = "", outcome: str | None = None) -> float:

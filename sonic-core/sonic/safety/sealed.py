@@ -204,6 +204,13 @@ class SealedActionPolicy(ActionPolicy):
             payload["scope_checker_config"] = copy.deepcopy(
                 getattr(self.scope_checker, "scope_config", None)
             )
+            payload["scope_checker_rules"] = copy.deepcopy(
+                getattr(self.scope_checker, "_rules", None)
+            )
+            payload["scope_checker_methods"] = [
+                getattr(getattr(self.scope_checker, "classify_command_risk", None), "__qualname__", ""),
+                getattr(getattr(self.scope_checker, "is_target_in_scope", None), "__qualname__", ""),
+            ]
             patterns = getattr(self.scope_checker, "_destructive_patterns", getattr(self.scope_checker, "_DESTRUCTIVE_PATTERNS", []))
             forbidden = getattr(self.scope_checker, "_forbidden_patterns", [])
             payload["scope_patterns_repr"] = sorted([getattr(p, "pattern", str(p)) for p in patterns]) + sorted([getattr(p, "pattern", str(p)) for p in forbidden])
@@ -212,7 +219,7 @@ class SealedActionPolicy(ActionPolicy):
                 payload["scope_instance_intrusive_patterns"] = sorted([getattr(p, "pattern", str(p)) for p in intrusive_inst])
         return hmac.new(
             self._seal_secret.encode(),
-            json.dumps(payload, sort_keys=True).encode(),
+            json.dumps(payload, sort_keys=True, default=str).encode(),
             hashlib.sha256,
         ).hexdigest()
 
@@ -220,10 +227,6 @@ class SealedActionPolicy(ActionPolicy):
     # Immutability
     # ------------------------------------------------------------------
     def __setattr__(self, name: str, value: Any) -> None:
-        # Allow the rate window + internal bookkeeping to keep mutating.
-        if name in ("_rate",):
-            object.__setattr__(self, name, value)
-            return
         if getattr(self, "_sealed", False):
             raise AttributeError(
                 f"sealed policy is immutable after seal(); attempted to set {name!r}={value!r}"
@@ -239,18 +242,22 @@ class SealedActionPolicy(ActionPolicy):
         target_resource: str,
         payload: dict[str, Any] | None = None,
     ) -> PolicyVerdict:
-        if self._sealed:
-            current_hash = self._compute_seal_hash()
-            if current_hash != self._seal_hash:
-                logger.error(
-                    "safety_policy_tampered",
-                    expected=self._seal_hash,
-                    computed=current_hash,
-                )
-                return PolicyVerdict(
-                    False,
-                    "safety policy integrity check failed: seal mismatch (policy was tampered)",
-                )
+        if not getattr(self, "_sealed", False) or not getattr(self, "_seal_hash", ""):
+            return PolicyVerdict(
+                False,
+                "safety policy integrity check failed: seal mismatch (policy was tampered)",
+            )
+        current_hash = self._compute_seal_hash()
+        if current_hash != self._seal_hash:
+            logger.error(
+                "safety_policy_tampered",
+                expected=self._seal_hash,
+                computed=current_hash,
+            )
+            return PolicyVerdict(
+                False,
+                "safety policy integrity check failed: seal mismatch (policy was tampered)",
+            )
         return super().evaluate(action_type, target_resource, payload or {})
 
     def _clone(self) -> SealedActionPolicy:

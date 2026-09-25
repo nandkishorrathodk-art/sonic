@@ -107,9 +107,19 @@ class DesktopActionRequest(BaseModel):
     app_name: str | None = None
     coordinates: tuple[int, int] | None = None
     destination_coordinates: tuple[int, int] | None = None
+    x: int | None = None
+    y: int | None = None
+    end_x: int | None = None
+    end_y: int | None = None
     text: str | None = None
     key: str | None = None
     session_id: str | None = "default"
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.coordinates is None and self.x is not None and self.y is not None:
+            self.coordinates = (int(self.x), int(self.y))
+        if self.destination_coordinates is None and self.end_x is not None and self.end_y is not None:
+            self.destination_coordinates = (int(self.end_x), int(self.end_y))
 
 
 class DesktopTileRequest(BaseModel):
@@ -1344,6 +1354,8 @@ async def interrupt_workstation_session(
     state = _get_or_create_session(tenant_id, session_id)
     state["interrupted"] = True
     state["status"] = "PAUSED"
+    if not state.get("paused_objective"):
+        state["paused_objective"] = state.get("last_objective") or state.get("mission_name") or ""
     state["current_action"] = "Paused by user (Takeover active)."
     _append_worklog(state, "response", "Agent Paused", "Autonomous execution paused by user. Direct control active.")
     _persist_workstation_state()
@@ -3876,7 +3888,11 @@ async def resume_workstation_after_human(
         _track_background_task(
             tenant_id,
             session_id,
-            asyncio.create_task(_run_prompt_reasoning_with_timeout(tenant_id, session_id, resume_prompt)),
+            asyncio.create_task(
+                _run_foreground_operator_task(
+                    _run_prompt_reasoning_with_timeout(tenant_id, session_id, resume_prompt)
+                )
+            ),
         )
     else:
         state["status"] = "IDLE"

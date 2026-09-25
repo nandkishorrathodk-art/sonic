@@ -1048,12 +1048,18 @@ class DockerComputerProvider(ComputerProvider):
 
         parts = [resolved_bin] + args
         disp = self._get_display(workspace_id)
-        spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 &"
-        self._active_windows[workspace_id] = os.path.basename(resolved_bin)
-        self._last_screenshot = None
-        self._last_screenshot_time = 0.0
+        bin_base = shlex.quote(os.path.basename(resolved_bin))
+        spawn = (
+            f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 & "
+            f"app_pid=$!; sleep 0.2; kill -0 \"$app_pid\" 2>/dev/null || pgrep -f -- {bin_base} >/dev/null 2>&1"
+        )
         code, _, _ = await self._docker_exec(spawn)
-        return code == 0
+        if code == 0:
+            self._active_windows[workspace_id] = os.path.basename(resolved_bin)
+            self._last_screenshot = None
+            self._last_screenshot_time = 0.0
+            return True
+        return False
 
     async def cleanup_desktop_windows(self, workspace_id: str) -> None:
         """Closes open application windows to restore desktop hygiene without killing panels or desktop."""

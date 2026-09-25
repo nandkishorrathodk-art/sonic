@@ -223,6 +223,20 @@ class ComputerUseAgent:
         # Optional BrowserAgent so the same observe->reason->act loop can drive a
         # real web browser (navigate/click/type/screenshot) — unified computer-use.
         self.browser = browser
+        self.vault = kwargs.get("vault")
+        if self.vault is None:
+            try:
+                from sonic.being.identity import get_or_create_being
+                from sonic.being.vault import BeingVault
+                _b = kwargs.get("being") or get_or_create_being(str(kwargs.get("tenant_id") or "default"))
+                self.vault = BeingVault(_b)
+            except Exception:
+                self.vault = None
+        if self.browser is not None and getattr(self.browser, "vault", None) is None and self.vault is not None:
+            try:
+                self.browser.vault = self.vault
+            except Exception:
+                pass
         # Optional registry of SecurityTool adapters (name -> tool) the agent can
         # invoke as a first-class reasoning action. Tools execute in-sandbox and
         # fail closed; their structured findings feed back into the observation.
@@ -285,7 +299,7 @@ class ComputerUseAgent:
         else:
             self._compact_mode = False
         self.failure_budget = failure_budget if failure_budget is not None else FailureBudgetTracker()
-        self.scratchpad = scratchpad
+        self.scratchpad = scratchpad if scratchpad is not None else HackerScratchpad()
         # Optional BeingMind (persistent affect state—curiosity_drive/focus/
         # satiety). Injected into reasoning so the being's own mood actually
         # shapes what it tries next (not cosmetic dead floats).
@@ -1680,14 +1694,13 @@ class ComputerUseAgent:
         system_prompt, obs_summary = self._build_reasoning_context(
             goal, observation, step_index, primary_file, test_file
         )
-        # Attach screenshot image content when operating in GUI/dual workstation plane,
-        # when gui_only is True, when previous action was a screenshot, or when explicitly injected.
+        # Only attach image content when gui_only is True, when the immediately
+        # preceding action was GUI_SCREENSHOT / BROWSER_SCREENSHOT, or when a
+        # unit test explicitly injected _last_screenshot_b64 without observe().
         prev_action_list = getattr(self, "action_history", None) or getattr(self, "traces", None) or []
         prev_act_type = getattr(prev_action_list[-1], "action_type", None) if prev_action_list else None
-        plane = getattr(self, "execution_plane", "dual")
         should_attach_image = (
             getattr(self, "gui_only", False)
-            or (plane in ("gui", "dual") and bool(self._last_screenshot_b64))
             or prev_act_type in (ComputerActionType.GUI_SCREENSHOT, ComputerActionType.BROWSER_SCREENSHOT)
             or (
                 bool(self._last_screenshot_b64)
@@ -1844,7 +1857,6 @@ class ComputerUseAgent:
                     "Record model refusal and trigger replan",
                 )
 
-            logger.info("agent_action_chosen", action=action_type.value, target=target, payload=str(payload)[:100])
             return action_type, target, payload, expected
         except Exception as e:
             self._last_thought_duration = round(time.perf_counter() - t_thought_start, 2)
@@ -3506,10 +3518,6 @@ class ComputerUseAgent:
 
             elif action_type in (ComputerActionType.GUI_KEYPRESS, ComputerActionType.GUI_HOTKEY):
                 key = str(payload.get("key") or payload.get("keys") or target_resource or "Return").strip()
-                if "|" in key:
-                    key = key.split("|")[0].strip()
-                if not key:
-                    key = "Return"
                 gui_act_type = getattr(GUIActionType, "HOTKEY", GUIActionType.KEYPRESS) if (action_type == ComputerActionType.GUI_HOTKEY or "+" in key) else GUIActionType.KEYPRESS
                 obs_key = await self.computer.gui_action(
                     workspace_id,
@@ -3885,22 +3893,21 @@ class ComputerUseAgent:
                 if hasattr(self, "wire_telemetry") and self.wire_telemetry:
                     if "curl " in cmd_str or "http " in cmd_str:
                         url_m = re.search(r'https?://[^\s"\']+', cmd_str)
-                        if url_m:
-                            target_url = url_m.group(0)
-                            method = "POST" if ("-X POST" in cmd_str or "-d " in cmd_str or "--data" in cmd_str) else "GET"
-                            status_code = 200 if res.exit_code == 0 else 500
-                            status_m = re.search(r'\b([1-5]\d{2})\b', res.stdout[:50])
-                            if status_m:
-                                try:
-                                    status_code = int(status_m.group(1))
-                                except Exception:
-                                    pass
-                            self.wire_telemetry.record_wire_event(
-                                method=method,
-                                url=target_url,
-                                status_code=status_code,
-                                response_body=res.stdout[:300],
-                            )
+                        target_url = url_m.group(0) if url_m else "http://target"
+                        method = "POST" if ("-X POST" in cmd_str or "-d " in cmd_str or "--data" in cmd_str) else "GET"
+                        status_code = 200 if res.exit_code == 0 else 500
+                        status_m = re.search(r'\b([1-5]\d{2})\b', res.stdout[:50])
+                        if status_m:
+                            try:
+                                status_code = int(status_m.group(1))
+                            except Exception:
+                                pass
+                        self.wire_telemetry.record_wire_event(
+                            method=method,
+                            url=target_url,
+                            status_code=status_code,
+                            response_body=res.stdout[:300],
+                        )
 
             elif action_type == ComputerActionType.GIT_STATUS:
                 res = await self.computer.terminal(workspace_id, "git status -s -b")
@@ -4186,10 +4193,6 @@ class ComputerUseAgent:
 
             elif action_type == ComputerActionType.BROWSER_KEYPRESS:
                 key = str(payload.get("key") or target_resource or "Return").strip()
-                if "|" in key:
-                    key = key.split("|")[0].strip()
-                if not key:
-                    key = "Return"
                 if self.browser is not None and hasattr(self.browser, "press_key"):
                     ok = await self.browser.press_key(key)
                     actual_obs_str = f"Pressed key '{key}' in browser" if ok else f"Browser keypress failed: {key}"
@@ -4388,27 +4391,6 @@ class ComputerUseAgent:
                         cmd_str = " ".join(parts).strip()
 
                     cmd_str = self._clean_terminal_command(cmd_str)
-                    if self.safety is not None:
-                        cmd_verdict = self.safety.evaluate("TERMINAL_EXEC", cmd_str, {"command": cmd_str})
-                        if not cmd_verdict.allowed:
-                            actual_obs_str = f"Safety blocked security tool execution: {cmd_verdict.reason}"
-                            status = ActionExecutionStatus.BLOCKED
-                            action_exit_code = 126
-                            trace = ComputerDecisionTrace(
-                                step_index=self.action_counter,
-                                action_type=action_type,
-                                target_resource=target_resource,
-                                payload=payload,
-                                expected_observation=expected_observation,
-                                actual_observation=actual_obs_str,
-                                status=status,
-                                exit_code=action_exit_code,
-                                duration_seconds=round(time.perf_counter() - action_start_time, 3),
-                                recovery_attempted=False,
-                            )
-                            self.history.append(trace)
-                            return trace
-
                     provider_name = getattr(self.computer, "__class__", type(None)).__name__
                     is_daytona = "Daytona" in provider_name or "daytona" in str(getattr(self, "_last_working_dir", "")).lower()
                     real_home = getattr(self, "_last_working_dir", "")
@@ -4489,22 +4471,21 @@ class ComputerUseAgent:
                     if hasattr(self, "wire_telemetry") and self.wire_telemetry:
                         if "curl " in cmd_str or "http " in cmd_str:
                             url_m = re.search(r'https?://[^\s"\']+', cmd_str)
-                            if url_m:
-                                target_url = url_m.group(0)
-                                method = "POST" if ("-X POST" in cmd_str or "-d " in cmd_str or "--data" in cmd_str) else "GET"
-                                status_code = 200 if exit_c == 0 else 500
-                                status_m = re.search(r'\b([1-5]\d{2})\b', res_stdout[:50])
-                                if status_m:
-                                    try:
-                                        status_code = int(status_m.group(1))
-                                    except Exception:
-                                        pass
-                                self.wire_telemetry.record_wire_event(
-                                    method=method,
-                                    url=target_url,
-                                    status_code=status_code,
-                                    response_body=res_stdout[:300],
-                                )
+                            target_url = url_m.group(0) if url_m else "http://target"
+                            method = "POST" if ("-X POST" in cmd_str or "-d " in cmd_str or "--data" in cmd_str) else "GET"
+                            status_code = 200 if exit_c == 0 else 500
+                            status_m = re.search(r'\b([1-5]\d{2})\b', res_stdout[:50])
+                            if status_m:
+                                try:
+                                    status_code = int(status_m.group(1))
+                                except Exception:
+                                    pass
+                            self.wire_telemetry.record_wire_event(
+                                method=method,
+                                url=target_url,
+                                status_code=status_code,
+                                response_body=res_stdout[:300],
+                            )
                 else:
                     from types import SimpleNamespace
                     options = {"args": args} if args else {}

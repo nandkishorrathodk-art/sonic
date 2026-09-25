@@ -302,6 +302,7 @@ class BrowserAgent:
             return False
         try:
             await self._page.click(selector, timeout=5000)
+            await self.save_state_to_vault()
             return True
         except Exception as e:
             logger.debug("click_failed", selector=selector, error=str(e))
@@ -313,6 +314,7 @@ class BrowserAgent:
             return False
         try:
             await self._page.fill(selector, text)
+            await self.save_state_to_vault()
             return True
         except Exception as e:
             logger.debug("type_failed", selector=selector, error=str(e))
@@ -338,6 +340,7 @@ class BrowserAgent:
             return False
         try:
             await self._page.keyboard.press(key)
+            await self.save_state_to_vault()
             return True
         except Exception as e:
             logger.debug("press_key_failed", key=key, error=str(e))
@@ -359,10 +362,12 @@ class BrowserAgent:
 
         A human waits for a "Download" or "Next" button to render before
         clicking it; without this the agent clicks stale coordinates on a
-        page that is still loading. No-op (True) in httpx fallback mode.
+        page that is still loading.
         """
         if not self._using_playwright or not self._page:
-            return True
+            last_html = getattr(self, "_last_html", "") or ""
+            clean_sel = selector.strip("#.")
+            return bool(clean_sel and clean_sel in last_html)
         try:
             await self._page.wait_for_selector(selector, state="visible", timeout=timeout_ms)
             return True
@@ -448,9 +453,9 @@ class BrowserAgent:
         # From page content
         html = await self._page.content()
         import re
-        api_patterns = re.findall(r'["\']/(api|v[0-9]+|graphql)[^"\']*["\']', html)
+        api_patterns = re.findall(r'["\'](/(?:api|v[0-9]+|graphql)[^"\']*)["\']', html)
         for match in api_patterns:
-            endpoints.add(f"/{match}")
+            endpoints.add(match if match.startswith("/") else f"/{match}")
 
         # From fetch/XHR URLs
         urls = await self._page.evaluate("""
@@ -468,7 +473,7 @@ class BrowserAgent:
         return list(endpoints)
 
     async def inject_xss_payload(self, selector: str, payload: str) -> dict[str, Any]:
-        """Inject XSS payload and check if it triggers."""
+        """Submit input into a form field and observe whether a browser dialog is triggered."""
         if not self._using_playwright or not self._page:
             return {"injected": False, "triggered": False}
 
@@ -519,7 +524,7 @@ class BrowserAgent:
                 return PageSnapshot(
                     url=url,
                     title=title,
-                    status_code=200,
+                    status_code=int(getattr(self, "_last_status_code", 200) or 200),
                     html_content=html[:50000],
                     screenshot_b64=screenshot_b64,
                     cookies=[{"name": c["name"], "value": c["value"], "domain": c["domain"]} for c in cookies],
