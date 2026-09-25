@@ -3236,6 +3236,10 @@ class ComputerUseAgent:
             ComputerActionType.GUI_DOUBLE_CLICK,
             ComputerActionType.GUI_RIGHT_CLICK,
             ComputerActionType.GUI_MOVE,
+        ) + (
+            # A typed target is resolved only when live pixels are available.
+            # Headless/unit-test providers may still accept a pre-focused field.
+            (ComputerActionType.GUI_TYPE,) if self._last_screenshot_b64 else ()
         ) and (payload.get("x") is None or payload.get("y") is None):
             semantic_match = self.perception_bus.resolve(target_resource)
             if semantic_match is not None:
@@ -3563,24 +3567,65 @@ class ComputerUseAgent:
                 text = str(payload.get("text") or payload.get("value") or payload.get("input") or "")
                 pre_screen_b64 = getattr(self, "_last_screenshot_b64", "")
                 obs_after = None
-                if hasattr(self, "motor") and self.motor:
-                    if getattr(self, "gui_only", False):
+                focus_x = payload.get("x")
+                focus_y = payload.get("y")
+                if self._last_screenshot_b64 and (focus_x is None or focus_y is None):
+                    actual_obs_str = (
+                        "GUI_TYPE blocked: a live desktop target could not be grounded to "
+                        "coordinates; re-observe before typing"
+                    )
+                    status = ActionExecutionStatus.BLOCKED
+                    action_exit_code = 126
+                elif focus_x is not None and focus_y is not None:
+                    focus_err = self._validate_coordinates(
+                        ComputerActionType.GUI_CLICK,
+                        {"x": focus_x, "y": focus_y},
+                    )
+                    if focus_err is not None:
+                        actual_obs_str = f"GUI_TYPE blocked before focus click: {focus_err}"
+                        status = ActionExecutionStatus.BLOCKED
+                        action_exit_code = 126
+                    else:
+                        await self.computer.gui_action(
+                            workspace_id,
+                            GUIAction(
+                                action=GUIActionType.CLICK,
+                                x=int(focus_x),
+                                y=int(focus_y),
+                            ),
+                        )
+                use_motor = bool(
+                    hasattr(self, "motor")
+                    and self.motor
+                    and (self._last_screenshot_b64 or focus_x is not None or focus_y is not None)
+                )
+                if use_motor:
+                    if status == ActionExecutionStatus.BLOCKED:
+                        pass
+                    elif getattr(self, "gui_only", False):
                         obs_after = await self.computer.gui_action(
                             workspace_id,
                             GUIAction(
                                 action=GUIActionType.TYPE,
                                 text=text,
+                                x=int(focus_x) if focus_x is not None else None,
+                                y=int(focus_y) if focus_y is not None else None,
                                 delay_ms=payload.get("delay_ms", 25),
                             ),
                         )
                     else:
                         await self.motor.human_type(workspace_id, text, delay_ms=payload.get("delay_ms", 25))
-                else:
+                elif status != ActionExecutionStatus.BLOCKED:
                     obs_after = await self.computer.gui_action(
                         workspace_id,
-                        GUIAction(action=GUIActionType.TYPE, text=text),
+                        GUIAction(
+                            action=GUIActionType.TYPE,
+                            text=text,
+                            x=int(focus_x) if focus_x is not None else None,
+                            y=int(focus_y) if focus_y is not None else None,
+                        ),
                     )
-                if hasattr(self.computer, "screenshot") and not obs_after:
+                if status != ActionExecutionStatus.BLOCKED and hasattr(self.computer, "screenshot") and not obs_after:
                     try:
                         obs_after = await self.computer.screenshot(workspace_id)
                     except Exception:
@@ -3590,7 +3635,14 @@ class ComputerUseAgent:
                     self._last_screenshot_b64 = post_screen_b64
                     self._prev_screenshot_hash = hashlib.md5(post_screen_b64.encode()).hexdigest()
                     self._update_screen_dims(obs_after)
-                actual_obs_str = f"Typed {len(text)} chars: {text[:50]}"
+                if status != ActionExecutionStatus.BLOCKED:
+                    if focus_x is not None and focus_y is not None:
+                        actual_obs_str = (
+                            f"Typed {len(text)} chars at focused coordinates "
+                            f"({focus_x}, {focus_y}): {text[:50]}"
+                        )
+                    else:
+                        actual_obs_str = f"Typed {len(text)} chars: {text[:50]}"
 
             elif action_type in (ComputerActionType.GUI_KEYPRESS, ComputerActionType.GUI_HOTKEY):
                 key = str(payload.get("key") or payload.get("keys") or target_resource or "Return").strip()

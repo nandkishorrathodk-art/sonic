@@ -856,6 +856,9 @@ class DaytonaComputerProvider(ComputerProvider):
                         await cu.mouse.move(dx, dy)
                         await cu.mouse.up()
                 elif action_type == GUIActionType.TYPE and action.text:
+                    if action.x is not None and action.y is not None:
+                        await cu.mouse.move(action.x, action.y)
+                        await cu.mouse.click(action.x, action.y, button="left")
                     await cu.keyboard.type(action.text)
                 elif action_type in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
                     await cu.keyboard.press(action.key or action.text)
@@ -875,7 +878,16 @@ class DaytonaComputerProvider(ComputerProvider):
                         await sandbox.process.exec(f"DISPLAY={disp} xdotool mousemove {sx} {sy} mousedown 1 mousemove {dx} {dy} mouseup 1")
                 elif action_type == GUIActionType.TYPE and action.text:
                     safe_text = shlex.quote(action.text)
-                    await sandbox.process.exec(f"DISPLAY={disp} xdotool type --delay 25 --clearmodifiers -- {safe_text}")
+                    focus = ""
+                    if action.x is not None and action.y is not None:
+                        focus = (
+                            f"DISPLAY={disp} xdotool mousemove --sync {int(action.x)} {int(action.y)} && "
+                            f"DISPLAY={disp} xdotool click 1 && "
+                        )
+                    await sandbox.process.exec(
+                        f"{focus}DISPLAY={disp} xdotool type --delay {int(action.delay_ms)} "
+                        f"--clearmodifiers -- {safe_text}"
+                    )
                 elif action_type in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
                     norm_key = self._normalize_x11_keysym(action.key or action.text or "")
                     safe_key = shlex.quote(norm_key)

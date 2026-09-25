@@ -954,23 +954,23 @@ while True:
                 repeat = 2 if atype == GUIActionType.DOUBLE_CLICK else 1
                 if action.x is not None and action.y is not None:
                     _validate_coords(action.x, action.y)
-                    move_cmd = f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} || xdotool mousemove {action.x} {action.y})"
-                    await exec_gui(f"DISPLAY={disp} {move_cmd} && DISPLAY={disp} xdotool click --repeat {repeat} {button}")
+                    move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
+                    await exec_gui(f"export DISPLAY={disp}; {move_cmd} && xdotool click --repeat {repeat} {button}")
                 else:
                     await exec_gui(f"DISPLAY={disp} xdotool click --repeat {repeat} {button}")
 
             elif atype == GUIActionType.RIGHT_CLICK:
                 if action.x is not None and action.y is not None:
                     _validate_coords(action.x, action.y)
-                    move_cmd = f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} || xdotool mousemove {action.x} {action.y})"
-                    await exec_gui(f"DISPLAY={disp} {move_cmd} && DISPLAY={disp} xdotool click 3")
+                    move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
+                    await exec_gui(f"export DISPLAY={disp}; {move_cmd} && xdotool click 3")
                 else:
                     await exec_gui(f"DISPLAY={disp} xdotool click 3")
 
             elif atype == GUIActionType.MOVE and action.x is not None and action.y is not None:
                 _validate_coords(action.x, action.y)
-                move_cmd = f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} || xdotool mousemove {action.x} {action.y})"
-                await exec_gui(f"DISPLAY={disp} {move_cmd}")
+                move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
+                await exec_gui(f"export DISPLAY={disp}; {move_cmd}")
 
             elif atype == GUIActionType.DRAG:
                 sx, sy = action.x or 0, action.y or 0
@@ -988,8 +988,8 @@ while True:
                 focus_prefix = ""
                 if action.x is not None and action.y is not None:
                     _validate_coords(action.x, action.y)
-                    focus_prefix = f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py click {action.x} {action.y} || (xdotool mousemove {action.x} {action.y} && xdotool click 1)) && sleep 0.05 && "
-                await exec_gui(f"DISPLAY={disp} {focus_prefix}xdotool type --clearmodifiers --delay {delay} -- {safe_text}")
+                    focus_prefix = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py click {action.x} {action.y} && sleep 0.05 && "
+                await exec_gui(f"export DISPLAY={disp}; {focus_prefix}xdotool type --clearmodifiers --delay {delay} -- {safe_text}")
 
             elif atype in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
                 norm_key = self._normalize_x11_keysym(action.key or action.text or "")
@@ -1000,11 +1000,11 @@ while True:
                 btn = 5 if action.scroll_delta < 0 else 4
                 times = abs(action.scroll_delta) if action.scroll_delta != 0 else 3
                 move_prefix = (
-                    f"([ -x /usr/local/bin/sonic_cursor.py ] && python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} || xdotool mousemove {action.x} {action.y}) && "
+                    f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} && "
                     if action.x is not None and action.y is not None
                     else ""
                 )
-                await exec_gui(f"DISPLAY={disp} {move_prefix}xdotool click --repeat {times} {btn}")
+                await exec_gui(f"export DISPLAY={disp}; {move_prefix}xdotool click --repeat {times} {btn}")
 
             elif atype in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
                 launched = await self.launch_application(workspace_id, action.app_name, actor=actor)
