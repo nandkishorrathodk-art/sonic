@@ -629,15 +629,23 @@ class DockerComputerProvider(ComputerProvider):
                 await asyncio.sleep(max(0.1, (action.delay_ms or 500) / 1000.0))
 
             elif atype == GUIActionType.SELECT_WINDOW and (action.window_id or action.app_name):
-                target = action.window_id or action.app_name
+                target = (action.window_id or action.app_name or "").strip()
                 if target:
-                    focus_code, _, focus_err = await self._docker_exec(
-                        f"export DISPLAY={disp}; (wmctrl -i -a {shlex.quote(target)} 2>/dev/null || "
-                        f"wmctrl -x -a {shlex.quote(target)} 2>/dev/null || "
-                        f"wmctrl -a {shlex.quote(target)} 2>/dev/null || "
-                        f"xdotool search --onlyvisible --class {shlex.quote(target)} windowactivate 2>/dev/null || "
-                        f"xdotool search --onlyvisible --name {shlex.quote(target)} windowactivate 2>/dev/null)"
-                    )
+                    if target.lower().startswith("0x"):
+                        focus_cmd = (
+                            f"export DISPLAY={disp}; xdotool key Escape 2>/dev/null; "
+                            f"wmctrl -i -a {shlex.quote(target)} 2>/dev/null || "
+                            f"xdotool windowactivate --sync {shlex.quote(target)} 2>/dev/null"
+                        )
+                    else:
+                        focus_cmd = (
+                            f"export DISPLAY={disp}; xdotool key Escape 2>/dev/null; "
+                            f"(wmctrl -a {shlex.quote(target)} 2>/dev/null || "
+                            f"wmctrl -x -a {shlex.quote(target)} 2>/dev/null || "
+                            f"xdotool search --onlyvisible --name {shlex.quote(target)} windowactivate 2>/dev/null || "
+                            f"xdotool search --onlyvisible --class {shlex.quote(target)} windowactivate 2>/dev/null)"
+                        )
+                    focus_code, _, focus_err = await self._docker_exec(focus_cmd)
                     if focus_code != 0:
                         raise RuntimeError(
                             f"window focus failed for '{target}': {focus_err.strip()}"
@@ -885,11 +893,14 @@ class DockerComputerProvider(ComputerProvider):
         std_utils = list(dict.fromkeys(self.app_policy.allowed_packages))
         utils_str = " ".join(std_utils)
         discovery_cmd = (
-            "find /usr/share/applications /usr/local/share/applications ~/.local/share/applications -name '*.desktop' 2>/dev/null | while read -r f; do "
+            "find /root/Desktop /home/sonic/Desktop /usr/share/applications /usr/local/share/applications ~/.local/share/applications -name '*.desktop' 2>/dev/null | while read -r f; do "
             "[ -f \"$f\" ] || continue; "
-            "b=$(basename \"$f\" .desktop); echo \"$b\"; "
+            "grep -qi '^NoDisplay=true' \"$f\" 2>/dev/null && continue; "
+            "grep -qi '^Terminal=true' \"$f\" 2>/dev/null && continue; "
+            "grep -qi 'TerminalEmulator' \"$f\" 2>/dev/null && continue; "
             "ex=$(grep -m1 -E '^Exec=' \"$f\" 2>/dev/null | cut -d= -f2- | awk '{print $1}'); "
             "[ -n \"$ex\" ] && basename \"$ex\"; "
+            "b=$(basename \"$f\" .desktop); echo \"$b\"; "
             "done; "
             "find /usr/local/bin -maxdepth 1 -type f 2>/dev/null | while read -r p; do [ -x \"$p\" ] && basename \"$p\"; done; "
             f"for b in {utils_str}; do command -v \"$b\" 2>/dev/null; done; true"
@@ -1050,8 +1061,14 @@ class DockerComputerProvider(ComputerProvider):
         disp = self._get_display(workspace_id)
         bin_base = shlex.quote(os.path.basename(resolved_bin))
         spawn = (
+            f"DISPLAY={disp} xdotool key Escape 2>/dev/null; "
             f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 & "
-            f"app_pid=$!; sleep 0.2; kill -0 \"$app_pid\" 2>/dev/null || pgrep -f -- {bin_base} >/dev/null 2>&1"
+            f"app_pid=$!; sleep 0.4; "
+            f"if ! kill -0 \"$app_pid\" 2>/dev/null && grep -q -- '--no-sandbox' /tmp/sonic_app_launch.log 2>/dev/null; then "
+            f"  DISPLAY={disp} nohup {shlex.quote(resolved_bin)} --no-sandbox --disable-dev-shm-usage {' '.join(shlex.quote(a) for a in args)} >/tmp/sonic_app_launch.log 2>&1 & "
+            f"  app_pid=$!; sleep 0.4; "
+            f"fi; "
+            f"kill -0 \"$app_pid\" 2>/dev/null || pgrep -f -- {bin_base} >/dev/null 2>&1"
         )
         code, _, _ = await self._docker_exec(spawn)
         if code == 0:

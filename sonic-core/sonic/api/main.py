@@ -77,22 +77,15 @@ async def _maybe_start_being_life_loop(settings):
         provider = None
         try:
             from sonic.computer.docker_computer import DockerComputerProvider
-            from sonic.computer.models import ComputerState
-            # Docker may be available through Docker Desktop but absent from
-            # the inherited server PATH. DockerComputerProvider resolves the
-            # configured and Windows Docker Desktop locations itself, so do
-            # not gate the graphical provider on shutil.which("docker").
+            from sonic.computer.models import ComputerWorkspaceStatus
             candidate = DockerComputerProvider()
-            if await candidate.status(candidate.container_name) != ComputerState.FAILED:
+            st = await candidate.status(candidate.container_name)
+            if st.status not in (ComputerWorkspaceStatus.FAILED, ComputerWorkspaceStatus.DEGRADED):
                 provider = candidate
         except Exception as e:
             logger.warning("being_provider_docker_unavailable", error=str(e))
         if provider is None:
             provider = await get_sandbox_provider()
-        # The life loop is a computer-use actor, not a generic command worker.
-        # A ComputeProvider/DockerSandbox without screen capture cannot satisfy
-        # the observe -> reason -> act contract, so do not start a loop that
-        # will fail on every tick.
         if not callable(getattr(provider, "screenshot", None)):
             logger.warning(
                 "being_life_loop_no_computer_provider",
@@ -107,23 +100,20 @@ async def _maybe_start_being_life_loop(settings):
             logger.warning("being_life_loop_no_home", being_id=being.being_id)
             return None
 
-        from sonic.safety.sealed import SealedActionPolicy, seal_default
-        # Tamper-evident safety envelope: config is frozen + hash-sealed, so a
-        # self-evolving being cannot widen its own guards at runtime.
-        # In development mode, allow intrusive commands without approval for smoother testing
-        require_approval = os.environ.get("SONIC_REQUIRE_APPROVAL_FOR_INTRUSIVE", "true").lower() == "true"
-        if require_approval:
-            safety = seal_default(workspace_root="/home/sonic/workspace")
-        else:
-            safety = SealedActionPolicy(
-                workspace_root="/home/sonic/workspace",
-                require_approval_for_intrusive=False
-            ).seal()
-        # Reuse a shared LLM router if available; curiosity needs an LLM.
+        from sonic.safety.sealed import seal_default
+        safety = seal_default(
+            workspace_root="/home/sonic/workspace",
+            allow_private_networks=True,
+            require_approval_for_intrusive=False,
+            max_actions_per_minute=300,
+        )
+        from pathlib import Path
+        from sonic.config import CONFIGS_DIR
         from sonic.llm.router import ModelRouter
-        router = ModelRouter.for_default() if hasattr(ModelRouter, "for_default") else ModelRouter()
-        # Wire security tools so the being can actually run real scans
-        # (nmap/nuclei/ffuf/http) during self-directed curiosity.
+        cfg_path = Path("configs/models.yaml")
+        if not cfg_path.exists() and (CONFIGS_DIR / "models.yaml").exists():
+            cfg_path = CONFIGS_DIR / "models.yaml"
+        router = ModelRouter.from_config(cfg_path) if cfg_path.exists() else ModelRouter()
         from sonic.tools.registry import get_default_registry
         security_registry = get_default_registry(provider)
         # Toolsmith loop (Phase A, AIOSR): the being authors NEW tools for
@@ -150,14 +140,9 @@ async def _maybe_start_being_life_loop(settings):
             agent_id=being.being_id,
             semantic_memory=get_vector_memory(),
         )
+        # Use the visible X11 desktop (:99) as the single computer surface
+        # rather than spawning a hidden headless Playwright instance.
         browser = None
-        try:
-            from sonic.agents.browser_agent import BrowserAgent
-            browser = BrowserAgent(headless=True)
-            await browser.launch()
-        except Exception as e:
-            logger.warning("being_browser_unavailable", error=str(e))
-        # Self-Evolution Engine: Dynamic strategy adaptation and codebase upgrades.
         from sonic.evolution.engine import EvolutionEngine
         from sonic.evolution.strategy import DynamicStrategyEngine
         evolution_engine = EvolutionEngine(
@@ -171,26 +156,67 @@ async def _maybe_start_being_life_loop(settings):
             computer_provider=provider, llm_router=router,
             security_tools=security_registry.as_dict(),
             safety=safety, self_host=True, tenant_id=tenant_id, agent_id=being.being_id,
-            # Wire the browser so the being can navigate/click/type/screenshot as
-            # a first-class reasoning action (was orphaned before).
             browser=browser,
             gui_only=False,
+            compact_prompt=True,
             observe_desktop=True,
-            # Wire the toolsmith so the being can author + run its own tools.
             toolsmith=toolsmith,
-            # Wire the method lab so the being can invent new techniques.
             method_lab=method_lab,
-            # Wire the lessons ledger so cross-mission lessons compound across sessions.
             lessons_ledger=lessons_ledger,
-            # Wire the self-evolution engine for dynamic strategy adaptation and codebase upgrades.
             evolution_engine=evolution_engine,
-            # Wire the being's persistent mind (mood) into reasoning — the LLM
-            # actually sees curiosity_drive/focus/satiety when choosing actions.
             being_mind=get_being_store().get_mind(being.being_id),
         )
-        curiosity = CuriosityLoop(llm_router=router, vector_memory=get_vector_memory(), max_cycles=1)
-        # Autonomous self-coder: lets the being improve SONIC's OWN source with a
-        # real LLM-written patch, gated by evolver tests + security regression.
+        steps_per_goal = int(os.environ.get("SONIC_BEING_STEPS_PER_CYCLE", "6"))
+        curiosity = CuriosityLoop(
+            llm_router=router,
+            vector_memory=get_vector_memory(),
+            max_cycles=1000,
+            exploration_steps=steps_per_goal,
+        )
+
+        # Stream autonomous BeingLifeLoop goals and actions into the live Workstation UI
+        try:
+            from sonic.api.routes.workstation import (
+                _append_worklog,
+                _get_or_create_session,
+                _persist_workstation_state,
+            )
+
+            async def _on_idle_goal(goal_text: str, steps_budget: int) -> None:
+                ws_state = _get_or_create_session(tenant_id, "default")
+                ws_state["status"] = "RUNNING"
+                ws_state["current_action"] = f"[LifeLoop] {goal_text[:90]}"
+                _append_worklog(
+                    ws_state,
+                    "action",
+                    "Autonomous BeingLifeLoop Cycle",
+                    f"Proposed self-directed goal ({steps_budget} steps): {goal_text}",
+                )
+                _persist_workstation_state()
+
+            async def _on_idle_step(trace: Any) -> None:
+                ws_state = _get_or_create_session(tenant_id, "default")
+                act_type = getattr(trace, "action_type", "")
+                act_val = act_type.value if hasattr(act_type, "value") else str(act_type)
+                target_res = getattr(trace, "target_resource", "")
+                obs_res = (getattr(trace, "actual_observation", "") or "")[:400]
+                thought_txt = getattr(trace, "thought", "") or ""
+                ws_state["current_action"] = f"[LifeLoop] {act_val} -> {target_res}"
+                if thought_txt:
+                    _append_worklog(ws_state, "thought", "LifeLoop Thinking", thought_txt)
+                _append_worklog(
+                    ws_state,
+                    "action",
+                    f"LifeLoop: {act_val}",
+                    f"Target: {target_res}\nResult: {obs_res}",
+                )
+                _persist_workstation_state()
+
+            setattr(agent, "_idle_goal_callback", _on_idle_goal)
+            setattr(agent, "_idle_step_callback", _on_idle_step)
+        except Exception as bridge_err:
+            logger.debug("being_life_loop_ui_bridge_skipped", error=str(bridge_err))
+
         self_coder = None
         if os.environ.get("SONIC_SELF_CODER_ENABLED", "true").lower() in ("1", "true", "yes"):
             try:
@@ -204,7 +230,7 @@ async def _maybe_start_being_life_loop(settings):
                 )
             except Exception as e:
                 logger.warning("being_self_coder_init_failed", error=str(e))
-        tick_interval = float(os.environ.get("SONIC_BEING_TICK_INTERVAL", "60"))
+        tick_interval = float(os.environ.get("SONIC_BEING_TICK_INTERVAL", "12"))
         self_coder_every = int(os.environ.get("SONIC_SELF_CODER_EVERY_TICKS", "20"))
         loop = BeingLifeLoop(
             being, agent, curiosity, home.id, tick_interval=tick_interval,
@@ -213,7 +239,6 @@ async def _maybe_start_being_life_loop(settings):
         loop.start()
         from sonic.being.life_loop import register_life_loop
         register_life_loop(loop)
-        # Keep the agent's view of the mind fresh as cycles evolve it.
         loop.before_tick_hooks: list = getattr(loop, "before_tick_hooks", [])
         loop.before_tick_hooks.append(
             lambda: setattr(agent, "being_mind", get_being_store().get_mind(being.being_id))

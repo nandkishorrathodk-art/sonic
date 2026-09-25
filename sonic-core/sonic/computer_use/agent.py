@@ -2172,6 +2172,8 @@ class ComputerUseAgent:
         if target:
             # Strip accidental leading "target:" or "target_resource:" prefix
             target = re.sub(r'^(?:target|target_resource)\s*:\s*', '', target, flags=re.IGNORECASE).strip(" *_\n\r\t`\"'")
+            # Strip accidental inline PAYLOAD: / EXPECTED: suffixes if model emitted them on the same line
+            target = re.sub(r'\s+\b(?:payload|expected)\s*:.*$', '', target, flags=re.IGNORECASE).strip(" *_\n\r\t`\"'")
             # Take first non-empty line to strip accidental trailing markdown blocks
             for line in target.splitlines():
                 if line.strip():
@@ -2272,12 +2274,24 @@ class ComputerUseAgent:
         else:
             payload = {}
 
-        # If target itself was formatted as JSON e.g. {"command": "hostname"}
+        # If target itself was formatted as JSON e.g. {"command": "hostname"} or {"text": "..."}
         if target.startswith("{"):
             tgt_dict = _extract_payload_dict(target)
             if "command" in tgt_dict:
                 payload.setdefault("command", str(tgt_dict["command"]).strip().rstrip(',;').strip())
                 target = str(tgt_dict["command"]).strip().rstrip(',;').strip().split()[0]
+            elif "text" in tgt_dict:
+                payload.setdefault("text", str(tgt_dict["text"]))
+                target = ""
+            elif "value" in tgt_dict:
+                payload.setdefault("text", str(tgt_dict["value"]))
+                target = ""
+            elif "content" in tgt_dict:
+                payload.setdefault("content", str(tgt_dict["content"]))
+                payload.setdefault("text", str(tgt_dict["content"]))
+            elif "key" in tgt_dict:
+                payload.setdefault("key", str(tgt_dict["key"]))
+                target = str(tgt_dict["key"])
             elif "app_name" in tgt_dict:
                 target = tgt_dict["app_name"]
             elif "url" in tgt_dict:
@@ -2315,8 +2329,12 @@ class ComputerUseAgent:
 
         if action_type in (ComputerActionType.GUI_TYPE, ComputerActionType.BROWSER_TYPE):
             # GUI and browser typing is strictly for text inputs, not shell commands.
-            # Do NOT map payload["command"] into payload["text"].
-            pass
+            if not payload.get("text"):
+                fallback_txt = fields.get("TEXT") or fields.get("CONTENT") or (
+                    target if action_type == ComputerActionType.GUI_TYPE and target and not target.startswith("{") else ""
+                )
+                if fallback_txt:
+                    payload["text"] = str(fallback_txt)
 
         if action_str in ("PYTHON", "PYTHON_EXEC", "PYTHON3"):
             py_code = payload.get("code") or payload.get("command") or target or ""
@@ -5552,6 +5570,8 @@ class ComputerUseAgent:
             return
         self._consecutive_failures = 0
         self._goal_complete_declared = False
+        if hasattr(self, "failure_budget") and hasattr(self.failure_budget, "records"):
+            self.failure_budget.records.clear()
         if getattr(self, "checklist", None) is not None:
             active_sg = self.checklist.active_sub_goal()
             if active_sg:
@@ -5589,6 +5609,12 @@ class ComputerUseAgent:
         t_start = time.perf_counter()
         self._interrupted = False
         goal_reached = False
+        if getattr(self, "_last_mission_goal", None) != goal:
+            self._last_mission_goal = goal
+            self._replan_count = 0
+            self._consecutive_failures = 0
+            if hasattr(self, "failure_budget") and hasattr(self.failure_budget, "records"):
+                self.failure_budget.records.clear()
 
         if getattr(self, "checklist", None) is None or self.checklist.top_level_goal != goal:
             has_explicit_steps = any(re.match(r'^(?:\d+[\.\)]|\-|\*)\s+', line.strip()) for line in goal.splitlines())
@@ -5904,6 +5930,8 @@ class ComputerUseAgent:
         obs = await self.observe(workspace_id)
         return (
             f"Active app: {obs.active_application}\n"
+            f"Open windows: {getattr(obs, 'open_applications', [])}\n"
+            f"Installed GUI apps: {(obs.installed_applications or [])[:15]}\n"
             f"Screen: {(obs.visible_text or '')[:300]}\n"
             f"Terminal: {(obs.terminal_output or '')[:200]}\n"
             f"Files: {obs.filesystem_files}\n"
@@ -5923,8 +5951,17 @@ class ComputerUseAgent:
         CuriosityCycleResult.
         """
         async def pursue(goal: str, steps: int) -> str:
+            goal_cb = getattr(self, "_idle_goal_callback", None)
+            if callable(goal_cb):
+                try:
+                    res_cb = goal_cb(goal, steps)
+                    if asyncio.iscoroutine(res_cb):
+                        await res_cb
+                except Exception:
+                    pass
             before = len(self.traces)
-            await self.run_mission(workspace_id, goal, steps=steps)
+            step_cb = getattr(self, "_idle_step_callback", None)
+            await self.run_mission(workspace_id, goal, steps=steps, step_callback=step_cb)
             # Summarize what the pursuit actually observed/did.
             new_traces = self.traces[before:]
             if not new_traces:

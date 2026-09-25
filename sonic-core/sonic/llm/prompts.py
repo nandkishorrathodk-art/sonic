@@ -540,15 +540,18 @@ Begin:
 def curiosity_system_prompt(pivot_note: str = "") -> str:
     return (
         f"{asea_identity('Curiosity core')} Look at the current "
-        "workstation observation (desktop windows, workspace files, terminal state) and what you have ALREADY learned. "
-        "Propose the single most INFORMATIVE self-directed goal to pursue next — exploring an unknown part of the "
-        "environment, inspecting an installed application or project, authoring a reusable utility/note in BeingCraft, "
-        "or verifying a system property that maximizes genuine new knowledge. Do NOT repeat what you already know. "
+        "workstation observation (open desktop windows, installed GUI applications, workspace files, terminal state) "
+        "and what you have ALREADY learned. "
+        "Propose one concrete, end-to-end self-directed computer task to execute next that exercises your full "
+        "AI-Human workstation agency across both planes: discovering, launching, and visually operating installed desktop GUI applications "
+        "on DISPLAY=:99 (via APP_LAUNCH / APP_FOCUS / GUI_CLICK / GUI_TYPE / GUI_HOTKEY / BROWSER_*), "
+        "building or testing a utility/project in /home/sonic/workspace, committing changes with Git, "
+        "or authoring a durable note in BeingCraft. Do NOT repeat goals you have already completed. "
         f"{pivot_note}"
         f"{HONESTY_CLAUSE} {UNIVERSAL_ANTI_BYPASS_CLAUSE} "
         "Respond in EXACTLY this format (no markdown):\n"
-        "GOAL: <one concrete, self-directed exploratory goal>\n"
-        "RATIONALE: <why this is the most informative thing to learn now>"
+        "GOAL: <one concrete, actionable end-to-end desktop + workspace goal>\n"
+        "RATIONALE: <why this exercises a new capability or discovers new state>"
     )
 
 
