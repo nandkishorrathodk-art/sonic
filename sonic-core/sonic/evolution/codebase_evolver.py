@@ -362,6 +362,14 @@ class CodebaseEvolver:
                             self.rollback_snapshots()
                             return False, ast_msg, 0, 0
 
+                # Validate AST on target file after applying unified diff
+                if target_path.exists() and target_path.suffix == ".py":
+                    content = target_path.read_text(encoding="utf-8")
+                    ast_ok, ast_msg = self.validate_ast(target_path, content)
+                    if not ast_ok:
+                        self.rollback_snapshots()
+                        return False, f"AST SyntaxError in patched file: {ast_msg}", 0, 0
+
                 # Count diff lines
                 added = sum(1 for line in code_diff_or_content.splitlines() if line.startswith("+") and not line.startswith("+++"))
                 removed = sum(1 for line in code_diff_or_content.splitlines() if line.startswith("-") and not line.startswith("---"))
@@ -487,7 +495,7 @@ class CodebaseEvolver:
             )
 
     def run_security_regression(self) -> bool:
-        """Verifies that no security invariants are broken by the proposed change."""
+        """Verifies that no security invariants are broken by the proposed change (fail-closed)."""
         sec_tests = ["sonic-core/tests/test_p0_security_hardening.py"]
         existing = [t for t in sec_tests if (self.repo_root / t).exists()]
         if not existing:
