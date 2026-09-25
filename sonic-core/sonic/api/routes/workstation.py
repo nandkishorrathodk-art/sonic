@@ -362,10 +362,16 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
         active_ws = str(def_desk.get("workspace_id") or def_desk.get("sandbox_id") or "") or active_ws
 
     if session_id not in _tenant_workstations[tenant_id]:
+        session_name = (
+            "New conversation"
+            if session_id == "default"
+            else f"Session {session_id[-8:]}"
+        )
         _tenant_workstations[tenant_id][session_id] = {
             "session_id": session_id,
             "tenant_id": tenant_id,
-            "mission_name": "New conversation",
+            "session_name": session_name,
+            "mission_name": session_name,
             "status": "IDLE",
             "target_repo": "",
             "git_branch": "",
@@ -422,6 +428,15 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
                 "events": [],
             },
         }
+    else:
+        session = _tenant_workstations[tenant_id][session_id]
+        if isinstance(session, dict) and not session.get("session_name"):
+            session["session_name"] = (
+                session.get("mission_name")
+                or ("New conversation" if session_id == "default" else f"Session {session_id[-8:]}")
+            )
+        if isinstance(session, dict) and not session.get("mission_name"):
+            session["mission_name"] = session["session_name"]
         _persist_workstation_state()
 
     session = _tenant_workstations[tenant_id][session_id]
@@ -953,7 +968,8 @@ async def list_workstation_sessions(user: User = Depends(require_auth)):
             continue
         result.append({
             "session_id": sid,
-            "mission_name": sdata.get("mission_name") or "New conversation",
+            "session_name": sdata.get("session_name") or sdata.get("mission_name") or f"Session {sid[-8:]}",
+            "mission_name": sdata.get("mission_name") or sdata.get("session_name") or f"Session {sid[-8:]}",
             "status": sdata.get("status", "IDLE"),
             "workspace_id": _session_workspace_id_for_tenant(tenant_id, sid),
             "git_branch": sdata.get("git_branch") or "",
@@ -1001,6 +1017,7 @@ async def delete_workstation_session(
             _tenant_workstations[tenant_id]["default"] = {
                 "session_id": "default",
                 "tenant_id": tenant_id,
+                "session_name": "New conversation",
                 "mission_name": "New conversation",
                 "status": "IDLE",
                 "target_repo": "",
@@ -2295,7 +2312,11 @@ def _is_complex_or_multi_part_objective(prompt: str) -> bool:
         target_hint,
     ))
     if profile["objective_present"] and (
-        network_target or profile["modalities"] != ["UNKNOWN"]
+        network_target
+        or (
+            profile["modalities"] != ["UNKNOWN"]
+            and any(modality != "DATA_FORENSICS" for modality in profile["modalities"])
+        )
         or re.search(r"\b(?:phase|recon|attack\s+surface)\b", p_lower)
     ):
         return True
@@ -3591,7 +3612,9 @@ async def send_workstation_prompt(
     tenant_id = _resolve_tenant_id(user)
     state = _get_or_create_session(tenant_id, session_id)
     prompt_text = (req.prompt or "").strip()
-    state["mission_name"] = prompt_text or "New conversation"
+    if prompt_text:
+        state["mission_name"] = prompt_text
+        state["session_name"] = prompt_text
     state["status"] = "RUNNING"
     state["current_action"] = "Thinking..."
     _append_worklog(

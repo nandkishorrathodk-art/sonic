@@ -148,7 +148,11 @@ export default function SonicDevinWorkstation() {
   const handleNewSession = async () => {
     abortPollRef.current = true;
     setLoading(false);
-    const newSessionId = `mission-${Math.random().toString(36).substring(2, 7)}`;
+    const newSessionId = `mission-${
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID().slice(0, 8)
+        : Math.random().toString(36).substring(2, 10)
+    }`;
     setSessionId(newSessionId);
     setActiveFile("");
     setFileContent([]);
@@ -367,7 +371,7 @@ export default function SonicDevinWorkstation() {
           <WorkstationHeader
             sidebarOpen={sidebarOpen}
             setSidebarOpen={setSidebarOpen}
-            sessionName={workstationState?.mission_name || "New conversation"}
+            sessionName={workstationState?.session_name || workstationState?.mission_name || "New conversation"}
             gitBranch={workstationState?.git_branch || ""}
             latestCommit={workstationState?.latest_commit}
             connectionStatus={connectionStatus}
@@ -390,7 +394,7 @@ export default function SonicDevinWorkstation() {
                 onSendPrompt={handleSendPrompt}
                 onInterrupt={handleInterrupt}
                 onSelectFile={fetchFile}
-                sessionName={workstationState?.mission_name || ""}
+                sessionName={workstationState?.session_name || workstationState?.mission_name || ""}
                 gitBranch={workstationState?.git_branch || ""}
                 rightPanelOpen={rightPanelOpen}
                 onToggleRightPanel={() => setRightPanelOpen((open) => !open)}
