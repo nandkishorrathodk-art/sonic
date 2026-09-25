@@ -40,6 +40,16 @@ SONIC operates concurrently across two clean execution planes with **complete co
 7. **Deterministic State-First Convergence (HDCE)**: Complex tasks must proceed state-first, not workflow-first. Workflows must pass only typed `StateDelta` mappings between nodes, purge raw temporary chatter, and validate every mutation through `ActionContract` pre/post-conditions.
 8. **Execution Plane Purity & Multi-Phase Persistence**: When a mission requests an execution plane (`requested_plane`), that plane must persist throughout all subsequent decomposition phases (`_plan_next_phase`). Headless tasks must not be contaminated by redundant GUI screenshot polling.
 9. **AI-Human Digital Being Invariant**: SONIC embodies a persistent digital colleague with continuous identity (`Being`), cross-session cognitive affect (`BeingMind`), human workstation fluency (hotkeys, window management, focus settling), and an always-on curiosity loop (`BeingLifeLoop`). It is never a disposable CLI bot.
+10. **Zero External Puppet Simulation (Developer/Assistant Never Impersonates SONIC)**:
+    - *"Jo SONIC ko karna chahiye wo developer/assistant kyu karega?"*
+    - The developer, pair programmer, or assistant agent must NEVER run manual background commands, shell scripts, or X11 actions (`docker exec ... xdotool`, `curl`, headless automation) to simulate or fake progress on a task given to SONIC.
+    - Every action on the screen, in the browser, or in the terminal MUST originate strictly from SONIC's own cognitive loop (`ComputerUseAgent.step() -> execute_action()`, `BossAgent`, or `LayaSystem1Engine`). Taking manual shortcuts behind the scenes destroys trust and is strictly forbidden as fake progress.
+11. **Smooth Visual Motor Perception & Visible Cursor Interactivity**:
+    - *"Cursor kaam karna chahiye aur use hona chahiye, background automation nahi."*
+    - Mouse cursor teleportation (0 ms instantaneous jump via raw `xdotool mousemove`) is strictly forbidden in user-facing workstations because streaming desktop protocols (noVNC / WebSockets) drop single-frame jumps, making the cursor look invisible or frozen to human observers.
+    - All pointer movements (`GUI_MOVE`, `GUI_CLICK`, `GUI_DOUBLE_CLICK`, `GUI_RIGHT_CLICK`) must use smooth cosine-eased motor interpolation (`sonic_cursor.py`) over 200–300 ms so human operators can visually follow the agent's intent.
+    - Keystroke typing (`GUI_TYPE`) must always focus the target element (`x, y`) before typing to ensure the cursor actively interacts with the intended field.
+    - Tasks involving visual applications, browsing, or desktop UI must actively dispatch to the desktop GUI plane rather than taking silent headless terminal shortcuts.
 
 ## Layout
 - `sonic-core/` — Python backend (uv workspace, Python 3.12+). `pip install -e sonic-core[dev]`.
@@ -2122,6 +2132,40 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
 ### 4. Verification Baseline (100% Green)
 - `sonic-core/tests/test_advanced_evolution.py` (9 tests) — **9 passed in 3.00s**.
 - Full regression suite across Evolution, Kernel, Safety, and Broker (42 tests) — **42 passed in 4.56s**.
+
+## Phase 40 — AI-Human Digital Being Identity Hardening, BeingVault Wiring & Sealed Safety Envelope (DONE)
+- **Foundational Agency**: Completely eliminated pentester/hacker lock-in across dashboard and backend. SONIC is an autonomous AI-Human Being capable of general-purpose computer use.
+- **BeingVault Persistence**: Added `BeingVault` to persist operator credentials, persistent browser profiles, and account states across reboots (`sonic/being/vault.py`).
+- **Sealed Safety Envelope**: `SealedActionPolicy` with SHA-256 HMAC cryptographic tamper seals; fail-closed exit 126 blocks unauthorized operations without execution bypass.
+- **Dynamic Application Discovery**: Discovers installed applications strictly via `$PATH`, `.desktop` entries, and POSIX alternatives (zero hardcoded app names).
+
+## Phase 41 — Multimodal Vision Engine & Live Life Loop GUI Streaming (DONE)
+- **Multimodal Format Normalization**: Consolidated system context and screenshots into valid single-turn multimodal payload for Llama-3.2-Vision and Nemotron vision architectures.
+- **Life Loop GUI Streaming**: Wired `BeingLifeLoop` to the live desktop interaction bus, streaming real-time visual perception and cognitive state to the frontend dashboard.
+- **Dynamic Window Activation**: Hardened X11 `APP_FOCUS` via `wmctrl` and `xdotool` so the agent reliably focuses active windows without spawning ghost processes.
+- **Payload Extraction**: Fixed JSON payload parsing in `GUI_TYPE` to correctly parse text and coordinate fields from LLM outputs.
+
+## Phase 42 — Laya System-1 Fast Intuition Engine & High-Speed Multi-Subagent Coordination (DONE)
+- **Laya System-1 Fast Engine**: Implemented `LayaSystem1Engine` (`sonic/llm/laya_engine.py`) providing sub-millisecond fast triage, guard classification, verification checks, and curiosity affect scoring. Includes zero-RAM laptop protection mode (`_has_sufficient_ram_gb`).
+- **Concurrent Subagent Workspaces**: `SubagentTeamworkManager` orchestrates concurrent subagents in isolated git branch workspaces with automatic verification gating and clean parent merge.
+- **Resource Forwarding**: Wired `BeingCraft` and `BeingVault` directly into `BossAgent` and all dispatched subagents.
+- **Routing Support**: Integrated Nemotron 120B/550B routing configurations.
+
+## Phase 43 — Human-Grade Motor Reflexes, Smooth Cursor Gliding & Anti-Puppet Invariants (DONE)
+- **Smooth Cursor Gliding Engine (`sonic_cursor.py`)**:
+  - Replaced 0 ms instantaneous cursor teleportation with cosine-eased trajectory interpolation (200–300 ms).
+  - Ensured human operators watching noVNC or streaming viewers can clearly see the mouse glide across the screen to target coordinates.
+- **Auto-Focus Target Typing**:
+  - `GUI_TYPE` automatically positions and clicks the cursor at `(x, y)` before typing keystrokes, ensuring active focus on input fields.
+- **Window Focus Deduplication**:
+  - `launch_application` in `docker_computer.py` activates existing open windows (`wmctrl -x -a` / `wmctrl -a`) when no arguments are passed, preventing duplicate app instances.
+- **Dual-Plane Prompt Directive Alignment**:
+  - Updated `agent.py` so visual, browsing, and GUI tasks actively utilize the graphical desktop plane (`APP_LAUNCH`, `APP_FOCUS`, `GUI_CLICK`, `GUI_TYPE`, `GUI_MOVE`) instead of taking silent headless terminal shortcuts.
+- **Strict Anti-Puppet Mandate**:
+  - Addressed Operator Feedback:
+    - *"Are jo sonic ko karna chahiye vo tum kyu karte ho?"* -> Developer/Assistant manual execution strictly forbidden.
+    - *"Cursor kaam nahi kar raha, use nahi kar raha, automate kaam tum kara rahe ho"* -> Replaced background shortcuts with visible cursor gliding, element focus, and autonomous agent-driven actions.
+
 
 
 
