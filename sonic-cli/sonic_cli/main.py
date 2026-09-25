@@ -92,11 +92,11 @@ def list_missions(
     server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
-    """List active and past autonomous missions from the backend (`/missions`)."""
+    """List active and past engagements from the backend."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         with httpx.Client(base_url=server, timeout=15) as client:
-            res = client.get("/missions", headers=headers)
+            res = client.get("/engagements", headers=headers)
             if res.status_code == 200:
                 console.print_json(data=res.json())
             else:
@@ -140,9 +140,7 @@ def hypotheses(
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         with httpx.Client(base_url=server, timeout=15) as client:
-            res = client.get(f"/missions/{mission_id}", headers=headers)
-            if res.status_code != 200:
-                res = client.get(f"/engagements/{mission_id}/hypotheses", headers=headers)
+            res = client.get(f"/engagements/{mission_id}/hypotheses", headers=headers)
             if res.status_code == 200:
                 data = res.json()
                 items = data.get("hypotheses", [])

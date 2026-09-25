@@ -46,6 +46,7 @@ export interface DesktopState {
 
 export interface WorkstationState {
   session_id: string;
+  session_name?: string;
   tenant_id: string;
   mission_name: string;
   status: "IDLE" | "RUNNING" | "PAUSED" | "WAITING_FOR_HUMAN" | "BLOCKED" | "COMPLETED" | "ERROR";
@@ -101,6 +102,7 @@ export interface CommandResult {
 
 export interface SessionItem {
   session_id: string;
+  session_name?: string;
   mission_name: string;
   status: string;
   workspace_id?: string;
@@ -139,6 +141,9 @@ export function normalizeSessionList(raw: unknown): SessionItem[] {
       session_id: typeof item.session_id === "string" && item.session_id.trim()
         ? item.session_id.trim()
         : `session-${idx}`,
+      session_name: typeof item.session_name === "string" && item.session_name.trim()
+        ? item.session_name.trim()
+        : undefined,
       mission_name: typeof item.mission_name === "string" && item.mission_name.trim()
         ? item.mission_name.trim()
         : "Unprovisioned Workstation",

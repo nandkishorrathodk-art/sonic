@@ -362,17 +362,23 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
         active_ws = str(def_desk.get("workspace_id") or def_desk.get("sandbox_id") or "") or active_ws
 
     if session_id not in _tenant_workstations[tenant_id]:
+        session_name = (
+            "New conversation"
+            if session_id == "default"
+            else f"Session {session_id[-8:]}"
+        )
         _tenant_workstations[tenant_id][session_id] = {
             "session_id": session_id,
             "tenant_id": tenant_id,
-            "mission_name": "New conversation",
+            "session_name": session_name,
+            "mission_name": session_name,
             "status": "IDLE",
             "target_repo": "",
             "git_branch": "",
             "latest_commit": "",
             "active_file": "",
             "elapsed_seconds": 0,
-            "thought_summary": "Ready for security research and engineering tasks.",
+            "thought_summary": "Ready to help operate the computer, build software, manage files, and learn from verified work.",
             "current_action": "Ready when you are.",
             "worklog": [],
             "evidence": [],
@@ -422,6 +428,15 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
                 "events": [],
             },
         }
+    else:
+        session = _tenant_workstations[tenant_id][session_id]
+        if isinstance(session, dict) and not session.get("session_name"):
+            session["session_name"] = (
+                session.get("mission_name")
+                or ("New conversation" if session_id == "default" else f"Session {session_id[-8:]}")
+            )
+        if isinstance(session, dict) and not session.get("mission_name"):
+            session["mission_name"] = session["session_name"]
         _persist_workstation_state()
 
     session = _tenant_workstations[tenant_id][session_id]
@@ -953,7 +968,8 @@ async def list_workstation_sessions(user: User = Depends(require_auth)):
             continue
         result.append({
             "session_id": sid,
-            "mission_name": sdata.get("mission_name") or "New conversation",
+            "session_name": sdata.get("session_name") or sdata.get("mission_name") or f"Session {sid[-8:]}",
+            "mission_name": sdata.get("mission_name") or sdata.get("session_name") or f"Session {sid[-8:]}",
             "status": sdata.get("status", "IDLE"),
             "workspace_id": _session_workspace_id_for_tenant(tenant_id, sid),
             "git_branch": sdata.get("git_branch") or "",
@@ -1001,6 +1017,7 @@ async def delete_workstation_session(
             _tenant_workstations[tenant_id]["default"] = {
                 "session_id": "default",
                 "tenant_id": tenant_id,
+                "session_name": "New conversation",
                 "mission_name": "New conversation",
                 "status": "IDLE",
                 "target_repo": "",
@@ -2178,6 +2195,8 @@ def _is_action_prompt(prompt: str) -> bool:
         "what is sonic", "who is sonic", "tell me about yourself",
     }
     cleaned = re.sub(r"[\s?!.,;]+$", "", lower).strip()
+    if re.fullmatch(r"(?:hi|hello|hey|thanks|thank you|yo|buddy|friend)(?:\s+\w+)?", cleaned):
+        return False
     if re.fullmatch(r"(?:hi|hello|hey|thanks|thank you|yo|buddy|friend)(?:\s+sonic)?(?:\s+desktop)?", cleaned):
         return False
     # Observation-only screen inspections stay in the observation/read-only lane
@@ -2199,6 +2218,7 @@ def _is_action_prompt(prompt: str) -> bool:
         or "what is your role" in cleaned
         or "what are your limitations" in cleaned
         or re.fullmatch(r"(?:hey\s+)?what happened", cleaned) is not None
+        or re.search(r"\b(?:i\s+)?(?:was\s+)?wondering\s+what\s+is\s+happening\b", cleaned)
     ):
         return False
     if (
@@ -2278,8 +2298,27 @@ def _is_complex_or_multi_part_objective(prompt: str) -> bool:
     p_lower = prompt.lower().strip()
     if any(k in p_lower for k in ("[boss]", "subagent", "sub-agent", "multi-phase", "orchestrat", "swarm")):
         return True
+    if re.search(r"\bdeep\s+dive\b", p_lower):
+        return True
     words = p_lower.split()
     if len(words) >= 25:
+        return True
+    if len(words) >= 8 and len(re.findall(r"\band\b", p_lower)) >= 2:
+        return True
+    profile = _infer_program_profile(prompt)
+    target_hint = str(profile.get("target") or "")
+    network_target = bool(re.search(
+        r"(?:https?://|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|ai|app)\b)",
+        target_hint,
+    ))
+    if profile["objective_present"] and (
+        network_target
+        or (
+            profile["modalities"] != ["UNKNOWN"]
+            and any(modality != "DATA_FORENSICS" for modality in profile["modalities"])
+        )
+        or re.search(r"\b(?:phase|recon|attack\s+surface)\b", p_lower)
+    ):
         return True
     return False
 
@@ -2303,9 +2342,16 @@ def _infer_program_profile(prompt: str, state: dict[str, Any] | None = None) -> 
         "DESKTOP_APP": ("desktop app", "gui", "graphical application", "window"),
         "NETWORK_SERVICE": ("network service", "host", "port", "daemon", "socket"),
         "DATA_FORENSICS": ("pcap", "memory dump", "forensics", "log file", "disk image"),
+        "SECURITY_ASSESSMENT": (
+            "vulnerability", "vulnerabilities", "sql injection", "xss",
+            "ssrf", "penetration test", "security audit",
+        ),
     }
     for modality, terms in modality_terms.items():
-        if any(term in text for term in terms):
+        if any(
+            re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
+            for term in terms
+        ):
             modalities.append(modality)
 
     target = _extract_target_url_or_domain(prompt, state)
@@ -3310,7 +3356,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         )
                                         s_req = LLMRequest(
                                             messages=[
-                                                Message(role=MessageRole.SYSTEM, content="You are SONIC, an autonomous systems and security architect. Summarize the verified findings and actions taken accurately and concisely in the user's language."),
+                                                Message(role=MessageRole.SYSTEM, content="You are SONIC, an autonomous AI-Human Digital Being and computer engineer. Summarize the verified work and actions taken accurately and concisely in the user's language."),
                                                 Message(role=MessageRole.USER, content=synth_prompt),
                                             ],
                                             task_type="reasoning",
@@ -3566,7 +3612,9 @@ async def send_workstation_prompt(
     tenant_id = _resolve_tenant_id(user)
     state = _get_or_create_session(tenant_id, session_id)
     prompt_text = (req.prompt or "").strip()
-    state["mission_name"] = prompt_text or "New conversation"
+    if prompt_text:
+        state["mission_name"] = prompt_text
+        state["session_name"] = prompt_text
     state["status"] = "RUNNING"
     state["current_action"] = "Thinking..."
     _append_worklog(
@@ -3835,4 +3883,3 @@ async def resume_workstation_after_human(
         state["current_action"] = "Human assistance completed. Ready to continue."
         _persist_workstation_state()
     return {"status": "resumed", "session_id": session_id, "message": msg, "resumed_objective": paused_objective}
-

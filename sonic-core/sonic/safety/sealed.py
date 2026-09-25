@@ -40,6 +40,7 @@ always acts under a proven-intact envelope.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import ipaddress
@@ -162,7 +163,7 @@ class SealedActionPolicy(ActionPolicy):
     def seal_hash(self) -> str:
         return self._seal_hash
 
-    def clone_for_agent(self, agent_id: str = "") -> "SealedActionPolicy":
+    def clone_for_agent(self, agent_id: str = "") -> SealedActionPolicy:
         """Clone policy with an independent rate window for a concurrent subagent."""
         cloned = SealedActionPolicy(
             workspace_root=str(self.workspace_root),
@@ -170,8 +171,8 @@ class SealedActionPolicy(ActionPolicy):
             allow_security_tool_targets=set(self.security_tool_targets),
             max_actions_per_minute=self.max_actions_per_minute,
             require_approval_for_intrusive=self.require_approval_for_intrusive,
-            scope_checker=self.scope_checker,
-            scope_config=self.scope_config,
+            scope_checker=copy.deepcopy(self.scope_checker),
+            scope_config=copy.deepcopy(self.scope_config),
             allow_private_networks=self.allow_private_networks,
             tenant_id=self.tenant_id,
             _seal_secret=self._seal_secret,
@@ -200,6 +201,9 @@ class SealedActionPolicy(ActionPolicy):
         if getattr(self, "scope_config", None):
             payload["scope_config"] = self.scope_config
         if hasattr(self, "scope_checker") and self.scope_checker is not None:
+            payload["scope_checker_config"] = copy.deepcopy(
+                getattr(self.scope_checker, "scope_config", None)
+            )
             patterns = getattr(self.scope_checker, "_destructive_patterns", getattr(self.scope_checker, "_DESTRUCTIVE_PATTERNS", []))
             forbidden = getattr(self.scope_checker, "_forbidden_patterns", [])
             payload["scope_patterns_repr"] = sorted([getattr(p, "pattern", str(p)) for p in patterns]) + sorted([getattr(p, "pattern", str(p)) for p in forbidden])

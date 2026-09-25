@@ -743,7 +743,11 @@ class MissionDirector:
                     f"Mission ended with no successful actions ({total_actions} attempted)."
                 )
 
-            self._record_event(mission_id, "MissionCompleted", {"outcome": "SUCCESS", "traces": len(traces)})
+            self._record_event(
+                mission_id,
+                "MissionCompleted",
+                {"outcome": state.outcome.value, "traces": len(traces)},
+            )
             await self._persist_mission(mission_id)
 
         except Exception as e:

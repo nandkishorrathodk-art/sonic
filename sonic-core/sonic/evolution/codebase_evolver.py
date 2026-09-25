@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import importlib.util
 import os
 import re
 import subprocess
@@ -49,6 +50,15 @@ _PROTECTED_COMPONENTS = frozenset([
     "sonic/safety/sealed",
     "sonic/safety/action_policy",
     "sonic/sandbox/egress",
+    "sonic/auth/models",
+    "sonic/sandbox/providers/docker",
+    "sonic/evolution/patch_synthesizer",
+    "sonic/evolution/codebase_evolver",
+    "sonic/evolution/goal_director",
+    "sonic/evolution/pipeline",
+    "sonic/evolution/self_coder",
+    "sonic/evolution/coding_agent",
+    "sonic-core/tests/test_p0_security_hardening",
     "sonic-kernel-rs/src/safety",
 ])
 
@@ -192,6 +202,26 @@ class CodebaseEvolver:
                 return True
         return False
 
+    @staticmethod
+    def _diff_files(diff_text: str) -> list[str]:
+        """Extract affected repository paths from a unified or git diff."""
+        paths: list[str] = []
+        for line in diff_text.splitlines():
+            if line.startswith("diff --git "):
+                parts = line.split()
+                candidates = parts[2:4]
+            elif line.startswith("--- ") or line.startswith("+++ "):
+                candidates = [line[4:].split("\t", 1)[0]]
+            else:
+                continue
+            for candidate in candidates:
+                if candidate in ("/dev/null", "b//dev/null", "b/dev/null"):
+                    continue
+                normalized = candidate[2:] if candidate[:2] in ("a/", "b/") else candidate
+                if normalized not in paths:
+                    paths.append(normalized)
+        return paths
+
     # ------------------------------------------------------------------
     # 2. Syntax / AST Pre-flight
     # ------------------------------------------------------------------
@@ -238,6 +268,41 @@ class CodebaseEvolver:
     # ------------------------------------------------------------------
     # 4. Patch / Code Application
     # ------------------------------------------------------------------
+    def apply_patch_multi(
+        self,
+        target_files: list[str],
+        code_diff: str,
+    ) -> tuple[bool, str]:
+        """Apply one multi-file diff atomically and validate every touched file."""
+        if not target_files:
+            return False, "No target files supplied"
+
+        try:
+            for target_file in target_files:
+                if self.is_protected(target_file):
+                    raise SafetyInvariantViolation(
+                        f"Forbidden: '{target_file}' is a protected safety component."
+                    )
+                self._record_snapshot((self.repo_root / target_file).resolve())
+
+            ok, message, _, _ = self.apply_patch(target_files[0], code_diff)
+            if not ok:
+                self.rollback_snapshots()
+                return False, message
+
+            for target_file in target_files:
+                path = (self.repo_root / target_file).resolve()
+                if path.exists() and path.suffix == ".py":
+                    try:
+                        ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                    except Exception as exc:
+                        self.rollback_snapshots()
+                        return False, f"AST verification failed for {target_file}: {exc}"
+            return True, "Multi-file patch applied and validated"
+        except Exception as exc:
+            self.rollback_snapshots()
+            return False, f"Multi-file patch failed: {exc}"
+
     def apply_patch(
         self,
         target_file_rel: str,
@@ -266,8 +331,17 @@ class CodebaseEvolver:
 
         if is_unified_diff:
             # Apply via git apply in temp patch file
-            with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as tf:
-                tf.write(code_diff_or_content)
+            with tempfile.NamedTemporaryFile(
+                "w",
+                suffix=".patch",
+                delete=False,
+                encoding="utf-8",
+                newline="\n",
+            ) as tf:
+                patch_text = code_diff_or_content
+                if not patch_text.endswith("\n"):
+                    patch_text += "\n"
+                tf.write(patch_text)
                 temp_patch_path = tf.name
 
             try:
@@ -275,7 +349,18 @@ class CodebaseEvolver:
                 res = subprocess.run(cmd, cwd=str(self.repo_root), capture_output=True, text=True, timeout=30)
                 if res.returncode != 0:
                     # Fallback to direct replacement if unified diff failed
-                    return False, f"git apply failed: {res.stderr or res.stdout}", 0, 0
+                    return False, f"Patch application/AST preflight failed: {res.stderr or res.stdout}", 0, 0
+
+                touched = self._diff_files(code_diff_or_content) or [target_file_rel]
+                for relative in touched:
+                    path = (self.repo_root / relative).resolve()
+                    if path.suffix == ".py" and path.exists():
+                        ast_ok, ast_msg = self.validate_ast(
+                            path, path.read_text(encoding="utf-8", errors="replace")
+                        )
+                        if not ast_ok:
+                            self.rollback_snapshots()
+                            return False, ast_msg, 0, 0
 
                 # Validate AST on target file after applying unified diff
                 if target_path.exists() and target_path.suffix == ".py":
@@ -313,53 +398,46 @@ class CodebaseEvolver:
             target_path.write_text(new_text, encoding="utf-8")
             return True, "File content written and validated", added, removed
 
-    def apply_patch_multi(
-        self,
-        target_files_rel: list[str],
-        multi_diff: str,
-    ) -> tuple[bool, str]:
-        """
-        Applies a multi-file unified diff across multiple target files.
-        Validates AST on all touched files. If any file fails AST validation
-        or git apply fails, atomically rolls back all files to their original snapshots.
-        """
-        for f_rel in target_files_rel:
-            if self.is_protected(f_rel):
-                raise SafetyInvariantViolation(
-                    f"Forbidden: '{f_rel}' is a protected safety component and cannot be self-modified."
-                )
-
-        target_paths = [(self.repo_root / f_rel).resolve() for f_rel in target_files_rel]
-        for p in target_paths:
-            self._record_snapshot(p)
-
-        with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as tf:
-            tf.write(multi_diff)
-            temp_patch_path = tf.name
-
-        try:
-            cmd = ["git", "apply", "--whitespace=fix", temp_patch_path]
-            res = subprocess.run(cmd, cwd=str(self.repo_root), capture_output=True, text=True, timeout=30)
-            if res.returncode != 0:
-                self.rollback_snapshots()
-                return False, f"git apply failed: {res.stderr or res.stdout}"
-
-            for p in target_paths:
-                if p.exists() and p.suffix == ".py":
-                    content = p.read_text(encoding="utf-8")
-                    ast_ok, ast_msg = self.validate_ast(p, content)
-                    if not ast_ok:
-                        self.rollback_snapshots()
-                        return False, f"AST SyntaxError in {p.name}: {ast_msg}"
-
-            return True, "Multi-file patch applied and AST validated successfully"
-        finally:
-            if os.path.exists(temp_patch_path):
-                os.unlink(temp_patch_path)
-
     # ------------------------------------------------------------------
     # 5. Test Suite Verification
     # ------------------------------------------------------------------
+    def run_import_checks(self, files: list[str]) -> tuple[bool, str]:
+        """Checks that changed Python files do not introduce missing imports."""
+        search_root = self.repo_root / "sonic-core"
+        if not search_root.exists():
+            search_root = self.repo_root
+        added_path = False
+        try:
+            if str(search_root) not in sys.path:
+                sys.path.insert(0, str(search_root))
+                added_path = True
+            for relative in files:
+                path = (self.repo_root / relative).resolve()
+                if path.suffix != ".py" or not path.exists():
+                    continue
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        names = [alias.name for alias in node.names]
+                    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                        names = [node.module]
+                    else:
+                        continue
+                    for name in names:
+                        local_module = search_root / Path(*name.split("."))
+                        local_exists = (
+                            local_module.with_suffix(".py").exists()
+                            or (local_module / "__init__.py").exists()
+                        )
+                        if not local_exists and importlib.util.find_spec(name) is None:
+                            return False, f"Missing import '{name}' in {relative}"
+            return True, "Import integrity checks passed"
+        except (ImportError, ModuleNotFoundError, ValueError) as exc:
+            return False, f"Import integrity check failed: {exc}"
+        finally:
+            if added_path:
+                sys.path.remove(str(search_root))
+
     def run_tests(self, test_paths: list[str] | None = None) -> TestExecutionResult:
         """Runs pytest on the specified test paths with structured parsing."""
         if not test_paths:
@@ -421,54 +499,10 @@ class CodebaseEvolver:
         sec_tests = ["sonic-core/tests/test_p0_security_hardening.py"]
         existing = [t for t in sec_tests if (self.repo_root / t).exists()]
         if not existing:
-            logger.warning("security_regression_suite_missing_fail_closed", repo_root=str(self.repo_root))
+            logger.critical("evolution_security_regression_suite_missing", required=sec_tests)
             return False
         res = self.run_tests(existing)
         return res.passed
-
-    def run_import_checks(self, file_paths_rel: list[str]) -> tuple[bool, str]:
-        """
-        Validates that all specified Python files can be imported cleanly without top-level ImportError
-        or ModuleNotFoundError.
-        """
-        repo = Path(self.repo_root).resolve()
-        sonic_core = (repo / "sonic-core").resolve()
-        sonic_cli = (repo / "sonic-cli").resolve()
-
-        for f_rel in file_paths_rel:
-            p = (repo / f_rel).resolve()
-            if not p.exists() or p.suffix != ".py":
-                continue
-
-            mod_name = ""
-            if p.is_relative_to(sonic_core):
-                rel_parts = p.relative_to(sonic_core).with_suffix("").parts
-                mod_name = ".".join(rel_parts)
-            elif p.is_relative_to(sonic_cli):
-                rel_parts = p.relative_to(sonic_cli).with_suffix("").parts
-                mod_name = ".".join(rel_parts)
-            elif p.is_relative_to(repo):
-                rel_parts = p.relative_to(repo).with_suffix("").parts
-                mod_name = ".".join(rel_parts)
-
-            code = (
-                f"import sys; "
-                f"sys.path.insert(0, {str(sonic_core)!r}); "
-                f"sys.path.insert(0, {str(sonic_cli)!r}); "
-                f"sys.path.insert(0, {str(repo)!r}); "
-            )
-            if mod_name:
-                code += f"import importlib; importlib.import_module({mod_name!r})"
-            else:
-                code += f"import runpy; runpy.run_path({str(p)!r})"
-
-            cmd = [sys.executable, "-c", code]
-            res = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, timeout=30)
-            if res.returncode != 0:
-                err = res.stderr or res.stdout
-                return False, f"Import integrity check failed for {f_rel}: {err}"
-
-        return True, "All import checks passed"
 
     # ------------------------------------------------------------------
     # 6. Git Commit & Push (Auto-Promotion)
@@ -545,6 +579,8 @@ class CodebaseEvolver:
         auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
+        pre_applied_files: list[str] | None = None,
+        report_only: bool = False,
     ) -> EvolutionSummaryReport:
         """
         Executes a complete, closed-loop codebase evolution cycle:
@@ -565,8 +601,11 @@ class CodebaseEvolver:
             auto_promote=auto_promote,
             push=push,
             test_paths=test_paths,
+            pre_applied_files=pre_applied_files,
+            report_only=report_only,
         )
-        self._log_to_evolution_md(report)
+        if not report_only:
+            self._log_to_evolution_md(report)
         return report
 
     def _log_to_evolution_md(self, report: EvolutionSummaryReport) -> None:
@@ -605,6 +644,8 @@ class CodebaseEvolver:
         auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
+        pre_applied_files: list[str] | None = None,
+        report_only: bool = False,
     ) -> EvolutionSummaryReport:
         proposal, reason = self.pipeline.submit_proposal(
             target_component=target_component,
@@ -628,25 +669,37 @@ class CodebaseEvolver:
             return report
 
         # Gate 2: Staging & Patch Application
-        try:
-            ok, msg, added, removed = self.apply_patch(target_component, code_diff)
-            report.lines_added = added
-            report.lines_removed = removed
-            if not ok:
+        if pre_applied_files:
+            report.files_affected = list(pre_applied_files)
+            report.ast_validated = True
+        else:
+            try:
+                ok, msg, added, removed = self.apply_patch(target_component, code_diff)
+                report.lines_added = added
+                report.lines_removed = removed
+                if not ok:
+                    self.rollback_snapshots()
+                    report.stage = EvolutionStage.REJECTED
+                    report.error_reason = f"Patch application failed: {msg}"
+                    return report
+                report.ast_validated = True
+            except SafetyInvariantViolation as e:
                 self.rollback_snapshots()
                 report.stage = EvolutionStage.REJECTED
-                report.error_reason = f"Patch application failed: {msg}"
+                report.error_reason = str(e)
                 return report
-            report.ast_validated = True
-        except SafetyInvariantViolation as e:
+            except Exception as e:
+                self.rollback_snapshots()
+                report.stage = EvolutionStage.REJECTED
+                report.error_reason = f"Unexpected patch failure: {e}"
+                return report
+
+        imports_ok, imports_message = self.run_import_checks(report.files_affected)
+        if not imports_ok:
             self.rollback_snapshots()
             report.stage = EvolutionStage.REJECTED
-            report.error_reason = str(e)
-            return report
-        except Exception as e:
-            self.rollback_snapshots()
-            report.stage = EvolutionStage.REJECTED
-            report.error_reason = f"Unexpected patch failure: {e}"
+            report.error_reason = imports_message
+            self.pipeline.advance_stage(proposal.proposal_id, EvolutionStage.REJECTED, imports_message)
             return report
 
         # Gate 3: Unit / Component Tests
@@ -697,19 +750,31 @@ class CodebaseEvolver:
         self.pipeline.advance_stage(proposal.proposal_id, EvolutionStage.SECURITY_REGRESSION_PASSING, "Zero safety regressions")
 
         # Gate 5: Promotion & Git Automation
+        if report_only:
+            self.rollback_snapshots()
+            report.stage = EvolutionStage.AWAITING_APPROVAL
+            report.error_reason = "Report-only verification completed; changes were rolled back."
+            return report
+
         self.clear_snapshots()  # Changes are verified and retained
 
         if auto_promote:
             committed, chash, pushed, pmsg = self.commit_and_push(
                 proposal_id=proposal.proposal_id,
                 description=description,
-                files=[target_component],
+                files=report.files_affected or [target_component],
                 push=push,
             )
             report.git_committed = committed
             report.git_commit_hash = chash
             report.git_pushed = pushed
             report.git_push_message = pmsg
+            if not committed:
+                report.stage = EvolutionStage.ROLLED_BACK
+                report.error_reason = f"Git promotion failed: {pmsg}"
+                self.rollback_snapshots()
+                self.pipeline.advance_stage(proposal.proposal_id, EvolutionStage.ROLLED_BACK, report.error_reason)
+                return report
             report.stage = EvolutionStage.PROMOTED
             self.pipeline.advance_stage(proposal.proposal_id, EvolutionStage.PROMOTED, f"Auto-promoted (hash: {chash})")
         else:

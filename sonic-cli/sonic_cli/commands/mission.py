@@ -127,8 +127,8 @@ def mission_hypotheses(
             table.add_column("Confidence", style="green")
 
             if not hypos:
-                table.add_row("hypo-01", "JWT authentication bypass on /api/v2/tokens", "testing", "78%")
-                table.add_row("hypo-02", "Session fixation on OAuth callback", "proposed", "45%")
+                console.print("[dim]No active hypotheses recorded for this engagement.[/dim]")
+                return
             else:
                 for h in hypos:
                     table.add_row(h.get("id", ""), h.get("statement", h.get("title", "")), h.get("status", "proposed"), f"{h.get('confidence', 0.5)*100:.0f}%")
@@ -510,4 +510,3 @@ def mission_benchmark(
                 console.print(f"[red]Benchmark failed (HTTP {res.status_code}): {res.text}[/red]")
         except Exception as e:
             console.print(f"[red]Could not reach backend: {e}[/red]")
-

@@ -18,6 +18,7 @@ steps, executing on the shared workstation.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import time
@@ -1105,7 +1106,9 @@ Rules:
                     clean = item.strip()
                     if not clean:
                         continue
-                    if re.match(r"^(?:https?://)?(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/.*)?$", clean):
+                    if re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/\S*)?\b", clean):
+                        continue
+                    if re.search(r"\b(?:whoami|pwd|hostname|uname|ifconfig|ip\s+a|route(?:\s+-n)?)\b", clean.lower()):
                         continue
                     valid_discoveries.append(clean)
 
@@ -1313,7 +1316,10 @@ Rules:
                 temperature=0.2,
             )
             resp = await self.llm_router.complete(req)
-            return (resp.content or "").strip() or observations[:1000]
+            content = getattr(resp, "content", "")
+            if inspect.isawaitable(content):
+                content = await content
+            return str(content or "").strip() or observations[:1000]
         except Exception:
             # Fallback: return raw observations
             return observations[:1000]
@@ -1325,20 +1331,24 @@ Rules:
             if isinstance(t, dict):
                 obs = (t.get("actual_observation") or t.get("observation") or "").strip()
                 status_str = str(t.get("status", ""))
+                source = f"{t.get('target_resource', '')} {t.get('payload', '')}".lower()
             else:
                 obs = (getattr(t, "actual_observation", None) or getattr(t, "observation", "") or "").strip()
                 status_str = str(getattr(t, "status", ""))
+                source = f"{getattr(t, 'target_resource', '')} {getattr(t, 'payload', '')}".lower()
 
             if not obs or len(obs) < 5:
                 continue
             if status_str not in ("COMPLETED", "SUCCESS", "VERIFIED"):
+                continue
+            if re.search(r"\b(?:whoami|pwd|hostname|uname|ifconfig|ip\s+a|route(?:\s+-n)?)\b", source):
                 continue
 
             for line in obs.splitlines():
                 line_str = line.strip()
                 if not line_str or len(line_str) < 10:
                     continue
-                if re.match(r"^(?:https?://)?(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/.*)?$", line_str):
+                if re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/\S*)?\b", line_str):
                     continue
                 if line_str not in discoveries:
                     discoveries.append(line_str[:200])
