@@ -30,6 +30,21 @@ if [ -x /usr/bin/python3 ]; then
     ln -sf /usr/bin/python3 /usr/local/bin/python
 fi
 
+# Ensure container web browser wrapper has --no-sandbox, CDP port 9222, and First Run state initialized
+if [ -x /usr/bin/google-chrome-stable ]; then
+    mkdir -p /root/.config/google-chrome
+    touch "/root/.config/google-chrome/First Run"
+    rm -f /root/.config/google-chrome/Singleton* 2>/dev/null || true
+    cat << 'EOF' > /usr/local/bin/chrome
+#!/bin/bash
+mkdir -p /root/.config/google-chrome
+touch "/root/.config/google-chrome/First Run"
+rm -f /root/.config/google-chrome/Singleton* 2>/dev/null
+exec /usr/bin/google-chrome-stable --no-sandbox --disable-dev-shm-usage --no-first-run --disable-fre --no-default-browser-check --remote-debugging-port=9222 "$@"
+EOF
+    chmod +x /usr/local/bin/chrome
+fi
+
 # Ensure workspace and /home/sonic/workspace exist and link together
 ln -sfn /workspace /home/sonic/workspace
 

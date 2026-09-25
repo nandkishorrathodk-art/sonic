@@ -388,17 +388,30 @@ class ModelRouter:
         # Use request's task_type if not explicitly provided
         effective_task = task_type or request.task_type
 
-        # Multimodal Vision Routing: if the request carries images, route to vision-capable model
+        # Only route to the dedicated vision model when the caller explicitly
+        # requests task_type="vision" (e.g. VisualGrounder coordinate extraction)
+        # or provides no task_type at all on an image-only prompt.
+        # Do NOT hijack "reasoning", "planning", or "coding" down to an 11B vision model!
         has_images = any(getattr(msg, "has_images", False) for msg in request.messages)
-        if has_images and (not effective_task or effective_task in ("reasoning", "general", "default", "classification")):
-            if "vision" in self.routing_rules or "computer_use" in self.routing_rules:
-                effective_task = "vision" if "vision" in self.routing_rules else "computer_use"
+        if has_images and not effective_task:
+            if "vision" in self.routing_rules:
+                effective_task = "vision"
 
         provider, model_override = self._resolve_provider(provider_name, effective_task)
 
         # Override model if routing rule specifies one
         if model_override and not request.model:
             request.model = model_override
+
+        # If the resolved target model is a high-parameter reasoning/coding model
+        # (e.g. nemotron-3-super-120b or nemotron-3-ultra-550b) that does not accept
+        # raw image_url blocks, strip image bytes from the message copy so the 120B/550B
+        # brain reasons over the rich text/AT-SPI/VisualGrounder observation without 400 errors.
+        active_model_name = (request.model or getattr(provider, "default_model", "") or "").lower()
+        if has_images and "vision" not in active_model_name and "vl" not in active_model_name and "gpt-4o" not in active_model_name and "claude" not in active_model_name:
+            for msg in request.messages:
+                if getattr(msg, "images", None):
+                    msg.images = []
 
         # Set task metadata
         request.task_type = effective_task

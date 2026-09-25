@@ -91,10 +91,15 @@ def _safe_str(val: Any) -> str:
     s = str(val)
     # Force UTF-8 encoding to avoid charmap issues on Windows
     try:
+        # First try to ensure it's valid UTF-8
         return s.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
     except Exception:
-        # Last resort: replace problematic characters
-        return s.encode("ascii", errors="replace").decode("ascii")
+        try:
+            # Fallback to ASCII with replacement
+            return s.encode("ascii", errors="replace").decode("ascii")
+        except Exception:
+            # Ultimate fallback: remove all non-ASCII
+            return "".join(c for c in s if ord(c) < 128)
 
 
 class _SafeLogger:
@@ -109,29 +114,56 @@ class _SafeLogger:
             return {str(k): self._sanitize(v) for k, v in val.items()}
         if isinstance(val, (list, tuple)):
             return [self._sanitize(v) for v in val]
-        return str(val) if val is not None else ""
+        try:
+            return str(val) if val is not None else ""
+        except Exception:
+            return ""
 
     def info(self, event: str, **kwargs: Any):
         try:
-            self._raw_logger.info(_safe_str(event), **{str(k): self._sanitize(v) for k, v in kwargs.items()})
+            safe_kwargs = {}
+            for k, v in kwargs.items():
+                try:
+                    safe_kwargs[str(k)] = self._sanitize(v)
+                except Exception:
+                    safe_kwargs[str(k)] = ""
+            self._raw_logger.info(_safe_str(event), **safe_kwargs)
         except Exception:
             pass  # Fail silently to avoid encoding crashes
 
     def warning(self, event: str, **kwargs: Any):
         try:
-            self._raw_logger.warning(_safe_str(event), **{str(k): self._sanitize(v) for k, v in kwargs.items()})
+            safe_kwargs = {}
+            for k, v in kwargs.items():
+                try:
+                    safe_kwargs[str(k)] = self._sanitize(v)
+                except Exception:
+                    safe_kwargs[str(k)] = ""
+            self._raw_logger.warning(_safe_str(event), **safe_kwargs)
         except Exception:
             pass  # Fail silently to avoid encoding crashes
 
     def error(self, event: str, **kwargs: Any):
         try:
-            self._raw_logger.error(_safe_str(event), **{str(k): self._sanitize(v) for k, v in kwargs.items()})
+            safe_kwargs = {}
+            for k, v in kwargs.items():
+                try:
+                    safe_kwargs[str(k)] = self._sanitize(v)
+                except Exception:
+                    safe_kwargs[str(k)] = ""
+            self._raw_logger.error(_safe_str(event), **safe_kwargs)
         except Exception:
             pass  # Fail silently to avoid encoding crashes
 
     def debug(self, event: str, **kwargs: Any):
         try:
-            self._raw_logger.debug(_safe_str(event), **{str(k): self._sanitize(v) for k, v in kwargs.items()})
+            safe_kwargs = {}
+            for k, v in kwargs.items():
+                try:
+                    safe_kwargs[str(k)] = self._sanitize(v)
+                except Exception:
+                    safe_kwargs[str(k)] = ""
+            self._raw_logger.debug(_safe_str(event), **safe_kwargs)
         except Exception:
             pass  # Fail silently to avoid encoding crashes
 
@@ -635,27 +667,50 @@ class ComputerUseAgent:
             self.perception_bus = PerceptionBus()
         self._screen_width = int(getattr(screen_obs, "width", self._screen_width) or self._screen_width)
         self._screen_height = int(getattr(screen_obs, "height", self._screen_height) or self._screen_height)
-        status = await self.computer.status(workspace_id)
-        if hasattr(self.computer, "application_list"):
-            try:
-                discovered_apps = await self.computer.application_list(workspace_id)
-                discovered_names = [
-                    str(getattr(item, "name", item)).strip()
-                    for item in (discovered_apps or [])
-                    if str(getattr(item, "name", item)).strip()
-                ]
-                if discovered_names:
-                    status.installed_applications = list(
-                        dict.fromkeys(list(getattr(status, "installed_applications", []) or []) + discovered_names)
-                    )
-            except Exception as exc:
-                logger.debug("application_inventory_unavailable", error=str(exc))
-        if getattr(self, "gui_only", False):
-            files = []
-            git_st = None
+        nsi_cached = getattr(self.computer, "_last_nsi_frame", None)
+        now_loop = asyncio.get_event_loop().time()
+        _nsi_active = (
+            nsi_cached is not None
+            and isinstance(nsi_cached, tuple)
+            and len(nsi_cached) == 2
+            and (now_loop - float(nsi_cached[0])) < 1.0
+            and isinstance(nsi_cached[1], dict)
+        )
+        if _nsi_active:
+            nsi_pkt = nsi_cached[1]
+            from types import SimpleNamespace
+            status = SimpleNamespace(
+                active_application=nsi_pkt.get("active_window") or "Desktop",
+                active_window=nsi_pkt.get("active_window") or "Desktop",
+                open_applications=list(nsi_pkt.get("open_windows") or ["Desktop"]),
+                running_processes=list(nsi_pkt.get("running_processes") or []),
+                installed_applications=list(nsi_pkt.get("installed_applications") or []),
+                working_directory=nsi_pkt.get("working_directory") or "/home/sonic/workspace",
+            )
+            files = [SimpleNamespace(name=str(fn)) for fn in (nsi_pkt.get("files") or [])]
+            git_st = SimpleNamespace(branch="main", is_clean=True)
         else:
-            files = await self.computer.list_files(workspace_id, ".")
-            git_st = await self.computer.git_action(workspace_id, "status")
+            status = await self.computer.status(workspace_id)
+            if hasattr(self.computer, "application_list"):
+                try:
+                    discovered_apps = await self.computer.application_list(workspace_id)
+                    discovered_names = [
+                        str(getattr(item, "name", item)).strip()
+                        for item in (discovered_apps or [])
+                        if str(getattr(item, "name", item)).strip()
+                    ]
+                    if discovered_names:
+                        status.installed_applications = list(
+                            dict.fromkeys(list(getattr(status, "installed_applications", []) or []) + discovered_names)
+                        )
+                except Exception as exc:
+                    logger.debug("application_inventory_unavailable", error=str(exc))
+            if getattr(self, "gui_only", False):
+                files = []
+                git_st = None
+            else:
+                files = await self.computer.list_files(workspace_id, ".")
+                git_st = await self.computer.git_action(workspace_id, "status")
 
         # Read live terminal state.
         # Prefer the agent's own recorded output from the last action so the
@@ -705,10 +760,13 @@ class ComputerUseAgent:
                     if "echo __sonic_obs_ready__" not in str(last_cmd):
                         terminal_output = _safe_str((last_stdout or "").strip())
             if not terminal_output:
-                term_res = await self.computer.terminal(workspace_id, "echo __sonic_obs_ready__")
-                raw_stdout = getattr(term_res, "stdout", "") or ""
-                term_out = _safe_str(raw_stdout.strip())
-                terminal_output = term_out or f"Exit {getattr(term_res, 'exit_code', 0)}"
+                if _nsi_active:
+                    terminal_output = "__sonic_obs_ready__"
+                else:
+                    term_res = await self.computer.terminal(workspace_id, "echo __sonic_obs_ready__")
+                    raw_stdout = getattr(term_res, "stdout", "") or ""
+                    term_out = _safe_str(raw_stdout.strip())
+                    terminal_output = term_out or f"Exit {getattr(term_res, 'exit_code', 0)}"
         except Exception:
             terminal_output = (
                 "GUI-only computer: terminal observation disabled"

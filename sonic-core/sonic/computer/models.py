@@ -151,7 +151,7 @@ class ScreenObservation(BaseModel):
     height: int = 1080
     active_window: str = "Desktop"
     visible_text: str = ""
-    detected_controls: list[str] = Field(default_factory=list)
+    detected_controls: list[Any] = Field(default_factory=list)
     desktop_state: str = "INTERACTIVE"
     timestamp: str = Field(default_factory=_now)
 

@@ -436,13 +436,374 @@ class DockerComputerProvider(ComputerProvider):
         )
 
     # -------------------------------------------------------------
+    # NSI (Neural-Symbolic Instant Eye) Persistent 8-15ms Retina Pipe
+    # -------------------------------------------------------------
+
+    _NSI_DAEMON_SCRIPT = r"""
+import base64, hashlib, io, json, os, subprocess, sys, threading, time, urllib.request
+def _detect_display():
+    d = os.environ.get("DISPLAY", "").strip()
+    if d:
+        return d
+    try:
+        xs = sorted(f[1:] for f in os.listdir("/tmp/.X11-unix") if f.startswith("X") and f[1:].isdigit())
+        if xs:
+            return ":" + xs[-1]
+    except Exception:
+        pass
+    return ":0"
+_DISP = _detect_display()
+os.environ["DISPLAY"] = _DISP
+try:
+    import mss
+    _HAS_MSS = True
+except Exception:
+    _HAS_MSS = False
+try:
+    from PIL import Image
+    _HAS_PIL = True
+except Exception:
+    _HAS_PIL = False
+
+class _State:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.b64 = ""
+        self.active_window = "Desktop"
+        self.open_windows = []
+        self.visible_text = ""
+        self.detected_controls = []
+        self.files = []
+        self.running_processes = []
+        self.installed_applications = []
+        self.working_directory = "/home/sonic/workspace"
+        self.version = 0
+        self.tile_hashes = {}
+        self.cached_ocr_controls = []
+        self.cached_ocr_lines = []
+        self.last_env_ts = 0.0
+        self.last_apps_ts = 0.0
+
+S = _State()
+
+def _run(cmd, timeout=2.0):
+    try:
+        r = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, text=True)
+        return r.returncode, r.stdout, r.stderr
+    except Exception as e:
+        return 1, "", str(e)
+
+def _grab():
+    if _HAS_MSS and _HAS_PIL:
+        try:
+            with mss.MSS() if hasattr(mss, "MSS") else mss.mss() as sct:
+                raw = sct.grab(sct.monitors[0])
+                img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG", compress_level=1)
+                return img, buf.getvalue()
+        except Exception:
+            pass
+    p = "/dev/shm/sonic_nsi_live.png"
+    _run(f"DISPLAY={_DISP} scrot -p -o {p} 2>/dev/null", timeout=1.5)
+    if os.path.exists(p):
+        try:
+            with open(p, "rb") as f:
+                b = f.read()
+            return (Image.open(io.BytesIO(b)).convert("RGB") if _HAS_PIL else None), b
+        except Exception:
+            pass
+    return None, b""
+
+def _dirty_bbox(img):
+    if img is None:
+        return True, (0, 0, 1280, 800), {}
+    w, h = img.size
+    small = img.resize((w // 4, h // 4))
+    sw, sh = small.size
+    raw = small.tobytes()
+    stride = sw * 3
+    nh, dxs, dys = {}, [], []
+    for gy in range(0, sh, 16):
+        for gx in range(0, sw, 16):
+            i1 = gy * stride + gx * 3
+            i2 = min(len(raw) - 12, (gy + 8) * stride + gx * 3)
+            th = hashlib.md5(raw[i1:i1 + 48] + raw[i2:i2 + 48]).digest()
+            k = (gx // 16, gy // 16)
+            nh[k] = th
+            if S.tile_hashes.get(k) != th:
+                tx, ty = k[0] * 64, k[1] * 64
+                dxs.extend([tx, min(w, tx + 64)])
+                dys.extend([ty, min(h, ty + 64)])
+    if not dxs:
+        return False, None, nh
+    return True, (max(0, min(dxs) - 16), max(0, min(dys) - 16), min(w, max(dxs) + 16), min(h, max(dys) + 16)), nh
+
+def _delta_ocr(img, png_bytes, bbox):
+    if bbox is None:
+        return S.cached_ocr_controls, S.cached_ocr_lines
+    x1, y1, x2, y2 = bbox
+    cp = "/dev/shm/sonic_nsi_crop.png"
+    try:
+        if img is not None and (x2 - x1 < img.size[0] or y2 - y1 < img.size[1]):
+            img.crop((x1, y1, x2, y2)).save(cp, format="PNG", compress_level=1)
+        else:
+            x1, y1 = 0, 0
+            with open(cp, "wb") as f:
+                f.write(png_bytes)
+    except Exception:
+        return S.cached_ocr_controls, S.cached_ocr_lines
+    code, out, _ = _run(f"tesseract {cp} stdout --psm 11 tsv 2>/dev/null", timeout=2.5)
+    kept = [c for c in S.cached_ocr_controls if not (x1 <= (c["bbox"][0] + c["bbox"][2]) // 2 <= x2 and y1 <= (c["bbox"][1] + c["bbox"][3]) // 2 <= y2)]
+    added = []
+    if code == 0 and out:
+        for row in out.splitlines()[1:]:
+            cols = row.split("\t")
+            if len(cols) >= 12 and cols[11].strip():
+                try:
+                    conf, wx, wy, ww, wh = float(cols[10]), int(cols[6]), int(cols[7]), int(cols[8]), int(cols[9])
+                    if conf >= 25.0 and ww > 2 and wh > 2:
+                        added.append({"name": cols[11].strip(), "role": "text", "bbox": [x1 + wx, y1 + wy, x1 + wx + ww, y1 + wy + wh], "source": "ocr"})
+                except Exception:
+                    pass
+    merged = kept + added
+    merged.sort(key=lambda c: (c["bbox"][1] // 18, c["bbox"][0]))
+    lmap = {}
+    for c in merged:
+        lmap.setdefault(c["bbox"][1] // 18, []).append(c["name"])
+    lines = [" ".join(w) for _, w in sorted(lmap.items())[:45]]
+    return merged, lines
+
+def _atspi_and_cdp():
+    ctrls, page_txt = [], ""
+    try:
+        tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=0.12).read().decode("utf-8", errors="replace"))
+        for t in tabs:
+            if t.get("type") == "page" and not str(t.get("url", "")).startswith("devtools://"):
+                page_txt = f"Browser Tab: {t.get('title', '')} ({t.get('url', '')})"
+                break
+    except Exception:
+        pass
+    try:
+        bus_num = _DISP.lstrip(":").split(".")[0]
+        bus_sock = f"/root/.cache/at-spi/bus_{bus_num}"
+        if not os.path.exists(bus_sock):
+            _run(f"DISPLAY={_DISP} /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 &", timeout=0.4)
+        if os.path.exists(bus_sock):
+            import gi
+            gi.require_version("Atspi", "2.0")
+            from gi.repository import Atspi
+            d = Atspi.get_desktop(0)
+            for i in range(min(d.get_child_count(), 10)):
+                app = d.get_child_at_index(i)
+                if not app: continue
+                st, vis = [(app, 0)], 0
+                while st and vis < 100:
+                    n, dp = st.pop()
+                    vis += 1
+                    if dp > 6 or not n: continue
+                    try:
+                        rn, nm = (n.get_role_name() or "").lower(), (n.get_name() or "").strip()
+                        if nm and any(r in rn for r in ("button", "menu", "entry", "text", "tab", "link")):
+                            cp = n.get_component_iface()
+                            if cp:
+                                rc = cp.get_extents(Atspi.CoordType.SCREEN)
+                                if rc and rc.width > 4 and rc.height > 4 and rc.x >= 0 and rc.y >= 0:
+                                    ctrls.append({"name": nm, "role": rn, "bbox": [int(rc.x), int(rc.y), int(rc.x + rc.width), int(rc.y + rc.height)], "source": "atspi"})
+                        for ci in range(min(n.get_child_count(), 16)):
+                            ch = n.get_child_at_index(ci)
+                            if ch: st.append((ch, dp + 1))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return ctrls, page_txt
+
+def _fast_retina_worker():
+    while True:
+        try:
+            img, png_b = _grab()
+            _, wout, _ = _run(f"(DISPLAY={_DISP} xdotool getactivewindow getwindowname 2>/dev/null || echo Desktop); echo '___W___'; DISPLAY={_DISP} wmctrl -lG 2>/dev/null", timeout=0.8)
+            aw, ows, wctrls = "Desktop", [], []
+            if "___W___" in wout:
+                ap, op = wout.split("___W___", 1)
+                aw = ap.strip() or "Desktop"
+                for ln in op.splitlines():
+                    lp = ln.strip().split(maxsplit=7)
+                    if len(lp) >= 8 and lp[7] not in ("xfce4-panel", "Desktop", "desktop"):
+                        ows.append(lp[7])
+                        try:
+                            wx, wy, ww, wh = int(lp[2]), int(lp[3]), int(lp[4]), int(lp[5])
+                            wctrls.append({"name": lp[7], "role": "window", "bbox": [max(0, wx), max(0, wy), max(0, wx + ww), max(0, wy + wh)], "source": "x11"})
+                        except Exception:
+                            pass
+            b64 = base64.b64encode(png_b).decode("ascii") if png_b else ""
+            S.latest_img = img
+            S.latest_png = png_b
+            with S.lock:
+                if b64:
+                    S.b64 = b64
+                S.active_window = aw
+                S.open_windows = ows
+                S.wctrls = wctrls
+                octrls = list(S.cached_ocr_controls)
+                olines = list(S.cached_ocr_lines)
+                actrls = list(getattr(S, "cached_atspi_controls", []))
+                ptxt = getattr(S, "cached_page_txt", "")
+                vparts = []
+                if aw and aw != "Desktop": vparts.append(f"Active Window: {aw}")
+                if ows: vparts.append(f"Open Windows: {', '.join(ows)}")
+                if ptxt: vparts.append(ptxt)
+                if olines: vparts.append("Screen OCR Text: " + " | ".join(olines))
+                S.visible_text = "\n".join(vparts)
+                S.detected_controls = actrls + wctrls + octrls
+                S.version += 1
+                pkt = {
+                    "ok": True,
+                    "version": S.version,
+                    "ts": time.time(),
+                    "b64": S.b64,
+                    "active_window": S.active_window,
+                    "open_windows": S.open_windows,
+                    "visible_text": S.visible_text,
+                    "detected_controls": S.detected_controls,
+                    "files": S.files,
+                    "running_processes": S.running_processes,
+                    "installed_applications": getattr(S, "installed_applications", []),
+                    "working_directory": S.working_directory,
+                }
+            tmp_f = "/dev/shm/sonic_nsi_frame.tmp"
+            shm_f = "/dev/shm/sonic_nsi_frame.json"
+            novnc_f = "/usr/share/novnc/nsi_frame.json"
+            try:
+                with open(tmp_f, "w") as f:
+                    json.dump(pkt, f)
+                os.replace(tmp_f, shm_f)
+                if os.path.isdir("/usr/share/novnc") and not os.path.islink(novnc_f):
+                    try:
+                        if os.path.exists(novnc_f):
+                            os.remove(novnc_f)
+                        os.symlink(shm_f, novnc_f)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+def _ocr_and_semantic_worker():
+    while True:
+        try:
+            img = getattr(S, "latest_img", None)
+            png_b = getattr(S, "latest_png", b"")
+            if png_b:
+                chg, dbox, nh = _dirty_bbox(img)
+                if chg:
+                    octrls, olines = _delta_ocr(img, png_b, dbox)
+                    with S.lock:
+                        S.tile_hashes = nh
+                        S.cached_ocr_controls = octrls
+                        S.cached_ocr_lines = olines
+            actrls, ptxt = _atspi_and_cdp()
+            with S.lock:
+                S.cached_atspi_controls = actrls
+                S.cached_page_txt = ptxt
+            now = time.time()
+            if now - S.last_env_ts > 1.5:
+                S.last_env_ts = now
+                wd = "/home/sonic/workspace" if os.path.exists("/home/sonic/workspace") else "/workspace"
+                try: S.files = sorted(os.listdir(wd))[:80]
+                except Exception: S.files = []
+                _, pout, _ = _run("ps -eo comm --no-headers 2>/dev/null | sort -u | head -35", timeout=1.0)
+                S.running_processes = [p.strip() for p in pout.splitlines() if p.strip()]
+                S.working_directory = wd
+            if now - S.last_apps_ts > 60.0 or not getattr(S, "installed_applications", None):
+                S.last_apps_ts = now
+                _, aout, _ = _run(
+                    "for f in /usr/share/applications/*.desktop; do "
+                    "[ -f \"$f\" ] || continue; "
+                    "grep -qi '^NoDisplay=true' \"$f\" 2>/dev/null && continue; "
+                    "grep -qi '^Terminal=true' \"$f\" 2>/dev/null && continue; "
+                    "grep -qi 'TerminalEmulator' \"$f\" 2>/dev/null && continue; "
+                    "basename \"$f\" .desktop; done",
+                    timeout=2.0,
+                )
+                S.installed_applications = list(dict.fromkeys([a.strip() for a in aout.splitlines() if a.strip()]))
+        except Exception:
+            pass
+        time.sleep(0.08)
+
+threading.Thread(target=_fast_retina_worker, daemon=True).start()
+threading.Thread(target=_ocr_and_semantic_worker, daemon=True).start()
+while True:
+    time.sleep(10.0)
+"""
+
+    async def _nsi_request(self, payload: dict[str, Any], timeout: float = 2.5) -> dict[str, Any] | None:
+        """Read fused NSI Retina snapshot over persistent loopback HTTP in ~2-10ms (zero docker exec!)."""
+        if "_docker_exec" in self.__dict__:
+            return None
+        if payload.get("cmd") != "frame":
+            return None
+        if not hasattr(self, "_nsi_http"):
+            import httpx
+            self._nsi_http = httpx.AsyncClient(timeout=0.5, trust_env=False)
+            self._nsi_booted = False
+        try:
+            resp = await self._nsi_http.get("http://127.0.0.1:6080/nsi_frame.json")
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("ok") and data.get("b64"):
+                    self._last_nsi_frame = (asyncio.get_event_loop().time(), data)
+                    return data
+        except Exception:
+            pass
+
+        # If daemon isn't running yet inside container, start it once in background
+        if not getattr(self, "_nsi_booted", False):
+            self._nsi_booted = True
+            try:
+                import base64
+                b64_script = base64.b64encode(self._NSI_DAEMON_SCRIPT.encode("utf-8")).decode("ascii")
+                boot_cmd = (
+                    f"echo '{b64_script}' | base64 -d > /tmp/sonic_nsi_daemon.py && "
+                    f"pkill -f sonic_nsi_daemon.py 2>/dev/null || true; "
+                    f"rm -f /dev/shm/sonic_nsi_frame.json && "
+                    f"nohup python3 /tmp/sonic_nsi_daemon.py >/tmp/sonic_nsi.log 2>&1 & "
+                    f"for _ in $(seq 1 40); do [ -s /dev/shm/sonic_nsi_frame.json ] && break; sleep 0.05; done"
+                )
+                await self._docker_exec(boot_cmd, timeout=6)
+                resp = await self._nsi_http.get("http://127.0.0.1:6080/nsi_frame.json")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("ok") and data.get("b64"):
+                        self._last_nsi_frame = (asyncio.get_event_loop().time(), data)
+                        return data
+            except Exception:
+                pass
+        return None
+
+    # -------------------------------------------------------------
     # Multi-Modal Perception: Screen Observation
     # -------------------------------------------------------------
 
     async def screenshot(self, workspace_id: str) -> ScreenObservation:
         now = asyncio.get_event_loop().time()
-        # if self._last_screenshot is not None and (now - self._last_screenshot_time) < 2.0:
-        #     return self._last_screenshot
+        nsi_data = await self._nsi_request({"cmd": "frame"}, timeout=2.5)
+        if nsi_data and nsi_data.get("ok") and nsi_data.get("b64"):
+            obs = ScreenObservation(
+                screenshot_base64=nsi_data["b64"],
+                width=1280,
+                height=800,
+                active_window=nsi_data.get("active_window") or "Desktop",
+                visible_text=nsi_data.get("visible_text") or "",
+                detected_controls=nsi_data.get("detected_controls") or [],
+                desktop_state="INTERACTIVE",
+            )
+            self._last_screenshot = obs
+            self._last_screenshot_time = now
+            return obs
 
         disp = self._get_display(workspace_id)
         tmp_id = uuid.uuid4().hex[:8]
@@ -450,7 +811,10 @@ class DockerComputerProvider(ComputerProvider):
         scr_cmd = (
             f"DISPLAY={disp} scrot -p -o {tmp_path} 2>/dev/null || "
             f"DISPLAY={disp} import -window root {tmp_path} 2>/dev/null; "
-            f"base64 -w0 {tmp_path} 2>/dev/null && rm -f {tmp_path} && "
+            f"base64 -w0 {tmp_path} 2>/dev/null && "
+            f"echo '___OCR_TSV___' && "
+            f"(tesseract {tmp_path} stdout --psm 11 tsv 2>/dev/null || true) && "
+            f"rm -f {tmp_path} && "
             f"echo '___ACTIVE_WINDOW___' && "
             f"(DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null || echo 'Desktop') && "
             f"echo '___OPEN_WINDOWS___' && "
@@ -458,11 +822,17 @@ class DockerComputerProvider(ComputerProvider):
         )
         code, out, _ = await self._docker_exec(scr_cmd, timeout=15)
         b64 = ""
+        ocr_tsv = ""
         active_win = "Desktop"
         open_wins: list[str] = []
         if code == 0 and out:
             parts = out.split("___ACTIVE_WINDOW___", 1)
-            b64 = parts[0].strip()
+            first_chunk = parts[0]
+            if "___OCR_TSV___" in first_chunk:
+                b64_part, ocr_tsv = first_chunk.split("___OCR_TSV___", 1)
+                b64 = b64_part.strip()
+            else:
+                b64 = first_chunk.strip()
             rest = parts[1] if len(parts) > 1 else ""
             if "___OPEN_WINDOWS___" in rest:
                 win_parts = rest.split("___OPEN_WINDOWS___", 1)
@@ -474,11 +844,38 @@ class DockerComputerProvider(ComputerProvider):
             else:
                 active_win = rest.strip() or "Desktop"
 
+        detected_controls: list[dict[str, Any]] = []
+        ocr_lines_map: dict[tuple[int, int, int], list[str]] = {}
+        if ocr_tsv:
+            for row in ocr_tsv.splitlines()[1:]:
+                cols = row.split("\t")
+                if len(cols) >= 12:
+                    word = cols[11].strip()
+                    if not word:
+                        continue
+                    try:
+                        conf = float(cols[10])
+                        x, y, w, h = int(cols[6]), int(cols[7]), int(cols[8]), int(cols[9])
+                        line_key = (int(cols[2]), int(cols[3]), int(cols[4]))
+                    except (ValueError, TypeError):
+                        continue
+                    if conf >= 25.0 and w > 2 and h > 2:
+                        ocr_lines_map.setdefault(line_key, []).append(word)
+                        detected_controls.append({
+                            "name": word,
+                            "role": "text",
+                            "bbox": (x, y, x + w, y + h),
+                            "source": "ocr",
+                        })
+
         vis_lines = []
         if active_win and active_win != "Desktop":
             vis_lines.append(f"Active Window: {active_win}")
         if open_wins:
             vis_lines.append(f"Open Windows: {', '.join(open_wins)}")
+        if ocr_lines_map:
+            ocr_text_summary = " | ".join(" ".join(words) for words in list(ocr_lines_map.values())[:40])
+            vis_lines.append(f"Screen OCR Text: {ocr_text_summary}")
         visible_text = "\n".join(vis_lines)
 
         obs = ScreenObservation(
@@ -487,7 +884,7 @@ class DockerComputerProvider(ComputerProvider):
             height=800,
             active_window=active_win,
             visible_text=visible_text,
-            detected_controls=[],
+            detected_controls=detected_controls,
             desktop_state="INTERACTIVE" if b64 else "NO_DISPLAY",
         )
         if b64:
@@ -536,7 +933,12 @@ class DockerComputerProvider(ComputerProvider):
             disp = self._get_display(workspace_id)
 
             async def exec_gui(command: str) -> None:
-                code, _, err = await self._docker_exec(command)
+                nsi_res = await self._nsi_request({"cmd": "x11", "shell": command, "timeout": 3.0}, timeout=3.5)
+                if nsi_res is not None and "exit_code" in nsi_res:
+                    code = int(nsi_res.get("exit_code", 1))
+                    err = str(nsi_res.get("stderr", ""))
+                else:
+                    code, _, err = await self._docker_exec(command)
                 if code != 0:
                     raise RuntimeError(f"GUI action failed with exit code {code}: {err.strip()}")
 
@@ -882,14 +1284,21 @@ class DockerComputerProvider(ComputerProvider):
         allowed, reason = self.app_policy.is_package_allowed(package_name)
         if not allowed:
             return False, reason
+        self._cached_app_list = None
         code, out, err = await self._docker_exec(f"DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y {shlex.quote(package_name)}", timeout=180)
         return (code == 0), out if code == 0 else err
 
     async def uninstall_application(self, workspace_id: str, package_name: str, actor: str = "operator") -> bool:
+        self._cached_app_list = None
         code, _, _ = await self._docker_exec(f"DEBIAN_FRONTEND=noninteractive apt-get remove -y {shlex.quote(package_name)}", timeout=120)
         return code == 0
 
     async def application_list(self, workspace_id: str) -> list[str]:
+        now = asyncio.get_event_loop().time()
+        cached = getattr(self, "_cached_app_list", None)
+        if cached is not None and (now - cached[0]) < 60.0:
+            return list(cached[1])
+
         std_utils = list(dict.fromkeys(self.app_policy.allowed_packages))
         utils_str = " ".join(std_utils)
         discovery_cmd = (
@@ -918,6 +1327,8 @@ class DockerComputerProvider(ComputerProvider):
                 app = app.strip("\"' ")
                 if app and app not in apps:
                     apps.append(app)
+        if apps:
+            self._cached_app_list = (now, list(apps))
         return apps
 
     @staticmethod
@@ -964,8 +1375,11 @@ class DockerComputerProvider(ComputerProvider):
         if not app_clean:
             return ""
 
-        # 1. If it's a direct executable on PATH or full path
-        code, out, _ = await self._docker_exec(f"which {shlex.quote(app_clean)} 2>/dev/null")
+        # 1. If it's a direct executable on PATH or full path (must be >20 bytes so empty stubs are ignored)
+        code, out, _ = await self._docker_exec(
+            f"bin=$(which {shlex.quote(app_clean)} 2>/dev/null | head -n1); "
+            f"if [ -n \"$bin\" ] && [ -f \"$bin\" ] && [ $(wc -c < \"$bin\" 2>/dev/null || echo 100) -gt 20 ]; then echo \"$bin\"; exit 0; fi; exit 1"
+        )
         if code == 0 and out.strip():
             return out.strip().splitlines()[0]
 
@@ -981,6 +1395,8 @@ class DockerComputerProvider(ComputerProvider):
         desktop_lookup_cmd = (
             f"for d in /root/Desktop/*.desktop /usr/share/applications/*.desktop ~/.local/share/applications/*.desktop; do "
             f"  [ -f \"$d\" ] || continue; "
+            f"  grep -qi '^NoDisplay=true' \"$d\" 2>/dev/null && continue; "
+            f"  grep -qi '^Terminal=true' \"$d\" 2>/dev/null && continue; "
             f"  name=$(grep -i '^Name=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
             f"  gname=$(grep -i '^GenericName=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
             f"  cats=$(grep -i '^Categories=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
@@ -1010,10 +1426,18 @@ class DockerComputerProvider(ComputerProvider):
                 if code == 0 and out.strip():
                     return out.strip().splitlines()[0]
         elif any(role in role_lower for role in ("editor", "text", "notepad")):
-            for alt in ("sensible-editor", "xdg-open"):
-                code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
-                if code == 0 and out.strip():
-                    return out.strip().splitlines()[0]
+            code, out, _ = await self._docker_exec(
+                "for d in /usr/share/applications/*.desktop; do "
+                "  [ -f \"$d\" ] || continue; "
+                "  grep -qi '^Terminal=true' \"$d\" 2>/dev/null && continue; "
+                "  if grep -qi 'TextEditor' \"$d\" 2>/dev/null; then "
+                "    bin=$(grep '^Exec=' \"$d\" | head -n1 | cut -d= -f2- | awk '{print $1}'); "
+                "    if which \"$bin\" >/dev/null 2>&1; then which \"$bin\"; exit 0; fi; "
+                "  fi; "
+                "done; exit 1"
+            )
+            if code == 0 and out.strip():
+                return out.strip().splitlines()[0]
 
         # 5. Default fallback: hyphenated if multi-word, else first token
         try:

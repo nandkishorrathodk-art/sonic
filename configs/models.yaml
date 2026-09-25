@@ -7,7 +7,7 @@
 
 # Default provider and model when no task-specific rule matches
 default_provider: nvidia
-default_model: meta/llama-3.2-11b-vision-instruct
+default_model: nvidia/nemotron-3-super-120b-a12b
 
 # ---- Provider Definitions ----
 providers:
@@ -88,31 +88,21 @@ providers:
     base_url_env: NVIDIA_BASE_URL
     base_url: https://integrate.api.nvidia.com/v1
     models:
+      - id: nvidia/nemotron-3-super-120b-a12b
+        speed_tier: fast
+        cost_per_1k_input: 0.0003
+        cost_per_1k_output: 0.0006
+        capabilities: [reasoning, coding, planning, tool_use, verification, general]
+      - id: nvidia/nemotron-3-ultra-550b-a55b
+        speed_tier: fast
+        cost_per_1k_input: 0.0005
+        cost_per_1k_output: 0.001
+        capabilities: [reasoning, coding, planning, tool_use, verification, architecture]
       - id: meta/llama-3.2-11b-vision-instruct
         speed_tier: fast
         cost_per_1k_input: 0.0003
         cost_per_1k_output: 0.0006
-        capabilities: [reasoning, coding, planning, vision, computer_use, tool_use, multimodal]
-      - id: openai/gpt-oss-20b
-        speed_tier: fast
-        cost_per_1k_input: 0.0005
-        cost_per_1k_output: 0.0015
-        capabilities: [reasoning, coding, planning, tool_use, thinking]
-      - id: moonshotai/kimi-k3
-        speed_tier: fast
-        cost_per_1k_input: 0.0005
-        cost_per_1k_output: 0.001
-        capabilities: [reasoning, coding, planning, vision, tool_use, multimodal]
-      - id: nvidia/nemotron-3.5-lightning-30b-a3b
-        speed_tier: fast
-        cost_per_1k_input: 0.0005
-        cost_per_1k_output: 0.001
-        capabilities: [reasoning, coding, planning, tool_use, general]
-      - id: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
-        speed_tier: medium
-        cost_per_1k_input: 0.0005
-        cost_per_1k_output: 0.001
-        capabilities: [reasoning, coding, architecture]
+        capabilities: [vision, computer_use, multimodal]
 
   claude:
     name: Anthropic Claude
@@ -178,56 +168,56 @@ routing_rules:
   planning:
     description: 'High-level planning, task decomposition, strategy'
     provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
+    model: nvidia/nemotron-3-ultra-550b-a55b
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
 
   reasoning:
     description: 'Code analysis, dataflow tracing, pattern matching'
     provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
+    model: nvidia/nemotron-3-super-120b-a12b
+    fallback: [nvidia/nvidia/nemotron-3-ultra-550b-a55b]
 
   fast_recon:
     description: 'Quick environment discovery, system inspection, tech detection'
     provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
+    model: nvidia/nemotron-3-super-120b-a12b
+    fallback: [nvidia/nvidia/nemotron-3-ultra-550b-a55b]
 
   coding:
     description: 'Code generation, fix generation, test writing'
     provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
+    model: nvidia/nemotron-3-ultra-550b-a55b
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
 
   verification:
     description: 'Evidence checking, confidence scoring, FP filtering'
     provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
+    model: nvidia/nemotron-3-super-120b-a12b
+    fallback: [nvidia/nvidia/nemotron-3-ultra-550b-a55b]
 
   hypothesis:
     description: 'Novel architecture ideation, creative reasoning'
     provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
+    model: nvidia/nemotron-3-ultra-550b-a55b
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
 
   classification:
     description: 'Quick labeling, triage, categorization'
     provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
+    model: nvidia/nemotron-3-super-120b-a12b
+    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
 
   vision:
     description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
     provider: nvidia
     model: meta/llama-3.2-11b-vision-instruct
-    fallback: [groq/qwen/qwen3.8-27b]
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
 
   computer_use:
     description: 'Autonomous computer vision and desktop interaction'
     provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/openai/gpt-oss-20b, groq/qwen/qwen3.8-27b]
+    model: nvidia/nemotron-3-super-120b-a12b
+    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
 
 # ---- Global Fallback Chain ----
 # If the preferred provider for a task fails, try these in order

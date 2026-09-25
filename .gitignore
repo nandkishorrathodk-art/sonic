@@ -71,6 +71,7 @@ sonic-core/sonic_data/
 *.db-wal
 sonic_data/
 .agents_tmp/
+.agents/
 open-computer-use/
 PROFILE_README.md
 profile.md
