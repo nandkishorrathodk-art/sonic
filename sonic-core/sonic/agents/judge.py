@@ -17,6 +17,7 @@ Strict Mandate & Prohibitions (AGENTS.md):
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Any
 
@@ -177,6 +178,31 @@ class JudgeAgent:
                             "fix_goal": f"Fix file path or write error for '{fpath}'.",
                         },
                     )
+
+        # A successful process is not evidence that it advanced the mission.
+        # Require a meaningful objective token in the concrete receipt before
+        # accepting a generic successful command as confirmation.
+        stop_words = {
+            "a", "an", "and", "by", "for", "from", "in", "into", "of",
+            "on", "or", "the", "to", "using", "with",
+        }
+        goal_terms = {
+            token for token in re.findall(r"[a-z0-9]+", sub_mission.goal.lower())
+            if len(token) > 2 and token not in stop_words
+        }
+        receipt_text = " ".join(
+            f"{_t_val(trace, 'target_resource', '')} "
+            f"{_t_val(trace, 'actual_observation', '')}"
+            for trace in traces
+        ).lower()
+        receipt_terms = set(re.findall(r"[a-z0-9]+", receipt_text))
+        if has_concrete_proof and goal_terms and not goal_terms.intersection(receipt_terms):
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.INCONCLUSIVE,
+                confidence=0.4,
+                notes="Execution succeeded but the receipt is not relevant to the sub-mission objective.",
+                evidence_items=evidence_items,
+            )
 
         # 5. Confirmed Grounded Verdict
         if has_concrete_proof and result.success:

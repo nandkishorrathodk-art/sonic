@@ -150,6 +150,13 @@ async def _maybe_start_being_life_loop(settings):
             agent_id=being.being_id,
             semantic_memory=get_vector_memory(),
         )
+        browser = None
+        try:
+            from sonic.agents.browser_agent import BrowserAgent
+            browser = BrowserAgent(headless=True)
+            await browser.launch()
+        except Exception as e:
+            logger.warning("being_browser_unavailable", error=str(e))
         # Self-Evolution Engine: Dynamic strategy adaptation and codebase upgrades.
         from sonic.evolution.engine import EvolutionEngine
         from sonic.evolution.strategy import DynamicStrategyEngine
@@ -166,7 +173,7 @@ async def _maybe_start_being_life_loop(settings):
             safety=safety, self_host=True, tenant_id=tenant_id, agent_id=being.being_id,
             # Wire the browser so the being can navigate/click/type/screenshot as
             # a first-class reasoning action (was orphaned before).
-            browser=None,
+            browser=browser,
             gui_only=False,
             observe_desktop=True,
             # Wire the toolsmith so the being can author + run its own tools.

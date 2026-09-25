@@ -533,7 +533,8 @@ class EvolutionGoalDirector:
         # does (or when the target is the signal target rather than a single
         # primary), snapshot + apply ALL touched files so a report-only rollback
         # can restore every one of them — not just the primary target.
-        touched = list(dict.fromkeys([*(synth_files or []), primary_target]))
+        diff_files = self.evolver._diff_files(code_diff)
+        touched = list(dict.fromkeys([*(synth_files or []), *diff_files, primary_target]))
         apply_files = touched if len(touched) > 1 else [primary_target]
         if len(apply_files) > 1:
             preflight = self.evolver.apply_patch_multi(apply_files, code_diff)

@@ -299,10 +299,14 @@ class LayaSystem1Engine:
                 for q_k, q_v in ans_map.items():
                     if isinstance(q_v, dict):
                         q_copy = dict(q_v)
-                        if "probability" not in q_copy:
-                            q_copy["probability"] = q_copy.get("answer_confidence") or (
-                                q_copy.get("probabilities", {}).get(q_copy.get("choice", ""), 0.5)
-                            )
+                        if q_copy.get("probability") is None:
+                            answer_confidence = q_copy.get("answer_confidence")
+                            if answer_confidence is not None:
+                                q_copy["probability"] = answer_confidence
+                            else:
+                                q_copy["probability"] = q_copy.get("probabilities", {}).get(
+                                    q_copy.get("choice", ""), 0.5
+                                )
                         ans_map[q_k] = q_copy
                 raw_routing = raw.get("routing")
                 routing_dict = dict(raw_routing) if isinstance(raw_routing, dict) else {}
@@ -550,11 +554,11 @@ class LayaSystem1Engine:
         )
         ans = res.answers.get("plane", {})
         choice = str(ans.get("choice", "gui"))
-        prob = (
-            ans.get("probability")
-            or ans.get("answer_confidence")
-            or ans.get("probabilities", {}).get(choice, 0.5)
-        )
+        prob = ans.get("probability")
+        if prob is None:
+            prob = ans.get("answer_confidence")
+        if prob is None:
+            prob = ans.get("probabilities", {}).get(choice, 0.5)
         return choice, float(prob)
 
     def verify_execution_receipt(self, goal: str, evidence: str) -> float:

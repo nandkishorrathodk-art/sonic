@@ -390,9 +390,8 @@ class ReActEngine:
             messages.append(Message(
                 role=MessageRole.ASSISTANT,
                 content=response.content or "",
+                tool_calls=response.tool_calls,
             ))
-            # NOTE: tool_calls are carried on the request-level response; the
-            # message history here only needs content + the tool results below.
 
             # Execute every requested tool in parallel — independent probes no
             # longer serialize one per step.

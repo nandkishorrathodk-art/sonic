@@ -244,14 +244,14 @@ class LayaPredictRequest(BaseModel):
 
 
 @router.get("/laya/status")
-async def laya_status():
+async def laya_status(user: User = Depends(require_auth)):
     """
     Get runtime status of the Laya System-1 Non-Autoregressive Decision Engine.
     Returns backend, language support, RAM safety check, and available presets.
     """
     engine = get_laya_engine()
     st: dict[str, Any] = {}
-    if hasattr(engine, "status") and callable(getattr(engine, "status")):
+    if hasattr(engine, "status") and callable(engine.status):
         try:
             custom_status = engine.status()
             if isinstance(custom_status, dict):
@@ -303,7 +303,10 @@ async def laya_status():
 
 
 @router.post("/laya/predict")
-async def laya_predict(request: LayaPredictRequest):
+async def laya_predict(
+    request: LayaPredictRequest,
+    user: User = Depends(require_auth),
+):
     """
     Execute a System-1 decision pass over `state` with structured questions or presets.
     """
@@ -324,7 +327,7 @@ async def laya_predict(request: LayaPredictRequest):
             if preset_resolved in preset_questions_map:
                 if request.model:
                     res = engine.predict(state=state_str, questions=preset_questions_map[preset_resolved], model=request.model)
-                elif hasattr(engine, "predict_preset") and callable(getattr(engine, "predict_preset")):
+                elif hasattr(engine, "predict_preset") and callable(engine.predict_preset):
                     res = engine.predict_preset(state=state_str, preset=preset_resolved)
                 else:
                     res = engine.predict(state=state_str, questions=preset_questions_map[preset_resolved])
@@ -363,4 +366,3 @@ async def laya_predict(request: LayaPredictRequest):
         "answers": answers if answers is not None else {},
         "routing": routing if routing is not None else {},
     }
-

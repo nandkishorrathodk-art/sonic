@@ -1575,6 +1575,14 @@ class ComputerUseAgent:
             "- Target Paths: Always create and execute scripts at the exact requested path (e.g. inside the target lab directory).\n"
             "==========================================\n\n"
         )
+        target_header += (
+            "=== AUTONOMOUS TOOL AUTHORING ===\n"
+            "You have the ability to author your own custom tools, scripts, and probes tailored specifically to this target. "
+            "When existing capabilities cannot answer an observation gap, prefer TOOL_AUTHOR followed by empirical TOOL_RUN "
+            "verification instead of forcing an unrelated pre-existing tool. Never claim an authored tool works until a real "
+            "sandbox execution returns a non-empty result.\n"
+            "================================\n\n"
+        )
         if getattr(self, "initial_context", None):
             obs_summary = (
                 "=== ADVISORY INITIAL CONTEXT (UNVERIFIED) ===\n"

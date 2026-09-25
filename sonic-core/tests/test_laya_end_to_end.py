@@ -11,7 +11,6 @@ Validates the full cognitive lifecycle across:
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,14 +21,10 @@ from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.curiosity import CuriosityLoop
 from sonic.computer_use.models_boss import SubMission
 from sonic.llm.laya_engine import (
-    LayaDecisionResult,
     LayaSystem1Engine,
-    _detect_script_and_model,
     _has_sufficient_ram_gb,
-    get_laya_engine,
 )
 from sonic.sandbox.provider import ExecResult
-
 
 # ============================================================================
 # 1. Single-Pass Decisions across English, Hindi, and Hinglish
@@ -378,7 +373,10 @@ def test_laya_ram_guard_blocks_local_loading_under_memory_pressure():
 def test_laya_api_status_endpoint_on_app():
     """Verify GET /llm/laya/status on sonic.api.main:app."""
     client = TestClient(app)
-    resp = client.get("/llm/laya/status")
+    token_response = client.post("/auth/dev-token")
+    assert token_response.status_code == 200
+    headers = {"Authorization": f"Bearer {token_response.json()['access_token']}"}
+    resp = client.get("/llm/laya/status", headers=headers)
     assert resp.status_code == 200
 
     data = resp.json()
@@ -393,6 +391,9 @@ def test_laya_api_status_endpoint_on_app():
 def test_laya_api_predict_endpoint_on_app():
     """Verify POST /llm/laya/predict on sonic.api.main:app across English, Hindi, and Hinglish."""
     client = TestClient(app)
+    token_response = client.post("/auth/dev-token")
+    assert token_response.status_code == 200
+    headers = {"Authorization": f"Bearer {token_response.json()['access_token']}"}
 
     # 1. English with preset
     resp_en = client.post(
@@ -401,6 +402,7 @@ def test_laya_api_predict_endpoint_on_app():
             "state": "Install dependencies and run pytest in terminal",
             "preset": "plane",
         },
+        headers=headers,
     )
     assert resp_en.status_code == 200
     data_en = resp_en.json()
@@ -425,6 +427,7 @@ def test_laya_api_predict_endpoint_on_app():
                 }
             },
         },
+        headers=headers,
     )
     assert resp_custom.status_code == 200
     data_custom = resp_custom.json()
@@ -437,13 +440,14 @@ def test_laya_api_predict_endpoint_on_app():
             "state": "git status",
             "preset": "guard",
         },
+        headers=headers,
     )
     assert resp_guard.status_code == 200
     data_guard = resp_guard.json()
     assert "risk_tier" in data_guard["answers"]
 
     # 4. Error handling: missing both preset and questions
-    resp_bad = client.post("/llm/laya/predict", json={"state": "hello"})
+    resp_bad = client.post("/llm/laya/predict", json={"state": "hello"}, headers=headers)
     assert resp_bad.status_code == 400
     assert "questions" in resp_bad.json()["detail"].lower()
 
@@ -451,6 +455,7 @@ def test_laya_api_predict_endpoint_on_app():
     resp_invalid_preset = client.post(
         "/llm/laya/predict",
         json={"state": "hello", "preset": "nonexistent_preset_xyz"},
+        headers=headers,
     )
     assert resp_invalid_preset.status_code == 400
     assert "unknown preset" in resp_invalid_preset.json()["detail"].lower()

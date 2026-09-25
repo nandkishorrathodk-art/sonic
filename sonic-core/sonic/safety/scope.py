@@ -17,6 +17,8 @@ editing safety_rules.yaml and restarting the system.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from enum import StrEnum
 from ipaddress import ip_address as _ip_addr
@@ -60,6 +62,31 @@ def _normalize_command(command: str) -> str:
     # Remove quotes wrapping tokens/words: e.g. "rm" -> rm, 'rm' -> rm
     norm = re.sub(r'["\']', "", norm)
     return norm
+
+
+def _decoded_command_candidates(command: str) -> list[str]:
+    """Expose common encoded IP payloads to the same fail-closed rules."""
+    candidates: list[str] = []
+    for token in re.findall(r"\b[A-Za-z0-9+/]{12,}={0,2}\b", command):
+        try:
+            decoded = base64.b64decode(token, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            continue
+        if decoded:
+            candidates.append(decoded)
+    for token in re.findall(r"\b(?:0x[0-9a-fA-F]+|[0-9]{8,})\b", command):
+        try:
+            value = int(token, 0)
+            if 0 <= value <= 0xFFFFFFFF:
+                candidates.append(".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0)))
+        except ValueError:
+            continue
+    for token in re.findall(r"\b(?:0[0-7]{2,3}\.){3}0[0-7]{2,3}\b", command):
+        try:
+            candidates.append(".".join(str(int(part, 8)) for part in token.split(".")))
+        except ValueError:
+            continue
+    return candidates
 
 
 class ScopeChecker:
@@ -210,7 +237,17 @@ class ScopeChecker:
             return RiskLevel.L0_SAFE
 
         norm_command = _normalize_command(command)
-        candidates = [command] if norm_command == command else [command, norm_command]
+        candidates = [command, *_decoded_command_candidates(command)]
+        if norm_command != command:
+            candidates.append(norm_command)
+        metadata_targets = (
+            "169.254.169.254",
+            "100.100.100.200",
+            "metadata.google.internal",
+        )
+        if any(target in candidate.lower() for candidate in candidates for target in metadata_targets):
+            logger.warning("command_classified_metadata_target", command=command[:200])
+            return RiskLevel.L2_FORBIDDEN
 
         patterns_to_check = getattr(self, "_destructive_patterns", self._DESTRUCTIVE_PATTERNS)
         for cmd in candidates:
@@ -531,5 +568,3 @@ def evaluate_laya_command_safety(command: str) -> dict[str, Any]:
         "laya_score": score,
         "laya_label": label,
     }
-
-
