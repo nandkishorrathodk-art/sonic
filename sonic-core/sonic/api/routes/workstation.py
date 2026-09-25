@@ -2786,12 +2786,16 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                     or ""
                 )
 
-                desktop_context = (
+                ctx_parts = [
                     f"CURRENT LIVE DESKTOP OBSERVATION (captured {screen.timestamp}): "
                     f"state={screen.desktop_state}; resolution={screen.width}x{screen.height}; "
-                    f"active_window={screen.active_window!r}; "
-                    f"visible_text={screen.visible_text!r}; controls={screen.detected_controls!r}."
-                )
+                    f"active_window={screen.active_window!r}"
+                ]
+                if screen.visible_text:
+                    ctx_parts.append(f"window_info={screen.visible_text!r}")
+                if screen.detected_controls:
+                    ctx_parts.append(f"controls={screen.detected_controls!r}")
+                desktop_context = "; ".join(ctx_parts) + "."
                 state["last_desktop_observation"] = desktop_context
                 state["last_desktop_observation_at"] = screen.timestamp
                 _persist_workstation_state()

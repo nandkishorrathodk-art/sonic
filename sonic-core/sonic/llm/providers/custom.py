@@ -355,6 +355,36 @@ class CustomLLMProvider(LLMProvider):
 
     def _to_openai_messages(self, request: LLMRequest) -> list[dict]:
         """Convert SONIC messages to OpenAI format (with multimodal/vision support)."""
+        has_any_images = any(msg.has_images for msg in request.messages)
+        if has_any_images:
+            # Llama-3.2-Vision and several OpenAI-compatible vision endpoints
+            # disable vision cross-attention or return 400 if 'system' or prior
+            # multi-turn messages precede the user message containing 'image_url'.
+            # Consolidate system instructions, prior text turns, and the image(s)
+            # into a single multimodal user turn.
+            text_sections: list[str] = []
+            image_parts: list[dict] = []
+            for msg in request.messages:
+                if msg.role == MessageRole.SYSTEM and msg.content:
+                    text_sections.append(msg.content)
+                elif msg.role == MessageRole.ASSISTANT and msg.content:
+                    text_sections.append(f"[Previous Assistant Response]:\n{msg.content}")
+                elif msg.role == MessageRole.USER and not msg.has_images and msg.content:
+                    text_sections.append(f"[Previous User Message]:\n{msg.content}")
+                elif msg.has_images:
+                    for img in msg.images:
+                        if img.base64:
+                            data_url = f"data:{img.media_type};base64,{img.base64}"
+                            image_parts.append({"type": "image_url", "image_url": {"url": data_url}})
+                        elif img.url:
+                            image_parts.append({"type": "image_url", "image_url": {"url": img.url}})
+                    if msg.content:
+                        text_sections.append(msg.content)
+            content_parts: list[dict] = list(image_parts)
+            if text_sections:
+                content_parts.append({"type": "text", "text": "\n\n".join(text_sections)})
+            return [{"role": "user", "content": content_parts}]
+
         messages = []
         for msg in request.messages:
             if msg.role == MessageRole.TOOL:
@@ -379,20 +409,7 @@ class CustomLLMProvider(LLMProvider):
                     ],
                 })
                 continue
-            if msg.has_images:
-                # Build multipart content array for vision models
-                content_parts: list[dict] = []
-                if msg.content:
-                    content_parts.append({"type": "text", "text": msg.content})
-                for img in msg.images:
-                    if img.base64:
-                        data_url = f"data:{img.media_type};base64,{img.base64}"
-                        content_parts.append({"type": "image_url", "image_url": {"url": data_url}})
-                    elif img.url:
-                        content_parts.append({"type": "image_url", "image_url": {"url": img.url}})
-                messages.append({"role": msg.role.value, "content": content_parts})
-            else:
-                messages.append({"role": msg.role.value, "content": msg.content})
+            messages.append({"role": msg.role.value, "content": msg.content})
         return messages
 
     def _to_anthropic_messages(self, request: LLMRequest) -> tuple[str, list[dict]]:
