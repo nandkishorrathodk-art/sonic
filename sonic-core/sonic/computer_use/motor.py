@@ -214,9 +214,17 @@ class MotorReflexes:
         result.elapsed_seconds = time.perf_counter() - started
         return result
 
+    def _has_method(self, attr: str) -> bool:
+        """Safely check if self.computer provides attr without autovivifying mocks."""
+        if hasattr(type(self.computer), attr):
+            return True
+        if hasattr(self.computer, "__dict__") and attr in self.computer.__dict__:
+            return True
+        return hasattr(self.computer, attr) and not hasattr(self.computer, "_mock_return_value")
+
     async def _exec_cmd(self, cmd: str, workspace_id: str = "") -> tuple[int, str, str]:
         """Execute a shell command via _docker_exec or terminal."""
-        if hasattr(self.computer, "_docker_exec"):
+        if self._has_method("_docker_exec"):
             try:
                 res = await self.computer._docker_exec(cmd)
                 if isinstance(res, tuple) and len(res) >= 3:
@@ -225,7 +233,7 @@ class MotorReflexes:
                     return res[0], res[1], ""
             except Exception as exc:
                 return 1, "", str(exc)
-        if hasattr(self.computer, "terminal"):
+        if self._has_method("terminal"):
             try:
                 res = await self.computer.terminal(workspace_id, cmd)
                 if hasattr(res, "exit_code"):
@@ -236,10 +244,10 @@ class MotorReflexes:
 
     def _get_display(self, workspace_id: str | None = None) -> str:
         """Resolve dynamic X11 DISPLAY for the workstation."""
-        if hasattr(self.computer, "_get_display"):
+        if self._has_method("_get_display"):
             try:
                 disp = self.computer._get_display(workspace_id)
-                if disp:
+                if isinstance(disp, str) and disp:
                     return disp
             except Exception:
                 pass
@@ -250,7 +258,7 @@ class MotorReflexes:
         safe_key = shlex.quote(key)
         disp = self._get_display(workspace_id)
         cmd = f"DISPLAY={disp} xdotool key --clearmodifiers {safe_key}"
-        if hasattr(self.computer, "_docker_exec"):
+        if self._has_method("_docker_exec"):
             try:
                 res = await self.computer._docker_exec(cmd)
                 if isinstance(res, tuple):
@@ -265,7 +273,7 @@ class MotorReflexes:
                 primary_error = None
         else:
             primary_error = None
-        if hasattr(self.computer, "terminal"):
+        if self._has_method("terminal"):
             try:
                 res = await self.computer.terminal(workspace_id, cmd)
                 if getattr(res, "exit_code", 0) != 0:
@@ -273,7 +281,7 @@ class MotorReflexes:
                 return
             except Exception as exc:
                 raise RuntimeError(f"hotkey dispatch failed: {exc}") from exc
-        if hasattr(self.computer, "gui_action"):
+        if self._has_method("gui_action"):
             result = await self.computer.gui_action(
                 workspace_id, GUIAction(action=GUIActionType.KEYPRESS, key=key)
             )
@@ -283,12 +291,57 @@ class MotorReflexes:
             return
         raise RuntimeError("No hotkey execution method available")
 
-    async def human_type(self, workspace_id: str, text: str, delay_ms: int = 25) -> str:
+    async def clear_field(self, workspace_id: str) -> None:
+        """Clear active input field using ctrl+a followed by BackSpace with cleared modifiers."""
+        disp = self._get_display(workspace_id)
+        cmd = f"DISPLAY={disp} xdotool key --clearmodifiers ctrl+a BackSpace"
+        exit_code, _, _ = await self._exec_cmd(cmd, workspace_id)
+        if exit_code != 0 and self._has_method("gui_action"):
+            try:
+                await self.computer.gui_action(
+                    workspace_id, GUIAction(action=GUIActionType.HOTKEY, key="ctrl+a")
+                )
+                await asyncio.sleep(0.05)
+                await self.computer.gui_action(
+                    workspace_id, GUIAction(action=GUIActionType.KEYPRESS, key="BackSpace")
+                )
+            except Exception:
+                pass
+
+    async def settle_focus(
+        self,
+        workspace_id: str,
+        target_window: str | None = None,
+        settle_seconds: float = 0.15,
+    ) -> None:
+        """Settle active window and focus transition before typing or interaction."""
+        disp = self._get_display(workspace_id)
+        if target_window:
+            safe_target = shlex.quote(target_window)
+            focus_cmd = (
+                f"DISPLAY={disp} wmctrl -a {safe_target} || "
+                f"DISPLAY={disp} xdotool search --name {safe_target} windowactivate --sync"
+            )
+            await self._exec_cmd(focus_cmd, workspace_id)
+        if settle_seconds > 0:
+            await asyncio.sleep(settle_seconds)
+
+    async def human_type(
+        self,
+        workspace_id: str,
+        text: str,
+        delay_ms: int = 25,
+        clear_field: bool = False,
+    ) -> str:
         """
         Executes xdotool type --delay {delay_ms} --clearmodifiers {safe_text} via
         computer._docker_exec (or computer.gui_action). If delay_ms > 0, types with
         natural human cadence (preventing React debounce drops and anti-bot flags).
+        If clear_field is True, clears the active input field before typing.
         """
+        if clear_field:
+            await self.clear_field(workspace_id)
+            await asyncio.sleep(0.05)
         safe_text = shlex.quote(text)
         delay_arg = f"--delay {delay_ms} " if delay_ms > 0 else ""
         disp = self._get_display(workspace_id)

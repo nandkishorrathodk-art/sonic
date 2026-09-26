@@ -40,6 +40,7 @@ class SubMission(BaseModel):
     process_mode: str = "deep"
     evidence_context: dict[str, Any] = Field(default_factory=dict)
     status: str = "PENDING"  # PENDING -> RUNNING -> COMPLETED -> FAILED
+    enable_llm_decomposition: bool | None = None
 
     @model_validator(mode="after")
     def _infer_plane_from_goal(self) -> SubMission:

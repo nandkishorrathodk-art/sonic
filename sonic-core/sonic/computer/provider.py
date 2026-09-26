@@ -146,6 +146,10 @@ class ComputerProvider(ABC):
         """Tile workstation windows side-by-side (optional capability)."""
         return False
 
+    async def maximize_window(self, workspace_id: str, target: str | None = None) -> bool:
+        """Maximize active or targeted window (optional capability)."""
+        return False
+
     async def settle_screen(
         self,
         workspace_id: str,

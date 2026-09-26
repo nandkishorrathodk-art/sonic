@@ -823,6 +823,9 @@ class DaytonaComputerProvider(ComputerProvider):
             GUIActionType.SCROLL,
             GUIActionType.DRAG,
             GUIActionType.SELECT_WINDOW,
+            GUIActionType.APP_MAXIMIZE,
+            GUIActionType.WINDOW_MAXIMIZE,
+            GUIActionType.WINDOW_TILE,
             GUIActionType.OPEN_APP,
             GUIActionType.LAUNCH_APP,
             GUIActionType.CLOSE_APP,
@@ -969,6 +972,27 @@ class DaytonaComputerProvider(ComputerProvider):
                         f"xdotool search --name {safe} windowactivate 2>/dev/null)"
                     )
                     self._active_windows[workspace_id] = title
+
+            elif action_type in (GUIActionType.APP_MAXIMIZE, GUIActionType.WINDOW_MAXIMIZE):
+                target = (action.window_id or action.app_name or "").strip()
+                if target and target != ":ACTIVE:":
+                    if target.lower().startswith("0x"):
+                        max_cmd = f"export DISPLAY={disp}; wmctrl -i -r {shlex.quote(target)} -b add,maximized_vert,maximized_horz"
+                    else:
+                        max_cmd = (
+                            f"export DISPLAY={disp}; "
+                            f"wmctrl -r {shlex.quote(target)} -b add,maximized_vert,maximized_horz 2>/dev/null || "
+                            f"wmctrl -x -r {shlex.quote(target)} -b add,maximized_vert,maximized_horz 2>/dev/null || "
+                            f"wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz"
+                        )
+                else:
+                    max_cmd = f"export DISPLAY={disp}; wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz"
+                await sandbox.process.exec(max_cmd)
+                if target and not target.lower().startswith("0x"):
+                    self._active_windows[workspace_id] = target
+
+            elif action_type == GUIActionType.WINDOW_TILE:
+                await self.tile_workstation(workspace_id)
 
         except Exception as e:
             logger.error("daytona_gui_action_dispatch_error", error=str(e))

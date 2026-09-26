@@ -132,10 +132,12 @@ class BossAgent:
         max_tree_depth: int = 3,
         craft: Any = None,
         vault: Any = None,
+        enable_llm_decomposition: bool = False,
         **kwargs: Any,
     ):
         self.computer = computer_provider
         self.llm_router = llm_router
+        self.enable_llm_decomposition = enable_llm_decomposition
         if safety is None:
             from sonic.safety.action_policy import ActionPolicy
 
@@ -634,10 +636,27 @@ class BossAgent:
             # Do not manufacture momentum after a phase that produced no
             # execution, evidence, or discoveries. A replan is useful only
             # when the previous attempt exposed something to reason about.
+            # Do not advance phases on actions_taken > 0 if all actions failed.
+            def _result_has_meaningful_progress(res: SubMissionResult) -> bool:
+                if res.success or bool(res.key_discoveries):
+                    return True
+                if res.actions_taken > 0:
+                    traces = list(getattr(res, "traces", []) or [])
+                    if traces:
+                        has_successful_action = any(
+                            str(getattr(t, "status", "")).upper() in ("SUCCESS", "COMPLETED", "VERIFIED")
+                            or (
+                                getattr(t, "exit_code", None) == 0
+                                and str(getattr(t, "status", "")).upper() not in ("FAILED", "BLOCKED")
+                            )
+                            for t in traces
+                        )
+                        return has_successful_action
+                    return str(getattr(res, "status", "")).upper() not in ("FAILED", "BLOCKED", "TIMED_OUT")
+                return False
+
             phase_progress = any(
-                result.success
-                or result.actions_taken > 0
-                or bool(result.key_discoveries)
+                _result_has_meaningful_progress(result)
                 for result in current_phase.results
             )
             if not phase_progress:
@@ -1194,6 +1213,23 @@ Rules:
             scoped_context["delegated_goal"] = sub_mission.goal
             scoped_context["delegated_plane"] = execution_plane
             scoped_context["execution_plane"] = execution_plane
+
+            # Allow structured task decomposition (enable_llm_decomposition=True) for multi-step GUI sub-missions
+            # so sub-agents can follow human workflows (Focus -> Maximize -> Type -> Save).
+            is_multi_step_gui = (
+                execution_plane in ("gui", "desktop")
+                and (
+                    getattr(sub_mission, "max_steps", 0) > 1
+                    or any(
+                        step_k in getattr(sub_mission, "goal", "").lower()
+                        for step_k in ("focus", "maximize", "type", "save", "click", "window")
+                    )
+                )
+            )
+            enable_decomp = getattr(sub_mission, "enable_llm_decomposition", None)
+            if enable_decomp is None:
+                enable_decomp = bool(is_multi_step_gui or getattr(self, "enable_llm_decomposition", False))
+
             agent = ComputerUseAgent(
                 computer_provider=self.computer,
                 autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
@@ -1209,7 +1245,7 @@ Rules:
                 being_mind=self.being_mind,
                 craft=self.craft,
                 vault=self.vault,
-                enable_llm_decomposition=False,
+                enable_llm_decomposition=enable_decomp,
                 browser=self.browser,
                 toolsmith=self.toolsmith,
                 method_lab=self.method_lab,
@@ -1440,6 +1476,7 @@ Rules:
             )
 
     _run_subagent = _dispatch_sub_agent
+    _execute_sub_mission = _dispatch_sub_agent
 
     async def _summarize_sub_agent_traces(
         self, goal: str, traces: list[Any]

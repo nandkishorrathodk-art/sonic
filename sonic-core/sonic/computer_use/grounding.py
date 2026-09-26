@@ -202,7 +202,10 @@ def _extract_bbox_midpoint_impl(
                 and (raw_x > 1.0 or raw_y > 1.0)
             )
             or (
-                is_normalized_1000 is None and max(raw_x, raw_y) <= 1000 and (raw_x > width or raw_y > height)
+                is_normalized_1000 is not False
+                and 0.0 <= raw_x <= 1000.0
+                and 0.0 <= raw_y <= 1000.0
+                and (raw_x > 1.0 or raw_y > 1.0)
             )
         ):
             px = int((raw_x / 1000.0) * width)
@@ -505,9 +508,86 @@ def crop_toolbar_region(
         return (screenshot_b64, (0, 0)) if crop_height_ratio is None else screenshot_b64
 
 
+def crop_active_window_region(
+    screenshot_b64: str,
+    geometry: tuple[int, int, int, int] | list[int] | dict[str, Any] | Any | None = None,
+    width: int = 1280,
+    height: int = 800,
+    padding: int = 0,
+    return_offset: bool | None = None,
+) -> tuple[str, tuple[int, int]] | str:
+    """
+    Crop the active window region (x, y, w, h) from the desktop screenshot for high-resolution foveated vision.
+
+    Args:
+        screenshot_b64: Base64-encoded PNG screenshot of the desktop.
+        geometry: Active window bounding box as (x, y, w, h), [x, y, w, h], dict with x, y, width/w, height/h,
+                  or an object with x, y, width, height or bbox attributes.
+        width: Fallback desktop screen width if image cannot be parsed.
+        height: Fallback desktop screen height if image cannot be parsed.
+        padding: Optional padding in pixels to expand the cropped window region.
+        return_offset: If True, returns (cropped_b64, (offset_x, offset_y)).
+                       If False, returns cropped_b64 string.
+                       If None (default), returns a tuple (cropped_b64, (offset_x, offset_y)).
+
+    Returns:
+        tuple of (cropped_screenshot_b64, (offset_x, offset_y)) or cropped_screenshot_b64 string.
+    """
+    if not _HAS_PIL or not screenshot_b64 or geometry is None:
+        return (screenshot_b64, (0, 0)) if (return_offset is not False) else screenshot_b64
+
+    # Extract x, y, w, h from various formats
+    x, y, w, h = 0, 0, 0, 0
+    if hasattr(geometry, "bbox"):
+        b = geometry.bbox
+        x, y, w, h = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+    elif hasattr(geometry, "x") and hasattr(geometry, "y") and hasattr(geometry, "width") and hasattr(geometry, "height"):
+        x, y, w, h = int(geometry.x), int(geometry.y), int(geometry.width), int(geometry.height)
+    elif isinstance(geometry, dict):
+        x = int(geometry.get("x", 0))
+        y = int(geometry.get("y", 0))
+        w = int(geometry.get("w", geometry.get("width", 0)))
+        h = int(geometry.get("h", geometry.get("height", 0)))
+    elif isinstance(geometry, (tuple, list)) and len(geometry) >= 4:
+        x, y, w, h = int(geometry[0]), int(geometry[1]), int(geometry[2]), int(geometry[3])
+    else:
+        return (screenshot_b64, (0, 0)) if (return_offset is not False) else screenshot_b64
+
+    if w <= 0 or h <= 0:
+        return (screenshot_b64, (0, 0)) if (return_offset is not False) else screenshot_b64
+
+    try:
+        raw_b64 = screenshot_b64.split(",", 1)[-1] if "," in screenshot_b64 else screenshot_b64
+        raw_bytes = base64.b64decode(raw_b64)
+        image = Image.open(io.BytesIO(raw_bytes))
+        img_w, img_h = image.size
+
+        # Clamp crop box to image dimensions with padding
+        x1 = max(0, x - padding)
+        y1 = max(0, y - padding)
+        x2 = min(img_w, x + w + padding)
+        y2 = min(img_h, y + h + padding)
+
+        if x2 <= x1 or y2 <= y1:
+            return (screenshot_b64, (0, 0)) if (return_offset is not False) else screenshot_b64
+
+        cropped = image.crop((x1, y1, x2, y2))
+        buffer = io.BytesIO()
+        cropped.convert("RGB").save(buffer, format="PNG")
+        cropped_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        if return_offset is False:
+            return cropped_b64
+        return cropped_b64, (x1, y1)
+    except Exception as exc:
+        logger.warning("crop_active_window_region_failed", error=str(exc))
+        return (screenshot_b64, (0, 0)) if (return_offset is not False) else screenshot_b64
+
+
 def map_crop_to_screen(
     local_coords: tuple[int, int],
     offset: tuple[int, int],
 ) -> tuple[int, int]:
     """Translate coordinates detected inside a micro-crop back to absolute desktop screen coordinates."""
     return local_coords[0] + offset[0], local_coords[1] + offset[1]
+

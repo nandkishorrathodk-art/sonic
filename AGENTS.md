@@ -2215,3 +2215,22 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
   - Removed unowned global Daytona workspace ID fallback.
 - **Integration & Regression Test Coverage (Track 5)**:
   - 250+ regression tests passing 100% across self-coder (`test_self_coder.py`), codebase evolution (`test_codebase_evolution.py`, `test_advanced_evolution.py`), Laya System-1 (`test_laya_end_to_end.py`, `test_laya_system1_engine.py`), action receipts (`test_agent_action_receipts.py`), boss plane routing (`test_boss_plane_routing_and_truthfulness.py`), and dynamic teamwork subagents (`test_teamwork_subagents.py`, `test_sonic_subagents_live_capability.py`).
+
+## Phase 47 — Workstation Human-Grade Autonomy, Visual Perception Grounding, Motor Sanitization, Multi-Window Tiling & Closed-Loop Visual Delta Watchdog (DONE)
+- **Visual Perception Grounding & Coordinate Normalization**:
+  - `agent.py`: Attached live desktop screenshots to LLM calls whenever `gui` or `dual` planes are active (`should_attach_image`), eliminating blind action selection.
+  - `grounding.py`: Fixed 1280x800 coordinate scaling bug where normalized 0-1000 coordinates were not scaled if `max(x, y) <= 1000`. Accurately translates normalized coordinates to desktop dimensions.
+  - Implemented foveated vision cropping (`crop_active_window_region`) and active window geometry `(x, y, w, h)` tracking in `ScreenObservation`.
+- **Motor Interaction, Payload Sanitization & Keyboard Accelerators**:
+  - `agent.py`: Removed naive `fallback_txt = target` assignment so UI target names (e.g. `File -> Open`) never leak into `GUI_TYPE` payloads.
+  - Sanitized typing and terminal payloads using expanded regex delimiters to strip model thoughts, commentary, and `BeingCraft note:` blocks.
+  - Added target field clearing (`xdotool key --clearmodifiers ctrl+a BackSpace`) and active window focus settling before typing.
+  - Documented and promoted standard keyboard accelerators (`Alt+F` for File menu, `Ctrl+S` for Save, `Ctrl+O` for Open, `Ctrl+N` for New) in prompts and action guidance.
+- **Multi-Window Management & Structured Task Decomposition**:
+  - Added `APP_MAXIMIZE`, `WINDOW_MAXIMIZE`, and `WINDOW_TILE` to `ComputerActionType` and `GUIActionType`.
+  - Implemented native window maximize (`wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz` or `wmctrl -i -r <wid>`) and window tiling in `docker_computer.py` and `agent.py`.
+  - Enabled structured task decomposition (`enable_llm_decomposition=True`) in `boss.py` for multi-step GUI sub-missions (Focus -> Maximize -> Type -> Save).
+- **Closed-Loop Visual Delta Watchdog & Judge Falsification Gates**:
+  - Upgraded `_consecutive_unchanged_screens` into an active watchdog that refocuses windows, retries with accelerators, and prevents infinite loops from burning step quotas.
+  - Fixed `JudgeAgent` (`judge.py`) to verify real on-disk artifacts and application state rather than accepting completion on superficial process status or unsaved text (`*untitled`).
+  - Gated Laya System-1 receipt verification to reject syntax errors, broken commands, and unsaved file claims.

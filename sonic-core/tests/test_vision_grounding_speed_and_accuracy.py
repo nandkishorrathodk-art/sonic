@@ -72,7 +72,7 @@ def test_bbox_parsing_accuracy():
     coords_float = extract_bbox_midpoint("[0.5, 0.5]", width=1280, height=800)
     assert coords_float == (640, 400)
 
-    coords_px = extract_bbox_midpoint("Center is [640, 400]", width=1280, height=800)
+    coords_px = extract_bbox_midpoint("Center is [640, 400]", width=1280, height=800, is_normalized_1000=False)
     assert coords_px == (640, 400)
 
 

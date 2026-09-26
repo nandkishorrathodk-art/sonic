@@ -101,7 +101,7 @@ class JudgeAgent:
             return JudgeEvaluation(
                 verdict=JudgeVerdict.FALSIFIED,
                 confidence=0.95,
-                notes=f"Worker produced no successful execution receipts. Errors: {err_summary[:200]}",
+                notes=f"Worker produced no successful execution traces. Errors: {err_summary[:200]}",
                 self_attestation_rejected=False,
                 remediation_blueprint={
                     "fix_goal": f"Resolve execution errors for objective: {sub_mission.goal}",
@@ -118,6 +118,45 @@ class JudgeAgent:
         has_concrete_proof = False
         evidence_items: list[str] = []
         written_files: list[str] = []
+        failed_traces: list[str] = []
+        syntax_errors: list[str] = []
+
+        # Check for unsaved editor buffers or window titles with unsaved asterisks (*untitled)
+        unsaved_match = None
+        for t in traces:
+            t_obs = str(_t_val(t, "actual_observation") or _t_val(t, "observation") or "")
+            t_ev = str(_t_val(t, "verification_evidence", ""))
+            t_text = f"{t_obs} {t_ev}"
+            if re.search(r'\*untitled|\buntitled\*|\bunsaved\b|\[modified\]|(?:^|\s)\*[a-zA-Z0-9_\-\.]+', t_text, re.IGNORECASE):
+                unsaved_match = f"Trace observation indicated unsaved editor buffer: {t_text[:120]}"
+                break
+
+        if not unsaved_match and self.computer:
+            try:
+                if hasattr(self.computer, "status"):
+                    st = await self.computer.status(workspace_id)
+                    wins = list(getattr(st, "windows", []))
+                    act = str(getattr(st, "active_application", ""))
+                    if act:
+                        wins.append(act)
+                    for w in wins:
+                        if re.search(r'\*untitled|\buntitled\*|\bunsaved\b|\[modified\]|(?:^|\s)\*[a-zA-Z0-9_\-\.]+', str(w), re.IGNORECASE):
+                            unsaved_match = f"Open editor window contains unsaved marker: '{w}'"
+                            break
+            except Exception:
+                pass
+
+        if unsaved_match:
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.FALSIFIED,
+                confidence=0.95,
+                notes=f"Rejection: File or editor window is unsaved ({unsaved_match}). Changes must be saved to disk.",
+                self_attestation_rejected=False,
+                remediation_blueprint={
+                    "fix_goal": f"Save unsaved editor buffers to disk for objective: {sub_mission.goal}",
+                    "error_context": unsaved_match,
+                },
+            )
 
         for t in traces:
             exit_c = _t_val(t, "exit_code", None)
@@ -128,15 +167,92 @@ class JudgeAgent:
             verif_ev = str(_t_val(t, "verification_evidence", "")).strip()
             t_status = str(_t_val(t, "status", "")).upper()
 
-            if t_status in ("FAILED", "BLOCKED") or (exit_c is not None and exit_c != 0):
+            # Check for terminal syntax errors
+            combined_t = f"{obs}\n{verif_ev}".lower()
+            is_syntax_err = any(
+                se in combined_t
+                for se in (
+                    "syntax error", "syntaxerror", "indentationerror", "taberror",
+                    "invalid syntax", "parse error", "unexpected token", "unexpected eof",
+                )
+            )
+            if is_syntax_err:
+                syntax_errors.append(f"{action}:{target}: {obs[:120]}")
+
+            # Failed traces and terminal syntax errors must NOT be silently skipped with continue
+            is_failed = t_status in ("FAILED", "BLOCKED") or (exit_c is not None and exit_c != 0) or is_syntax_err
+            if is_failed:
+                failed_traces.append(f"{action}:{target}: status={t_status}, exit={exit_c}, err={obs[:100]}")
                 continue
 
-            if (exit_c == 0 and (obs or verif_ev)) or (exit_c is None and (obs or verif_ev)):
-                has_concrete_proof = True
-                if target:
-                    evidence_items.append(f"{action}:{target[:120]}")
+            # Concrete proof evaluation:
+            # GUI actions with exit_code is None must NOT be treated as has_concrete_proof = True
+            # without verifying the target application state or artifacts.
+            is_gui_action = (
+                action.startswith("GUI_")
+                or action in ("APP_LAUNCH", "APP_FOCUS", "APP_CLOSE")
+                or action.startswith("BROWSER_")
+            )
+
+            if is_gui_action:
+                # GUI actions with exit_code is None must NOT be treated as has_concrete_proof = True
+                # without verifying the target application state or artifacts.
+                app_state_verified = False
                 if action in ("FILE_WRITE", "FILE_EDIT", "FILE_CREATE") and target:
-                    written_files.append(target)
+                    app_state_verified = True
+                elif verif_ev and "verified" in verif_ev.lower():
+                    app_state_verified = True
+                elif obs and any(
+                    term in obs.lower()
+                    for term in (
+                        "[app_state_verified]",
+                        "launched and focused",
+                        "window state verified",
+                        "application state confirmed",
+                    )
+                ):
+                    app_state_verified = True
+                elif self.computer and hasattr(self.computer, "status"):
+                    try:
+                        comp_status = await self.computer.status(workspace_id)
+                        active_app = str(getattr(comp_status, "active_application", "")).lower()
+                        open_apps = [str(a).lower() for a in getattr(comp_status, "open_applications", [])]
+                        if target and (target.lower() in active_app or any(target.lower() in app for app in open_apps)):
+                            app_state_verified = True
+                    except Exception:
+                        pass
+
+                if app_state_verified:
+                    has_concrete_proof = True
+                    if target:
+                        evidence_items.append(f"{action}:{target[:120]}")
+                    if action in ("FILE_WRITE", "FILE_EDIT", "FILE_CREATE") and target:
+                        written_files.append(target)
+            else:
+                if (exit_c == 0 and (obs or verif_ev)) or (exit_c is None and (verif_ev or (obs and t_status in ("COMPLETED", "VERIFIED")))):
+                    has_concrete_proof = True
+                    if target:
+                        evidence_items.append(f"{action}:{target[:120]}")
+                    if action in ("FILE_WRITE", "FILE_EDIT", "FILE_CREATE") and target:
+                        written_files.append(target)
+
+        # Check 2.1: Terminal syntax errors must invalidate confirmation
+        res_text = f"{result.findings_summary} {' '.join(result.key_discoveries)}".lower()
+        if any(se in res_text for se in ("syntax error", "syntaxerror", "indentationerror", "taberror", "invalid syntax")):
+            syntax_errors.append(f"Result summary reported syntax error: {result.findings_summary[:120]}")
+
+        if syntax_errors:
+            err_details = "; ".join(syntax_errors[:3])
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.FALSIFIED,
+                confidence=0.95,
+                notes=f"Worker trace contained terminal syntax errors: {err_details}",
+                self_attestation_rejected=False,
+                remediation_blueprint={
+                    "fix_goal": f"Fix terminal syntax errors for objective: {sub_mission.goal}",
+                    "error_context": err_details,
+                },
+            )
 
         # 3. Anti-Self-Attestation Gate
         if worker_self_verified and not has_concrete_proof:
@@ -155,16 +271,90 @@ class JudgeAgent:
                 },
             )
 
-        # 4. Independent File Artifact Verification (verify files written during trace actually exist on disk)
-        if written_files and self.computer and hasattr(self.computer, "read_file"):
-            for fpath in written_files:
+        # 3.5 Security Vulnerability Reproduction Check:
+        vuln_markers = ("sqli", "sql injection", "xss", "rce", "cve-", "idor", "open port", "flag{", "bypass", "vulnerability")
+        combined_findings = (result.findings_summary + " " + " ".join(result.key_discoveries)).lower()
+        if any(m in combined_findings for m in vuln_markers):
+            valid_terminal_cmds = [
+                str(_t_val(t, "target_resource") or _t_val(t, "target") or "")
+                for t in traces
+                if str(_t_val(t, "action_type", "")).upper() in ("TERMINAL_EXEC", "TERMINAL", "EXEC")
+                and _t_val(t, "exit_code", 1) == 0
+            ]
+            if valid_terminal_cmds and self.computer and hasattr(self.computer, "terminal"):
+                try:
+                    reprod_cmd = valid_terminal_cmds[-1]
+                    re_exec = await self.computer.terminal(workspace_id, reprod_cmd)
+                    re_exit = getattr(re_exec, "exit_code", 1)
+                    re_obs = str(getattr(re_exec, "stdout", "") or getattr(re_exec, "stderr", ""))
+                    if re_exit == 0:
+                        return JudgeEvaluation(
+                            verdict=JudgeVerdict.CONFIRMED,
+                            confidence=0.95,
+                            notes=f"Re-execution of PoC '{reprod_cmd[:60]}' confirmed exit 0.",
+                            reproduction_exit_code=0,
+                            reproduced_output=re_obs[:300],
+                            evidence_items=[reprod_cmd],
+                        )
+                    else:
+                        return JudgeEvaluation(
+                            verdict=JudgeVerdict.FALSIFIED,
+                            confidence=0.85,
+                            notes=f"Independent re-execution of PoC failed (exit {re_exit}).",
+                            reproduction_exit_code=re_exit,
+                            reproduced_output=re_obs[:300],
+                        )
+                except Exception as ex:
+                    logger.warning("judge_poc_reproduction_error", error=str(ex))
+
+        # 4. Independent File Artifact Verification
+        # For file-writing/editor goals, verify the file actually exists and is non-empty on disk before confirming.
+        goal_lower = sub_mission.goal.lower()
+        is_file_goal = (
+            any(
+                w in goal_lower
+                for w in (
+                    "create file", "create folder", "write file", "edit file",
+                    "save file", "author", "evidence file", "generate report",
+                    "touch", "file", "write", "editor", "script",
+                )
+            )
+            or bool(written_files)
+            or any(
+                str(_t_val(t, "action_type", "")).upper() in ("FILE_WRITE", "FILE_EDIT", "FILE_CREATE")
+                for t in traces
+            )
+        )
+        candidate_files = list(written_files)
+        candidate_files.extend(getattr(sub_mission, "owned_paths", []))
+        file_matches_in_goal = re.findall(
+            r'[\w\-./\\]+\.(?:py|md|txt|json|sh|yaml|yml|csv|html|toml|rs|js|ts)',
+            sub_mission.goal,
+            re.IGNORECASE,
+        )
+        candidate_files.extend(file_matches_in_goal)
+
+        for t in traces:
+            t_cmd = str(_t_val(t, "target_resource") or _t_val(t, "target") or "")
+            t_matches = re.findall(
+                r'(?:touch|cat\s*>\s*|echo\s*.*?>\s*|nano\s+|vim\s+|tee\s+)?([a-zA-Z0-9_\-./\\]+\.(?:py|md|txt|json|sh|yaml|yml|csv|html|toml|rs|js|ts))',
+                t_cmd,
+                re.IGNORECASE,
+            )
+            candidate_files.extend(t_matches)
+
+        candidate_files = list(dict.fromkeys(f.strip() for f in candidate_files if f and f.strip()))
+
+        if is_file_goal and candidate_files and self.computer and hasattr(self.computer, "read_file"):
+            for fpath in candidate_files:
                 try:
                     content = await self.computer.read_file(workspace_id, fpath)
-                    if content is None or content == "":
+                    if not content or content.strip() == "":
                         return JudgeEvaluation(
                             verdict=JudgeVerdict.FALSIFIED,
                             confidence=0.9,
-                            notes=f"File artifact '{fpath}' recorded in trace is missing or empty on disk.",
+                            notes=f"Claimed file '{fpath}' was not found or is empty in workspace (Rule 15 violation).",
+                            self_attestation_rejected=False,
                             remediation_blueprint={
                                 "fix_goal": f"Ensure '{fpath}' is properly written and non-empty.",
                             },
@@ -173,30 +363,75 @@ class JudgeAgent:
                     return JudgeEvaluation(
                         verdict=JudgeVerdict.FALSIFIED,
                         confidence=0.9,
-                        notes=f"Independent verification failed reading '{fpath}': {exc}",
+                        notes=f"Error reading claimed file '{fpath}' from workspace: {exc}",
+                        self_attestation_rejected=False,
                         remediation_blueprint={
                             "fix_goal": f"Fix file path or write error for '{fpath}'.",
                         },
                     )
+
+        # 4.5 Workstation Application & Desktop Window Check (Rule 5 & Rule 7):
+        is_gui_mission = getattr(sub_mission, "plane", "") == "gui" or any(
+            w in goal_lower
+            for w in ("desktop", "browser", "window", "gui", "open application", "launch application")
+        )
+        if is_gui_mission:
+            has_gui_action = any(
+                str(_t_val(t, "action_type", "")).startswith("GUI_")
+                or str(_t_val(t, "action_type", "")) in ("APP_LAUNCH", "APP_FOCUS")
+                for t in traces
+            )
+            gui_verified = has_gui_action
+            if self.computer and hasattr(self.computer, "terminal"):
+                try:
+                    wm_res = await self.computer.terminal(
+                        workspace_id,
+                        "DISPLAY=:99 wmctrl -l 2>/dev/null | grep -v ' -1 '",
+                    )
+                    open_wins = [
+                        line for line in (getattr(wm_res, "stdout", "") or "").splitlines()
+                        if line.strip()
+                    ]
+                    if open_wins:
+                        gui_verified = True
+                    else:
+                        gui_verified = False
+                except Exception:
+                    pass
+
+            if not gui_verified:
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.FALSIFIED,
+                    confidence=0.85,
+                    notes="GUI desktop interaction unverified: No application window or visual action was detected on Display :99.",
+                )
 
         # A successful process is not evidence that it advanced the mission.
         # Require a meaningful objective token in the concrete receipt before
         # accepting a generic successful command as confirmation.
         stop_words = {
             "a", "an", "and", "by", "for", "from", "in", "into", "of",
-            "on", "or", "the", "to", "using", "with",
+            "on", "or", "the", "to", "using", "with", "run", "check",
         }
         goal_terms = {
             token for token in re.findall(r"[a-z0-9]+", sub_mission.goal.lower())
             if len(token) > 2 and token not in stop_words
         }
-        receipt_text = " ".join(
+        receipt_text = " ".join([
             f"{_t_val(trace, 'target_resource', '')} "
-            f"{_t_val(trace, 'actual_observation', '')}"
+            f"{_t_val(trace, 'target', '')} "
+            f"{_t_val(trace, 'actual_observation', '')} "
+            f"{_t_val(trace, 'payload', '')}"
             for trace in traces
-        ).lower()
+        ] + [
+            result.findings_summary,
+            " ".join(result.key_discoveries),
+        ]).lower()
         receipt_terms = set(re.findall(r"[a-z0-9]+", receipt_text))
-        if has_concrete_proof and goal_terms and not goal_terms.intersection(receipt_terms):
+        has_overlap = bool(goal_terms.intersection(receipt_terms)) or any(
+            gt in receipt_text for gt in goal_terms
+        )
+        if has_concrete_proof and goal_terms and not has_overlap:
             return JudgeEvaluation(
                 verdict=JudgeVerdict.INCONCLUSIVE,
                 confidence=0.4,

@@ -2182,6 +2182,149 @@ def _extract_target_url_or_domain(prompt: str, state: dict[str, Any] | None = No
     return ""
 
 
+_DASHBOARD_CHROME_MARKERS = (
+    "[Missions]",
+    "[Computer]",
+    "[Research]",
+    "[Experiments]",
+    "[Graph Memory]",
+    "[Evidence Board]",
+    "[Agents]",
+    "[Security Lab]",
+    "[Settings]",
+    "FAIL-CLOSED",
+    "SONICA-SEA",
+    "TAKE OVER",
+    "Sandbox Command Terminal",
+)
+
+_TASK_IMPERATIVE_RE = re.compile(
+    r"(?:"
+    r"\b(?:open|launch|create|write|run|make|install|click|navigate|type|scroll|"
+    r"download|compile|build|delete|focus|kholo|chalao|banao|likho)\b"
+    r"|band\s+karo|search\s+karo|install\s+karo|kaam\s+karo|kar\s+do"
+    r")",
+    re.IGNORECASE,
+)
+
+_CONVERSATIONAL_UNDERSTANDING_RE = re.compile(
+    r"(?:"
+    r"\bh[ao]w\s+many\s+tools?\b"
+    r"|\bmany\s+tools?\s+you\s+have\b"
+    r"|\bdo\s+you\s+have\b[^.?\n]{0,40}\b(?:thoughts?|mind|feelings?)\b"
+    r"|\byour\s+own\s+thoughts?\b"
+    r"|\bdo\s+you\s+(?:think|understand|feel)\b"
+    r"|\bwhat\s+do\s+you\s+think\b"
+    r"|\bare\s+you\s+(?:an?\s+)?(?:ai|human|alive|real)\b"
+    r"|\bcan\s+you\s+(?:talk|chat|speak|understand)\b"
+    r"|\bcan\s+you\s+(?:play\s+)?(?:a\s+)?ctf\b"
+    r"|\b(?:samajh|samjh)\b"
+    r"|\b(?:soch|khayal|dimaag|dimag)\b"
+    r"|\bkitn[ae]\s+tools?\b"
+    r"|\b(?:kaun|kon)\s+(?:ho|hai)\b"
+    r"|\bkaise\s+ho\b"
+    r"|\b(?:namaste|namaskar)\b"
+    r"|\bbaat\s+kar"
+    r"|\bkya\s+(?:tum|tu|aap)\b"
+    r"|\b(?:tum|tu|aap)\s+(?:kaun|kon|kya|kaise)\b"
+    r"|\bapn[ae]\s+(?:bare|baare|thoughts|soch)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_dashboard_dump(prompt: str) -> bool:
+    """True when the operator message is copied workstation chrome, not a sentence."""
+    hits = sum(1 for marker in _DASHBOARD_CHROME_MARKERS if marker in prompt)
+    if hits >= 2:
+        return True
+    return "localhost:12001" in prompt and hits >= 1
+
+
+def _dashboard_dump_reply() -> str:
+    return (
+        "Yeh message workstation ki screen copy lag raha hai, aapka sentence nahi. "
+        "Maine isko command nahi banaya aur koi kaam start nahi kiya. "
+        "Jo chahiye woh ek line mein likho — jaise 'browser kholo', 'kaun ho tum', "
+        "ya 'kya tumhe samajh aata hai'."
+    )
+
+
+def _has_task_imperative(prompt: str) -> bool:
+    return _TASK_IMPERATIVE_RE.search(prompt) is not None
+
+
+def _is_conversational_understanding(prompt: str) -> bool:
+    """Questions about identity, thoughts, and comprehension — not a desktop task."""
+    return _CONVERSATIONAL_UNDERSTANDING_RE.search(prompt) is not None
+
+
+def _being_conversation_brief(tenant_id: str) -> str:
+    """Short persistent-self brief. Never invents a tool inventory."""
+    try:
+        from sonic.being.identity import get_or_create_being
+
+        being = get_or_create_being(tenant_id)
+        mind = being.get_persona_profile()
+        store_mind = None
+        try:
+            from sonic.being.identity import get_being_store
+
+            store_mind = get_being_store().get_mind(being.being_id)
+        except Exception:
+            store_mind = None
+        curiosity = f"{store_mind.curiosity_drive:.2f}" if store_mind is not None else "unknown"
+        focus = f"{store_mind.focus:.2f}" if store_mind is not None else "unknown"
+        fact_count = len(store_mind.learned_facts) if store_mind is not None else 0
+        return (
+            f"Name {being.name}, id {being.being_id}, born {being.born_at}. "
+            f"Curiosity {curiosity}, focus {focus}, learned_facts {fact_count}. "
+            f"Bio: {mind.get('bio', '')} "
+            "No tool inventory is attached to this brief. Discover tools on the live computer; do not invent one."
+        )
+    except Exception:
+        return (
+            "Being record unavailable this turn. "
+            "Do not invent a name history, a mood, or a tool list."
+        )
+
+
+def _claims_unrun_execution(text: str) -> bool:
+    """Detect a chat reply that presents command output nobody ran."""
+    normalized = re.sub(r"\s+", " ", (text or "").lower())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "nmap scan report",
+            "starting nmap",
+            "$ nmap",
+            "flag.txt",
+            "the flag is",
+            "my current tool inventory",
+            "tool inventory includes",
+            "penetration architect",
+            "self-evolving penetration",
+        )
+    )
+
+
+def _honest_no_execution_reply(prompt: str, being_brief: str) -> str:
+    hindi = bool(re.search(r"[अ-ह]", prompt)) or bool(
+        re.search(r"\b(?:tum|kya|kaun|samajh|hai|ho|karo|nahi)\b", prompt.lower())
+    )
+    if hindi:
+        return (
+            "Maine is turn pe koi command nahi chalayi, isliye scan, tool list, ya flag nahi banaunga. "
+            f"{being_brief} "
+            "Main sochta hoon live screen aur terminal dekh kar. Jo kaam karna hai woh ek seedhi line mein bolo."
+        )
+    return (
+        "I did not run a command this turn, so I will not invent a scan, a tool list, or a flag. "
+        f"{being_brief} "
+        "I reason from the live workstation. Send the task as one sentence."
+    )
+
+
 def _is_action_prompt(prompt: str) -> bool:
     """Return True for any substantive prompt that should go through the real
     ComputerUseAgent action loop.
@@ -2240,6 +2383,11 @@ def _is_action_prompt(prompt: str) -> bool:
         or cleaned in _GREETINGS
         or cleaned in _GREETING_PHRASES
     ):
+        return False
+
+    # Identity, thoughts, and "do you understand" stay in conversation.
+    # A real computer imperative in the same sentence still starts the action loop.
+    if _is_conversational_understanding(cleaned) and not _has_task_imperative(cleaned):
         return False
 
     # All non-greeting, non-meta-query prompts (task/action/engineering/GUI/web objectives)
@@ -2741,6 +2889,15 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
     program_profile = _infer_program_profile(prompt, state)
     state["program_profile"] = program_profile
     try:
+        if _looks_like_dashboard_dump(prompt):
+            message = _dashboard_dump_reply()
+            state["status"] = "IDLE"
+            state["current_action"] = "Waiting for a single operator sentence."
+            state["thought_summary"] = message
+            _append_worklog(state, "response", "SONIC Response", message)
+            _persist_workstation_state()
+            return
+
         scope_manifest = program_profile.get("scope_manifest")
         if (
             execution_prompt
@@ -3530,13 +3687,19 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
             _append_worklog(state, "info", "LLM Provider Unavailable", fallback_response)
         else:
             system_prompt = WORKSTATION_CHAT_SYSTEM
+            being_brief = _being_conversation_brief(tenant_id)
             conv_history = _extract_recent_conversation_messages(state)
             messages = [
                 Message(role=MessageRole.SYSTEM, content=system_prompt),
                 *conv_history,
                 Message(
                     role=MessageRole.USER,
-                    content=f"Operator Objective:\n{prompt}\n\nWorkstation Context & Real Terminal Output:\n{desktop_context}",
+                    content=(
+                        f"Operator Objective:\n{prompt}\n\n"
+                        f"Being self-model (answer identity and thought questions from this; "
+                        f"do not invent another persona or a tool list):\n{being_brief}\n\n"
+                        f"Workstation Context & Real Terminal Output:\n{desktop_context}"
+                    ),
                     images=(
                         [ImageContent(
                             base64=desktop_screenshot_b64.split(",", 1)[-1],

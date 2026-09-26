@@ -180,6 +180,76 @@ logger = _SafeLogger(get_logger(__name__))
 _GOAL_COMPLETE_SENTINEL = "GOAL_COMPLETE"
 
 
+def sanitize_typing_text(text_val: str) -> str:
+    """Ensure typing payloads never contain navigation commands ('File -> Open') or thoughts ('BeingCraft note:')."""
+    if not text_val:
+        return ""
+    t = str(text_val).strip()
+
+    # 1. Navigation commands: 'File -> Open', 'Edit -> Preferences', 'Menu -> Item'
+    if re.match(r"^[A-Za-z0-9_\s]+\s*->\s*[A-Za-z0-9_\s]+$", t):
+        return ""
+
+    # Strip navigation command lines if multiline
+    lines = [
+        line for line in t.splitlines()
+        if not re.match(r"^\s*[A-Za-z0-9_\s]+\s*->\s*[A-Za-z0-9_\s]+$", line.strip())
+    ]
+    t = "\n".join(lines).strip()
+
+    # 2. Strip thoughts / BeingCraft note blocks
+    t = re.sub(
+        r'(?i)\b(?:BeingCraft[\s_]+note|BeingCraftNote|BeingCraft|Thought|Reasoning|Explanation|Commentary|Observation|Plan|Reflection|Summary)\b(?:\*{1,2}|_)?\s*:.*?(?=(?:\r?\n|$))',
+        '',
+        t,
+    ).strip()
+    t = re.sub(
+        r'(?i)\b(?:Note|Notes)\b(?:\*{1,2}|_)?\s*:.*?(?=(?:\r?\n|$))',
+        '',
+        t,
+    ).strip()
+    t = re.sub(
+        r'\*\*(?:BeingCraft(?:\s*note)?|Thought|Reasoning|Explanation|Commentary|Note)\*\*.*?(?=(?:\r?\n|$))',
+        '',
+        t,
+        flags=re.IGNORECASE,
+    ).strip()
+    t = re.sub(
+        r'(?:\r?\n)\s*(?:Note(?:\s+that)?|Please note|We need to|This will|I will|Next we|Now we)\b.*$',
+        '',
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    return t
+
+
+def sanitize_command_payload(cmd: str) -> str:
+    """Strip trailing thoughts, BeingCraft note blocks, and commentary from shell commands."""
+    if not cmd:
+        return ""
+    c = str(cmd).strip()
+    # Strip BeingCraft note and thought blocks
+    c = re.sub(
+        r'(?i)(?:\n|\s+)(?:BeingCraft[\s_]+note|BeingCraftNote|BeingCraft|Thought|Reasoning|Explanation|Commentary|Observation|Plan|Reflection|Summary)\b(?:\*{1,2}|_)?\s*:.*$',
+        '',
+        c,
+        flags=re.DOTALL,
+    ).strip()
+    c = re.sub(
+        r'(?i)(?:\n|\s+)(?:Note|Notes)\b(?:\*{1,2}|_)?\s*:.*$',
+        '',
+        c,
+        flags=re.DOTALL,
+    ).strip()
+    c = re.sub(
+        r'\*\*(?:BeingCraft(?:\s*note)?|Thought|Reasoning|Explanation|Commentary|Note)\*\*.*$',
+        '',
+        c,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    return c
+
+
 class ComputerUseAgent:
     """
     Autonomous Computer-Using Engineer uniting Brain (Cognitive State,
@@ -375,6 +445,9 @@ class ComputerUseAgent:
         # step so the LLM acts on real scan findings rather than a claim.
         self._last_tool_result: Any | None = None
         self._last_screenshot_b64: str = ""
+        self._last_active_window_geometry: tuple[int, int, int, int] | None = None
+        self._consecutive_unchanged_screens: int = 0
+        self._watchdog_aborted: bool = False
         # Last observed screen dimensions, used to validate GUI coordinate
         # actions before they touch the provider. Updated on every observe() /
         # screenshot; sane defaults until the first real observation lands.
@@ -1105,6 +1178,122 @@ class ComputerUseAgent:
             "primary_target": primary_target,
         }
 
+    @staticmethod
+    def _validate_typing_text(text: str) -> tuple[bool, str]:
+        """Verify that typing payload does not contain sentinel, garbage, or thought tokens."""
+        if not text or not str(text).strip():
+            return True, "text payload is empty"
+        t_clean = str(text).strip()
+        sentinel_tokens = {
+            "undefined", "null", "[object object]", "none", "nan", "nil",
+            "{'text': 'value'}", '{"text": "value"}', "{text: value}",
+        }
+        if t_clean.lower() in sentinel_tokens:
+            return True, f"contains invalid sentinel '{t_clean}'"
+        syntax_delims = set(" \t\r\n\"'{}[]()<>,.;:")
+        if len(t_clean) >= 4 and all(c in syntax_delims for c in t_clean):
+            return True, "contains only syntax delimiters"
+        return False, ""
+
+    @staticmethod
+    def _validate_typing_field(
+        target_resource: str,
+        semantic_match: Any = None,
+    ) -> tuple[bool, str]:
+        """Verify that target element is an input/typeable field and not a button/icon/link/checkbox."""
+        if semantic_match is not None:
+            role = getattr(semantic_match, "role", "")
+            if role:
+                role_clean = str(role).lower().strip()
+                non_input_roles = {
+                    "button", "btn", "push-button", "pushbutton", "clickable",
+                    "checkbox", "check-box", "radio", "radiobutton", "link",
+                    "image", "img", "icon", "menuitem", "tab", "dialog", "modal",
+                    "heading", "scrollbar", "separator", "status-bar",
+                }
+                if role_clean in non_input_roles:
+                    return True, f"element role is '{role_clean}', which does not accept text input"
+        if target_resource:
+            t_low = target_resource.lower().strip()
+            non_input_indicators = (
+                "button", "btn", "checkbox", "check-box", "radio",
+                "icon", "scrollbar", "tab", "menuitem", "link",
+            )
+            if any(ind in t_low for ind in non_input_indicators):
+                if any(ind in t_low for ind in ("checkbox", "check-box", "radio", "icon", "scrollbar")):
+                    return True, f"target '{target_resource}' is a non-input element"
+                t_no_compound = t_low.replace("checkbox", "").replace("check-box", "").replace("combobox", "combo_input")
+                input_indicators = (
+                    "input", "field", "text box", "textbox", "text", "entry",
+                    "search", "bar", "area", "editor", "terminal", "console",
+                    "keyboard", "prompt", "url",
+                )
+                if not any(ind in t_no_compound for ind in input_indicators):
+                    return True, f"target '{target_resource}' is a non-input element"
+        return False, ""
+
+    @staticmethod
+    def _is_active_buffer_target(target: str, payload: dict[str, Any], prev_trace: Any = None) -> bool:
+        """Check if target represents an already active editor/terminal buffer or focused window."""
+        t_clean = str(target or "").strip().lower()
+        if not t_clean:
+            return True
+        buffer_indicators = (
+            "editor", "keyboard", "active", "active_window", "window", "buffer",
+            "focused", "terminal", "console", "cursor", "text area", "workspace",
+        )
+        if any(ind in t_clean for ind in buffer_indicators):
+            return True
+        if payload.get("active") is True or payload.get("focused") is True:
+            return True
+        if prev_trace is not None:
+            prev_act = getattr(prev_trace, "action_type", None)
+            prev_tgt = str(getattr(prev_trace, "target_resource", "") or "").lower().strip()
+            if prev_act in (ComputerActionType.APP_LAUNCH, ComputerActionType.APP_FOCUS):
+                if t_clean in prev_tgt or prev_tgt in t_clean:
+                    return True
+        return False
+
+    async def _handle_visual_stall_watchdog(
+        self,
+        workspace_id: str,
+        action_type: ComputerActionType,
+        actual_obs_str: str,
+    ) -> tuple[str, bool]:
+        """Adaptive recovery watchdog for consecutive unchanged desktop screens."""
+        unchanged = self._consecutive_unchanged_screens
+        if unchanged == 2:
+            try:
+                if hasattr(self.computer, "gui_action"):
+                    await self.computer.gui_action(
+                        workspace_id,
+                        GUIAction(action=GUIActionType.FOCUS, target=":ACTIVE:"),
+                    )
+                elif hasattr(self.computer, "_docker_exec"):
+                    await self.computer._docker_exec("DISPLAY=:99 wmctrl -a :ACTIVE:")
+            except Exception:
+                pass
+            actual_obs_str += " | [WATCHDOG]: Refocused active window to clear input stalls."
+            return actual_obs_str, False
+        elif unchanged == 3:
+            try:
+                if hasattr(self.computer, "gui_action"):
+                    await self.computer.gui_action(
+                        workspace_id,
+                        GUIAction(action=GUIActionType.HOTKEY, key="Alt+F"),
+                    )
+                elif hasattr(self.computer, "_docker_exec"):
+                    await self.computer._docker_exec("DISPLAY=:99 xdotool key --clearmodifiers alt+f")
+            except Exception:
+                pass
+            actual_obs_str += " | [WATCHDOG]: Triggered Alt+F accelerator to unstuck navigation."
+            return actual_obs_str, False
+        elif unchanged >= 4:
+            actual_obs_str += " | [WATCHDOG_ABORT]: Screen state perpetually stuck; aborting mission early to prevent quota burning."
+            return actual_obs_str, True
+        return actual_obs_str, False
+
+
     def _build_reasoning_context(
         self,
         goal: str,
@@ -1762,9 +1951,22 @@ class ComputerUseAgent:
         # unit test explicitly injected _last_screenshot_b64 without observe().
         prev_action_list = getattr(self, "action_history", None) or getattr(self, "traces", None) or []
         prev_act_type = getattr(prev_action_list[-1], "action_type", None) if prev_action_list else None
+        plane = str(getattr(self, "execution_plane", "dual") or "dual").lower().strip()
         should_attach_image = (
-            getattr(self, "gui_only", False)
-            or prev_act_type in (ComputerActionType.GUI_SCREENSHOT, ComputerActionType.BROWSER_SCREENSHOT)
+            plane in ("gui", "dual")
+            or getattr(self, "gui_only", False)
+            or prev_act_type in (
+                ComputerActionType.GUI_SCREENSHOT,
+                ComputerActionType.BROWSER_SCREENSHOT,
+                ComputerActionType.APP_LAUNCH,
+                ComputerActionType.APP_FOCUS,
+                ComputerActionType.APP_MAXIMIZE,
+                ComputerActionType.WINDOW_MAXIMIZE,
+                ComputerActionType.WINDOW_TILE,
+                ComputerActionType.GUI_CLICK,
+                ComputerActionType.GUI_DOUBLE_CLICK,
+                ComputerActionType.GUI_TYPE,
+            )
             or (
                 bool(self._last_screenshot_b64)
                 and not getattr(observation, "screenshot_base64", "")
@@ -1779,6 +1981,19 @@ class ComputerUseAgent:
             raw_b64 = raw_b64.strip()
             if raw_b64:
                 images = [ImageContent(base64=raw_b64, media_type="image/png")]
+                active_geom = (
+                    getattr(observation, "active_window_geometry", None)
+                    or getattr(getattr(observation, "screen", None), "active_window_geometry", None)
+                    or getattr(self, "_last_active_window_geometry", None)
+                )
+                if active_geom:
+                    try:
+                        from sonic.computer_use.grounding import crop_active_window_region
+                        crop_b64, _ = crop_active_window_region(raw_b64, active_geom)
+                        if crop_b64:
+                            images.append(ImageContent(base64=crop_b64, media_type="image/png"))
+                    except Exception:
+                        pass
                 user_text = f"{obs_summary}\n\nBased on the desktop screenshot and observation above, choose the next action."
             else:
                 user_text = obs_summary
@@ -2172,6 +2387,11 @@ class ComputerUseAgent:
             "SCAN": ComputerActionType.SECURITY_TOOL,
             "APP_CLOSE": ComputerActionType.APP_CLOSE,
             "APP_FOCUS": ComputerActionType.APP_FOCUS,
+            "APP_MAXIMIZE": ComputerActionType.APP_MAXIMIZE,
+            "WINDOW_MAXIMIZE": ComputerActionType.WINDOW_MAXIMIZE,
+            "WINDOW_TILE": ComputerActionType.WINDOW_TILE,
+            "MAXIMIZE": ComputerActionType.APP_MAXIMIZE,
+            "TILE": ComputerActionType.WINDOW_TILE,
             "APP_INSTALL": ComputerActionType.APP_INSTALL,
             "SERVICE_ACTION": ComputerActionType.SERVICE_ACTION,
             "BROWSER_NAVIGATE": ComputerActionType.BROWSER_NAVIGATE,
@@ -2432,11 +2652,11 @@ class ComputerUseAgent:
         if action_type in (ComputerActionType.GUI_TYPE, ComputerActionType.BROWSER_TYPE):
             # GUI and browser typing is strictly for text inputs, not shell commands.
             if not payload.get("text"):
-                fallback_txt = fields.get("TEXT") or fields.get("CONTENT") or (
-                    target if action_type == ComputerActionType.GUI_TYPE and target and not target.startswith("{") else ""
-                )
+                fallback_txt = fields.get("TEXT") or fields.get("CONTENT") or ""
                 if fallback_txt:
                     payload["text"] = str(fallback_txt)
+            if payload.get("text"):
+                payload["text"] = sanitize_typing_text(str(payload["text"]))
 
         if action_str in ("PYTHON", "PYTHON_EXEC", "PYTHON3"):
             py_code = payload.get("code") or payload.get("command") or target or ""
@@ -2491,7 +2711,7 @@ class ComputerUseAgent:
                     cmd_str = "echo 'ERROR: Shell placeholder name is not an executable command' >&2; exit 1"
                 # Strip trailing " command" or " commands"
                 cmd_str = re.sub(r'\s+commands?$', '', cmd_str, flags=re.IGNORECASE).strip().rstrip(',;').strip()
-                payload["command"] = cmd_str.strip().rstrip(',;').strip()
+                payload["command"] = sanitize_command_payload(cmd_str.strip().rstrip(',;').strip())
 
         if action_type in (ComputerActionType.GUI_CLICK, ComputerActionType.GUI_DOUBLE_CLICK, ComputerActionType.GUI_RIGHT_CLICK, ComputerActionType.GUI_MOVE):
             if target and "," in target:
@@ -2583,6 +2803,9 @@ class ComputerUseAgent:
         ComputerActionType.APP_LAUNCH,
         ComputerActionType.APP_CLOSE,
         ComputerActionType.APP_FOCUS,
+        ComputerActionType.APP_MAXIMIZE,
+        ComputerActionType.WINDOW_MAXIMIZE,
+        ComputerActionType.WINDOW_TILE,
         ComputerActionType.BROWSER_NAVIGATE,
         ComputerActionType.BROWSER_CLICK,
         ComputerActionType.BROWSER_TYPE,
@@ -2608,6 +2831,9 @@ class ComputerUseAgent:
         ComputerActionType.APP_LAUNCH,
         ComputerActionType.APP_CLOSE,
         ComputerActionType.APP_FOCUS,
+        ComputerActionType.APP_MAXIMIZE,
+        ComputerActionType.WINDOW_MAXIMIZE,
+        ComputerActionType.WINDOW_TILE,
         ComputerActionType.BROWSER_NAVIGATE,
         ComputerActionType.BROWSER_CLICK,
         ComputerActionType.BROWSER_TYPE,
@@ -3760,19 +3986,33 @@ class ComputerUseAgent:
                         actual_obs_str = f"Right-clicked at ({x}, {y})"
 
             elif action_type == ComputerActionType.GUI_TYPE:
-                text = str(payload.get("text") or payload.get("value") or payload.get("input") or "")
+                raw_text = str(payload.get("text") or payload.get("value") or payload.get("input") or "")
+                text = sanitize_typing_text(raw_text)
                 pre_screen_b64 = getattr(self, "_last_screenshot_b64", "")
                 obs_after = None
                 focus_x = payload.get("x")
                 focus_y = payload.get("y")
-                if self._last_screenshot_b64 and (focus_x is None or focus_y is None):
+                prev_tr = self.traces[-1] if getattr(self, "traces", None) else None
+                is_active_buffer = self._is_active_buffer_target(target_resource, payload, prev_tr)
+
+                if self._last_screenshot_b64 and (focus_x is None or focus_y is None) and not is_active_buffer:
                     actual_obs_str = (
                         "GUI_TYPE blocked: a live desktop target could not be grounded to "
                         "coordinates; re-observe before typing"
                     )
                     status = ActionExecutionStatus.BLOCKED
                     action_exit_code = 126
-                elif focus_x is not None and focus_y is not None:
+                else:
+                    # Settle focus and clear field if motor reflexes available
+                    if hasattr(self, "motor") and self.motor:
+                        try:
+                            if hasattr(self.motor, "settle_focus"):
+                                await self.motor.settle_focus(workspace_id, target_window=target_resource)
+                            if hasattr(self.motor, "clear_field"):
+                                await self.motor.clear_field(workspace_id)
+                        except Exception:
+                            pass
+                if focus_x is not None and focus_y is not None:
                     focus_err = self._validate_coordinates(
                         ComputerActionType.GUI_CLICK,
                         {"x": focus_x, "y": focus_y},
@@ -3945,6 +4185,7 @@ class ComputerUseAgent:
             elif action_type == ComputerActionType.GUI_SCREENSHOT:
                 screen = await self.computer.screenshot(workspace_id)
                 self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
+                self._last_active_window_geometry = getattr(screen, "active_window_geometry", None)
                 self._update_screen_dims(screen)
                 actual_obs_str = f"Screenshot captured ({screen.width}x{screen.height})"
 
@@ -4378,7 +4619,8 @@ class ComputerUseAgent:
                     snap = await self.browser.navigate(url)
                     self._last_browser_snapshot = snap
                     final_url = str(getattr(snap, "url", "") or "").strip()
-                    browser_status_code = int(getattr(snap, "status_code", 0) or 0)
+                    raw_status = getattr(snap, "status_code", None)
+                    browser_status_code = int(raw_status) if raw_status is not None else 200
                     browser_response_body = str(getattr(snap, "html_content", "") or "")[:300]
                     if not final_url or browser_status_code <= 0:
                         raise RuntimeError("browser navigation produced no verified page response")
@@ -5465,6 +5707,9 @@ class ComputerUseAgent:
             ComputerActionType.APP_LAUNCH,
             ComputerActionType.APP_CLOSE,
             ComputerActionType.APP_FOCUS,
+        ComputerActionType.APP_MAXIMIZE,
+        ComputerActionType.WINDOW_MAXIMIZE,
+        ComputerActionType.WINDOW_TILE,
             ComputerActionType.APP_INSTALL,
         }:
             # Any desktop mutation invalidates semantic targets. The next
@@ -5711,6 +5956,9 @@ class ComputerUseAgent:
             )
             is_exempt_navigation = action_type in (
                 ComputerActionType.APP_FOCUS,
+        ComputerActionType.APP_MAXIMIZE,
+        ComputerActionType.WINDOW_MAXIMIZE,
+        ComputerActionType.WINDOW_TILE,
                 ComputerActionType.GUI_HOTKEY,
                 ComputerActionType.GUI_KEYPRESS,
                 ComputerActionType.BROWSER_KEYPRESS,

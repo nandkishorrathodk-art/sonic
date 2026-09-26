@@ -1061,6 +1061,27 @@ while True:
                         )
                     self._active_windows[workspace_id] = target
 
+            elif atype in (GUIActionType.APP_MAXIMIZE, GUIActionType.WINDOW_MAXIMIZE):
+                target = (action.window_id or action.app_name or "").strip()
+                if target and target != ":ACTIVE:":
+                    if target.lower().startswith("0x"):
+                        max_cmd = f"export DISPLAY={disp}; wmctrl -i -r {shlex.quote(target)} -b add,maximized_vert,maximized_horz"
+                    else:
+                        max_cmd = (
+                            f"export DISPLAY={disp}; "
+                            f"wmctrl -r {shlex.quote(target)} -b add,maximized_vert,maximized_horz 2>/dev/null || "
+                            f"wmctrl -x -r {shlex.quote(target)} -b add,maximized_vert,maximized_horz 2>/dev/null || "
+                            f"wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz"
+                        )
+                else:
+                    max_cmd = f"export DISPLAY={disp}; wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz"
+                await exec_gui(max_cmd)
+                if target and not target.lower().startswith("0x"):
+                    self._active_windows[workspace_id] = target
+
+            elif atype == GUIActionType.WINDOW_TILE:
+                await self.tile_workstation(workspace_id)
+
             else:
                 raise ValueError(f"Unsupported or incomplete GUI action: {action.action}")
 
@@ -1068,6 +1089,24 @@ while True:
             self._last_screenshot_time = 0.0
             await asyncio.sleep(0.3)
             return await self.screenshot(workspace_id)
+
+    async def maximize_window(self, workspace_id: str, target: str | None = None) -> bool:
+        """Maximize the active or targeted window using wmctrl."""
+        disp = self._get_display(workspace_id)
+        if target and target.strip() and target.strip() != ":ACTIVE:":
+            safe = target.strip()
+            if safe.lower().startswith("0x"):
+                cmd = f"DISPLAY={disp} wmctrl -i -r {shlex.quote(safe)} -b add,maximized_vert,maximized_horz"
+            else:
+                cmd = (
+                    f"DISPLAY={disp} wmctrl -r {shlex.quote(safe)} -b add,maximized_vert,maximized_horz 2>/dev/null || "
+                    f"DISPLAY={disp} wmctrl -x -r {shlex.quote(safe)} -b add,maximized_vert,maximized_horz 2>/dev/null || "
+                    f"DISPLAY={disp} wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz"
+                )
+        else:
+            cmd = f"DISPLAY={disp} wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz"
+        code, _, _ = await self._docker_exec(cmd, timeout=5)
+        return code == 0
 
     async def tile_workstation(self, workspace_id: str) -> bool:
         """
@@ -1094,9 +1133,11 @@ while True:
         client_windows = [w for w in windows if w[1] not in ("xfce4-panel", "Desktop", "desktop")]
         if client_windows:
             left_win = client_windows[0]
+            await self._docker_exec(f'DISPLAY={disp} wmctrl -i -r "{left_win[0]}" -b remove,maximized_vert,maximized_horz')
             code1, _, _ = await self._docker_exec(f'DISPLAY={disp} wmctrl -i -r "{left_win[0]}" -e 0,0,0,640,800')
             if len(client_windows) > 1:
                 right_win = client_windows[1]
+                await self._docker_exec(f'DISPLAY={disp} wmctrl -i -r "{right_win[0]}" -b remove,maximized_vert,maximized_horz')
                 code2, _, _ = await self._docker_exec(f'DISPLAY={disp} wmctrl -i -r "{right_win[0]}" -e 0,640,0,640,800')
 
         return (not windows and code_l == 0) or code1 == 0 or code2 == 0

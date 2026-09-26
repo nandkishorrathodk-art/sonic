@@ -6,7 +6,11 @@ Unified exports for Phase 14 Autonomous Computer-Using Engineer.
 
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.benchmark import MultiTrialBenchmarkSuite, MultiTrialResult
-from sonic.computer_use.grounding import crop_toolbar_region, map_crop_to_screen
+from sonic.computer_use.grounding import (
+    crop_active_window_region,
+    crop_toolbar_region,
+    map_crop_to_screen,
+)
 from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionPlan,
@@ -44,6 +48,7 @@ __all__ = [
     "Checkpoint",
     "CheckpointManager",
     "LocalWorkspaceFileStore",
+    "crop_active_window_region",
     "crop_toolbar_region",
     "map_crop_to_screen",
 ]

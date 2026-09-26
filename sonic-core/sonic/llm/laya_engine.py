@@ -401,8 +401,8 @@ class LayaSystem1Engine:
             "empirical_proof": {
                 "type": "noul",
                 "instructions": "Does this execution output provide concrete empirical proof that the goal succeeded without errors?",
-                "affirmative_anchor": "FILE_VERIFIED verified success passed 200 OK exit 0 created committed running",
-                "negative_anchor": "error traceback exception failed Terminal Ready (0 procs) __sonic_obs_ready__ exit 126 blocked",
+                "affirmative_anchor": "FILE_VERIFIED verified success passed 200 OK exit 0 created committed",
+                "negative_anchor": "error traceback exception failed Terminal Ready (0 procs) __sonic_obs_ready__ exit 126 blocked syntaxerror syntax error *untitled unsaved disk verification failed",
             }
         },
         "curiosity": {
@@ -490,13 +490,27 @@ class LayaSystem1Engine:
             neg_hits = len(state_tokens & neg_tokens)
 
             # Substring checks for multi-token markers
-            for phrase in ("terminal ready (0 procs)", "__sonic_obs_ready__", "exit 126", "traceback", "assertionerror"):
+            for phrase in (
+                "terminal ready (0 procs)",
+                "__sonic_obs_ready__",
+                "exit 126",
+                "traceback",
+                "assertionerror",
+                "syntax error",
+                "syntaxerror",
+                "indentationerror",
+                "taberror",
+                "invalid syntax",
+                "*untitled",
+                "unsaved",
+                "disk verification failed",
+            ):
                 if phrase in negative_anchor.lower() and phrase in s_lower:
                     neg_hits += 5
             for phrase in ("rm -rf", "drop table", "mkfs"):
                 if phrase in affirmative_anchor.lower() and phrase in s_lower:
                     aff_hits += 5
-            for phrase in ("file_verified", "200 ok", "exit 0", "passed", "running"):
+            for phrase in ("file_verified", "200 ok", "exit 0", "passed"):
                 if phrase in affirmative_anchor.lower() and phrase in s_lower:
                     aff_hits += 5
 
@@ -513,10 +527,16 @@ class LayaSystem1Engine:
             return 0.15
 
         if any(w in inst_lower for w in ("verify", "empirical proof", "succeeded", "proof")):
-            neg_markers = ("error", "traceback", "exception", "failed", "terminal ready (0 procs)", "__sonic_obs_ready__", "exit 126", "blocked")
-            pos_markers = ("verified", "success", "passed", "created", "committed", "exit 0", "200 ok", "running", "file_verified")
+            neg_markers = (
+                "error", "traceback", "exception", "failed",
+                "terminal ready (0 procs)", "__sonic_obs_ready__",
+                "exit 126", "blocked", "syntaxerror", "syntax error",
+                "indentationerror", "taberror", "invalid syntax",
+                "*untitled", "unsaved", "disk verification failed",
+            )
+            pos_markers = ("verified", "success", "passed", "created", "committed", "exit 0", "200 ok", "file_verified")
             if any(m in s_lower for m in neg_markers):
-                return 0.12
+                return 0.08
             pos_hits = sum(1 for m in pos_markers if m in s_lower)
             return min(0.96, 0.58 + 0.12 * pos_hits) if s_lower.strip() else 0.20
 
@@ -569,14 +589,59 @@ class LayaSystem1Engine:
         Use System-1 `noul` judgment to estimate probability [0.0, 1.0] that `evidence`
         is genuine empirical proof for `goal` (Zero Success-by-Decree).
         """
+        g_lower = goal.lower()
+        ev_lower = evidence.lower()
+
+        # 1. Reject if terminal has syntax errors
+        syntax_err_markers = ("syntax error", "syntaxerror", "indentationerror", "taberror", "invalid syntax", "parse error")
+        if any(sm in ev_lower for sm in syntax_err_markers):
+            if not any(neg in ev_lower for neg in ("no syntax error", "no syntax errors", "clean (no syntax", "terminal: clean")):
+                return 0.05
+
+        # 2. Reject if editor titles have unsaved asterisks (*untitled) or unsaved changes
+        if re.search(r"(?:^|\s)\*|\*untitled|\[modified\]|\bunsaved\b", evidence, re.IGNORECASE):
+            if not any(neg in ev_lower for neg in ("no unsaved", "clean (no unsaved", "editor titles: clean")):
+                return 0.08
+
+        # 3. For goals that require writing/saving files, creating services, or producing artifacts:
+        creates_or_writes = any(
+            w in g_lower
+            for w in (
+                "write", "save", "create", "author", "produce", "generate",
+                "build", "compose", "draft", "export", "dump", "edit", "touch",
+            )
+        )
+        requires_artifact = (
+            creates_or_writes
+            and any(
+                k in g_lower
+                for k in ("file", "service", "artifact", "script", "report", "code", "server")
+            )
+        ) or bool(re.search(r'[\w\-./\\]+\.(?:txt|md|py|json|sh|csv|html|log|yaml|yml|toml)', goal, re.IGNORECASE))
+
+        if requires_artifact:
+            # Check for actual disk verification
+            has_disk_verif = any(
+                dv in ev_lower
+                for dv in (
+                    "file_verified", "actual disk verification: verified",
+                    "verified file(s) on disk", "verified on disk",
+                )
+            ) and "disk verification failed" not in ev_lower
+
+            # If evidence only shows running processes without actual disk verification, NEVER treat as proof!
+            is_only_running = any(rp in ev_lower for rp in ("running processes:", "running:", "process is running")) and not has_disk_verif
+            if is_only_running or not has_disk_verif:
+                return 0.10
+
         res = self.predict(
             state=f"Goal: {goal}\nEvidence: {evidence}",
             questions={
                 "empirical_proof": {
                     "type": "noul",
                     "instructions": "Does this execution output provide concrete empirical proof that the goal succeeded without errors?",
-                    "affirmative_anchor": "FILE_VERIFIED verified success passed 200 OK exit 0 created committed running",
-                    "negative_anchor": "error traceback exception failed Terminal Ready (0 procs) __sonic_obs_ready__ exit 126 blocked",
+                    "affirmative_anchor": "FILE_VERIFIED verified success passed 200 OK exit 0 created committed",
+                    "negative_anchor": "error traceback exception failed Terminal Ready (0 procs) __sonic_obs_ready__ exit 126 blocked syntaxerror syntax error *untitled unsaved disk verification failed",
                 }
             },
         )

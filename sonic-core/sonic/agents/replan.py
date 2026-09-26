@@ -51,7 +51,7 @@ from sonic.agents.task_graph import (
     TaskPriority,
     TaskStatus,
 )
-from sonic.llm.prompts import asea_identity
+from sonic.llm.prompts import asea_identity, UNIVERSAL_ANTI_BYPASS_CLAUSE, FACTS_VS_INFERENCES_CLAUSE
 from sonic.logger import get_logger
 
 logger = get_logger(__name__)
@@ -386,6 +386,10 @@ Pending: {json.dumps(pending_tasks[:10])}
 ## Valid Agent Types
 {json.dumps(sorted(VALID_AGENT_TYPES))}
 
+{UNIVERSAL_ANTI_BYPASS_CLAUSE}
+
+{FACTS_VS_INFERENCES_CLAUSE}
+
 ## Instructions
 Respond with ONLY valid JSON matching this structure:
 {{
@@ -420,6 +424,7 @@ Rules:
 3. Only use valid agent types.
 4. Keep tasks focused and actionable.
 5. Prefer tasks that reduce uncertainty.
+6. When evidence is insufficient, propose tasks that gather information rather than guessing.
 """
 
     def _parse_llm_response(self, raw: str) -> ReplanDecision:

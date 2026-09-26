@@ -69,6 +69,9 @@ class GUIActionType(StrEnum):
     MOVE = "MOVE"
     DRAG = "DRAG"
     SELECT_WINDOW = "SELECT_WINDOW"
+    APP_MAXIMIZE = "APP_MAXIMIZE"
+    WINDOW_MAXIMIZE = "WINDOW_MAXIMIZE"
+    WINDOW_TILE = "WINDOW_TILE"
     OPEN_APP = "OPEN_APP"
     LAUNCH_APP = "LAUNCH_APP"
     CLOSE_APP = "CLOSE_APP"
@@ -150,10 +153,36 @@ class ScreenObservation(BaseModel):
     width: int = 1920
     height: int = 1080
     active_window: str = "Desktop"
+    active_window_geometry: tuple[int, int, int, int] | None = None
     visible_text: str = ""
     detected_controls: list[Any] = Field(default_factory=list)
     desktop_state: str = "INTERACTIVE"
     timestamp: str = Field(default_factory=_now)
+
+    def __init__(self, **data: Any):
+        if "active_window_geom" in data and "active_window_geometry" not in data:
+            data["active_window_geometry"] = data.pop("active_window_geom")
+        if "active_window_geometry" in data and data["active_window_geometry"] is not None:
+            raw_geom = data["active_window_geometry"]
+            if hasattr(raw_geom, "bbox"):
+                b = raw_geom.bbox
+                data["active_window_geometry"] = (int(b[0]), int(b[1]), int(b[2]), int(b[3]))
+            elif hasattr(raw_geom, "x") and hasattr(raw_geom, "y") and hasattr(raw_geom, "width") and hasattr(raw_geom, "height"):
+                data["active_window_geometry"] = (int(raw_geom.x), int(raw_geom.y), int(raw_geom.width), int(raw_geom.height))
+            elif isinstance(raw_geom, dict):
+                x = raw_geom.get("x", 0)
+                y = raw_geom.get("y", 0)
+                w = raw_geom.get("w", raw_geom.get("width", 0))
+                h = raw_geom.get("h", raw_geom.get("height", 0))
+                data["active_window_geometry"] = (int(x), int(y), int(w), int(h))
+            elif isinstance(raw_geom, (list, tuple)) and len(raw_geom) >= 4:
+                data["active_window_geometry"] = (int(raw_geom[0]), int(raw_geom[1]), int(raw_geom[2]), int(raw_geom[3]))
+        super().__init__(**data)
+
+    @property
+    def active_window_geom(self) -> tuple[int, int, int, int] | None:
+        return self.active_window_geometry
+
 
 
 class ComputerState(BaseModel):

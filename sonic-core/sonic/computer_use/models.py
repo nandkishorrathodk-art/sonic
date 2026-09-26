@@ -193,6 +193,9 @@ class ComputerActionType(StrEnum):
     APP_LAUNCH = "APP_LAUNCH"
     APP_CLOSE = "APP_CLOSE"
     APP_FOCUS = "APP_FOCUS"
+    APP_MAXIMIZE = "APP_MAXIMIZE"
+    WINDOW_MAXIMIZE = "WINDOW_MAXIMIZE"
+    WINDOW_TILE = "WINDOW_TILE"
     APP_INSTALL = "APP_INSTALL"
     SERVICE_ACTION = "SERVICE_ACTION"
     GIT_STATUS = "GIT_STATUS"
@@ -290,6 +293,15 @@ class ComputerWorldObservation(BaseModel):
     @property
     def screenshot_base64(self) -> str:
         return getattr(self.screen, "screenshot_base64", "")
+
+    @property
+    def active_window_geometry(self) -> tuple[int, int, int, int] | None:
+        return getattr(self.screen, "active_window_geometry", None)
+
+    @property
+    def active_window_geom(self) -> tuple[int, int, int, int] | None:
+        return getattr(self.screen, "active_window_geometry", None)
+
 
 
 class ComputerActionPlan(BaseModel):

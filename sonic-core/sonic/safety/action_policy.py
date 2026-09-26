@@ -86,13 +86,15 @@ class ActionPolicy:
     # denied by default (fail-closed).
     DEFAULT_ALLOWED_TYPES = frozenset({
         # GUI desktop interaction (in-sandbox only, no host execution risk)
-        "GUI_CLICK", "GUI_DOUBLE_CLICK", "GUI_RIGHT_CLICK", "GUI_TYPE", "GUI_KEYPRESS",
+        "GUI_CLICK", "GUI_DOUBLE_CLICK", "GUI_RIGHT_CLICK", "GUI_TYPE", "GUI_KEYPRESS", "GUI_HOTKEY",
         "GUI_MOVE", "GUI_SCROLL", "GUI_SCREENSHOT", "GUI_DRAG", "GUI_WAIT",
         "FILE_READ", "FILE_WRITE", "TERMINAL_EXEC",
         "GIT_STATUS", "GIT_DIFF", "GIT_BRANCH", "GIT_COMMIT", "GIT_PUSH",
-        "APP_LAUNCH", "APP_CLOSE", "APP_FOCUS", "APP_INSTALL", "SERVICE_ACTION",
-        "BROWSER_NAVIGATE", "BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_SCREENSHOT",
-        "BROWSER_WAIT", "BROWSER_DOWNLOAD",
+        "APP_LAUNCH", "APP_CLOSE", "APP_FOCUS", "APP_MAXIMIZE", "WINDOW_MAXIMIZE", "WINDOW_TILE",
+        "APP_INSTALL", "SERVICE_ACTION",
+        "BROWSER_NAVIGATE", "BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_SELECT",
+        "BROWSER_KEYPRESS", "BROWSER_SCROLL", "BROWSER_SCREENSHOT",
+        "BROWSER_WAIT", "BROWSER_DOWNLOAD", "WAIT_FOR_HUMAN", "GOAL_COMPLETE",
         "SECURITY_TOOL",
         # Toolsmith (Phase A, AIOSR): authoring writes source under the
         # workspace toolsmith dir (path-confined like FILE_WRITE); running
