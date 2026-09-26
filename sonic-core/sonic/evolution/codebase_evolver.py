@@ -452,12 +452,23 @@ class CodebaseEvolver:
         cmd = [sys.executable, "-m", "pytest"] + test_paths + ["-q", "--tb=short"]
         start_time = time.time()
         try:
+            env = os.environ.copy()
+            source_paths = [
+                str(path)
+                for path in (self.repo_root / "sonic-core", self.repo_root)
+                if path.is_dir()
+            ]
+            inherited_pythonpath = env.get("PYTHONPATH", "")
+            if inherited_pythonpath:
+                source_paths.append(inherited_pythonpath)
+            env["PYTHONPATH"] = os.pathsep.join(source_paths)
             res = subprocess.run(
                 cmd,
                 cwd=str(self.repo_root),
                 capture_output=True,
                 text=True,
                 timeout=120,
+                env=env,
             )
             duration = time.time() - start_time
             output = (res.stdout or "") + (res.stderr or "")
@@ -480,7 +491,7 @@ class CodebaseEvolver:
                 skipped = int(m_skip.group(1))
 
             total = passed + failed + skipped
-            is_success = (res.returncode == 0) and (failed == 0) and total > 0
+            is_success = (res.returncode == 0) and (failed == 0) and passed > 0
 
             return TestExecutionResult(
                 passed=is_success,
@@ -501,9 +512,13 @@ class CodebaseEvolver:
 
     def run_security_regression(self) -> bool:
         """Verifies that no security invariants are broken by the proposed change."""
-        sec_tests = ["sonic-core/tests/test_p0_security_hardening.py"]
+        required = "sonic-core/tests/test_p0_security_hardening.py"
+        sec_tests = [
+            required,
+            "sonic-core/tests/test_safety_sealed_policy.py",
+        ]
         existing = [t for t in sec_tests if (self.repo_root / t).exists()]
-        if not existing:
+        if required not in existing:
             logger.critical("evolution_security_regression_suite_missing", repo_root=str(self.repo_root))
             return False
         res = self.run_tests(existing)

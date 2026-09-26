@@ -38,7 +38,6 @@ from sonic.being.identity import (
     Being,
     BeingMind,
     get_being_store,
-    record_idle_cycle,
 )
 from sonic.logger import get_logger
 
@@ -63,6 +62,19 @@ def resume_after_operator() -> None:
     """Release the workstation back to idle autonomy after a mission ends."""
     if _active_life_loop is not None:
         _active_life_loop.resume_after_operator()
+
+
+def get_life_loop_status() -> dict[str, Any]:
+    """Return observable process-local life-loop and self-coder state."""
+    loop = _active_life_loop
+    if loop is None:
+        return {"running": False, "cycles_completed": 0, "self_coder_configured": False}
+    return {
+        "running": loop._task is not None and not loop._task.done(),
+        "cycles_completed": loop.cycles_completed,
+        "self_coder_configured": loop.self_coder is not None,
+        "self_coder_every_ticks": loop.self_coder_every,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -195,8 +207,22 @@ class BeingLifeLoop:
         # Autonomous self-coder (own-codebase improvement). Runs every N idle
         # ticks (never every tick, so curiosity/exploration still dominates).
         self.self_coder = self_coder
-        self.self_coder_every = max(1, int(self_coder_every))
+        if not isinstance(self_coder_every, int) or not 1 <= self_coder_every <= 10000:
+            raise ValueError("self_coder_every must be an integer from 1 to 10000")
+        self.self_coder_every = self_coder_every
         self.self_coder_reports: list = []
+        if self.self_coder is None:
+            logger.info(
+                "being_self_coder_disabled",
+                being_id=self.being.being_id,
+                reason="no_self_coder_configured",
+            )
+        else:
+            logger.info(
+                "being_self_coder_configured",
+                being_id=self.being.being_id,
+                every_ticks=self.self_coder_every,
+            )
 
     def pause_for_operator(self) -> None:
         self._operator_active.set()
@@ -264,24 +290,63 @@ class BeingLifeLoop:
         return await self._run_one_tick()
 
     async def _maybe_self_improve(self) -> None:
-        """Every N ticks, run one honest self-coder cycle on SONIC's own source."""
+        """Every N ticks, create an isolated verified candidate for approval."""
         if self.self_coder is None:
+            return
+        if self._operator_active.is_set():
+            logger.info(
+                "being_self_coder_deferred",
+                being_id=self.being.being_id,
+                reason="operator_active",
+            )
             return
         if self.cycles_completed % self.self_coder_every != 0:
             return
+        logger.info(
+            "being_self_coder_cycle_start",
+            being_id=self.being.being_id,
+            cycle=self.cycles_completed,
+            every_ticks=self.self_coder_every,
+        )
         try:
-            report = await self.self_coder.run(max_cycles=1)
+            from sonic.evolution.self_coder_candidates import SelfCoderCandidateStore
+
+            store = SelfCoderCandidateStore(self.self_coder.repo_root)
+
+            async def run_candidate():
+                return await store.run_candidate(
+                    self.being.tenant_id,
+                    1,
+                    lambda root: self.self_coder.isolated_copy(root),
+                )
+
+            result = await asyncio.to_thread(lambda: asyncio.run(run_candidate()))
         except Exception as e:
-            logger.warning("being_self_coder_failed", error=str(e))
+            logger.error(
+                "being_self_coder_candidate_failed",
+                being_id=self.being.being_id,
+                cycle=self.cycles_completed,
+                error=str(e),
+            )
             return
-        self.self_coder_reports.append(report)
-        if getattr(report, "changed", False):
-            self.bus.publish("being.self_improved", {
-                "being_id": self.being.being_id,
-                "cycles": len(getattr(report, "cycles", [])),
-                "report": report.to_text()[:4000],
-            })
-            logger.info("being_self_improved", cycles=len(getattr(report, "cycles", [])))
+        self.self_coder_reports.append(result)
+        candidates = result.get("candidates", [])
+        self.bus.publish("being.self_coder_candidates", {
+            "being_id": self.being.being_id,
+            "cycle": self.cycles_completed,
+            "candidates": [
+                {"candidate_id": item["candidate_id"], "status": item["status"]}
+                for item in candidates
+            ],
+        })
+        logger.info(
+            "being_self_coder_candidate_cycle_complete",
+            being_id=self.being.being_id,
+            cycle=self.cycles_completed,
+            candidates=len(candidates),
+            verified=sum(item.get("status") == "verified" for item in candidates),
+            failed=sum(item.get("status") != "verified" for item in candidates),
+        )
 
     async def _run(self) -> None:
         """The long-lived loop: tick, yield, repeat — until stop().
