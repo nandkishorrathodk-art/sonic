@@ -2166,6 +2166,18 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
     - *"Are jo sonic ko karna chahiye vo tum kyu karte ho?"* -> Developer/Assistant manual execution strictly forbidden.
     - *"Cursor kaam nahi kar raha, use nahi kar raha, automate kaam tum kara rahe ho"* -> Replaced background shortcuts with visible cursor gliding, element focus, and autonomous agent-driven actions.
 
+## Phase 44 — Generic Behavioral Contracts, Physical Display Mutex & Reasoning Heartbeat (DONE)
+- **Browser Profile Lock Recovery**: Automatically recovers stale generic browser locks (`SingletonLock`, `SingletonCookie`, `SingletonSocket`) only when no live process owns the profile (`browser_agent.py`). Preserves persistent browser state and cookies.
+- **Generic Modal & Consent Verification**: Detects semantic dialogs (`[role="dialog"]`, `<dialog>`), attempts non-destructive dismissal (`Escape`), and strictly asserts overlay disappearance before declaring action success.
+- **Motor Failure Propagation**: Replaced silent error swallowing in `motor.py` (`_send_hotkey`, `human_type`, `_exec_cmd`) with explicit `RuntimeError` raising and fail-closed exit code `126`.
+- **Coordinate-Space Contracts**: Added explicit coordinate-space scaling (`pixel`, `normalized`, `normalized_1000`, `model_1000`) in `grounding.py` for exact resolution mapping.
+- **Target Window Ownership Validation**: GUI actions specifying target window verify active window ownership before dispatch; mismatched focus triggers `SELECT_WINDOW` or fail-closed `BLOCKED`.
+- **Physical Display Mutex**: Keyed `DisplayLeaseManager` in `teamwork.py` to physical display identity (`:99`) preventing concurrent subagent mouse/keyboard race conditions.
+- **Reasoning Heartbeat & Observability**: Dispatches periodic (~2s) heartbeat events during heavy LLM thinking turns into the workstation worklog without injecting synthetic pixels or modifying raw screenshots.
+- **Universal Zero-Visual-Delta Enforcement**: Expanded zero visual delta checks across click, double-click, typing, and hotkeys to trigger re-observation and anti-stall recovery.
+- **Micro-Crop Toolbar Ratio Compatibility**: Restored `crop_height_ratio` backwards compatibility in `crop_toolbar_region`.
+
+
 
 
 
