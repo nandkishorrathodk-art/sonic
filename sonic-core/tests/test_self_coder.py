@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -391,7 +392,11 @@ def test_self_coder_end_to_end_commits_a_real_change(repo: Path, tmp_path: Path)
         "@@ -1,3 +1,2 @@\n def total(items):\n-    # TODO: ignore None entries\n-    return sum(items)\n"
         "+    return sum(i for i in items if i is not None)\n```"
     ])
-    coder = SelfCoder(repo_root=repo, llm=llm, evolver=evolver, director=director)
+    # These tests cover the patch/verification pipeline. The separate
+    # investigation contract is tested with a tool-grounded CodingAgent result.
+    coder = SelfCoder(
+        repo_root=repo, llm=llm, evolver=evolver, director=director, agentic=False
+    )
     report = asyncio.run(coder.run(max_cycles=1))
 
     # report-only by default: the change is verified (awaiting_approval) but the tree is restored.
@@ -452,11 +457,149 @@ def test_self_coder_allow_writes_commits(repo: Path, tmp_path: Path):
         "@@ -1,3 +1,2 @@\n def total(items):\n-    # TODO: ignore None entries\n-    return sum(items)\n"
         "+    return sum(i for i in items if i is not None)\n```"
     ])
-    coder = SelfCoder(repo_root=repo, llm=llm, evolver=evolver, director=director, allow_writes=True)
+    coder = SelfCoder(
+        repo_root=repo,
+        llm=llm,
+        evolver=evolver,
+        director=director,
+        allow_writes=True,
+        agentic=False,
+    )
     report = asyncio.run(coder.run(max_cycles=1))
     assert report.changed is True
     assert report.cycles[0].tree_action == "committed"
     assert "is not None" in (repo / "sonic-core" / "sonic" / "agents" / "widget.py").read_text()
+
+
+def test_failing_test_signal_targets_editable_source_frame(repo: Path, monkeypatch):
+    from sonic.evolution.self_coder import SelfCoder
+
+    test_file = repo / "sonic-core" / "tests" / "test_widget.py"
+    test_file.write_text("def test_total():\n    assert False\n", encoding="utf-8")
+    output = (
+        "________________________ test_total _________________________\n"
+        "Traceback (most recent call last):\n"
+        "  sonic-core/tests/test_widget.py:2: in test_total\n"
+        "  sonic-core/sonic/agents/widget.py:2: in total\n"
+        "E AssertionError\n"
+        "FAILED sonic-core/tests/test_widget.py::test_total - AssertionError\n"
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 1, stdout=output, stderr=""
+        ),
+    )
+
+    coder = SelfCoder(repo_root=repo)
+    signals = coder._failing_test_signals(limit=5)
+
+    assert len(signals) == 1
+    assert signals[0][1] == "sonic-core/sonic/agents/widget.py"
+    assert "test_widget.py::test_total" in signals[0][0]
+    assert coder._test_paths_for(signals[0][1]) == [
+        "sonic-core/tests/test_widget.py"
+    ]
+
+
+def test_test_only_failure_does_not_become_source_edit_signal(repo: Path, monkeypatch):
+    from sonic.evolution.self_coder import SelfCoder
+
+    test_file = repo / "sonic-core" / "tests" / "test_widget.py"
+    test_file.write_text("def test_total():\n    assert False\n", encoding="utf-8")
+    output = (
+        "________________________ test_total _________________________\n"
+        "Traceback (most recent call last):\n"
+        "  sonic-core/tests/test_widget.py:2: in test_total\n"
+        "E AssertionError\n"
+        "FAILED sonic-core/tests/test_widget.py::test_total - AssertionError\n"
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 1, stdout=output, stderr=""
+        ),
+    )
+
+    assert SelfCoder(repo_root=repo)._failing_test_signals(limit=5) == []
+
+
+def test_static_audit_signal_is_prioritized_and_safety_targets_are_excluded(
+    repo: Path, monkeypatch
+):
+    from sonic.evolution.codebase_auditor import CodebaseAuditor
+    from sonic.evolution.self_coder import SelfCoder
+
+    findings = [
+        SimpleNamespace(
+            kind="shell_true",
+            severity="high",
+            file="sonic-core/sonic/agents/widget.py",
+            line=1,
+            title="Subprocess uses shell=True",
+            detail="Potentially unsafe shell invocation",
+        ),
+        SimpleNamespace(
+            kind="new_audit_rule",
+            severity="medium",
+            file="sonic-core/sonic/agents/widget.py",
+            line=2,
+            title="New auditor rule",
+            detail="Future audit kinds should be discoverable without a second allowlist",
+        ),
+        SimpleNamespace(
+            kind="shell_true",
+            severity="critical",
+            file="sonic-core/sonic/safety/kernel.py",
+            line=1,
+            title="Safety policy invokes shell",
+            detail="Protected target",
+        ),
+    ]
+    monkeypatch.setattr(CodebaseAuditor, "static_scan", lambda self: findings)
+    coder = SelfCoder(repo_root=repo)
+    monkeypatch.setattr(coder, "_failing_test_signals", lambda limit: [])
+
+    signals = coder.discover_signals(limit=5)
+
+    assert signals[0][1] == "sonic-core/sonic/agents/widget.py"
+    assert "shell_true" in signals[0][0]
+    assert any("new_audit_rule" in signal[0] for signal in signals)
+    assert all("safety/kernel.py" not in signal[1] for signal in signals)
+
+
+def test_self_coder_does_not_synthesize_without_completed_investigation(
+    repo: Path, monkeypatch
+):
+    from sonic.evolution.coding_agent import CodingAgent
+
+    async def incomplete_investigation(self, goal):
+        return SimpleNamespace(
+            finished=False,
+            diagnosis="Possible issue, but not checked with tools.",
+            steps=1,
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(CodingAgent, "run", incomplete_investigation)
+    coder = SelfCoder(repo_root=repo, llm=_StubLLM(["unused"]))
+    monkeypatch.setattr(
+        coder.director,
+        "submit_goal",
+        lambda **kwargs: pytest.fail("incomplete investigation reached patch synthesis"),
+    )
+
+    cycle = asyncio.run(
+        coder.run_cycle(
+            "A failing behavior needs investigation",
+            "sonic-core/sonic/agents/widget.py",
+            "bug_fix",
+        )
+    )
+
+    assert cycle.stage == "investigation_incomplete"
+    assert cycle.proposed_diff == ""
+    assert cycle.tree_action == "rolled_back"
 
 
 def test_normalize_bare_hunks_fills_line_numbers(repo: Path):
@@ -641,7 +784,7 @@ def test_coding_agent_write_stages_in_overlay(tmp_path: Path):
 
 
 def test_coding_agent_command_security(repo: Path):
-    from sonic.evolution.coding_agent import CodingAgent, _ALLOWED_CMDS
+    from sonic.evolution.coding_agent import _ALLOWED_CMDS, CodingAgent
 
     assert "python -c" not in _ALLOWED_CMDS
 
@@ -919,7 +1062,7 @@ def test_test_failure_triggers_rollback_and_avoid_lesson(repo: Path, tmp_path: P
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "setup test suite")
 
-    from sonic.being.lessons import LessonsLedger, LessonKind
+    from sonic.being.lessons import LessonKind, LessonsLedger
 
     ledger = LessonsLedger(tenant_id="test_tenant", agent_id="test_agent")
 

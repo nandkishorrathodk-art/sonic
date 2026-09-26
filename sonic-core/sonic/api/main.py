@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -52,10 +53,14 @@ async def _maybe_start_being_life_loop(settings):
     missing being loop must not block API boot.
     """
     import os
+
     # Only run the always-on loop when explicitly enabled. Default off so test
     # boots and headless dev don't spawn a background actor that needs a sandbox.
     if os.environ.get("SONIC_ENABLE_BEING_LIFE_LOOP") != "1":
-        logger.info("being_life_loop_disabled", reason="SONIC_ENABLE_BEING_LIFE_LOOP!=1")
+        logger.info(
+            "being_life_loop_disabled",
+            reason="SONIC_ENABLE_BEING_LIFE_LOOP!=1",
+        )
         return None
     try:
         from sonic.being.identity import get_being_store, get_or_create_being
@@ -108,6 +113,7 @@ async def _maybe_start_being_life_loop(settings):
             max_actions_per_minute=300,
         )
         from pathlib import Path
+
         from sonic.config import CONFIGS_DIR
         from sonic.llm.router import ModelRouter
         cfg_path = Path("configs/models.yaml")
@@ -151,7 +157,9 @@ async def _maybe_start_being_life_loop(settings):
             toolsmith=toolsmith,
             lessons_ledger=lessons_ledger,
             llm_client=router,
+            queue_self_update_goal=False,
         )
+        self_coder.configure_evolution_engine(evolution_engine)
         agent = ComputerUseAgent(
             computer_provider=provider, llm_router=router,
             security_tools=security_registry.as_dict(),
@@ -212,29 +220,14 @@ async def _maybe_start_being_life_loop(settings):
                 )
                 _persist_workstation_state()
 
-            setattr(agent, "_idle_goal_callback", _on_idle_goal)
-            setattr(agent, "_idle_step_callback", _on_idle_step)
+            agent._idle_goal_callback = _on_idle_goal
+            agent._idle_step_callback = _on_idle_step
         except Exception as bridge_err:
             logger.debug("being_life_loop_ui_bridge_skipped", error=str(bridge_err))
 
-        self_coder = None
-        if os.environ.get("SONIC_SELF_CODER_ENABLED", "true").lower() in ("1", "true", "yes"):
-            try:
-                from sonic.evolution.self_coder import SelfCoder
-
-                self_coder = SelfCoder(
-                    repo_root=evolution_engine.codebase_evolver.repo_root,
-                    llm=router,
-                    evolver=evolution_engine.codebase_evolver,
-                    max_cycles=1,
-                )
-            except Exception as e:
-                logger.warning("being_self_coder_init_failed", error=str(e))
         tick_interval = float(os.environ.get("SONIC_BEING_TICK_INTERVAL", "12"))
-        self_coder_every = int(os.environ.get("SONIC_SELF_CODER_EVERY_TICKS", "20"))
         loop = BeingLifeLoop(
             being, agent, curiosity, home.id, tick_interval=tick_interval,
-            self_coder=self_coder, self_coder_every=self_coder_every,
         )
         loop.start()
         from sonic.being.life_loop import register_life_loop
@@ -247,6 +240,45 @@ async def _maybe_start_being_life_loop(settings):
         return loop
     except Exception as e:
         logger.warning("being_life_loop_init_failed", error=str(e))
+        return None
+
+
+async def _maybe_start_self_coder_background_loop():
+    """Start periodic codebase maintenance independently of desktop curiosity."""
+    import os
+
+    from sonic.evolution.self_coder_config import get_self_coder_config
+
+    try:
+        config = get_self_coder_config()
+    except ValueError as exc:
+        logger.error("self_coder_configuration_invalid", error=str(exc))
+        return None
+    if not config.enabled:
+        logger.info("self_coder_background_loop_disabled")
+        return None
+    try:
+        from sonic.api.routes.self_coder import _build_coder, _candidate_store
+        from sonic.evolution.self_coder_loop import SelfCoderBackgroundLoop
+
+        coder = await asyncio.to_thread(_build_coder, require_llm=True)
+        loop = SelfCoderBackgroundLoop(
+            candidate_store=_candidate_store(),
+            coder_factory=lambda root: coder.isolated_copy(root),
+            tenant_id=os.environ.get(
+                "SONIC_SELF_CODER_TENANT",
+                os.environ.get("SONIC_BEING_TENANT", "default"),
+            ),
+            interval_seconds=config.interval_seconds,
+        )
+        loop.start()
+        logger.info(
+            "self_coder_background_loop_configured",
+            interval_seconds=config.interval_seconds,
+        )
+        return loop
+    except Exception as exc:
+        logger.error("self_coder_background_loop_init_failed", error=str(exc))
         return None
 
 
@@ -304,10 +336,16 @@ async def lifespan(app: FastAPI):
         life_loop_task = await _maybe_start_being_life_loop(settings)
     except Exception as e:
         logger.warning("being_life_loop_not_started", reason=str(e))
+    self_coder_loop = await _maybe_start_self_coder_background_loop()
 
     yield
 
     # Shutdown
+    if self_coder_loop is not None:
+        try:
+            await self_coder_loop.stop()
+        except Exception as e:
+            logger.warning("self_coder_background_loop_stop_failed", error=str(e))
     if life_loop_task is not None:
         try:
             await life_loop_task.stop()

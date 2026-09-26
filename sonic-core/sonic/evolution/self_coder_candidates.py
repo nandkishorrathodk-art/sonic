@@ -1,0 +1,499 @@
+"""Isolated, verified self-coder candidates with safe local branch promotion."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import re
+import subprocess
+import threading
+import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from sonic.evolution.codebase_evolver import CodebaseEvolver
+from sonic.evolution.pipeline import EvolutionStage
+
+
+class CandidateWorkflowError(RuntimeError):
+    """A self-coder candidate could not be safely created or promoted."""
+
+
+class SelfCoderCandidateStore:
+    """Persist tested patch/report records outside the checked-out source tree."""
+
+    _locks: dict[str, threading.Lock] = {}
+    _locks_guard = threading.Lock()
+    _repo_locks: dict[str, threading.Lock] = {}
+
+    def __init__(self, repo_root: Path | str, storage_dir: Path | str | None = None):
+        self.repo_root = Path(repo_root).resolve()
+        self.storage_dir = Path(storage_dir).resolve() if storage_dir else (
+            self.repo_root / "sonic_data" / "self_coder_candidates"
+        )
+        self.worktrees_dir = self.storage_dir / "worktrees"
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.worktrees_dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, candidate_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{32}", candidate_id):
+            raise KeyError("Candidate not found")
+        return self.storage_dir / f"{candidate_id}.json"
+
+    def _lock(self, candidate_id: str) -> threading.Lock:
+        self._path(candidate_id)
+        with self._locks_guard:
+            return self._locks.setdefault(candidate_id, threading.Lock())
+
+    def _repo_lock(self) -> threading.Lock:
+        key = str(self.repo_root)
+        with self._locks_guard:
+            return self._repo_locks.setdefault(key, threading.Lock())
+
+    def save(self, record: dict[str, Any]) -> None:
+        record["integrity_sha256"] = self._integrity_hash(record)
+        path = self._path(str(record["candidate_id"]))
+        tmp = path.with_suffix(".json.new")
+        tmp.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+
+    def get(self, candidate_id: str, tenant_id: str) -> dict[str, Any] | None:
+        path = self._path(candidate_id)
+        if not path.is_file():
+            return None
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record.get("tenant_id") != tenant_id:
+            return None
+        return record
+
+    def list(self, tenant_id: str) -> list[dict[str, Any]]:
+        records = []
+        for path in sorted(self.storage_dir.glob("*.json")):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if record.get("tenant_id") == tenant_id:
+                records.append(record)
+        return records
+
+    def delete(self, candidate_id: str, tenant_id: str) -> bool:
+        path = self._path(candidate_id)
+        record = self.get(candidate_id, tenant_id)
+        if record is None:
+            return False
+        path.unlink()
+        return True
+
+    @staticmethod
+    def _integrity_hash(record: dict[str, Any]) -> str:
+        immutable_fields = (
+            "candidate_id", "tenant_id", "base_commit", "base_branch",
+            "target_file", "description", "diff", "files", "test_paths",
+            "verification", "diagnosis", "impact",
+            "working_tree_changes_excluded", "report", "created_at",
+        )
+        payload = {key: record.get(key) for key in immutable_fields}
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _git(self, args: list[str], cwd: Path | None = None, timeout: int = 60) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=str(cwd or self.repo_root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CandidateWorkflowError(f"git {' '.join(args)} could not complete: {exc}") from exc
+        if result.returncode:
+            raise CandidateWorkflowError(
+                f"git {' '.join(args)} failed ({result.returncode}): "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
+        return result.stdout.strip()
+
+    def _base_state(self) -> tuple[str, str]:
+        commit = self._git(["rev-parse", "--verify", "HEAD"])
+        branch = self._git(["branch", "--show-current"])
+        if not commit or not branch:
+            raise CandidateWorkflowError("Cannot identify the active Git branch and base commit")
+        return commit, branch
+
+    def _remove_worktree(self, path: Path) -> None:
+        if path.exists():
+            self._git(["worktree", "remove", "--force", str(path)])
+        self._git(["worktree", "prune"])
+
+    async def run_candidate(
+        self,
+        tenant_id: str,
+        max_cycles: int,
+        coder_factory: Callable[[Path], Any],
+    ) -> dict[str, Any]:
+        lock = self._repo_lock()
+        await asyncio.to_thread(lock.acquire)
+        try:
+            return await self._run_candidate_unlocked(
+                tenant_id, max_cycles, coder_factory
+            )
+        finally:
+            lock.release()
+
+    async def _run_candidate_unlocked(
+        self,
+        tenant_id: str,
+        max_cycles: int,
+        coder_factory: Callable[[Path], Any],
+    ) -> dict[str, Any]:
+        if not 1 <= max_cycles <= 10:
+            raise ValueError("max_cycles must be between 1 and 10")
+        candidate_id = uuid.uuid4().hex
+        base_commit, base_branch = self._base_state()
+        working_tree_changes = self._git(
+            ["status", "--porcelain", "--untracked-files=all"]
+        )
+        working_tree_changes = [
+            line[3:].strip() for line in working_tree_changes.splitlines()
+        ]
+        tenant_records = self.list(tenant_id)
+        if any(
+            record.get("base_commit") == base_commit
+            and record.get("status") == "no_candidate"
+            for record in tenant_records
+        ):
+            previous = next(
+                record
+                for record in reversed(tenant_records)
+                if record.get("base_commit") == base_commit
+                and record.get("status") == "no_candidate"
+            )
+            return {
+                "candidates": [],
+                "report": previous.get("report", ""),
+                "status": "no_actionable_signal",
+            }
+        excluded_signals = {
+            (str(record.get("target_file", "")), str(record.get("description", "")))
+            for record in tenant_records
+            if record.get("base_commit") == base_commit
+            and record.get("target_file")
+            and record.get("description")
+            and record.get("status")
+            in {
+                "verified",
+                "rejected",
+                "approved",
+                "auto_promoted",
+                "failed",
+                "failed_revalidation",
+                "stale",
+                "tampered",
+            }
+        }
+        worktree = self.worktrees_dir / candidate_id
+        try:
+            self._git(["worktree", "add", "--detach", str(worktree), base_commit])
+        except CandidateWorkflowError as exc:
+            raise CandidateWorkflowError(f"Could not create isolated candidate worktree: {exc}") from exc
+        cleanup_error = ""
+        persisted: list[dict[str, Any]] = []
+        try:
+            coder = coder_factory(worktree)
+            try:
+                report = await coder.run(
+                    max_cycles=max_cycles,
+                    excluded_signals=excluded_signals,
+                )
+            except Exception as exc:
+                raise CandidateWorkflowError(f"Self-coder execution failed: {exc}") from exc
+            cycles = list(getattr(report, "cycles", []))
+            for cycle in cycles:
+                verification = {
+                    "full_test_suite": False,
+                    "security_regression": False,
+                    "error": "",
+                }
+                passed = (
+                    getattr(cycle, "stage", "") == EvolutionStage.AWAITING_APPROVAL.value
+                    and bool(getattr(cycle, "proposed_diff", "").strip())
+                    and bool(getattr(cycle, "patch_files", []))
+                )
+                cycle_id = candidate_id if len(cycles) == 1 else uuid.uuid4().hex
+                test_paths = [
+                    path
+                    for path in ("sonic-core/tests", "sonic-cli/tests")
+                    if (worktree / path).is_dir()
+                ]
+                if passed and not test_paths:
+                    passed = False
+                    verification["error"] = "Candidate worktree contains no configured test suite"
+                if passed:
+                    verifier = CodebaseEvolver(repo_root=worktree)
+                    applied, apply_message = verifier.apply_patch_multi(
+                        list(cycle.patch_files), cycle.proposed_diff
+                    )
+                    if not applied:
+                        passed = False
+                        verification["error"] = f"Candidate patch could not be reapplied: {apply_message}"
+                    else:
+                        imports_ok, import_message = verifier.run_import_checks(
+                            list(cycle.patch_files)
+                        )
+                        tests = verifier.run_tests(test_paths)
+                        security_ok = verifier.run_security_regression()
+                        verification.update({
+                            "full_test_suite": tests.passed,
+                            "security_regression": security_ok,
+                            "test_count": tests.total_tests,
+                            "passed_tests": tests.passed_tests,
+                            "failed_tests": tests.failed_tests,
+                            "test_output": tests.raw_output[-4000:],
+                            "import_check": import_message,
+                        })
+                        passed = imports_ok and tests.passed and security_ok
+                        if not passed:
+                            verification["error"] = (
+                                import_message if not imports_ok else
+                                tests.error_message if not tests.passed else
+                                "Security regression suite failed"
+                            )
+                record = {
+                    "candidate_id": cycle_id,
+                    "tenant_id": tenant_id,
+                    "status": "verified" if passed else "failed",
+                    "base_commit": base_commit,
+                    "base_branch": base_branch,
+                    "target_file": getattr(cycle, "target_file", ""),
+                    "description": getattr(cycle, "signal", ""),
+                    "diagnosis": getattr(cycle, "diagnosis", ""),
+                    "impact": {
+                        "assessment": (
+                            "Expected to address the observed signal; production "
+                            "impact is not measured by this candidate run."
+                        ),
+                        "basis": getattr(cycle, "diagnosis", ""),
+                        "measured": {
+                            "files_changed": list(getattr(cycle, "patch_files", [])),
+                            "lines_added": int(getattr(cycle, "lines_added", 0)),
+                            "lines_removed": int(getattr(cycle, "lines_removed", 0)),
+                            "tests_passed": verification.get("passed_tests", 0),
+                            "tests_failed": verification.get("failed_tests", 0),
+                        },
+                    },
+                    "diff": getattr(cycle, "proposed_diff", "") if passed else "",
+                    "files": list(getattr(cycle, "patch_files", [])) if passed else [],
+                    "test_paths": test_paths,
+                    "verification": verification,
+                    "working_tree_changes_excluded": working_tree_changes,
+                    "cycle_stage": getattr(cycle, "stage", ""),
+                    "cycle_reason": getattr(cycle, "reason", ""),
+                    "report": report.to_text(),
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "commit": "",
+                    "commit_branch": "",
+                    "error": "" if passed else (
+                        verification["error"] or getattr(cycle, "reason", "")
+                        or "Candidate did not pass all verification gates"
+                    ),
+                }
+                self.save(record)
+                persisted.append(record)
+            if not persisted:
+                record = {
+                    "candidate_id": candidate_id,
+                    "tenant_id": tenant_id,
+                    "status": "no_candidate",
+                    "base_commit": base_commit,
+                    "base_branch": base_branch,
+                    "target_file": "",
+                    "description": "",
+                    "diff": "",
+                    "files": [],
+                    "test_paths": [],
+                    "verification": {},
+                    "cycle_stage": "no_candidate",
+                    "cycle_reason": "No actionable signal produced a verified patch",
+                    "report": report.to_text(),
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "commit": "",
+                    "commit_branch": "",
+                    "error": "No actionable signal produced a verified patch",
+                }
+                self.save(record)
+                persisted.append(record)
+            report_text = report.to_text()
+        finally:
+            try:
+                self._remove_worktree(worktree)
+            except Exception as exc:
+                cleanup_error = str(exc)
+            if cleanup_error:
+                for record in persisted:
+                    record["status"] = "failed"
+                    record["error"] = f"Candidate worktree cleanup failed: {cleanup_error}"
+                    self.save(record)
+                raise CandidateWorkflowError(
+                    f"Candidate worktree cleanup failed; no candidate is available: {cleanup_error}"
+                )
+        promoted: list[dict[str, Any]] = []
+        for record in persisted:
+            if record["status"] == "verified":
+                try:
+                    promoted.append(
+                        self.auto_promote(record["candidate_id"], tenant_id)
+                    )
+                except Exception as exc:
+                    latest = self.get(record["candidate_id"], tenant_id) or record
+                    if latest["status"] not in {"auto_promoted", "approval_cleanup_failed"}:
+                        latest["status"] = "promotion_failed"
+                        latest["error"] = f"Automatic branch promotion failed: {exc}"
+                    latest["promotion_error"] = str(exc)
+                    self.save(latest)
+                    promoted.append(latest)
+            else:
+                promoted.append(record)
+        report_text = self._append_promotion_report(report_text, promoted)
+        for record in promoted:
+            record["report"] = report_text
+            self.save(record)
+        return {"candidates": promoted, "report": report_text}
+
+    @staticmethod
+    def _append_promotion_report(
+        report: str, records: list[dict[str, Any]]
+    ) -> str:
+        lines = [report.rstrip(), "", "## Candidate impact and promotion receipts"]
+        for record in records:
+            lines.extend([
+                f"- Candidate: `{record['candidate_id']}` — **{record['status']}**",
+                f"  - Signal: {record.get('description') or record.get('error', 'No actionable signal')}",
+                f"  - Diagnosis: {record.get('diagnosis') or 'No completed diagnosis'}",
+                f"  - Expected impact: {record.get('impact', {}).get('assessment', 'Not assessed')}",
+                f"  - Files: {', '.join(record.get('files', [])) or 'none'}",
+                f"  - Verification: {record.get('verification', {})}",
+            ])
+            if record.get("commit_branch"):
+                lines.append(
+                    f"  - Local commit: `{record.get('commit')}` on "
+                    f"`{record['commit_branch']}` (active branch unchanged)"
+                )
+            if record.get("working_tree_changes_excluded"):
+                lines.append(
+                    "  - Uncommitted active-checkout changes were excluded from "
+                    "the candidate base: "
+                    + ", ".join(record["working_tree_changes_excluded"])
+                )
+            if record.get("error"):
+                lines.append(f"  - Error: {record['error']}")
+        return "\n".join(lines)
+
+    def approve(self, candidate_id: str, tenant_id: str) -> dict[str, Any]:
+        return self._promote(candidate_id, tenant_id, automatic=False)
+
+    def auto_promote(self, candidate_id: str, tenant_id: str) -> dict[str, Any]:
+        """Commit an already verified candidate to its isolated local branch."""
+        return self._promote(candidate_id, tenant_id, automatic=True)
+
+    def _promote(
+        self, candidate_id: str, tenant_id: str, *, automatic: bool
+    ) -> dict[str, Any]:
+        with self._lock(candidate_id):
+            record = self.get(candidate_id, tenant_id)
+            if record is None:
+                raise KeyError("Candidate not found")
+            if record["status"] != "verified":
+                raise ValueError(f"Candidate cannot be approved from status {record['status']}")
+            if record.get("integrity_sha256") != self._integrity_hash(record):
+                record["status"] = "tampered"
+                record["error"] = "Candidate integrity check failed; exact tested patch is unprovable"
+                self.save(record)
+                raise ValueError(record["error"])
+            current_commit, _ = self._base_state()
+            if current_commit != record["base_commit"]:
+                record["status"] = "stale"
+                record["error"] = "Active base commit changed after candidate verification"
+                self.save(record)
+                raise ValueError(record["error"])
+
+            branch = f"sonic/self-coder/{candidate_id}"
+            worktree = self.worktrees_dir / f"approve-{candidate_id}"
+            report = None
+            branch_created = False
+            committed = False
+            cleanup_errors: list[str] = []
+            try:
+                self._git(["worktree", "add", "-b", branch, str(worktree), current_commit])
+                branch_created = True
+                evolver = CodebaseEvolver(repo_root=worktree)
+                target = record["files"][0]
+                report = evolver.evolve(
+                    target_component=target,
+                    description=record["description"],
+                    code_diff=record["diff"],
+                    auto_promote=True,
+                    push=False,
+                    test_paths=record["test_paths"] or None,
+                )
+                if report.stage != EvolutionStage.PROMOTED or not report.git_committed:
+                    record["status"] = "failed_revalidation"
+                    record["error"] = report.error_reason or "Candidate failed current-base revalidation"
+                    self.save(record)
+                    raise ValueError(record["error"])
+                record["status"] = "auto_promoted" if automatic else "approved"
+                record["commit"] = report.git_commit_hash
+                record["commit_branch"] = branch
+                record["error"] = ""
+                record["promotion"] = (
+                    "automatically committed after passing candidate and revalidation gates"
+                    if automatic else "operator approved after revalidation"
+                )
+                self.save(record)
+                committed = True
+                return record
+            finally:
+                if worktree.exists():
+                    try:
+                        self._remove_worktree(worktree)
+                    except CandidateWorkflowError as exc:
+                        cleanup_errors.append(str(exc))
+                if branch_created and not committed:
+                    try:
+                        self._git(["branch", "-D", branch])
+                    except CandidateWorkflowError as exc:
+                        cleanup_errors.append(str(exc))
+                if cleanup_errors:
+                    record["status"] = "approval_cleanup_failed"
+                    record["error"] = "; ".join(cleanup_errors)
+                    self.save(record)
+                    raise CandidateWorkflowError(
+                        f"Approval cleanup failed: {record['error']}"
+                    )
+
+    def reject(self, candidate_id: str, tenant_id: str, reason: str) -> dict[str, Any]:
+        with self._lock(candidate_id):
+            record = self.get(candidate_id, tenant_id)
+            if record is None:
+                raise KeyError("Candidate not found")
+            if record["status"] != "verified":
+                raise ValueError(f"Candidate cannot be rejected from status {record['status']}")
+            record["status"] = "rejected"
+            record["error"] = reason.strip() or "Rejected by operator"
+            self.save(record)
+            return record
+
+    def cleanup(self, candidate_id: str, tenant_id: str) -> None:
+        with self._lock(candidate_id):
+            record = self.get(candidate_id, tenant_id)
+            if record is None:
+                raise KeyError("Candidate not found")
+            if record["status"] == "verified":
+                raise ValueError("Reject a verified candidate before cleanup")
+            if record["status"] in {
+                "approved", "auto_promoted", "approval_cleanup_failed"
+            }:
+                raise ValueError("Committed candidate records are retained for audit")
+            self.delete(candidate_id, tenant_id)

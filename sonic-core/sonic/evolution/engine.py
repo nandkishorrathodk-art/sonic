@@ -74,6 +74,7 @@ class EvolutionEngine:
         goal_director: EvolutionGoalDirector | None = None,
         llm_client: Any | None = None,
         north_star: str = CORE_NORTH_STAR_GOAL,
+        queue_self_update_goal: bool = True,
     ):
         self.north_star = north_star
         # The LLM router that actually writes patches for the self-coder.
@@ -112,17 +113,16 @@ class EvolutionEngine:
                 llm_client=self.llm_client,
             )
         )
-        # Auto-queue the perpetual self-update goal only once (idempotent:
-        # ord() equality avoids the earlier U+2011 vs ASCII-hyphen mismatch that
-        # re-created a duplicate goal on every boot).
-        from sonic.evolution.goal_director import create_self_update_goal
+        if queue_self_update_goal:
+            # Auto-queue the perpetual self-update goal only once (idempotent).
+            from sonic.evolution.goal_director import create_self_update_goal
 
-        if not any(
-            g.title.replace("\u2011", "-").startswith("Self-Update")
-            for g in self.goal_director.list_goals()
-        ):
-            create_self_update_goal(self.goal_director)
-            logger.info("auto_self_update_goal_created")
+            if not any(
+                g.title.replace("\u2011", "-").startswith("Self-Update")
+                for g in self.goal_director.list_goals()
+            ):
+                create_self_update_goal(self.goal_director)
+                logger.info("auto_self_update_goal_created")
 
     async def handle_target_failure(
         self,

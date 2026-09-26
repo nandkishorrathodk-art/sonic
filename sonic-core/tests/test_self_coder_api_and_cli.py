@@ -3,7 +3,7 @@ Tests for Self-Coder API security, tenant isolation, and CLI enhancements.
 ==========================================================================
 Covers:
 1. self_coder API tenant-scoped reports storage and isolation.
-2. self_coder API RBAC on git push (requires tenant_admin or super_admin).
+2. self-coder candidates never push automatically and fail closed on worktree errors.
 3. self_coder API non-blocking audit & signals via asyncio.to_thread.
 4. CLI & Journal changelog version range filtering on promoted entries.
 5. CLI --max-goals > 0 validation in build_parser() and main().
@@ -32,12 +32,13 @@ from sonic.auth.models import User, UserRole
 from sonic.evolution.cli import (
     _positive_int,
     build_parser,
-    generate_changelog as cli_changelog,
     is_safe_repo_path,
     main,
 )
+from sonic.evolution.cli import (
+    generate_changelog as cli_changelog,
+)
 from sonic.evolution.evolution_journal import EvolutionJournal, JournalEntry
-
 
 # =====================================================================
 # 1. API Tenant Isolation & RBAC Tests
@@ -56,86 +57,71 @@ async def test_self_coder_tenant_scoped_reports():
     rep_a = await self_coder_report(user=user_a)
     assert rep_a == {"cycles": [], "changed": False, "text": ""}
 
-    mock_report = MagicMock()
-    mock_report.cycles = []
-    mock_report.changed = True
-    mock_report.started_at = "2026-09-20T10:00:00Z"
-    mock_report.finished_at = "2026-09-20T10:01:00Z"
-    mock_report.to_text.return_value = "Alpha Report Text"
+    class MockStore:
+        async def run_candidate(self, tenant_id, max_cycles, coder_factory):
+            return {"candidates": [{"tenant_id": tenant_id, "status": "auto_promoted"}],
+                    "report": f"Report for {tenant_id}"}
 
-    mock_coder = MagicMock()
-    mock_coder.run = AsyncMock(return_value=mock_report)
-
-    with patch("sonic.api.routes.self_coder._build_coder", return_value=mock_coder):
+    with patch("sonic.api.routes.self_coder._candidate_store", return_value=MockStore()):
         run_res_a = await self_coder_run(SelfCoderRunRequest(max_cycles=1), user=user_a)
 
     assert run_res_a["changed"] is True
-    assert run_res_a["text"] == "Alpha Report Text"
+    assert run_res_a["active_branch_changed"] is False
+    assert run_res_a["text"] == "Report for tenant_alpha"
+    assert run_res_a["candidates"][0]["tenant_id"] == "tenant_alpha"
     assert "tenant_alpha" in _last_reports_by_tenant
 
-    # User A sees Alpha Report
+    # User A sees Alpha report
     res_a = await self_coder_report(user=user_a)
-    assert res_a["text"] == "Alpha Report Text"
+    assert res_a["text"] == "Report for tenant_alpha"
 
     # User B still sees empty report
     res_b = await self_coder_report(user=user_b)
     assert res_b == {"cycles": [], "changed": False, "text": ""}
 
     # User with empty tenant_id maps to "default"
-    mock_report.to_text.return_value = "Default Report Text"
-    with patch("sonic.api.routes.self_coder._build_coder", return_value=mock_coder):
+    with patch("sonic.api.routes.self_coder._candidate_store", return_value=MockStore()):
         await self_coder_run(SelfCoderRunRequest(max_cycles=1), user=user_none)
 
     assert "default" in _last_reports_by_tenant
     res_def = await self_coder_report(user=user_none)
-    assert res_def["text"] == "Default Report Text"
+    assert res_def["text"] == "Report for default"
 
 
 @pytest.mark.asyncio
-async def test_self_coder_run_push_rbac():
-    """Verify git push is restricted to tenant_admin or super_admin."""
-    mock_report = MagicMock()
-    mock_report.cycles = []
-    mock_report.changed = False
-    mock_report.started_at = ""
-    mock_report.finished_at = ""
-    mock_report.to_text.return_value = ""
-
-    mock_coder = MagicMock()
-    mock_coder.run = AsyncMock(return_value=mock_report)
-
-    # 1. Operator cannot push
+async def test_self_coder_run_never_pushes():
+    """Self-coder never pushes; verified candidates only commit to local branches."""
     operator_user = User(email="op@target.com", name="Op", role=UserRole.OPERATOR)
     with pytest.raises(HTTPException) as exc_info:
         await self_coder_run(SelfCoderRunRequest(push=True), user=operator_user)
-    assert exc_info.value.status_code == 403
-    assert "Git push requires tenant_admin or super_admin role" in exc_info.value.detail
+    assert exc_info.value.status_code == 400
+    assert "never push" in exc_info.value.detail
 
-    # 2. Auditor cannot push
+    # Push remains disabled for every role, including tenant/global admins.
     auditor_user = User(email="audit@target.com", name="Auditor", role=UserRole.AUDITOR)
     with pytest.raises(HTTPException) as exc_info:
         await self_coder_run(SelfCoderRunRequest(push=True), user=auditor_user)
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 400
 
-    # 3. Tenant Admin CAN push
     tenant_admin = User(email="admin@target.com", name="Tenant Admin", role=UserRole.TENANT_ADMIN)
-    with patch("sonic.api.routes.self_coder._build_coder", return_value=mock_coder):
-        res = await self_coder_run(SelfCoderRunRequest(push=True), user=tenant_admin)
-        assert res is not None
-        assert mock_coder.push is True
-
-    # 4. Super Admin CAN push
+    with pytest.raises(HTTPException) as exc_info:
+        await self_coder_run(SelfCoderRunRequest(push=True), user=tenant_admin)
+    assert exc_info.value.status_code == 400
     super_admin = User(email="super@target.com", name="Super Admin", role=UserRole.SUPER_ADMIN)
-    with patch("sonic.api.routes.self_coder._build_coder", return_value=mock_coder):
-        res = await self_coder_run(SelfCoderRunRequest(push=True), user=super_admin)
-        assert res is not None
-        assert mock_coder.push is True
+    with pytest.raises(HTTPException) as exc_info:
+        await self_coder_run(SelfCoderRunRequest(push=True), user=super_admin)
+    assert exc_info.value.status_code == 400
 
-    # 5. Operator with push=False is allowed
-    with patch("sonic.api.routes.self_coder._build_coder", return_value=mock_coder):
-        res = await self_coder_run(SelfCoderRunRequest(push=False), user=operator_user)
-        assert res is not None
-        assert mock_coder.push is False
+
+@pytest.mark.asyncio
+async def test_self_coder_candidate_run_fails_closed_on_worktree_error():
+    user = User(email="u@target.com", name="U", role=UserRole.OPERATOR)
+    with patch("sonic.api.routes.self_coder._candidate_store") as store_factory:
+        store_factory.return_value.run_candidate = AsyncMock(side_effect=RuntimeError("worktree unavailable"))
+        with pytest.raises(HTTPException) as exc_info:
+            await self_coder_run(SelfCoderRunRequest(), user=user)
+    assert exc_info.value.status_code == 500
+    assert "worktree unavailable" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
