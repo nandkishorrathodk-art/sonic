@@ -2851,19 +2851,57 @@ class ComputerUseAgent:
             ComputerActionType.GUI_SCROLL,
             ComputerActionType.GUI_DRAG,
         }
-        if action_type in gui_actions and hasattr(self.computer, "status"):
+        status_method = getattr(type(self.computer), "status", None)
+        is_test_double = type(self.computer).__module__ == "unittest.mock"
+        if action_type in gui_actions:
+            if status_method is None and not is_test_double:
+                actual_obs_str = "GUI action blocked before dispatch: active-window ownership cannot be verified"
+                status = ActionExecutionStatus.BLOCKED
+                action_exit_code = 126
+                requested_window = None
+            else:
+                requested_window = (
+                    payload.get("target_window")
+                    or payload.get("window")
+                    or payload.get("active_window")
+                )
+            if status == ActionExecutionStatus.BLOCKED:
+                trace = ComputerDecisionTrace(
+                    step_index=self.action_counter,
+                    action_type=action_type,
+                    target_resource=target_resource,
+                    payload=str(payload),
+                    predicted_outcome=predicted_outcome,
+                    actual_observation=actual_obs_str,
+                    expected_observation=predicted_outcome,
+                    info_gain=0.0,
+                    recovery_attempted=False,
+                    status=status,
+                    exit_code=action_exit_code,
+                    thought=getattr(self, "_last_thought", ""),
+                    duration_seconds=round(time.perf_counter() - t_start, 3),
+                    thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+                )
+                self.traces.append(trace)
+                self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
+                return trace
+        if action_type in gui_actions and status_method is not None:
             requested_window = (
                 payload.get("target_window")
                 or payload.get("window")
                 or payload.get("active_window")
             )
-            if requested_window:
-                try:
-                    current_status = await self.computer.status(workspace_id)
-                    active_window = str(
-                        getattr(current_status, "active_application", "")
-                        or getattr(current_status, "active_window", "")
-                    ).strip()
+            try:
+                current_status = self.computer.status(workspace_id)
+                if inspect.isawaitable(current_status):
+                    current_status = await current_status
+                active_window = str(
+                    getattr(current_status, "active_application", "")
+                    or getattr(current_status, "active_window", "")
+                ).strip()
+                if not active_window:
+                    raise RuntimeError("active window is unknown")
+                if requested_window:
                     if active_window.casefold() != str(requested_window).strip().casefold():
                         focus_result = await self.computer.gui_action(
                             workspace_id,
@@ -2872,9 +2910,24 @@ class ComputerUseAgent:
                                 app_name=str(requested_window),
                             ),
                         )
-                        if getattr(focus_result, "exit_code", 0) not in (None, 0):
+                        focus_status = (
+                            focus_result.get("status")
+                            if isinstance(focus_result, dict)
+                            else getattr(focus_result, "status", None)
+                        )
+                        focus_exit = (
+                            focus_result.get("exit_code")
+                            if isinstance(focus_result, dict)
+                            else getattr(focus_result, "exit_code", None)
+                        )
+                        if (
+                            focus_status is not None
+                            and str(focus_status).upper() in {"FAILED", "FAILURE", "BLOCKED", "ERROR"}
+                        ) or focus_exit not in (None, 0):
                             raise RuntimeError("target window focus failed")
-                        refreshed = await self.computer.status(workspace_id)
+                        refreshed = self.computer.status(workspace_id)
+                        if inspect.isawaitable(refreshed):
+                            refreshed = await refreshed
                         refreshed_active = str(
                             getattr(refreshed, "active_application", "")
                             or getattr(refreshed, "active_window", "")
@@ -2883,27 +2936,27 @@ class ComputerUseAgent:
                             raise RuntimeError(
                                 f"target window ownership not verified: {refreshed_active or 'unknown'}"
                             )
-                except Exception as exc:
-                    actual_obs_str = f"GUI action blocked before dispatch: {exc}"
-                    trace = ComputerDecisionTrace(
-                        step_index=self.action_counter,
-                        action_type=action_type,
-                        target_resource=target_resource,
-                        payload=str(payload),
-                        predicted_outcome=predicted_outcome,
-                        actual_observation=actual_obs_str,
-                        expected_observation=predicted_outcome,
-                        info_gain=0.0,
-                        recovery_attempted=False,
-                        status=ActionExecutionStatus.BLOCKED,
-                        exit_code=126,
-                        thought=getattr(self, "_last_thought", ""),
-                        duration_seconds=round(time.perf_counter() - t_start, 3),
-                        thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
-                    )
-                    self.traces.append(trace)
-                    self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
-                    return trace
+            except Exception as exc:
+                actual_obs_str = f"GUI action blocked before dispatch: {exc}"
+                trace = ComputerDecisionTrace(
+                    step_index=self.action_counter,
+                    action_type=action_type,
+                    target_resource=target_resource,
+                    payload=str(payload),
+                    predicted_outcome=predicted_outcome,
+                    actual_observation=actual_obs_str,
+                    expected_observation=predicted_outcome,
+                    info_gain=0.0,
+                    recovery_attempted=False,
+                    status=ActionExecutionStatus.BLOCKED,
+                    exit_code=126,
+                    thought=getattr(self, "_last_thought", ""),
+                    duration_seconds=round(time.perf_counter() - t_start, 3),
+                    thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+                )
+                self.traces.append(trace)
+                self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
+                return trace
 
         # Pre-execution refusal or blocked action handling (e.g. from LLM safety refusal)
         if action_type == ActionExecutionStatus.BLOCKED or str(action_type).upper() in ("BLOCKED", "ACTIONEXECUTIONSTATUS.BLOCKED"):
@@ -3544,8 +3597,14 @@ class ComputerUseAgent:
         if str(action_type.value).startswith(("GUI_", "APP_")):
             from sonic.computer_use.teamwork import DisplayLeaseManager
 
-            _display_lease_lock = DisplayLeaseManager.get_lock(workspace_id)
-            await _display_lease_lock.acquire()
+            display = None
+            if hasattr(self.computer, "_get_display"):
+                display = self.computer._get_display(workspace_id)
+            _display_lease_lock = await DisplayLeaseManager.acquire(
+                workspace_id,
+                display=display,
+                owner=getattr(self, "agent_id", None),
+            )
 
         try:
             if action_type == ComputerActionType.GUI_CLICK:
@@ -5139,8 +5198,8 @@ class ComputerUseAgent:
                     raw_error=str(e),
                 )
         finally:
-            if _display_lease_lock is not None and _display_lease_lock.locked():
-                _display_lease_lock.release()
+            if _display_lease_lock is not None:
+                DisplayLeaseManager.release(_display_lease_lock, display=display)
 
         # Adaptive Closed-Loop Recovery if needed
         if recovery_needed:

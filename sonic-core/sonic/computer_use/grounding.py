@@ -322,7 +322,15 @@ def resolve_ui_target(
     if "," in clean_query:
         parts = clean_query.split(",")
         if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
-            return int(parts[0].strip()), int(parts[1].strip())
+            if coordinate_space is None and screenshot_b64:
+                return None
+            coords = (int(parts[0].strip()), int(parts[1].strip()))
+            if coordinate_space and coordinate_space.strip().lower() in {"normalized", "normalized_1000", "model_1000"}:
+                return (
+                    int(coords[0] * width / 1000),
+                    int(coords[1] * height / 1000),
+                )
+            return coords
 
     # 2. Dynamic Grounding function (multimodal vision model callback)
     if grounding_fn and screenshot_b64:
@@ -381,7 +389,15 @@ async def resolve_ui_target_async(
     if "," in clean_query:
         parts = clean_query.split(",")
         if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
-            return int(parts[0].strip()), int(parts[1].strip())
+            if coordinate_space is None and screenshot_b64:
+                return None
+            coords = (int(parts[0].strip()), int(parts[1].strip()))
+            if coordinate_space and coordinate_space.strip().lower() in {"normalized", "normalized_1000", "model_1000"}:
+                return (
+                    int(coords[0] * width / 1000),
+                    int(coords[1] * height / 1000),
+                )
+            return coords
 
     # 2. Dynamic Grounding function (sync or async)
     if grounding_fn and screenshot_b64:
