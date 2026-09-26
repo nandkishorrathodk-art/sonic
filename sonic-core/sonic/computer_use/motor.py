@@ -219,15 +219,15 @@ class MotorReflexes:
                     return res
                 elif isinstance(res, tuple) and len(res) == 2:
                     return res[0], res[1], ""
-            except Exception:
-                pass
+            except Exception as exc:
+                return 1, "", str(exc)
         if hasattr(self.computer, "terminal"):
             try:
                 res = await self.computer.terminal(workspace_id, cmd)
                 if hasattr(res, "exit_code"):
                     return res.exit_code, getattr(res, "stdout", ""), getattr(res, "stderr", "")
-            except Exception:
-                pass
+            except Exception as exc:
+                return 1, "", str(exc)
         return 1, "", "No execution method available"
 
     def _get_display(self, workspace_id: str | None = None) -> str:
@@ -250,20 +250,34 @@ class MotorReflexes:
             try:
                 res = await self.computer._docker_exec(cmd)
                 if isinstance(res, tuple):
+                    exit_code = int(res[0]) if res else 1
+                    if exit_code != 0:
+                        raise RuntimeError(str(res[2] if len(res) > 2 else res[1] if len(res) > 1 else "hotkey failed"))
                     return
-            except Exception:
-                pass
+                raise RuntimeError("hotkey provider returned no execution receipt")
+            except Exception as exc:
+                primary_error = exc
+            else:
+                primary_error = None
+        else:
+            primary_error = None
         if hasattr(self.computer, "terminal"):
             try:
-                await self.computer.terminal(workspace_id, cmd)
+                res = await self.computer.terminal(workspace_id, cmd)
+                if getattr(res, "exit_code", 0) != 0:
+                    raise RuntimeError(getattr(res, "stderr", "") or "hotkey failed")
                 return
-            except Exception:
-                pass
+            except Exception as exc:
+                primary_error = exc
         if hasattr(self.computer, "gui_action"):
-            await self.computer.gui_action(
+            result = await self.computer.gui_action(
                 workspace_id, GUIAction(action=GUIActionType.KEYPRESS, key=key)
             )
+            failure = self._failure_from_dispatch(result)
+            if failure:
+                raise RuntimeError(failure)
             return
+        raise RuntimeError(str(primary_error or "No hotkey execution method available"))
 
     async def human_type(self, workspace_id: str, text: str, delay_ms: int = 25) -> str:
         """
@@ -280,24 +294,31 @@ class MotorReflexes:
             try:
                 res = await self.computer._docker_exec(cmd)
                 if isinstance(res, tuple) and len(res) >= 2:
+                    if int(res[0]) != 0:
+                        raise RuntimeError(str(res[2] if len(res) > 2 else res[1] or "typing failed"))
                     out = res[1]
                     return out.strip() if out and str(out).strip() else f"typed: {text}"
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"typing failed: {exc}") from exc
 
         if hasattr(self.computer, "gui_action"):
-            await self.computer.gui_action(
+            result = await self.computer.gui_action(
                 workspace_id, GUIAction(action=GUIActionType.TYPE, text=text, delay_ms=delay_ms)
             )
+            failure = self._failure_from_dispatch(result)
+            if failure:
+                raise RuntimeError(failure)
             return f"typed: {text}"
         elif hasattr(self.computer, "terminal"):
             try:
                 res = await self.computer.terminal(workspace_id, cmd)
+                if getattr(res, "exit_code", 0) != 0:
+                    raise RuntimeError(getattr(res, "stderr", "") or "typing failed")
                 out = getattr(res, "stdout", "")
                 return out.strip() if out and out.strip() else f"typed: {text}"
-            except Exception:
-                pass
-        return f"typed: {text}"
+            except Exception as exc:
+                raise RuntimeError(f"typing failed: {exc}") from exc
+        raise RuntimeError("No typing execution method available")
 
     async def hotkey_navigate(self, workspace_id: str, url: str, delay_ms: int = 25) -> str:
         """
@@ -430,9 +451,8 @@ class MotorReflexes:
                     workspace_id,
                     action_obj,
                 )
-            except Exception:
-                click_cmd = f"DISPLAY={disp} xdotool mousemove {x} {y} click {button}"
-                await self._exec_cmd(click_cmd, workspace_id)
+            except Exception as exc:
+                raise RuntimeError(f"GUI click failed: {exc}") from exc
         else:
             click_cmd = f"DISPLAY={disp} xdotool mousemove {x} {y} click {button}"
             await self._exec_cmd(click_cmd, workspace_id)

@@ -46,6 +46,7 @@ def extract_bbox_midpoint(
     *,
     screen_width: int | None = None,
     screen_height: int | None = None,
+    coordinate_space: str | None = None,
 ) -> tuple[int, int] | None:
     """Extract (x, y) pixel midpoint from multimodal model grounding output.
     
@@ -69,6 +70,14 @@ def extract_bbox_midpoint(
         if "NOT_FOUND" in upper_resp or "NOT FOUND" in upper_resp:
             return None
 
+    if coordinate_space is not None:
+        normalized_space = coordinate_space.strip().lower()
+        if normalized_space in {"normalized", "normalized_1000", "model_1000"}:
+            is_normalized_1000 = True
+        elif normalized_space in {"pixel", "screen_pixel", "absolute"}:
+            is_normalized_1000 = False
+        else:
+            raise ValueError(f"unsupported coordinate space: {coordinate_space}")
     pt = _extract_bbox_midpoint_impl(bbox_response, width, height, is_normalized_1000)
     if pt == (0, 0):
         return None
@@ -283,6 +292,7 @@ def resolve_ui_target(
     screen_width: int | None = None,
     screen_height: int | None = None,
     perception_bus: Any | None = None,
+    coordinate_space: str | None = None,
 ) -> tuple[int, int] | None:
     """Resolves a natural language UI target query to absolute screen coordinates (x, y).
 
@@ -321,7 +331,15 @@ def resolve_ui_target(
             if grounding_output:
                 if isinstance(grounding_output, (tuple, list)) and len(grounding_output) >= 2:
                     return int(grounding_output[0]), int(grounding_output[1])
-                coords = extract_bbox_midpoint(grounding_output, width, height)
+                output_space = grounding_output.get("coordinate_space") if isinstance(grounding_output, dict) else coordinate_space
+                coords = extract_bbox_midpoint(
+                    grounding_output,
+                    width,
+                    height,
+                    screen_width=screen_width,
+                    screen_height=screen_height,
+                    coordinate_space=output_space,
+                )
                 if coords:
                     return coords
         except Exception as exc:
@@ -340,6 +358,7 @@ async def resolve_ui_target_async(
     screen_width: int | None = None,
     screen_height: int | None = None,
     perception_bus: Any | None = None,
+    coordinate_space: str | None = None,
 ) -> tuple[int, int] | None:
     """Asynchronous variant of resolve_ui_target supporting coroutine grounding functions."""
     if not query:
@@ -376,7 +395,15 @@ async def resolve_ui_target_async(
             if grounding_output:
                 if isinstance(grounding_output, (tuple, list)) and len(grounding_output) >= 2:
                     return int(grounding_output[0]), int(grounding_output[1])
-                coords = extract_bbox_midpoint(grounding_output, width, height)
+                output_space = grounding_output.get("coordinate_space") if isinstance(grounding_output, dict) else coordinate_space
+                coords = extract_bbox_midpoint(
+                    grounding_output,
+                    width,
+                    height,
+                    screen_width=screen_width,
+                    screen_height=screen_height,
+                    coordinate_space=output_space,
+                )
                 if coords:
                     return coords
         except Exception as exc:
@@ -422,7 +449,8 @@ def crop_toolbar_region(
     bbox: tuple[int, int, int, int] | None = None,
     width: int = 1280,
     height: int = 800,
-) -> tuple[str, tuple[int, int]]:
+    crop_height_ratio: float | None = None,
+) -> tuple[str, tuple[int, int]] | str:
     """
     Hierarchical micro-crop targeting of high-density UI toolbars (e.g. dense GUI components, navigation bars, buttons).
 
@@ -431,15 +459,17 @@ def crop_toolbar_region(
         bbox: Optional (x1, y1, x2, y2) bounding box to crop. Defaults to the top toolbar band (0, 0, width, min(240, height)).
         width: Desktop screen width.
         height: Desktop screen height.
+        crop_height_ratio: Optional fraction of screen height to crop (returns raw b64 str if provided).
 
     Returns:
-        Tuple of (cropped_screenshot_b64, (offset_x, offset_y)).
+        Tuple of (cropped_screenshot_b64, (offset_x, offset_y)) by default, or cropped_screenshot_b64 if crop_height_ratio is specified.
         If PIL is unavailable or decoding fails, returns (screenshot_b64, (0, 0)).
     """
     if not _HAS_PIL or not screenshot_b64:
-        return screenshot_b64, (0, 0)
+        return (screenshot_b64, (0, 0)) if crop_height_ratio is None else screenshot_b64
 
-    crop_box = bbox or (0, 0, width, min(240, height))
+    crop_h = int(height * crop_height_ratio) if crop_height_ratio is not None else min(240, height)
+    crop_box = bbox or (0, 0, width, crop_h)
     x1, y1, x2, y2 = crop_box
 
     try:
@@ -451,10 +481,12 @@ def crop_toolbar_region(
         buffer = io.BytesIO()
         cropped.convert("RGB").save(buffer, format="PNG")
         cropped_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        if crop_height_ratio is not None:
+            return cropped_b64
         return cropped_b64, (x1, y1)
     except Exception as exc:
         logger.warning("crop_toolbar_region_failed", error=str(exc))
-        return screenshot_b64, (0, 0)
+        return (screenshot_b64, (0, 0)) if crop_height_ratio is None else screenshot_b64
 
 
 def map_crop_to_screen(

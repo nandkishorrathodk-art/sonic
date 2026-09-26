@@ -3301,6 +3301,22 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             async def _on_step(trace):
                                 await _record_step_trace(trace)
 
+                            async def _on_heartbeat(event):
+                                elapsed = event.get("elapsed_seconds", 0)
+                                _append_worklog(
+                                    state,
+                                    "thought",
+                                    "Reasoning heartbeat",
+                                    (
+                                        f"Step {event.get('step', '?')} still reasoning "
+                                        f"after {elapsed:.1f}s; observation version "
+                                        f"{event.get('last_observation_version', 0)}."
+                                    ),
+                                )
+                                state["current_action"] = "Reasoning from the latest live observation"
+                                _persist_workstation_state()
+
+                            agent._heartbeat_callback = _on_heartbeat
                             try:
                                 traces = await agent.run_mission(
                                     workspace_id=desktop_id,

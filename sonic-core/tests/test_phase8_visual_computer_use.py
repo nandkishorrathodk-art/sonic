@@ -68,6 +68,26 @@ class TestGUIActionDispatch:
         assert gui_action.action == GUIActionType.TYPE
 
     @pytest.mark.asyncio
+    async def test_gui_type_focuses_grounded_input_before_typing(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+        agent._last_screenshot_b64 = "live-screen"
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_TYPE,
+            "search field",
+            {"x": 320, "y": 240, "text": "query"},
+            "Focus and type in the grounded field",
+        )
+        assert trace.status == "SUCCESS"
+        actions = [
+            call.args[1].action for call in provider.gui_action.call_args_list
+        ]
+        assert actions[:2] == [GUIActionType.CLICK, GUIActionType.TYPE]
+        click = provider.gui_action.call_args_list[0].args[1]
+        assert (click.x, click.y) == (320, 240)
+
+    @pytest.mark.asyncio
     async def test_gui_keypress_dispatches_to_provider(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider)
@@ -254,6 +274,9 @@ class TestReasoningPrompt:
         assert "GUI_KEYPRESS" in system_prompt
         assert "GUI_SCROLL" in system_prompt
         assert "GUI_SCREENSHOT" in system_prompt
+        assert "EXECUTION GROUND-TRUTH" in system_prompt
+        assert "visible cursor" in system_prompt
+        assert "APP_FOCUS" in system_prompt
 
 
 class TestSafetyPolicy:

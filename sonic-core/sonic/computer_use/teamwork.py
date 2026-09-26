@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import time
 import uuid
@@ -47,12 +48,18 @@ class DisplayLeaseManager:
     """Ensures parallel subagents never fight over the physical X11 mouse/keyboard cursor on :99."""
 
     _locks: dict[str, asyncio.Lock] = {}
+    _lock_metadata: dict[str, dict[str, Any]] = {}
 
     @classmethod
-    def get_lock(cls, workspace_id: str) -> asyncio.Lock:
-        key = workspace_id or "default"
+    def get_lock(cls, workspace_id: str, display: str | None = None) -> asyncio.Lock:
+        # Workspace IDs are logical; several tenant workspaces can still share
+        # the same physical X11 display. Serialize by display to protect the
+        # real cursor and keyboard, while retaining a workspace fallback for
+        # providers that expose an isolated display.
+        key = f"display:{display or os.environ.get('DISPLAY') or ':99'}"
         if key not in cls._locks:
             cls._locks[key] = asyncio.Lock()
+            cls._lock_metadata[key] = {"display": display or os.environ.get("DISPLAY") or ":99"}
         return cls._locks[key]
 
 
@@ -674,4 +681,3 @@ class SubagentTeamworkManager:
             status = getattr(t, "status", "") if not isinstance(t, dict) else t.get("status", "")
             lines.append(f"[{status}] {act_str} ({tgt}): {str(obs)[:200]}")
         return "\n".join(lines)
-

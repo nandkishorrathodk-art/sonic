@@ -16,8 +16,10 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import contextlib
 import hashlib
 import ipaddress
+import inspect
 import json
 import os
 import re
@@ -1827,6 +1829,24 @@ class ComputerUseAgent:
             reasoning_effort=None if images else "high",
         )
         t_thought_start = time.perf_counter()
+        heartbeat_task: asyncio.Task[Any] | None = None
+        heartbeat_callback = getattr(self, "_heartbeat_callback", None)
+        if heartbeat_callback is not None:
+            async def _heartbeat_loop() -> None:
+                while True:
+                    await asyncio.sleep(2.0)
+                    event = {
+                        "phase": "reasoning",
+                        "elapsed_seconds": round(time.perf_counter() - t_thought_start, 1),
+                        "step": step_index,
+                        "goal": goal,
+                        "last_observation_version": getattr(observation, "perception_version", 0),
+                    }
+                    result = heartbeat_callback(event)
+                    if inspect.isawaitable(result):
+                        await result
+
+            heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
             response = await self.llm_router.complete(request)
             self._last_thought_duration = round(time.perf_counter() - t_thought_start, 2)
@@ -1926,6 +1946,11 @@ class ComputerUseAgent:
                     "Reasoning failed",
                 )
             return self._diagnostic_fallback(primary_file)
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
 
     @staticmethod
     def _normalize_app_name(target: str) -> str:
@@ -2816,6 +2841,70 @@ class ComputerUseAgent:
         elif not isinstance(payload, dict):
             payload = {} if payload is None else {"raw": payload}
 
+        gui_actions = {
+            ComputerActionType.GUI_CLICK,
+            ComputerActionType.GUI_DOUBLE_CLICK,
+            ComputerActionType.GUI_RIGHT_CLICK,
+            ComputerActionType.GUI_TYPE,
+            ComputerActionType.GUI_KEYPRESS,
+            ComputerActionType.GUI_MOVE,
+            ComputerActionType.GUI_SCROLL,
+            ComputerActionType.GUI_DRAG,
+        }
+        if action_type in gui_actions and hasattr(self.computer, "status"):
+            requested_window = (
+                payload.get("target_window")
+                or payload.get("window")
+                or payload.get("active_window")
+            )
+            if requested_window:
+                try:
+                    current_status = await self.computer.status(workspace_id)
+                    active_window = str(
+                        getattr(current_status, "active_application", "")
+                        or getattr(current_status, "active_window", "")
+                    ).strip()
+                    if active_window.casefold() != str(requested_window).strip().casefold():
+                        focus_result = await self.computer.gui_action(
+                            workspace_id,
+                            GUIAction(
+                                action=GUIActionType.SELECT_WINDOW,
+                                app_name=str(requested_window),
+                            ),
+                        )
+                        if getattr(focus_result, "exit_code", 0) not in (None, 0):
+                            raise RuntimeError("target window focus failed")
+                        refreshed = await self.computer.status(workspace_id)
+                        refreshed_active = str(
+                            getattr(refreshed, "active_application", "")
+                            or getattr(refreshed, "active_window", "")
+                        ).strip()
+                        if refreshed_active.casefold() != str(requested_window).strip().casefold():
+                            raise RuntimeError(
+                                f"target window ownership not verified: {refreshed_active or 'unknown'}"
+                            )
+                except Exception as exc:
+                    actual_obs_str = f"GUI action blocked before dispatch: {exc}"
+                    trace = ComputerDecisionTrace(
+                        step_index=self.action_counter,
+                        action_type=action_type,
+                        target_resource=target_resource,
+                        payload=str(payload),
+                        predicted_outcome=predicted_outcome,
+                        actual_observation=actual_obs_str,
+                        expected_observation=predicted_outcome,
+                        info_gain=0.0,
+                        recovery_attempted=False,
+                        status=ActionExecutionStatus.BLOCKED,
+                        exit_code=126,
+                        thought=getattr(self, "_last_thought", ""),
+                        duration_seconds=round(time.perf_counter() - t_start, 3),
+                        thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+                    )
+                    self.traces.append(trace)
+                    self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
+                    return trace
+
         # Pre-execution refusal or blocked action handling (e.g. from LLM safety refusal)
         if action_type == ActionExecutionStatus.BLOCKED or str(action_type).upper() in ("BLOCKED", "ACTIONEXECUTIONSTATUS.BLOCKED"):
             actual_obs_str = (
@@ -3486,15 +3575,14 @@ class ComputerUseAgent:
                         actual_obs_str = f"Clicked at ({x}, {y})"
                     if pre_screen_b64 and post_screen_b64 and pre_screen_b64 == post_screen_b64:
                         self._consecutive_unchanged_screens += 1
-                        if self._consecutive_unchanged_screens >= 2:
-                            status = ActionExecutionStatus.FAILED
-                            recovery_needed = True
-                            actual_obs_str = (
-                                f"{actual_obs_str} | [ANTI-STALL ALERT]: Consecutive clicks produced zero screen change (display unchanged). "
-                                f"Coordinate ({x}, {y}) did not trigger UI response. Marked as FAILED to trigger strategy pivot."
-                            )
-                        else:
-                            actual_obs_str = f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after click — target element may be occluded, missing, or page is loading."
+                        status = ActionExecutionStatus.FAILED
+                        recovery_needed = True
+                        actual_obs_str = (
+                            f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged | "
+                            f"[ANTI-STALL ALERT]: Click produced zero visual change "
+                            f"at ({x}, {y}). Re-observe and choose a different strategy; "
+                            "the action is not treated as successful."
+                        )
                     elif post_screen_b64:
                         self._consecutive_unchanged_screens = 0
 
@@ -3525,15 +3613,14 @@ class ComputerUseAgent:
                         actual_obs_str = f"Double-clicked at ({x}, {y})"
                     if pre_screen_b64 and post_screen_b64 and pre_screen_b64 == post_screen_b64:
                         self._consecutive_unchanged_screens += 1
-                        if self._consecutive_unchanged_screens >= 2:
-                            status = ActionExecutionStatus.FAILED
-                            recovery_needed = True
-                            actual_obs_str = (
-                                f"{actual_obs_str} | [ANTI-STALL ALERT]: Consecutive double-clicks produced zero screen change (display unchanged). "
-                                f"Coordinate ({x}, {y}) did not trigger UI response. Marked as FAILED to trigger strategy pivot."
-                            )
-                        else:
-                            actual_obs_str = f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after double-click."
+                        status = ActionExecutionStatus.FAILED
+                        recovery_needed = True
+                        actual_obs_str = (
+                            f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged | "
+                            f"[ANTI-STALL ALERT]: Double-click produced zero "
+                            f"visual change at ({x}, {y}). Re-observe and re-ground; the action "
+                            "is not treated as successful."
+                        )
                     elif post_screen_b64:
                         self._consecutive_unchanged_screens = 0
 
@@ -3636,7 +3723,15 @@ class ComputerUseAgent:
                     self._prev_screenshot_hash = hashlib.md5(post_screen_b64.encode()).hexdigest()
                     self._update_screen_dims(obs_after)
                 if status != ActionExecutionStatus.BLOCKED:
-                    if focus_x is not None and focus_y is not None:
+                    if pre_screen_b64 and post_screen_b64 and pre_screen_b64 == post_screen_b64:
+                        status = ActionExecutionStatus.FAILED
+                        recovery_needed = True
+                        actual_obs_str = (
+                            "[VISUAL VERIFICATION]: Screen state unchanged | "
+                            "[ANTI-STALL ALERT]: Typing produced zero visual change; "
+                            "re-observe focus and target before retrying."
+                        )
+                    elif focus_x is not None and focus_y is not None:
                         actual_obs_str = (
                             f"Typed {len(text)} chars at focused coordinates "
                             f"({focus_x}, {focus_y}): {text[:50]}"
@@ -3646,6 +3741,7 @@ class ComputerUseAgent:
 
             elif action_type in (ComputerActionType.GUI_KEYPRESS, ComputerActionType.GUI_HOTKEY):
                 key = str(payload.get("key") or payload.get("keys") or target_resource or "Return").strip()
+                pre_key_b64 = getattr(self, "_last_screenshot_b64", "")
                 gui_act_type = getattr(GUIActionType, "HOTKEY", GUIActionType.KEYPRESS) if (action_type == ComputerActionType.GUI_HOTKEY or "+" in key) else GUIActionType.KEYPRESS
                 obs_key = await self.computer.gui_action(
                     workspace_id,
@@ -3657,6 +3753,18 @@ class ComputerUseAgent:
                     self._prev_screenshot_hash = hashlib.md5(key_b64.encode()).hexdigest()
                     self._update_screen_dims(obs_key)
                 actual_obs_str = f"Pressed {'hotkey' if action_type == ComputerActionType.GUI_HOTKEY or '+' in key else 'key'}: {key}"
+                if (
+                    pre_key_b64
+                    and key_b64
+                    and pre_key_b64 == key_b64
+                ):
+                    status = ActionExecutionStatus.FAILED
+                    recovery_needed = True
+                    actual_obs_str = (
+                        "[VISUAL VERIFICATION]: Screen state unchanged | "
+                        "[ANTI-STALL ALERT]: Keypress produced zero visual change; "
+                        "re-observe before repeating."
+                    )
 
             elif action_type == ComputerActionType.GUI_MOVE:
                 if payload.get("x") is None or payload.get("y") is None:

@@ -114,6 +114,23 @@ NO_SUCCESS_BY_DECREE = (
     "never in a confirmed verdict."
 )
 
+EXECUTION_GROUND_TRUTH_CLAUSE = """
+## EXECUTION GROUND-TRUTH & BEHAVIORAL ENFORCEMENT
+Every desktop or terminal mutation MUST be emitted as the single next action
+from the observe -> reason -> act loop. Never invent progress, hide a shortcut,
+or claim success without the resulting sandbox receipt.
+For visual work, stay on DISPLAY=:99:
+- Check Open Windows before APP_LAUNCH; use APP_FOCUS when the app is already open.
+- Ground coordinates in the current screenshot, accessibility state, or active-window
+  bounds. If a click does not change state, re-observe and re-ground elsewhere.
+- Before GUI_TYPE, provide grounded x and y for the input. The runtime will move
+  the visible cursor there, click to focus, and then type with human cadence.
+- Keep actions atomic and observable; use a short wait or screenshot when the
+  desktop needs to settle so the operator is never left with a stale screen.
+Use TERMINAL_EXEC only when the objective or live observation calls for terminal,
+file, code, or test work; it must still be emitted and verified through this loop.
+"""
+
 
 # ---------------------------------------------------------------------------
 # JSON schemas matching the Python parsers
@@ -620,6 +637,7 @@ PRIMARY ROLE: Act as an autonomous AI-Human Digital Being and senior computer en
 You can see the live desktop screenshot, Screen visible text, `Open Windows` (actual open X11 application windows), `Active Application / Window`, `Available Installed Desktop Applications`, `Browser State`, `Last Command Output` (Terminal output), workspace files, git state, and previous action history.
 {HONESTY_CLAUSE}
 {SAFETY_CLAUSE}
+{EXECUTION_GROUND_TRUTH_CLAUSE}
 
 ARCHITECTURAL ROLES AND CONCURRENT DUAL-PLANE EXECUTION:
 1. THE COMPUTER WORKSTATION (`DISPLAY=:99` Graphical Desktop Application Plane):
@@ -659,7 +677,8 @@ TARGET: <resource path, application/window name, url, css selector, coordinates,
 PAYLOAD: <json dict, e.g. {{"path": "...", "content": "..."}}, {{"command": "..."}}, {{"url": "..."}}, {{"selector": "...", "text": "..."}}, {{"selector": "...", "value": "..."}}, {{"app_name": "..."}}, {{"key": "..."}}, {{"text": "..."}}>
 For GUI_CLICK/GUI_DOUBLE_CLICK/GUI_RIGHT_CLICK/GUI_MOVE: TARGET can be numeric pixel coordinates like "<x>,<y>" grounded from the current screenshot OR a visual UI element query visible on screen
 For GUI_DRAG: TARGET is "<x>,<y>" (source) and PAYLOAD is {{"x": <sx>, "y": <sy>, "x2": <dx>, "y2": <dy>}} (destination) grounded from the live screenshot
-For GUI_TYPE: PAYLOAD is {{"text": "..."}}
+For GUI_TYPE: TARGET/PAYLOAD must include grounded input coordinates:
+{{"x": <integer>, "y": <integer>, "text": "..."}}
 For GUI_KEYPRESS / GUI_HOTKEY: PAYLOAD is {{"key": "Return|Tab|Escape|ctrl+s|ctrl+c|ctrl+v|alt+Tab|..."}}
 For GUI_SCROLL / BROWSER_SCROLL: TARGET is "<x>,<y>" and PAYLOAD is {{"delta": -3}} (negative=down, positive=up)
 For GUI_SCREENSHOT: no target or payload needed
@@ -695,6 +714,7 @@ EXPECTED: The application window launches and appears in Open Windows on the gra
 COMPUTER_USE_SYSTEM_PROMPT_COMPACT = f"""{asea_identity("computer-use core")} You are Sonic — an Autonomous AI-Human Digital Being and senior computer engineer operating your dedicated computer workstation (`DISPLAY=:99` graphical desktop + concurrent headless terminal). You are NOT a scripted checklist bot. You can launch, focus, switch between, and operate 1, 2, or N desktop GUI applications (`APP_LAUNCH`, `APP_FOCUS`, `GUI_*`, `BROWSER_*`) while concurrently executing commands, file writes, and Git workflows (`TERMINAL_EXEC`, `FILE_*`, `GIT_*`) in the terminal. Prove every milestone with empirical receipts — never claim success by decree.
 {HONESTY_CLAUSE}
 {SAFETY_CLAUSE}
+{EXECUTION_GROUND_TRUTH_CLAUSE}
 
 ARCHITECTURAL ROLES:
 1. Graphical Desktop Workstation (`DISPLAY=:99`): Use `APP_LAUNCH` to launch desktop apps from `Available Installed Desktop Applications`, `APP_FOCUS` to switch focus between open windows in `Open Windows`, `GUI_*` to click/type/hotkey inside the focused window, and `BROWSER_*` for web pages.
@@ -711,7 +731,8 @@ KEY RULES:
 - APP_LAUNCH: To start ANY desktop application (Google Chrome, mousepad, terminal), use ACTION: APP_LAUNCH with TARGET: <app_name> (e.g. google-chrome or mousepad). The bare desktop background has NO search bar.
 - APP_FOCUS: TARGET is the open window title or app name to bring to X11 foreground focus
 - GUI_CLICK: TARGET is "<x>,<y>" coordinates grounded from the screenshot or a visible UI element query
-- GUI_TYPE: PAYLOAD is {{"text": "..."}} inside an already focused input field
+- GUI_TYPE: TARGET/PAYLOAD must include grounded input coordinates
+  {{"x": <integer>, "y": <integer>, "text": "..."}}
 - GUI_KEYPRESS / GUI_HOTKEY: PAYLOAD is {{"key": "Return"}} (e.g. "Return", "Enter", "Tab", "Escape", "ctrl+s")
 - TERMINAL_EXEC: TARGET/PAYLOAD must be an EXACT shell command, NEVER natural language
 - FILE_WRITE: TARGET is the file path and PAYLOAD is {{"path": "...", "content": "..."}}

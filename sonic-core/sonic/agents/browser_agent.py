@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import inspect
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -81,6 +82,41 @@ class BrowserAgent:
         self.allow_javascript = allow_javascript
         self.require_scope = require_scope
 
+    @staticmethod
+    def _profile_is_owned(profile_dir: Path) -> bool:
+        """Detect a live process using the requested persistent profile."""
+        proc_root = Path("/proc")
+        if not proc_root.exists():
+            return False
+        marker = str(profile_dir.resolve())
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                command = (entry / "cmdline").read_bytes().decode(errors="ignore")
+            except OSError:
+                continue
+            if marker in command:
+                return True
+        return False
+
+    @classmethod
+    def _prepare_profile(cls, profile_dir: str | None) -> str | None:
+        """Remove stale generic profile locks only when no live owner exists."""
+        if not profile_dir:
+            return None
+        path = Path(profile_dir).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        if not cls._profile_is_owned(path):
+            for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                lock = path / name
+                try:
+                    if lock.is_symlink() or lock.exists():
+                        lock.unlink()
+                except OSError as exc:
+                    logger.warning("browser_profile_lock_cleanup_failed", path=str(lock), error=str(exc))
+        return str(path)
+
     def _validate_url(self, url: str) -> None:
         """Reject unsafe browser destinations before any network request."""
         clean = (url or "").strip()
@@ -125,6 +161,7 @@ class BrowserAgent:
                 "ignore_https_errors": False,
                 "accept_downloads": True,
             }
+            profile_dir = self._prepare_profile(os.environ.get("SONIC_BROWSER_PROFILE_DIR"))
             if saved_state is not None:
                 ctx_kwargs["storage_state"] = saved_state
 
@@ -150,8 +187,14 @@ class BrowserAgent:
 
             if not connected_cdp:
                 self._attached_cdp = False
-                self._browser = await browser_engine.launch(headless=self.headless)
-                self._context = await self._browser.new_context(**ctx_kwargs)
+                if profile_dir:
+                    self._context = await browser_engine.launch_persistent_context(
+                        profile_dir, headless=self.headless, **ctx_kwargs
+                    )
+                    self._browser = self._context.browser
+                else:
+                    self._browser = await browser_engine.launch(headless=self.headless)
+                    self._context = await self._browser.new_context(**ctx_kwargs)
                 self._page = await self._context.new_page()
 
             await self._page.route("**/*", self._guard_request)
@@ -301,9 +344,11 @@ class BrowserAgent:
         if not self._using_playwright or not self._page:
             return False
         try:
+            if not await self.dismiss_blocking_overlays():
+                return False
             await self._page.click(selector, timeout=5000)
             await self.save_state_to_vault()
-            return True
+            return await self._verify_no_blocking_overlay()
         except Exception as e:
             logger.debug("click_failed", selector=selector, error=str(e))
             return False
@@ -313,11 +358,33 @@ class BrowserAgent:
         if not self._using_playwright or not self._page:
             return False
         try:
+            if not await self.dismiss_blocking_overlays():
+                return False
             await self._page.fill(selector, text)
             await self.save_state_to_vault()
-            return True
+            return await self._verify_no_blocking_overlay()
         except Exception as e:
             logger.debug("type_failed", selector=selector, error=str(e))
+            return False
+
+    async def _verify_no_blocking_overlay(self) -> bool:
+        """Return true only when semantic modal elements are no longer visible."""
+        if not self._page:
+            return False
+        return not await self._page.locator('[role="dialog"]:visible, dialog:visible').count()
+
+    async def dismiss_blocking_overlays(self) -> bool:
+        """Dismiss a generic semantic dialog and verify the dismissal."""
+        if not self._page:
+            return False
+        try:
+            dialogs = self._page.locator('[role="dialog"]:visible, dialog:visible')
+            if await dialogs.count():
+                await self._page.keyboard.press("Escape")
+                await self._page.wait_for_timeout(100)
+            return await self._verify_no_blocking_overlay()
+        except Exception as exc:
+            logger.warning("browser_overlay_verification_failed", error=str(exc))
             return False
 
     async def select_option(self, selector: str, value: str) -> bool:
