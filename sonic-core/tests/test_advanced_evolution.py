@@ -16,6 +16,7 @@ import asyncio
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -315,6 +316,39 @@ def test_goal_director_capability_add_bumps_minor_version(temp_evolution_env):
     assert version_tracker.current_version() == "0.2.0"
 
 
+def test_failed_commit_does_not_promote_or_bump_version(temp_evolution_env):
+    director: EvolutionGoalDirector = temp_evolution_env["director"]
+    version_tracker: VersionTracker = temp_evolution_env["version_tracker"]
+    repo_root: Path = temp_evolution_env["repo_root"]
+    target = "sonic-core/sonic/research/commit_probe.py"
+    target_path = repo_root / target
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text("VALUE = 1\n", encoding="utf-8")
+    (repo_root / "sonic-core" / "tests" / "test_commit_probe.py").write_text(
+        "def test_probe():\n    assert True\n", encoding="utf-8"
+    )
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "add commit probe")
+    original = target_path.read_text(encoding="utf-8")
+
+    goal = director.submit_goal(
+        title="Commit failure regression",
+        description="A failed commit must not advance the version",
+        target_files=[target],
+    )
+    with patch.object(director.evolver, "commit_and_push", return_value=(False, "", False, "commit denied")):
+        report = asyncio.run(director.execute_goal(
+            goal.goal_id,
+            custom_patch="VALUE = 2\n",
+            auto_promote=True,
+            test_paths=["sonic-core/tests/test_commit_probe.py"],
+        ))
+
+    assert report.stage == EvolutionStage.ROLLED_BACK
+    assert version_tracker.current_version() == "0.1.0"
+    assert target_path.read_text(encoding="utf-8") == original
+
+
 def test_evolution_engine_unified_facade(temp_evolution_env):
     """Verifies that EvolutionEngine cleanly exposes goal queue, status, and version progression."""
     director = temp_evolution_env["director"]
@@ -341,4 +375,3 @@ def test_evolution_engine_unified_facade(temp_evolution_env):
     )
     assert goal.title == "Engine facade test goal"
     assert engine.get_evolution_status()["queued_goals"] == 1
-

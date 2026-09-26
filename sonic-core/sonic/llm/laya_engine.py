@@ -174,24 +174,33 @@ class LayaSystem1Engine:
                     )
                     if resp.status_code == 200:
                         data = resp.json()
-                        return LayaDecisionResult(
-                            answers=data.get("answers", {}),
-                            routing=data.get("routing", {"model": chosen_model, "backend": "laya_remote"}),
+                        result = self._validate_backend_result(
+                            data, questions, chosen_model, "laya_remote"
+                        )
+                        if result is not None:
+                            return result
+                        logger.warning("laya_remote_invalid_response")
+                    else:
+                        logger.warning(
+                            "laya_remote_non_success_status",
+                            status_code=resp.status_code,
                         )
             except Exception as exc:
-                logger.debug("laya_remote_call_failed", error=str(exc))
+                logger.warning("laya_remote_call_failed", error=str(exc))
 
         # 2. Local `laya` Python package (if installed & RAM guard passes)
         local_router = self._get_local_router()
         if local_router is not None:
             try:
                 raw = local_router.predict(state, questions, model=chosen_model, max_len=max_len)
-                return LayaDecisionResult(
-                    answers=raw.get("answers", {}),
-                    routing=raw.get("routing", {"model": chosen_model, "backend": "laya_local"}),
+                result = self._validate_backend_result(
+                    raw, questions, chosen_model, "laya_local"
                 )
+                if result is not None:
+                    return result
+                logger.warning("laya_local_invalid_response")
             except Exception as exc:
-                logger.debug("laya_local_predict_failed", error=str(exc))
+                logger.warning("laya_local_predict_failed", error=str(exc))
 
         # 3. Zero-RAM Calibrated System-1 Scoring Engine (Multilingual EN / HI / Hinglish)
         answers: dict[str, dict[str, Any]] = {}
@@ -232,6 +241,58 @@ class LayaSystem1Engine:
                 "backend": "laya_vector_projection",
             },
         )
+
+    @staticmethod
+    def _validate_backend_result(
+        raw: Any,
+        questions: dict[str, dict[str, Any]],
+        model: str,
+        backend: str,
+    ) -> LayaDecisionResult | None:
+        """Reject incomplete or malformed model results so callers get fallback scoring."""
+        if isinstance(raw, LayaDecisionResult):
+            answers = raw.answers
+            routing = raw.routing
+        elif isinstance(raw, dict):
+            answers = raw.get("answers")
+            routing = raw.get("routing", {})
+        else:
+            return None
+
+        if not isinstance(answers, dict) or not isinstance(routing, dict):
+            return None
+
+        normalized: dict[str, dict[str, Any]] = {}
+        for key, spec in questions.items():
+            answer = answers.get(key)
+            if not isinstance(answer, dict):
+                return None
+            question_type = str(spec.get("type", "choice")).lower()
+            if question_type == "choice":
+                criteria = spec.get("criteria")
+                choice = answer.get("choice")
+                probability = answer.get("probability")
+                if not isinstance(criteria, dict) or choice not in criteria:
+                    return None
+                if not isinstance(probability, (int, float)) or isinstance(probability, bool):
+                    return None
+                if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+                    return None
+            elif question_type in {"score", "noul"}:
+                field_name = "score" if question_type == "score" else "noul"
+                value = answer.get(field_name)
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    return None
+                if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                    return None
+            else:
+                return None
+            normalized[key] = answer
+
+        result_routing = dict(routing)
+        result_routing.setdefault("model", model)
+        result_routing.setdefault("backend", backend)
+        return LayaDecisionResult(answers=normalized, routing=result_routing)
 
     def _score_choice_criteria(
         self,
@@ -488,8 +549,19 @@ class LayaSystem1Engine:
             },
         )
         ans = res.answers.get("plane", {})
-        choice = str(ans.get("choice", "gui"))
-        prob = float(ans.get("probability", 0.5))
+        raw_choice = ans.get("choice")
+        raw_prob = ans.get("probability")
+        if (
+            raw_choice not in {"gui", "headless"}
+            or not isinstance(raw_prob, (int, float))
+            or isinstance(raw_prob, bool)
+            or not math.isfinite(raw_prob)
+            or not 0.0 <= raw_prob <= 1.0
+        ):
+            logger.warning("laya_plane_decision_invalid")
+            return "gui", 0.5
+        choice = str(raw_choice)
+        prob = float(raw_prob)
         return choice, prob
 
     def verify_execution_receipt(self, goal: str, evidence: str) -> float:
@@ -559,4 +631,3 @@ def get_laya_engine() -> LayaSystem1Engine:
             if _LAYA_SINGLETON is None:
                 _LAYA_SINGLETON = LayaSystem1Engine()
     return _LAYA_SINGLETON
-

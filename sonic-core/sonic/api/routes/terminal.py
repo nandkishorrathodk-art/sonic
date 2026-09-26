@@ -227,6 +227,12 @@ async def terminal_websocket(
     try:
         while True:
             msg = await websocket.receive_json()
+            if stop_state.is_stopped(user.tenant_id):
+                await websocket.send_json({
+                    "type": "error",
+                    "data": "\x1b[1;31m[POLICY ERROR] Runtime kill switch is asserted.\x1b[0m\r\n",
+                })
+                break
             msg_type = msg.get("type", "")
 
             if msg_type == "input":

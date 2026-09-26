@@ -26,20 +26,17 @@ not a mock of the agent itself.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
-
-import pytest
 
 from sonic.computer.models import (
-    ComputerState, ComputerWorkspaceStatus, FileEntry, GitStatusInfo,
-    ScreenObservation, ServiceInfo,
+    ComputerState,
+    FileEntry,
+    GitStatusInfo,
+    ScreenObservation,
 )
 from sonic.computer.provider import ComputerProvider
-from sonic.computer_use.agent import ComputerUseAgent, _GOAL_COMPLETE_SENTINEL
-from sonic.computer_use.models import ComputerWorldObservation
-from sonic.computer.models import GUIAction
+from sonic.computer_use.agent import _GOAL_COMPLETE_SENTINEL, ComputerUseAgent
+from sonic.computer_use.models import ComputerActionType
 from sonic.sandbox.provider import ExecResult
-
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -87,7 +84,8 @@ class _StubComputer(ComputerProvider):
         self.commands.append(command)
         # Reflect a configurable terminal output so the agent's NEXT observation
         # changes (used to prove observation-driven adaptivity).
-        return ExecResult(command=command, exit_code=0, stdout=self.terminal_output, stderr="")
+        exit_code = 1 if "FAILED" in self.terminal_output else 0
+        return ExecResult(command=command, exit_code=exit_code, stdout=self.terminal_output, stderr="")
 
     async def read_file(self, workspace_id, path):
         self.reads.append(path)
@@ -198,21 +196,22 @@ def test_action_selection_is_llm_driven():
         _action("GOAL_COMPLETE", "goal-complete", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
     agent = ComputerUseAgent(computer_provider=comp, llm_router=llm)
-    traces = _run(agent.run_mission(comp.workspace_id, "Fix the auth vulnerability", steps=10))
+    traces = _run(agent.run_mission(comp.workspace_id, "Fix the auth vulnerability and run tests", steps=10))
 
-    # Four LLM calls; the GOAL_COMPLETE one terminates the loop WITHOUT acting.
+    # The GOAL_COMPLETE declaration is followed by a typed verification action.
     assert len(llm.received_prompts) == 4
-    # Three real actions executed (read, write, commit) — the 4th was goal-complete.
-    assert len(traces) == 3
+    # Three user-directed actions plus the independently executed pytest probe.
+    assert len(traces) == 4
     from sonic.computer_use.models import ComputerActionType
     assert [t.action_type for t in traces] == [
         ComputerActionType.FILE_READ,
         ComputerActionType.FILE_WRITE,
         ComputerActionType.GIT_COMMIT,
+        ComputerActionType.VERIFY_PROBE,
     ]
     assert comp.written.get("auth_controller.py") == "PATCHED"
     assert comp.commits == ["fix auth"]
-    assert agent.metrics.verification_score == 1.00  # goal reached, no failures
+    assert agent.metrics.verification_score == 1.00
 
 
 def test_reasoning_contract_exposes_full_live_action_surface():
@@ -299,7 +298,8 @@ def test_reasoning_reacts_to_observation_not_just_goal():
     llm1 = _StubLLM([_action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL)])
     agent1 = ComputerUseAgent(computer_provider=comp1, llm_router=llm1)
     traces1 = _run(agent1.run_mission("ws-stub", "Make tests green", steps=3))
-    assert len(traces1) == 0  # completed immediately, no action taken
+    assert len(traces1) == 1  # independent typed pytest verification was executed
+    assert traces1[0].action_type == ComputerActionType.VERIFY_PROBE
 
     # Run 2: tests failing -> fix then complete.
     comp2 = _StubComputer(terminal_output="FAILED test_auth::test_token")
@@ -309,9 +309,9 @@ def test_reasoning_reacts_to_observation_not_just_goal():
     ])
     agent2 = ComputerUseAgent(computer_provider=comp2, llm_router=llm2)
     traces2 = _run(agent2.run_mission("ws-stub", "Make tests green", steps=3))
-    from sonic.computer_use.models import ComputerActionType
-    assert len(traces2) == 1
+    assert len(traces2) == 2
     assert traces2[0].action_type == ComputerActionType.FILE_WRITE
+    assert traces2[1].action_type == ComputerActionType.VERIFY_PROBE
     # The differing observation reached the LLM.
     assert "FAILED test_auth::test_token" in llm2.received_prompts[0]
 
@@ -328,7 +328,7 @@ def test_history_carried_across_steps():
         _action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
     agent = ComputerUseAgent(computer_provider=comp, llm_router=llm)
-    _run(agent.run_mission(comp.workspace_id, "goal", steps=3))
+    _run(agent.run_mission(comp.workspace_id, "Run tests and report the results", steps=3))
     assert len(llm.received_prompts) == 2
     step2_prompt = llm.received_prompts[1]
     # Step-1 action and its result appear in the step-2 context.
@@ -345,6 +345,8 @@ def test_goal_complete_terminates_loop_early():
     comp = _StubComputer()
     llm = _StubLLM([_action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL)])
     agent = ComputerUseAgent(computer_provider=comp, llm_router=llm)
-    traces = _run(agent.run_mission(comp.workspace_id, "goal", steps=5))
-    assert len(traces) == 0, "GOAL_COMPLETE must not execute an action"
+    traces = _run(agent.run_mission(comp.workspace_id, "Run pytest", steps=5))
+    assert len(traces) == 1
+    assert traces[0].action_type == ComputerActionType.VERIFY_PROBE
+    assert traces[0].exit_code == 0
     assert len(llm.received_prompts) == 1, "Loop must stop after GOAL_COMPLETE"

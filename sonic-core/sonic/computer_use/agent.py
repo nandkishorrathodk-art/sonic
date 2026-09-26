@@ -18,9 +18,10 @@ import asyncio
 import base64
 import contextlib
 import hashlib
-import ipaddress
 import inspect
+import ipaddress
 import json
+import math
 import os
 import re
 import shlex
@@ -54,6 +55,8 @@ from sonic.computer_use.models import (
     SubGoal,
     SubGoalChecklist,
     SubGoalStatus,
+    VerificationProbe,
+    VerificationProbeKind,
 )
 from sonic.computer_use.motor import MotorReflexes
 from sonic.computer_use.perception_bus import PerceptionBus
@@ -1785,7 +1788,7 @@ class ComputerUseAgent:
         available_actions = (
             self._GUI_ONLY_ACTIONS
             if getattr(self, "gui_only", False)
-            else frozenset(ComputerActionType)
+            else frozenset(ComputerActionType) - {ComputerActionType.VERIFY_PROBE}
         )
         action_schema = "|".join(
             action.value for action in ComputerActionType if action in available_actions
@@ -1842,9 +1845,17 @@ class ComputerUseAgent:
                         "goal": goal,
                         "last_observation_version": getattr(observation, "perception_version", 0),
                     }
-                    result = heartbeat_callback(event)
-                    if inspect.isawaitable(result):
-                        await result
+                    try:
+                        result = heartbeat_callback(event)
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception as exc:
+                        logger.warning(
+                            "computer_reasoning_heartbeat_failed",
+                            step=step_index,
+                            error=str(exc),
+                        )
+                        return
 
             heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
@@ -2816,7 +2827,51 @@ class ComputerUseAgent:
         payload: dict[str, Any],
         predicted_outcome: str,
     ) -> ComputerDecisionTrace:
+        """Serialize every shared-display action before checking focus or dispatching."""
+        action_name = getattr(action_type, "value", str(action_type))
+        shared_display_action = action_name.startswith(("GUI_", "APP_", "BROWSER_"))
+        if not shared_display_action:
+            return await self._execute_action_unlocked(
+                workspace_id, action_type, target_resource, payload, predicted_outcome
+            )
+
+        from sonic.computer_use.teamwork import DisplayLeaseManager
+
+        display = None
+        get_display = getattr(self.computer, "_get_display", None)
+        if callable(get_display):
+            display = get_display(workspace_id)
+            if inspect.isawaitable(display):
+                display = await display
+        lock = await DisplayLeaseManager.acquire(
+            workspace_id,
+            display=display,
+            owner=getattr(self, "agent_id", None),
+        )
+        try:
+            return await self._execute_action_unlocked(
+                workspace_id, action_type, target_resource, payload, predicted_outcome
+            )
+        finally:
+            DisplayLeaseManager.release(lock, display=display)
+
+    async def _execute_action_unlocked(
+        self,
+        workspace_id: str,
+        action_type: ComputerActionType,
+        target_resource: str,
+        payload: dict[str, Any],
+        predicted_outcome: str,
+    ) -> ComputerDecisionTrace:
         """Executes the action inside the computer sandbox and validates outcome."""
+        if not hasattr(self, "action_counter"):
+            self.action_counter = 0
+        if not hasattr(self, "traces"):
+            self.traces = []
+        if not hasattr(self, "history"):
+            self.history = []
+        if not hasattr(self, "safety"):
+            self.safety = None
         self.action_counter += 1
         t_start = time.perf_counter()
         actual_obs_str = ""
@@ -3389,7 +3444,7 @@ class ComputerUseAgent:
         ) + (
             # A typed target is resolved only when live pixels are available.
             # Headless/unit-test providers may still accept a pre-focused field.
-            (ComputerActionType.GUI_TYPE,) if self._last_screenshot_b64 else ()
+            (ComputerActionType.GUI_TYPE,) if getattr(self, "_last_screenshot_b64", "") else ()
         ) and (payload.get("x") is None or payload.get("y") is None):
             semantic_match = self.perception_bus.resolve(target_resource)
             if semantic_match is not None:
@@ -3600,19 +3655,6 @@ class ComputerUseAgent:
             if not burst_ok:
                 self._inject_replan(goal=str(actual_obs_str))
             return trace
-
-        _display_lease_lock = None
-        if str(action_type.value).startswith(("GUI_", "APP_")):
-            from sonic.computer_use.teamwork import DisplayLeaseManager
-
-            display = None
-            if hasattr(self.computer, "_get_display"):
-                display = self.computer._get_display(workspace_id)
-            _display_lease_lock = await DisplayLeaseManager.acquire(
-                workspace_id,
-                display=display,
-                owner=getattr(self, "agent_id", None),
-            )
 
         try:
             if action_type == ComputerActionType.GUI_CLICK:
@@ -4103,6 +4145,34 @@ class ComputerUseAgent:
                             recovery_needed = True
                         else:
                             actual_obs_str = f"Wrote patch ({len(content)} bytes) to {path}"
+
+            elif action_type == ComputerActionType.VERIFY_PROBE:
+                try:
+                    probe = VerificationProbe.model_validate(payload.get("probe"))
+                    command = probe.to_command()
+                except Exception as exc:
+                    status = ActionExecutionStatus.BLOCKED
+                    action_exit_code = 126
+                    actual_obs_str = f"Invalid verification probe: {exc}"
+                else:
+                    res = await self.computer.terminal(workspace_id, command)
+                    action_exit_code = getattr(res, "exit_code", None)
+                    safe_stdout = _safe_str(getattr(res, "stdout", "") or "")
+                    safe_stderr = _safe_str(getattr(res, "stderr", "") or "")
+                    action_stderr = safe_stderr
+                    actual_obs_str = (
+                        "\n".join(part for part in (safe_stdout, safe_stderr) if part)
+                        or f"Exit {action_exit_code}"
+                    )
+                    if action_exit_code is None:
+                        status = ActionExecutionStatus.FAILED
+                        actual_obs_str = f"Verification probe returned no exit code. {actual_obs_str}"
+                    elif action_exit_code == 124:
+                        status = ActionExecutionStatus.TIMED_OUT
+                    elif action_exit_code in (125, 126):
+                        status = ActionExecutionStatus.BLOCKED
+                    elif action_exit_code != 0:
+                        status = ActionExecutionStatus.FAILED
 
             elif action_type == ComputerActionType.TERMINAL_EXEC:
                 raw_cmd = payload.get("command") if (isinstance(payload, dict) and "command" in payload) else target_resource
@@ -4665,10 +4735,13 @@ class ComputerUseAgent:
                 if self.browser is not None and selector:
                     ok = await self.browser.wait_for_element(selector)
                     actual_obs_str = f"Element {selector} ready" if ok else f"Element {selector} not found within timeout"
+                    if not ok:
+                        status = ActionExecutionStatus.FAILED
+                        recovery_needed = False
                 else:
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(2)
-                    actual_obs_str = "Waited 2s (no BrowserAgent)"
+                    actual_obs_str = "Browser wait unsupported: no browser page is available to verify the selector"
+                    status = ActionExecutionStatus.FAILED
+                    recovery_needed = False
 
             elif action_type == ComputerActionType.BROWSER_DOWNLOAD:
                 # Human step: click a download link on the website and save the
@@ -5234,10 +5307,6 @@ class ComputerUseAgent:
                     error_class=err_class,
                     raw_error=str(e),
                 )
-        finally:
-            if _display_lease_lock is not None:
-                DisplayLeaseManager.release(_display_lease_lock, display=display)
-
         # Adaptive Closed-Loop Recovery if needed
         if recovery_needed:
             if self.recovery_events < self.max_recovery_attempts:
@@ -5301,7 +5370,11 @@ class ComputerUseAgent:
         after_state = self._current_experience_state(
             exit_code=action_exit_code,
             terminal_output=actual_obs_str
-            if action_type in (ComputerActionType.TERMINAL_EXEC, ComputerActionType.SECURITY_TOOL)
+            if action_type in (
+                ComputerActionType.TERMINAL_EXEC,
+                ComputerActionType.SECURITY_TOOL,
+                ComputerActionType.VERIFY_PROBE,
+            )
             else "",
         )
         before_graph = getattr(self, "_experience_before_graph", None)
@@ -5351,7 +5424,11 @@ class ComputerUseAgent:
         # Store the real action output so observe() reads real terminal data
         # instead of a dummy probe. Strictly for sandbox command executions (TERMINAL_EXEC, SECURITY_TOOL).
         # GUI and Browser actions must NOT write into _last_action_output!
-        if action_type in (ComputerActionType.TERMINAL_EXEC, ComputerActionType.SECURITY_TOOL):
+        if action_type in (
+            ComputerActionType.TERMINAL_EXEC,
+            ComputerActionType.SECURITY_TOOL,
+            ComputerActionType.VERIFY_PROBE,
+        ):
             cmd_display = ""
             if isinstance(payload, dict):
                 cmd_display = str(payload.get("command") or payload.get("tool") or payload.get("tool_name") or "")
@@ -5577,6 +5654,7 @@ class ComputerUseAgent:
     _TRIVIAL_COMMANDS: frozenset[str] = frozenset({
         "pwd", "whoami", "id", "uname", "echo", "true", "uname -m",
         "uname -a", "echo OK", "hostname", "date",
+        "ip a", "ip addr", "ip addr show", "ifconfig", "route -n",
     })
     _MAX_TRIVIAL_CONSECUTIVE: int = 2
 
@@ -5682,6 +5760,41 @@ class ComputerUseAgent:
         """
         return False
 
+    def _verification_probe_for_goal(self, goal: str) -> VerificationProbe | None:
+        """Infer only fixed-shape probes; never accept a shell command as input."""
+        normalized = goal.lower().strip()
+        if any(term in normalized for term in ("test", "pytest", "unittest")):
+            return VerificationProbe(kind=VerificationProbeKind.PYTEST)
+        if any(term in normalized for term in ("install", "set up", "setup")):
+            match = re.search(
+                r"(?:install|set\s+up|setup)\s+(?:the\s+)?([a-zA-Z0-9_.+-]+)",
+                normalized,
+            )
+            if match:
+                return VerificationProbe(
+                    kind=VerificationProbeKind.EXECUTABLE,
+                    target=match.group(1),
+                )
+        if any(term in normalized for term in ("file", "create", "write", "save", "generate", "report")):
+            match = re.search(
+                r'([a-zA-Z0-9_\-\./\\]+\.(?:txt|md|py|json|sh|csv|html|log))',
+                goal,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                target = match.group(1)
+                if not target.startswith(("/", "\\")):
+                    root = str(
+                        getattr(
+                            getattr(self, "safety", None),
+                            "workspace_root",
+                            "/home/sonic/workspace",
+                        )
+                    )
+                    target = f"{root}/{target}"
+                return VerificationProbe(kind=VerificationProbeKind.FILE, target=target)
+        return None
+
     async def verify_goal(
         self,
         workspace_id: str,
@@ -5725,76 +5838,11 @@ class ComputerUseAgent:
             return verified, evidence
 
         do_llm = use_llm if use_llm is not None else getattr(self, "enable_llm_verification", False)
-
-        if do_llm and self.llm_router is not None:
-            async def _query_llm(prompt: str) -> str:
-                from sonic.llm.schemas import LLMRequest, Message, MessageRole
-                req = LLMRequest(
-                    messages=[Message(role=MessageRole.USER, content=prompt)],
-                    task_type="reasoning",
-                )
-                resp = await self.llm_router.complete(req)
-                return resp.content
-
-            # Step 1: Gather current observation for context
-            obs = await self.observe(workspace_id)
-            obs_summary = f"app={obs.active_application}, term={obs.terminal_output[:200] if obs.terminal_output else 'empty'}"
-
-            # Step 2: Ask LLM to propose a verification command
-            verify_prompt = (
-                f"Goal: {goal}\n"
-                f"Current observation: {obs_summary}\n\n"
-                "Propose a single shell command that would verify whether this goal "
-                "has been achieved. The command should produce clear output that "
-                "proves success or failure. Respond with ONLY the command, nothing else.\n"
-                "If no verification command makes sense, respond with: OBSERVE_ONLY"
-            )
-
-            evidence = ""
-            try:
-                llm_resp = await _query_llm(verify_prompt)
-                verify_cmd = llm_resp.strip().split("\n")[0].strip()
-
-                if verify_cmd and verify_cmd != "OBSERVE_ONLY" and len(verify_cmd) < 500:
-                    try:
-                        res = await self.computer.terminal(workspace_id, verify_cmd)
-                        evidence = (res.stdout.strip() if res.stdout else "") or f"Exit {res.exit_code}"
-                    except Exception as e:
-                        evidence = f"Verify probe failed: {e}"
-                else:
-                    evidence = f"Observation: {obs_summary}"
-            except Exception:
-                evidence = f"Observation (LLM unavailable): {obs_summary}"
-
-            # Step 3: Ask LLM to evaluate the evidence
-            try:
-                eval_prompt = (
-                    f"Goal: {goal}\n"
-                    f"Verification evidence:\n{evidence[:2000]}\n\n"
-                    "Based on this evidence, has the goal been achieved? "
-                    "Respond with exactly YES or NO on the first line, "
-                    "followed by a brief explanation."
-                )
-                eval_resp = await _query_llm(eval_prompt)
-                first_line = eval_resp.strip().split("\n")[0].upper()
-                verified = "YES" in first_line
-            except Exception:
-                ev_lower = evidence.lower()
-                verified = False
-
-            return verified, evidence
-
-        # Standard sandbox-grounded probe
         g = goal.lower().strip()
-        verify_cmd: str | None = None
-        if any(k in g for k in ("test", "pytest", "unittest")):
-            verify_cmd = "python -m pytest -q --tb=short 2>&1 | tail -5"
-        elif any(k in g for k in ("install", "set up", "setup")):
-            m = re.search(r"install(?:\s+(?:the\s+)?)?([a-zA-Z0-9_.-]+)", g)
-            pkg = m.group(1) if m else ""
-            if pkg:
-                verify_cmd = f"which {pkg} 2>/dev/null || dpkg -l {pkg} 2>/dev/null | grep ^ii"
-        elif any(k in g for k in ("run", "start", "serve", "launch", "open")):
+        if (
+            self._verification_probe_for_goal(goal) is None
+            and any(k in g for k in ("run", "start", "serve", "launch", "open"))
+        ):
             obs = await self.observe(workspace_id)
             m_target = re.search(r"(?:run|start|serve|launch|open)\s+(?:the\s+)?([a-zA-Z0-9_\-\.]+)", g)
             target_prog = m_target.group(1).lower() if m_target else ""
@@ -5810,65 +5858,102 @@ class ComputerUseAgent:
             else:
                 verified = len(obs.processes) > 0 and obs.active_application != ""
             return verified, evidence
-        elif any(k in g for k in ("file", "create", "write", "save", "generate", "report")):
-            m_file = re.search(r'([a-zA-Z0-9_\-\./]+\.(?:txt|md|py|json|sh|csv|html|log))', goal)
-            if m_file:
-                target_file = m_file.group(1)
-                if not target_file.startswith("/"):
-                    target_file = f"/home/sonic/workspace/{target_file}"
-                verify_cmd = f"test -f {shlex.quote(target_file)} && [ -s {shlex.quote(target_file)} ] && echo 'FILE_VERIFIED: {target_file}' && head -n 5 {shlex.quote(target_file)}"
 
-        evidence = ""
-        has_independent_probe = bool(verify_cmd)
-        if verify_cmd:
-            try:
-                res = await self.computer.terminal(workspace_id, verify_cmd)
-                evidence = (res.stdout.strip() if res.stdout else "") or f"Exit {res.exit_code}"
-            except Exception as e:
-                evidence = f"Verify probe failed: {e}"
-        else:
+        probe = self._verification_probe_for_goal(goal)
+        if probe is None:
             obs = await self.observe(workspace_id)
-            evidence = f"Re-observed: app={obs.active_application}, term={obs.terminal_output[:120]}"
-            evidence += " | No independent verification probe was inferred."
+            evidence = (
+                f"Re-observed: app={obs.active_application}, "
+                f"term={obs.terminal_output[:120]} | "
+                "No typed independent verification probe was inferred."
+            )
+            return False, evidence
 
-        ev_lower = evidence.lower()
-        # Fail-closed verification: reject dummy/placeholder observations as
-        # evidence of goal completion. Only REAL command output counts.
-        _DUMMY_MARKERS = (
+        trace = await self.execute_action(
+            workspace_id,
+            ComputerActionType.VERIFY_PROBE,
+            target_resource=probe.kind.value,
+            payload={"probe": probe.model_dump(mode="json")},
+            predicted_outcome="A typed verification probe returns exit code 0.",
+        )
+        exit_code = getattr(trace, "exit_code", None)
+        evidence = (
+            f"Verification probe={probe.kind.value}; exit_code={exit_code}; "
+            f"status={getattr(trace.status, 'value', trace.status)}; "
+            f"output={trace.actual_observation[:1500]}"
+        )
+        probe_output = str(getattr(trace, "actual_observation", "") or "").strip().lower()
+        rejected_receipt_markers = (
             "__sonic_obs_ready__",
-            "generic recovery action",
             "terminal ready (0 procs)",
+            "traceback",
+            "assertionerror",
+            "command not found",
+            "connection refused",
+            "timed out",
+            "exit 126",
+            "placeholder",
+            "dummy",
+            "blocked",
+            "failed",
         )
-        _is_dummy = any(marker in ev_lower for marker in _DUMMY_MARKERS)
-        if _is_dummy:
-            return False, f"Verification inconclusive — dummy marker detected. Evidence: {evidence}"
+        verified = (
+            exit_code == 0
+            and trace.status in (
+                ActionExecutionStatus.COMPLETED,
+                ActionExecutionStatus.SUCCESS,
+                ActionExecutionStatus.VERIFIED,
+            )
+            and bool(probe_output)
+            and not any(marker in probe_output for marker in rejected_receipt_markers)
+        )
 
-        _raw_has_content = bool(evidence.strip())
-        if "Re-observed: " in evidence:
-            _has_successful_action = any(
-                getattr(a, "status", None) == ActionExecutionStatus.SUCCESS
-                and getattr(a, "action_type", None)
-                not in (ComputerActionType.WAIT_FOR_HUMAN, ComputerActionType.GOAL_COMPLETE)
-                for a in getattr(self, "action_history", [])
+        if verified and do_llm and self.llm_router is not None:
+            from sonic.llm.schemas import LLMRequest, Message, MessageRole
+            request = LLMRequest(
+                messages=[
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"Goal: {goal}\nVerified probe receipt:\n{evidence}\n"
+                            "Does this receipt prove the goal? Respond YES or NO."
+                        ),
+                    )
+                ],
+                task_type="reasoning",
             )
-            _has_concrete_evidence = (
-                "term=" in evidence
-                and not evidence.rstrip().endswith("term=")
-                and (
-                    _has_successful_action
-                    or bool(getattr(obs, "active_application", ""))
-                )
-            )
-        else:
-            _has_concrete_evidence = _raw_has_content
-        _no_error_markers = (
-            "error" not in ev_lower
-            and "traceback" not in ev_lower
-            and "exception" not in ev_lower
-            and "failed" not in ev_lower
-        )
-        verified = _has_concrete_evidence and _no_error_markers
+            try:
+                response = await self.llm_router.complete(request)
+                verified = response.content.strip().splitlines()[0].upper() == "YES"
+            except Exception:
+                verified = False
         return verified, evidence
+
+    async def _verify_completion_receipt(self, goal: str, evidence: str) -> tuple[bool, str]:
+        """Use System-1 as a contradiction check alongside independent verification."""
+        try:
+            from sonic.llm.laya_engine import get_laya_engine
+
+            score = await asyncio.to_thread(
+                get_laya_engine().verify_execution_receipt,
+                goal,
+                evidence,
+            )
+            if (
+                not isinstance(score, (int, float))
+                or isinstance(score, bool)
+                or not math.isfinite(score)
+                or not 0.0 <= score <= 1.0
+            ):
+                raise ValueError("receipt scorer returned an invalid probability")
+        except Exception as exc:
+            logger.warning("mission_receipt_verification_failed", error=str(exc))
+            return False, f"System-1 receipt check unavailable: {exc}"
+
+        note = f"System-1 receipt confidence: {score:.2f}"
+        if score < 0.30:
+            return False, f"{note}; evidence contradicts successful completion"
+        return True, note
 
     def _inject_replan(self, goal: str) -> None:
         """Signal the reasoning loop to abandon the current approach.
@@ -5973,6 +6058,10 @@ class ComputerUseAgent:
             # do not stop on self-declaration alone. We independently verify.
             if expected == _GOAL_COMPLETE_SENTINEL:
                 verified, evidence = await self.verify_goal(workspace_id, goal)
+                if verified:
+                    receipt_ok, receipt_note = await self._verify_completion_receipt(goal, evidence)
+                    evidence = f"{evidence}\n{receipt_note}"
+                    verified = receipt_ok
                 if verified:
                     if self.traces:
                         self.traces[-1].verification_evidence = evidence[:500]
@@ -6198,9 +6287,14 @@ class ComputerUseAgent:
 
         if not goal_reached and self.metrics.actions_successful > 0 and self.metrics.actions_failed == 0:
             try:
-                verified, _ = await self.verify_goal(workspace_id, goal)
+                verified, evidence = await self.verify_goal(workspace_id, goal)
                 if verified:
-                    goal_reached = True
+                    receipt_ok, receipt_note = await self._verify_completion_receipt(goal, evidence)
+                    goal_reached = receipt_ok
+                    if self.traces:
+                        self.traces[-1].verification_evidence = (
+                            f"{evidence}\n{receipt_note}"
+                        )[:500]
             except Exception as v_err:
                 logger.debug("post_mission_verify_error", error=str(v_err))
 

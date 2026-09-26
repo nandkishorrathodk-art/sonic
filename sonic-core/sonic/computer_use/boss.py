@@ -21,13 +21,17 @@ import asyncio
 import json
 import re
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC
 from typing import Any
-import uuid
 
 import structlog
 
+from sonic.agents.judge import (
+    JudgeAgent,
+    JudgeVerdict,
+)
 from sonic.agents.replan import (
     ReplanEngine,
     ReplanTrigger,
@@ -38,16 +42,10 @@ from sonic.agents.task_graph import (
     TaskPriority,
     TaskStatus,
 )
-from sonic.agents.judge import (
-    JudgeAgent,
-    JudgeEvaluation,
-    JudgeVerdict,
-)
 from sonic.computer_use.models_boss import (
     BossReport,
     BossThinking,
     Phase,
-    SubAgentReport,
     SubMission,
     SubMissionResult,
 )
@@ -70,11 +68,17 @@ def _safe_discovery_context(items: list[str]) -> str:
     for item in items[-3:]:
         text = " ".join(str(item).split()).replace("`", "")
         lowered = text.lower()
+        text = re.sub(
+            r"\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?::\d{1,5})?\b",
+            "[address omitted]",
+            text,
+        )
+        lowered = text.lower()
         if not text or any(marker in lowered for marker in (
             "ignore previous", "ignore the rules", "system message",
             "assistant:", "developer:", "run ", "execute ", "curl ",
             "wget ", "python ", "bash ", "sh ",
-        )):
+        )) or re.match(r"^(?:whoami|id|pwd|hostname|uname)\s*:", lowered):
             continue
         safe.append({"observation": text[:180]})
     if not safe:
@@ -171,11 +175,12 @@ class BossAgent:
         self.agent_id = agent_id or (being.being_id if being else f"{tenant_id}-boss")
         self.tree_depth = max(0, int(tree_depth))
         self.max_tree_depth = max(1, int(max_tree_depth))
-        self.requested_plane = (
+        requested = (
             requested_plane.lower().strip()
             if requested_plane
             else ("gui" if gui_only else None)
         )
+        self.requested_plane = requested if requested in {"gui", "headless"} else None
         self.max_phases = max_phases
         self.sub_agent_steps = sub_agent_steps
         # Explicit concurrency budget: the Boss may never create more live
@@ -242,6 +247,14 @@ class BossAgent:
     def interrupt(self) -> None:
         """Signal the Boss to stop orchestration."""
         self._interrupted = True
+
+    def _worker_limit_for_wave(self, missions: list[SubMission]) -> int:
+        """Limit shared-display execution to one GUI-capable worker."""
+        if self._shared_desktop and any(
+            str(mission.plane).lower() != "headless" for mission in missions
+        ):
+            return 1
+        return self.max_parallel_workers
 
     def _sync_phase_to_graph(self, phase: Phase) -> None:
         """Register phase sub-missions into TaskGraph DAG."""
@@ -350,8 +363,8 @@ class BossAgent:
 
         if requested_plane:
             self.requested_plane = str(requested_plane).lower().strip()
-        elif hasattr(objective, "requested_plane") and getattr(objective, "requested_plane"):
-            self.requested_plane = str(getattr(objective, "requested_plane")).lower().strip()
+        elif hasattr(objective, "requested_plane") and objective.requested_plane:
+            self.requested_plane = str(objective.requested_plane).lower().strip()
         elif isinstance(objective, dict) and objective.get("requested_plane"):
             self.requested_plane = str(objective["requested_plane"]).lower().strip()
 
@@ -449,17 +462,12 @@ class BossAgent:
                                 self.task_graph.mark_failed(s.id, "Dependencies could not be resolved")
                             except Exception:
                                 pass
+
                     break
 
-                # Respect the configured worker budget, display exclusivity, and owned_paths isolation.
-                # Only tasks on GUI plane or requiring exclusive display serialize to 1 worker on shared desktop;
-                # parallel headless workers fan out concurrently up to max_parallel_workers.
-                has_gui = any(
-                    getattr(s, "requires_exclusive_display", False)
-                    or getattr(s, "plane", "headless") == "gui"
-                    for s in unblocked_ready
-                )
-                worker_limit = 1 if (has_gui and self._shared_desktop) else self.max_parallel_workers
+                # A physical desktop/browser is shared mutable state. Serialize
+                # every GUI-capable worker; only headless workers may fan out.
+                worker_limit = self._worker_limit_for_wave(unblocked_ready)
                 wave_batch: list[SubMission] = []
                 locked_paths: set[str] = set()
                 for cand in unblocked_ready:
@@ -791,7 +799,11 @@ Rules:
 
             sub_id = str(sm.get("id") or "").strip()
             depends_on = [str(d).strip() for d in sm.get("depends_on", []) if str(d).strip()] if isinstance(sm.get("depends_on"), list) else []
-            plane = str(sm.get("plane") or (self.requested_plane or "gui")).strip().lower()
+            plane = (
+                self.requested_plane
+                if self.requested_plane
+                else str(sm.get("plane") or "gui").strip().lower()
+            )
             if plane not in ("headless", "gui"):
                 plane = self.requested_plane if self.requested_plane in ("headless", "gui") else "gui"
 
@@ -1209,7 +1221,7 @@ Rules:
                 initial_context=scoped_context,
             )
             if not hasattr(agent, "execution_plane"):
-                setattr(agent, "execution_plane", execution_plane)
+                agent.execution_plane = execution_plane
 
             # Step callback to stream SubAgent actions to UI
             async def _sub_step_callback(trace):
@@ -1480,26 +1492,36 @@ Rules:
             return observations[:1000]
 
     def _extract_key_discoveries(self, traces: list[Any]) -> list[str]:
-        """Extract concrete verified observations from SubAgent traces filtering diagnostic commands and tool noise."""
-        discoveries: list[str] = []
-        diag_commands = (
-            "whoami", "uname", "pwd", "hostname", "ip addr", "ip a", "ifconfig", "route -n", "route", "ifconfig.me", "icanhazip.com"
-        )
-        banner_noise = (
-            "starting nmap", "nmap done", "nmap scan report", "host is up",
-            "starting gobuster", "finished in", "latency).",
-        )
+        """Extract verified, high-information observations from SubAgent traces."""
+        from sonic.computer_use.agent import ComputerUseAgent
 
+        discoveries: list[str] = []
+        diagnostic_commands = ComputerUseAgent._TRIVIAL_COMMANDS
+        evidence_pattern = re.compile(
+            r"\d+/(?:tcp|udp)\s+open"
+            r"|HTTP/[0-9.]+\s+\d{3}"
+            r"|(?:flag|ctf|token|key|secret|cve|vulnerab|leak|inject|exploit|sqli|rce|xss)"
+            r"|\b(?:found|discovered|exposed|success):",
+            re.IGNORECASE,
+        )
         for t in traces:
             status_str = str(_trace_value(t, "status", ""))
             if status_str not in ("COMPLETED", "SUCCESS", "VERIFIED"):
                 continue
-
-            target = str(_trace_value(t, "target_resource", "")).lower()
-            payload = str(_trace_value(t, "payload", "")).lower()
-
-            # Skip diagnostic commands and their outputs
-            if any(cmd in target or cmd in payload for cmd in diag_commands):
+            target = str(_trace_value(t, "target_resource", "") or "")
+            payload = _trace_value(t, "payload", "")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            command = target
+            if isinstance(payload, dict):
+                command = str(payload.get("command") or payload.get("cmd") or target)
+            elif isinstance(payload, str) and payload.strip():
+                command = payload
+            normalized_command = " ".join(command.lower().split()).rstrip(";")
+            if normalized_command in diagnostic_commands:
                 continue
 
             obs = str(_trace_value(t, "actual_observation", "") or _trace_value(t, "observation", "")).strip()
@@ -1510,28 +1532,12 @@ Rules:
                 line_str = line.strip()
                 if not line_str or len(line_str) < 5:
                     continue
-                line_lower = line_str.lower()
-                # Skip tool noise banners
-                if any(noise in line_lower for noise in banner_noise):
-                    continue
-                # Skip bare IP addresses
                 if re.match(r"^(?:https?://)?(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/.*)?$", line_str):
                     continue
-                # Skip diagnostic system output lines
-                if any(diag in line_lower for diag in ("root_user", "workstation-box", "linux workstation", "/home/daytona", "kernel ip routing")):
-                    continue
-
-                is_high_value = bool(
-                    re.search(r"\d+/(?:tcp|udp)\s+open", line_str, re.IGNORECASE)
-                    or re.search(r"HTTP/[0-9.]+\s+\d{3}", line_str, re.IGNORECASE)
-                    or re.search(r"(?:flag|ctf|token|key|secret|cve|vulnerab|leak|inject|exploit|sqli|rce|xss)", line_str, re.IGNORECASE)
-                    or any(w in line_lower for w in ("found:", "discovered:", "exposed:", "success:"))
-                )
-
-                if is_high_value and line_str not in discoveries:
+                if evidence_pattern.search(line_str) and line_str not in discoveries:
                     discoveries.append(line_str[:200])
 
-        return discoveries[:15]
+        return discoveries[:10]
 
     # ------------------------------------------------------------------
     # Findings Aggregation
@@ -1867,8 +1873,8 @@ If the objective is complete or no more work is needed, return:
                 for p in self.phases for r in p.results
             ]
             final_summary = (
-                f"Objective execution incomplete. No sub-missions achieved verified success.\n"
-                f"Sub-mission execution diagnostics:\n" + ("\n".join(failed_goals[:10]) if failed_goals else "No sub-missions executed.")
+                "Objective execution incomplete. No sub-missions achieved verified success.\n"
+                "Sub-mission execution diagnostics:\n" + ("\n".join(failed_goals[:10]) if failed_goals else "No sub-missions executed.")
             )
         else:
             try:

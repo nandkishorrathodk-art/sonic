@@ -869,7 +869,7 @@ def test_ast_syntax_error_triggers_rejection_and_rollback(repo: Path):
     )
     assert report_diff.stage != "promoted"
     assert report_diff.stage == EvolutionStage.REJECTED
-    assert "syntax" in report_diff.error_reason.lower() or "ast" in report_diff.error_reason.lower()
+    assert any(term in report_diff.error_reason.lower() for term in ("syntax", "ast", "corrupt patch"))
     assert target_abs.read_text(encoding="utf-8") == orig_content
 
     # 3. Via SelfCoder loop
@@ -888,7 +888,7 @@ def test_ast_syntax_error_triggers_rejection_and_rollback(repo: Path):
     coder = SelfCoder(repo_root=repo, llm=llm, evolver=evolver, director=director, agentic=False)
     cycle = asyncio.run(coder.run_cycle("Fix widget calculation", target_rel, "bug_fix"))
     assert cycle.stage != "promoted"
-    assert "syntax" in cycle.reason.lower() or "ast" in cycle.reason.lower()
+    assert any(term in cycle.reason.lower() for term in ("syntax", "ast", "corrupt patch"))
     assert target_abs.read_text(encoding="utf-8") == orig_content
 
 
@@ -1017,4 +1017,3 @@ def test_multi_file_atomic_rollback(repo: Path):
     assert report.stage != EvolutionStage.PROMOTED
     assert f1.read_text(encoding="utf-8") == "VALUE_A = 10\n"
     assert f2.read_text(encoding="utf-8") == "VALUE_B = 20\n"
-

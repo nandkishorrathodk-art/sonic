@@ -7,6 +7,7 @@ from sonic.computer.provider import ComputerProvider
 from sonic.computer_use.action_contracts import ActionReceipt
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
+from sonic.safety.action_policy import ActionPolicy
 from sonic.sandbox.provider import ExecResult
 
 
@@ -14,6 +15,7 @@ class _ReceiptComputer(ComputerProvider):
     def __init__(self, exit_code: int = 0):
         self.exit_code = exit_code
         self.gui_calls = 0
+        self.commands: list[str] = []
 
     async def create(self, *args, **kwargs): return type("Workspace", (), {"id": "workspace"})()
     async def destroy(self, *args, **kwargs): return True
@@ -32,6 +34,7 @@ class _ReceiptComputer(ComputerProvider):
     async def service_action(self, *args, **kwargs): return None
 
     async def terminal(self, workspace_id, command, timeout=60, actor="operator"):
+        self.commands.append(command)
         return ExecResult(
             command=command,
             exit_code=self.exit_code,
@@ -131,3 +134,68 @@ def test_file_write_trace_exposes_receipt_without_fabricating_exit_code():
     assert trace.receipt.exit_code is None
     assert trace.state_delta is trace.receipt.state_delta
     assert trace.receipt.evidence == "Wrote patch (8 bytes) to notes.txt"
+
+
+def test_verify_goal_runs_typed_probe_through_action_receipt():
+    computer = _ReceiptComputer()
+    agent = ComputerUseAgent(
+        computer_provider=computer,
+        safety=ActionPolicy(workspace_root="/home/sonic/workspace"),
+    )
+
+    verified, evidence = _run(agent.verify_goal("workspace", "run pytest tests"))
+
+    assert verified is True, evidence
+    assert computer.commands == ["python -m pytest -q --tb=short"]
+    trace = agent.traces[-1]
+    assert trace.action_type == ComputerActionType.VERIFY_PROBE
+    assert trace.exit_code == 0
+    assert trace.action_receipt.exit_code == 0
+    assert "exit_code=0" in evidence
+
+
+def test_invalid_verification_probe_is_blocked_before_terminal():
+    computer = _ReceiptComputer()
+    agent = ComputerUseAgent(
+        computer_provider=computer,
+        safety=ActionPolicy(workspace_root="/home/sonic/workspace"),
+    )
+
+    trace = _run(
+        agent.execute_action(
+            "workspace",
+            ComputerActionType.VERIFY_PROBE,
+            "pytest",
+            {"probe": {"kind": "pytest", "target": "; touch /tmp/pwned"}},
+            "verification",
+        )
+    )
+
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert trace.exit_code == 126
+    assert computer.commands == []
+
+
+def test_llm_verification_cannot_supply_a_shell_command():
+    computer = _ReceiptComputer()
+    router = type(
+        "Judge",
+        (),
+        {"complete": staticmethod(
+            lambda request: _async_response("YES")
+        )},
+    )()
+    agent = ComputerUseAgent(
+        computer_provider=computer,
+        llm_router=router,
+        safety=ActionPolicy(workspace_root="/home/sonic/workspace"),
+    )
+
+    verified, _ = _run(agent.verify_goal("workspace", "run pytest", use_llm=True))
+
+    assert verified is True
+    assert computer.commands == ["python -m pytest -q --tb=short"]
+
+
+async def _async_response(content: str):
+    return type("Response", (), {"content": content})()

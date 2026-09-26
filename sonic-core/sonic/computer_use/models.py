@@ -7,12 +7,14 @@ autonomy levels, engineering mission modes, decision traces, and metrics.
 
 from __future__ import annotations
 
+import re
+import shlex
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sonic.computer.models import ScreenObservation
 
@@ -217,7 +219,45 @@ class ComputerActionType(StrEnum):
     INVOKE_SUBAGENT = "INVOKE_SUBAGENT"
     SEND_MESSAGE = "SEND_MESSAGE"
     MANAGE_SUBAGENTS = "MANAGE_SUBAGENTS"
+    VERIFY_PROBE = "VERIFY_PROBE"
     GOAL_COMPLETE = "GOAL_COMPLETE"
+
+
+class VerificationProbeKind(StrEnum):
+    PYTEST = "pytest"
+    EXECUTABLE = "executable"
+    FILE = "file"
+
+
+class VerificationProbe(BaseModel):
+    """A constrained verification request compiled to a fixed shell command."""
+
+    kind: VerificationProbeKind
+    target: str = ""
+
+    @model_validator(mode="after")
+    def validate_target(self) -> VerificationProbe:
+        if self.kind == VerificationProbeKind.PYTEST:
+            if self.target:
+                raise ValueError("pytest probes do not accept a target")
+        elif self.kind == VerificationProbeKind.EXECUTABLE:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}", self.target):
+                raise ValueError("executable probe target must be a simple binary name")
+        elif self.kind == VerificationProbeKind.FILE:
+            if not self.target or "\0" in self.target:
+                raise ValueError("file probe requires a valid path")
+        return self
+
+    def to_command(self) -> str:
+        if self.kind == VerificationProbeKind.PYTEST:
+            return "python -m pytest -q --tb=short"
+        if self.kind == VerificationProbeKind.EXECUTABLE:
+            return f"command -v -- {shlex.quote(self.target)}"
+        return (
+            f"test -f {shlex.quote(self.target)} && "
+            f"test -s {shlex.quote(self.target)} && "
+            "printf '%s\\n' FILE_VERIFIED"
+        )
 
 
 # ============================================
