@@ -3,15 +3,19 @@ Tests for BossAgent plane routing, FILE_WRITE JSON-unwrapping, and zero-hallucin
 Validates Dual-Plane Concurrency (Mandates 1, 5) and Empirical Falsification (Rule 15).
 """
 
-import asyncio
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from sonic.computer_use.models_boss import SubMission
-from sonic.computer_use.boss import BossAgent
+import pytest
+
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ComputerActionType, ActionExecutionStatus, ComputerDecisionTrace
+from sonic.computer_use.boss import BossAgent
+from sonic.computer_use.models import (
+    ActionExecutionStatus,
+    ComputerActionType,
+    ComputerDecisionTrace,
+)
+from sonic.computer_use.models_boss import SubMission
 
 
 def test_sub_mission_plane_inference_dual_plane():
@@ -45,6 +49,56 @@ def test_sub_mission_plane_inference_dual_plane():
         goal="Click button on screen to add a new task and verify visual completion"
     )
     assert s5.plane == "gui"
+
+
+@pytest.mark.asyncio
+async def test_requested_plane_overrides_decomposition_plane():
+    router = MagicMock()
+    router.complete = AsyncMock(return_value=type(
+        "Response",
+        (),
+        {
+            "content": json.dumps({
+                "thinking": "One focused worker.",
+                "phase_name": "Inspection",
+                "sub_missions": [
+                    {"goal": "Inspect the repository", "plane": "gui", "max_steps": 2}
+                ],
+            })
+        },
+    )())
+    boss = BossAgent(
+        computer_provider=MagicMock(),
+        llm_router=router,
+        requested_plane="headless",
+    )
+
+    phase = await boss._strategic_decomposition("inspect the repository")
+
+    assert phase is not None
+    assert phase.sub_missions[0].plane == "headless"
+
+
+def test_shared_display_serializes_gui_workers_only():
+    computer = type(
+        "DisplayProvider",
+        (),
+        {"screenshot": lambda self: None, "gui_action": lambda self: None},
+    )()
+    boss = BossAgent(
+        computer_provider=computer,
+        llm_router=MagicMock(),
+        max_parallel_workers=4,
+    )
+
+    assert boss._worker_limit_for_wave([
+        SubMission(goal="inspect source", plane="headless"),
+        SubMission(goal="run tests", plane="headless"),
+    ]) == 4
+    assert boss._worker_limit_for_wave([
+        SubMission(goal="inspect source", plane="headless"),
+        SubMission(goal="click the visible control", plane="gui"),
+    ]) == 1
 
 
 @pytest.mark.asyncio
@@ -116,4 +170,3 @@ async def test_summarize_sub_agent_traces_deterministic_on_failure():
     assert "Execution failed: no verified progress" in summary
     assert "TERMINAL_EXEC" in summary
     assert "Permission denied" in summary
-
