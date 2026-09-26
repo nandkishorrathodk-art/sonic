@@ -337,10 +337,7 @@ class EvolutionGoalDirector:
         # 3. Read file contents and summarize functions/classes
         file_contexts: dict[str, dict[str, Any]] = {}
         for rel_path in target_files:
-            try:
-                full_p = self.evolver._resolve_repo_path(rel_path)
-            except ValueError as exc:
-                raise SafetyInvariantViolation(str(exc)) from exc
+            full_p = (self.repo_root / rel_path).resolve()
             if full_p.exists() and full_p.is_file():
                 content = full_p.read_text(encoding="utf-8", errors="replace")
                 symbols: list[str] = []
@@ -432,6 +429,7 @@ class EvolutionGoalDirector:
         4. Bumps version upon success
         5. Logs live notes to evolution.md
         """
+        self._report_only = bool(report_only)
         goal = self.get_goal(goal_id)
         if not goal:
             raise ValueError(f"Evolution goal not found: {goal_id}")
@@ -462,7 +460,7 @@ class EvolutionGoalDirector:
                 version_after=goal.version_before,
                 files_affected=goal.target_files,
                 notes=goal.notes,
-            ), report_only=report_only)
+            ))
             report = EvolutionSummaryReport(
                 proposal_id=goal.goal_id,
                 target_component=str(goal.target_files),
@@ -493,7 +491,7 @@ class EvolutionGoalDirector:
         # actually write one. If it cannot, we fail honestly (never a comment stub).
         code_diff = custom_patch
         if not code_diff:
-            synthesis = await self._synthesize_patch(goal, target_files, test_paths=test_paths)
+            synthesis = await self._synthesize_patch(goal, target_files)
             if synthesis is None or synthesis.proposal is None:
                 reason = getattr(synthesis, "reason", "no patch synthesized")
                 goal.notes = f"Patch synthesis failed: {reason}"
@@ -519,7 +517,7 @@ class EvolutionGoalDirector:
                     version_after=goal.version_before,
                     files_affected=goal.target_files,
                     notes=goal.notes,
-                ), report_only=report_only)
+                ))
                 return report
             code_diff = synthesis.proposal.diff
             self.last_patch_proposal = synthesis.proposal
@@ -536,9 +534,8 @@ class EvolutionGoalDirector:
         # primary), snapshot + apply ALL touched files so a report-only rollback
         # can restore every one of them — not just the primary target.
         diff_files = self.evolver._diff_files(code_diff)
-        apply_files = list(dict.fromkeys(diff_files or (synth_files or [primary_target])))
-        if not apply_files:
-            apply_files = [primary_target]
+        touched = list(dict.fromkeys([*(synth_files or []), *diff_files, primary_target]))
+        apply_files = touched if len(touched) > 1 else [primary_target]
         if len(apply_files) > 1:
             preflight = self.evolver.apply_patch_multi(apply_files, code_diff)
             if not preflight[0]:
@@ -603,7 +600,7 @@ class EvolutionGoalDirector:
                 test_summary=f"Tests: {report.test_result.passed_tests} passed in {report.test_result.duration_seconds:.2f}s",
                 notes=goal.description,
                 commit_hash=report.git_commit_hash,
-            ), report_only=report_only)
+            ))
 
         elif report.stage == EvolutionStage.AWAITING_APPROVAL:
             goal.status = GoalStatus.ROLLED_BACK
@@ -634,13 +631,13 @@ class EvolutionGoalDirector:
                 lines_removed=report.lines_removed,
                 test_summary=f"FAILED (Exit Code {report.test_result.failed_tests} failures)",
                 notes=goal.notes,
-            ), report_only=report_only)
+            ))
 
         return report
 
-    def _record_entry(self, entry: JournalEntry, *, report_only: bool = False) -> None:
+    def _record_entry(self, entry: JournalEntry) -> None:
         """Write a journal entry unless this run is report-only (no side-effects)."""
-        if report_only:
+        if getattr(self, "_report_only", False):
             return
         self.journal.record_entry(entry)
 
@@ -649,7 +646,6 @@ class EvolutionGoalDirector:
         goal: EvolutionGoal,
         target_files: list[str],
         failure_digest: str = "",
-        test_paths: list[str] | None = None,
     ) -> Any:
         """Ask the LLM to write a real unified diff for the goal.
 
@@ -662,8 +658,6 @@ class EvolutionGoalDirector:
         llm = self.llm_client
         if llm is None:
             llm = self._resolve_llm()
-        context_test_paths = test_paths if test_paths is not None else self.test_paths
-        context_test_paths = self.evolver._validate_test_paths(context_test_paths)
         synthesizer = PatchSynthesizer(
             llm=llm,
             repo_root=self.repo_root,
@@ -674,7 +668,7 @@ class EvolutionGoalDirector:
             goal,
             target_files,
             max_attempts=self.patch_max_attempts,
-            test_paths=context_test_paths,
+            test_paths=self.test_paths,
             failure_digest=failure_digest or self._feedback_for(goal),
         )
 

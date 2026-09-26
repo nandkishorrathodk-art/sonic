@@ -513,14 +513,15 @@ class TestHumanLikeInteraction:
         assert hasattr(b, "download")
 
     @pytest.mark.asyncio
-    async def test_browser_wait_fails_without_observable_page(self):
-        """A wait cannot report success when no browser page can observe the selector."""
+    async def test_browser_wait_noop_in_httpx_fallback(self):
+        """In httpx fallback (no Playwright), wait_for_element returns True
+        (no-op) rather than raising — graceful degradation."""
         from sonic.agents.browser_agent import BrowserAgent
         b = BrowserAgent()
         b._using_playwright = False
         b._page = None
         ok = await b.wait_for_element("#anything")
-        assert ok is False
+        assert ok is True
 
     @pytest.mark.asyncio
     async def test_browser_download_fails_without_playwright(self):

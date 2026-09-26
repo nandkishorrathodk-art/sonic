@@ -24,6 +24,7 @@ self-directed exploration cannot escape the envelope.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import sqlite3
@@ -98,7 +99,6 @@ class ActionPolicy:
         # workspace toolsmith dir (path-confined like FILE_WRITE); running
         # executes it in-sandbox (command-gated like TERMINAL_EXEC).
         "TOOL_AUTHOR", "TOOL_RUN",
-        "VERIFY_PROBE",
         # Method-invention (Phase B, AIOSR): synthesizes a novel technique and
         # runs its probe in-sandbox (same structural confinement as TOOL_RUN).
         "METHOD_INVENT",
@@ -182,25 +182,6 @@ class ActionPolicy:
             verdict = self._check_path(path, action_type_name)
             if not verdict.allowed:
                 return verdict
-
-        if action_type_name == "VERIFY_PROBE":
-            probe = payload.get("probe")
-            if not isinstance(probe, dict) or set(probe) - {"kind", "target"}:
-                return PolicyVerdict(False, "verification probe must use the typed allowlisted schema")
-            kind = probe.get("kind")
-            probe_target = probe.get("target", "")
-            if kind == "pytest" and probe_target == "":
-                pass
-            elif kind == "executable" and isinstance(probe_target, str) and re.fullmatch(
-                r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}", probe_target
-            ):
-                pass
-            elif kind == "file" and isinstance(probe_target, str):
-                verdict = self._check_path(probe_target, "VERIFY_PROBE")
-                if not verdict.allowed:
-                    return verdict
-            else:
-                return PolicyVerdict(False, "unsupported or invalid verification probe")
 
         # 2b. Confinement and injection defense for GIT_COMMIT
         if action_type_name == "GIT_COMMIT":

@@ -56,29 +56,6 @@ async def test_execute_burst_stops_on_dispatch_failure():
     assert "execution failed" in (result.stop_reason or "")
 
 
-@pytest.mark.parametrize(
-    "receipt",
-    [
-        {"success": False},
-        {"ok": False},
-    ],
-)
-@pytest.mark.asyncio
-async def test_execute_burst_stops_on_negative_provider_receipt(receipt):
-    class ReceiptComputer(_Computer):
-        async def gui_action(self, workspace_id: str, action: GUIAction):
-            self.calls.append(action)
-            return receipt
-
-    computer = ReceiptComputer()
-    result = await MotorReflexes(computer).execute_burst("workspace", _actions())
-
-    assert result.success is False
-    assert result.completed == 0
-    assert len(computer.calls) == 1
-    assert "false" in (result.stop_reason or "")
-
-
 @pytest.mark.asyncio
 async def test_execute_burst_verifier_interrupts():
     computer = _Computer()

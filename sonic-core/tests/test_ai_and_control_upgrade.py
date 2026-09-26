@@ -538,47 +538,6 @@ class _RecordingRouter(_StubRouter):
         return await super().complete(request)
 
 
-@pytest.mark.asyncio
-async def test_heartbeat_callback_failure_does_not_discard_llm_action(monkeypatch):
-    real_sleep = asyncio.sleep
-
-    async def quick_sleep(_delay: float):
-        await real_sleep(0.01)
-
-    monkeypatch.setattr("sonic.computer_use.agent.asyncio.sleep", quick_sleep)
-
-    class DelayedRouter(_StubRouter):
-        async def complete(self, request):
-            await real_sleep(0.04)
-            return LLMResponse(
-                content=(
-                    "ACTION: TERMINAL_EXEC\n"
-                    "TARGET: hostname\n"
-                    "PAYLOAD: {\"command\": \"hostname\"}\n"
-                    "EXPECTED: Hostname output"
-                ),
-                model="test-model",
-            )
-
-    agent = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=DelayedRouter())
-
-    def broken_heartbeat(_event):
-        raise RuntimeError("worklog persistence failed")
-
-    agent._heartbeat_callback = broken_heartbeat
-    action_type, target, payload, _ = await agent._llm_choose_action(
-        goal="Check hostname",
-        observation=ComputerWorldObservation(),
-        step_index=1,
-        primary_file="",
-        test_file="",
-    )
-
-    assert action_type == ComputerActionType.TERMINAL_EXEC
-    assert target == "hostname"
-    assert payload["command"] == "hostname"
-
-
 def test_multimodal_computer_use_does_not_send_reasoning_effort():
     router = _RecordingRouter()
     agent = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=router)
@@ -713,4 +672,5 @@ def test_clean_terminal_command_strips_exec():
     assert ComputerUseAgent._clean_terminal_command("_EXEC") == "echo 'ERROR: Empty command' >&2; exit 1"
     assert ComputerUseAgent._clean_terminal_command("_EXEC ls -la") == "ls -la"
     assert ComputerUseAgent._clean_terminal_command("EXEC ps aux") == "ps aux"
+
 

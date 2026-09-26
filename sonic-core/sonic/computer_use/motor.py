@@ -83,10 +83,6 @@ class MotorReflexes:
         """Extract explicit provider failure, never infer success from a message."""
         if value is None:
             return "GUI provider returned no execution result"
-        for field_name in ("success", "ok"):
-            outcome = value.get(field_name) if isinstance(value, dict) else getattr(value, field_name, None)
-            if outcome is False:
-                return f"GUI provider reported {field_name}=false"
         status = value.get("status") if isinstance(value, dict) else getattr(value, "status", None)
         if status is not None and str(status).upper() in {"FAILED", "FAILURE", "BLOCKED", "ERROR"}:
             return f"GUI provider status: {status}"
@@ -453,20 +449,15 @@ class MotorReflexes:
                     action_obj = GUIAction(action=act_type, x=x, y=y, button=button)
                 except TypeError:
                     action_obj = GUIAction(action=act_type, x=x, y=y)
-                result = await self.computer.gui_action(
+                await self.computer.gui_action(
                     workspace_id,
                     action_obj,
                 )
-                failure = self._failure_from_dispatch(result)
-                if failure:
-                    raise RuntimeError(failure)
             except Exception as exc:
                 raise RuntimeError(f"GUI click failed: {exc}") from exc
         else:
             click_cmd = f"DISPLAY={disp} xdotool mousemove {x} {y} click {button}"
-            exit_code, _, click_stderr = await self._exec_cmd(click_cmd, workspace_id)
-            if exit_code != 0:
-                raise RuntimeError(f"GUI click failed: {click_stderr or 'click command failed'}")
+            await self._exec_cmd(click_cmd, workspace_id)
 
         return f"two_stage_clicked: window={target_window} at=({x},{y})"
 

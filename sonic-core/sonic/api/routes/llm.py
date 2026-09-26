@@ -10,7 +10,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from starlette.concurrency import run_in_threadpool
 
 from sonic.auth.middleware import require_auth
 from sonic.auth.models import User
@@ -314,7 +313,7 @@ async def laya_predict(
     engine = get_laya_engine()
     state_val = request.state if request.state is not None else ""
 
-    def predict_sync():
+    try:
         if request.preset and not request.questions:
             preset_raw = request.preset.strip().lower()
             preset_resolved = LAYA_PRESET_ALIASES.get(preset_raw, preset_raw)
@@ -327,41 +326,27 @@ async def laya_predict(
             preset_questions_map = getattr(engine, "PRESET_QUESTIONS", {})
             if preset_resolved in preset_questions_map:
                 if request.model:
-                    return engine.predict(
-                        state=state_str,
-                        questions=preset_questions_map[preset_resolved],
-                        model=request.model,
-                    )
-                if hasattr(engine, "predict_preset") and callable(engine.predict_preset):
-                    return engine.predict_preset(state=state_str, preset=preset_resolved)
-                return engine.predict(
-                    state=state_str,
-                    questions=preset_questions_map[preset_resolved],
-                )
-            if preset_raw in LAYA_PRESETS:
+                    res = engine.predict(state=state_str, questions=preset_questions_map[preset_resolved], model=request.model)
+                elif hasattr(engine, "predict_preset") and callable(engine.predict_preset):
+                    res = engine.predict_preset(state=state_str, preset=preset_resolved)
+                else:
+                    res = engine.predict(state=state_str, questions=preset_questions_map[preset_resolved])
+            elif preset_raw in LAYA_PRESETS:
                 actual_state, questions = _resolve_preset_questions(preset_raw, state_val)
-                return engine.predict(state=actual_state, questions=questions, model=request.model)
-
-            available = sorted(
-                set(
-                    list(preset_questions_map.keys())
-                    + list(LAYA_PRESETS.keys())
-                    + list(LAYA_PRESET_ALIASES.keys())
+                res = engine.predict(state=actual_state, questions=questions, model=request.model)
+            else:
+                available = sorted(list(set(list(preset_questions_map.keys()) + list(LAYA_PRESETS.keys()) + list(LAYA_PRESET_ALIASES.keys()))))
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown preset '{request.preset}'. Available presets: {available}",
                 )
-            )
+        elif request.questions:
+            res = engine.predict(state=state_val, questions=request.questions, model=request.model)
+        else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown preset '{request.preset}'. Available presets: {available}",
+                detail="Either 'questions' or 'preset' must be provided for Laya prediction.",
             )
-        if request.questions:
-            return engine.predict(state=state_val, questions=request.questions, model=request.model)
-        raise HTTPException(
-            status_code=400,
-            detail="Either 'questions' or 'preset' must be provided for Laya prediction.",
-        )
-
-    try:
-        res = await run_in_threadpool(predict_sync)
     except HTTPException:
         raise
     except Exception as e:

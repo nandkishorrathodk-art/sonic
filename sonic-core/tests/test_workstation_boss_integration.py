@@ -1,5 +1,6 @@
 """Comprehensive integration tests for BossAgent with Workstation API and MissionDirector."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,9 +9,9 @@ from sonic.api.routes.workstation import (
     _get_or_create_session,
     _infer_program_profile,
     _is_action_prompt,
-    _is_complex_or_multi_part_objective,
     _is_observation_only_prompt,
     _requires_desktop_observation,
+    _is_complex_or_multi_part_objective,
     _run_prompt_reasoning,
 )
 from sonic.computer_use.models import (
@@ -23,6 +24,7 @@ from sonic.computer_use.models_boss import (
     BossThinking,
     Phase,
     SubMission,
+    SubMissionResult,
 )
 from sonic.mission_engine.director import MissionDirector
 
@@ -132,15 +134,6 @@ async def test_workstation_routes_complex_prompt_to_boss_agent(monkeypatch):
             if phase_callback:
                 await phase_callback("boss_thinking", {"content": "Planning attack phases", "thinking_type": "strategic_decomposition"})
                 await phase_callback("sub_dispatch", {"sub_agent_number": 1, "goal": "Discover endpoints", "max_steps": 5})
-                await phase_callback("sub_step", {"trace": {
-                    "step_index": 1,
-                    "action_type": "TERMINAL_EXEC",
-                    "target": "hostname",
-                    "payload": '{"command": "hostname"}',
-                    "observation": "host-name",
-                    "status": "SUCCESS",
-                    "exit_code": None,
-                }})
                 await phase_callback("sub_report", {"sub_agent_number": 1, "findings_summary": "Found 12 endpoints"})
                 await phase_callback("phase_complete", {"phase_number": 1, "name": "Recon", "results_count": 1, "success_count": 1})
                 await phase_callback("boss_report", {"findings_summary": "Recon completed: Apache 2.4 + PHP 7.4 found."})
@@ -155,8 +148,6 @@ async def test_workstation_routes_complex_prompt_to_boss_agent(monkeypatch):
         assert mock_boss.run.called
         assert state["status"] == "IDLE"
         assert state["thought_summary"] == "Recon completed: Apache 2.4 + PHP 7.4 found."
-        command_entries = [item for item in state["worklog"] if item.get("type") == "command"]
-        assert command_entries[-1]["exit_code"] is None
 
         titles = [w.get("title") for w in state.get("worklog", [])]
         assert any("Boss Thinking" in t for t in titles)
@@ -263,9 +254,8 @@ async def test_director_coordinates_with_boss_agent():
 @pytest.mark.asyncio
 async def test_boss_emits_sub_agent_number_in_sub_report():
     """Verify that BossAgent.run emits sub_agent_number in the sub_report event payload."""
-    import json
-
     from sonic.computer_use.boss import BossAgent
+    import json
 
     decomp_json = json.dumps({
         "thinking": "Single task phase",

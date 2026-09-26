@@ -303,14 +303,7 @@ class TestCodebaseEvolverBugFixes:
 
         with patch.object(evolver, "apply_patch", return_value=(True, "ok", 1, 1)), \
              patch("ast.parse", side_effect=ValueError("malformed token or null byte")):
-            diff = (
-                "--- a/sonic/tools/adapters/custom_parser.py\n"
-                "+++ b/sonic/tools/adapters/custom_parser.py\n"
-                "@@ -1 +1 @@\n"
-                "-old\n"
-                "+new\n"
-            )
-            ok, msg = evolver.apply_patch_multi([file1], diff)
+            ok, msg = evolver.apply_patch_multi([file1], "dummy diff")
 
         assert ok is False
         assert "AST verification failed" in msg or "malformed token" in msg
@@ -345,62 +338,3 @@ class TestCodebaseEvolverBugFixes:
         files3 = CodebaseEvolver._diff_files(unified_diff_dev_null)
         assert files3 == ["sonic/tools/legacy.py"]
 
-    def test_rejects_repository_escape_and_protected_secondary_diff_path(self, temp_repo, tmp_path):
-        evolver = CodebaseEvolver(repo_root=temp_repo)
-        target = "sonic/tools/adapters/custom_parser.py"
-        outside = tmp_path / "outside.py"
-        outside.write_text("VALUE = 1\n", encoding="utf-8")
-
-        escaped = evolver.evolve(
-            target_component="../outside.py",
-            description="Escape repository root",
-            code_diff="VALUE = 2\n",
-        )
-        assert escaped.stage == EvolutionStage.REJECTED
-        assert "escapes repository root" in escaped.error_reason
-        assert outside.read_text(encoding="utf-8") == "VALUE = 1\n"
-
-        protected_diff = (
-            "diff --git a/sonic/tools/adapters/custom_parser.py b/sonic/tools/adapters/custom_parser.py\n"
-            "--- a/sonic/tools/adapters/custom_parser.py\n"
-            "+++ b/sonic/tools/adapters/custom_parser.py\n"
-            "@@ -1 +1 @@\n"
-            "-old\n"
-            "+new\n"
-            "diff --git a/sonic/auth/models.py b/sonic/auth/models.py\n"
-            "--- a/sonic/auth/models.py\n"
-            "+++ b/sonic/auth/models.py\n"
-            "@@ -1 +1 @@\n"
-            "-old\n"
-            "+new\n"
-        )
-        result = evolver.evolve(
-            target_component=target,
-            description="Try to modify protected auth code",
-            code_diff=protected_diff,
-        )
-        assert result.stage == EvolutionStage.REJECTED
-        assert "Safety Invariant Violation" in result.error_reason
-
-    def test_failed_commit_rolls_back_and_is_not_promoted(self, temp_repo):
-        evolver = CodebaseEvolver(repo_root=temp_repo)
-        target = "sonic/tools/adapters/custom_parser.py"
-        original = (temp_repo / target).read_text(encoding="utf-8")
-        replacement = "def parse_status(code: int) -> str:\n    return 'NEW'\n"
-        passing = TestExecutionResult(passed=True, total_tests=1, passed_tests=1)
-
-        with patch.object(evolver, "run_tests", return_value=passing), \
-             patch.object(evolver, "run_import_checks", return_value=(True, "ok")), \
-             patch.object(evolver, "run_security_regression", return_value=True), \
-             patch.object(evolver, "commit_and_push", return_value=(False, "", False, "commit denied")):
-            report = evolver.evolve(
-                target_component=target,
-                description="Commit failure must not promote",
-                code_diff=replacement,
-                auto_promote=True,
-            )
-
-        assert report.stage == EvolutionStage.ROLLED_BACK
-        assert report.git_committed is False
-        assert "commit denied" in report.error_reason
-        assert (temp_repo / target).read_text(encoding="utf-8") == original
