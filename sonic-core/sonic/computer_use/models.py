@@ -7,6 +7,8 @@ autonomy levels, engineering mission modes, decision traces, and metrics.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shlex
 import uuid
@@ -252,7 +254,13 @@ class VerificationProbe(BaseModel):
         if self.kind == VerificationProbeKind.PYTEST:
             return "python -m pytest -q --tb=short"
         if self.kind == VerificationProbeKind.EXECUTABLE:
+            if os.name == "nt":
+                return f'python -c "import shutil, sys; sys.exit(0 if shutil.which(sys.argv[1]) else 1)" {json.dumps(self.target)}'
             return f"command -v -- {shlex.quote(self.target)}"
+        if os.name == "nt":
+            return (
+                f'python -c "import os, sys; p = sys.argv[1]; sys.exit(0 if os.path.isfile(p) and os.path.getsize(p) > 0 and print(\'FILE_VERIFIED\') is None else 1)" {json.dumps(self.target)}'
+            )
         return (
             f"test -f {shlex.quote(self.target)} && "
             f"test -s {shlex.quote(self.target)} && "

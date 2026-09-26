@@ -1508,6 +1508,7 @@ Rules:
             status_str = str(_trace_value(t, "status", ""))
             if status_str not in ("COMPLETED", "SUCCESS", "VERIFIED"):
                 continue
+
             target = str(_trace_value(t, "target_resource", "") or "")
             payload = _trace_value(t, "payload", "")
             if isinstance(payload, str):
