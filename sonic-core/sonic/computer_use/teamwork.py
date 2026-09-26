@@ -62,6 +62,35 @@ class DisplayLeaseManager:
             cls._lock_metadata[key] = {"display": display or os.environ.get("DISPLAY") or ":99"}
         return cls._locks[key]
 
+    @classmethod
+    async def acquire(
+        cls,
+        workspace_id: str,
+        display: str | None = None,
+        *,
+        timeout: float = 30.0,
+        owner: str | None = None,
+    ) -> asyncio.Lock:
+        """Acquire a physical-display lease without waiting forever."""
+        lock = cls.get_lock(workspace_id, display=display)
+        await asyncio.wait_for(lock.acquire(), timeout=timeout)
+        key = f"display:{display or os.environ.get('DISPLAY') or ':99'}"
+        cls._lock_metadata[key].update(
+            {"owner": owner or workspace_id, "acquired_at": time.time()}
+        )
+        return lock
+
+    @classmethod
+    def release(cls, lock: asyncio.Lock, display: str | None = None) -> None:
+        """Release a lease and clear ownership telemetry."""
+        key = f"display:{display or os.environ.get('DISPLAY') or ':99'}"
+        metadata = cls._lock_metadata.get(key)
+        if metadata is not None:
+            metadata.pop("owner", None)
+            metadata.pop("acquired_at", None)
+        if lock.locked():
+            lock.release()
+
 
 # ---------------------------------------------------------------------------
 # Data Models for Dynamic Subagents & Teamwork

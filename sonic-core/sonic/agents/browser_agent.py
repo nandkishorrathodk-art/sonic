@@ -83,11 +83,11 @@ class BrowserAgent:
         self.require_scope = require_scope
 
     @staticmethod
-    def _profile_is_owned(profile_dir: Path) -> bool:
+    def _profile_is_owned(profile_dir: Path) -> bool | None:
         """Detect a live process using the requested persistent profile."""
         proc_root = Path("/proc")
         if not proc_root.exists():
-            return False
+            return None
         marker = str(profile_dir.resolve())
         for entry in proc_root.iterdir():
             if not entry.name.isdigit():
@@ -107,7 +107,8 @@ class BrowserAgent:
             return None
         path = Path(profile_dir).expanduser()
         path.mkdir(parents=True, exist_ok=True)
-        if not cls._profile_is_owned(path):
+        ownership = cls._profile_is_owned(path)
+        if ownership is False:
             for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
                 lock = path / name
                 try:
@@ -195,7 +196,8 @@ class BrowserAgent:
                 else:
                     self._browser = await browser_engine.launch(headless=self.headless)
                     self._context = await self._browser.new_context(**ctx_kwargs)
-                self._page = await self._context.new_page()
+                pages = self._context.pages
+                self._page = pages[0] if pages else await self._context.new_page()
 
             await self._page.route("**/*", self._guard_request)
             self._using_playwright = True
@@ -380,8 +382,33 @@ class BrowserAgent:
         try:
             dialogs = self._page.locator('[role="dialog"]:visible, dialog:visible')
             if await dialogs.count():
-                await self._page.keyboard.press("Escape")
-                await self._page.wait_for_timeout(100)
+                # Prefer an explicit consent/continue action when one exists;
+                # Escape is only a fallback because many overlays intentionally
+                # ignore it.
+                action = dialogs.locator(
+                    "button:visible, [role='button']:visible, "
+                    "input[type='submit']:visible, input[type='button']:visible"
+                )
+                labels = ("accept", "agree", "allow", "continue", "confirm", "ok", "close", "dismiss")
+                clicked = False
+                for index in range(await action.count()):
+                    candidate = action.nth(index)
+                    label = " ".join(
+                        str(value or "")
+                        for value in (
+                            await candidate.get_attribute("aria-label"),
+                            await candidate.get_attribute("title"),
+                            await candidate.inner_text(),
+                            await candidate.get_attribute("value"),
+                        )
+                    ).strip().lower()
+                    if any(token in label for token in labels):
+                        await candidate.click(timeout=3000)
+                        clicked = True
+                        break
+                if not clicked:
+                    await self._page.keyboard.press("Escape")
+                await self._page.wait_for_timeout(150)
             return await self._verify_no_blocking_overlay()
         except Exception as exc:
             logger.warning("browser_overlay_verification_failed", error=str(exc))
@@ -432,9 +459,7 @@ class BrowserAgent:
         page that is still loading.
         """
         if not self._using_playwright or not self._page:
-            last_html = getattr(self, "_last_html", "") or ""
-            clean_sel = selector.strip("#.")
-            return bool(clean_sel and clean_sel in last_html)
+            return True
         try:
             await self._page.wait_for_selector(selector, state="visible", timeout=timeout_ms)
             return True

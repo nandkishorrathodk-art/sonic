@@ -256,7 +256,7 @@ class MotorReflexes:
                     return
                 raise RuntimeError("hotkey provider returned no execution receipt")
             except Exception as exc:
-                primary_error = exc
+                raise RuntimeError(f"hotkey dispatch failed: {exc}") from exc
             else:
                 primary_error = None
         else:
@@ -268,7 +268,7 @@ class MotorReflexes:
                     raise RuntimeError(getattr(res, "stderr", "") or "hotkey failed")
                 return
             except Exception as exc:
-                primary_error = exc
+                raise RuntimeError(f"hotkey dispatch failed: {exc}") from exc
         if hasattr(self.computer, "gui_action"):
             result = await self.computer.gui_action(
                 workspace_id, GUIAction(action=GUIActionType.KEYPRESS, key=key)
@@ -277,7 +277,7 @@ class MotorReflexes:
             if failure:
                 raise RuntimeError(failure)
             return
-        raise RuntimeError(str(primary_error or "No hotkey execution method available"))
+        raise RuntimeError("No hotkey execution method available")
 
     async def human_type(self, workspace_id: str, text: str, delay_ms: int = 25) -> str:
         """
@@ -433,7 +433,9 @@ class MotorReflexes:
             f"DISPLAY={disp} wmctrl -a {safe_target} || "
             f"DISPLAY={disp} xdotool search --name {safe_target} windowactivate --sync"
         )
-        await self._exec_cmd(focus_cmd, workspace_id)
+        exit_code, _, stderr = await self._exec_cmd(focus_cmd, workspace_id)
+        if exit_code != 0:
+            raise RuntimeError(f"target window focus failed: {stderr or 'activation command failed'}")
 
         # Stage 2: Settle for window manager focus transition
         if settle_seconds > 0:
