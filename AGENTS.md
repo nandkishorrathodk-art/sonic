@@ -2195,5 +2195,23 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
   - All 3 execute concurrently in isolated branches, pass programmatic verification commands (`python -c "assert ..."`), pass Judge verification, and merge back into the parent workspace with zero collision.
   - Outcomes synthesized by `ComputerUseAgent` (`integrated_pipeline.py`) and `BossAgent` (`BossReport`).
 
-
-
+## Phase 46 — 5-Track Architectural Audit, Self-Coder API Reconciliation & Fail-Closed Safety Verification (DONE)
+- **Self-Evolution & Path Confinement (Track 1)**:
+  - Reconciled `GoalDirector` <-> `CodebaseEvolver` APIs: added/restored `apply_patch_multi`, `pre_applied_files`, `_diff_files`, and `report_only` mode.
+  - Expanded protected safety components to strictly block autonomous tampering with `auth/`, `safety/`, `evolution/`, and regression test suites.
+  - Missing security regression suites now fail closed (exit code 1 / status blocked).
+  - Failed git commits do not advance version numbers or mark goals as `PROMOTED`.
+- **Laya & System-1 Decision Engine Gating (Track 2)**:
+  - Synchronous Laya inference offloaded via `run_in_executor` to prevent blocking the async FastAPI/workstation event loop (`sonic/api/routes/llm.py`).
+  - Laya heartbeat callback exceptions caught cleanly so they never crash successful LLM turns.
+  - Added Laya receipt evaluation checks during mission goal completion.
+- **End-to-End Execution Loop & Verification Probes (Track 3)**:
+  - Closed unmonitored terminal bypass in `ComputerUseAgent.verify_goal()`: probes are now dispatched as typed `VerificationProbe` via `ComputerActionType.VERIFY_PROBE` through `execute_action()` and evaluated against `ActionPolicy`.
+  - Added cross-platform verification probe commands (`models.py`) supporting Windows and POSIX environments (`python -c "import os, sys..."`).
+- **Physical Display Serialization & Workstation Telemetry (Track 4)**:
+  - `BossAgent` limits concurrent GUI workers on `_shared_desktop` to 1, while allowing headless tasks to scale up to `max_parallel_workers`.
+  - Preserved nullable exit codes in workstation telemetry rather than fabricating `0` or `1`.
+  - Added runtime kill-switch rechecks inside the active terminal WebSocket input loop (`sonic/api/routes/terminal.py`).
+  - Removed unowned global Daytona workspace ID fallback.
+- **Integration & Regression Test Coverage (Track 5)**:
+  - 250+ regression tests passing 100% across self-coder (`test_self_coder.py`), codebase evolution (`test_codebase_evolution.py`, `test_advanced_evolution.py`), Laya System-1 (`test_laya_end_to_end.py`, `test_laya_system1_engine.py`), action receipts (`test_agent_action_receipts.py`), boss plane routing (`test_boss_plane_routing_and_truthfulness.py`), and dynamic teamwork subagents (`test_teamwork_subagents.py`, `test_sonic_subagents_live_capability.py`).
