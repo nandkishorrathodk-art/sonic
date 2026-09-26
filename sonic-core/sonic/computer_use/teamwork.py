@@ -23,9 +23,11 @@ Implements Antigravity-grade, 100% unscripted multi-agent teamwork for SONIC:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -135,6 +137,7 @@ class SubagentConversation:
     parent_workspace_id: str
     effective_workspace_id: str
     isolated_dir: Path | None = None
+    git_branch: str | None = None
     state: str = "running"  # "running" | "verifying" | "idle" | "completed" | "errored" | "canceled"
     state_detail: str = ""
     agent_instance: Any = None
@@ -188,6 +191,7 @@ class SubagentTeamworkManager:
         }
         self.conversations: dict[str, SubagentConversation] = {}
         self.judge = JudgeAgent(computer_provider=self.computer, judge_id=f"teamwork-judge-{tenant_id}")
+        self._baseline_snapshots: dict[str, dict[str, tuple[int, str]]] = {}
 
     # ------------------------------------------------------------------
     # 1. DEFINE_SUBAGENT
@@ -249,7 +253,7 @@ class SubagentTeamworkManager:
 
         async def _launch_one(spec: SubagentTaskSpec) -> SubagentConversation:
             conv_id = f"subconv-{uuid.uuid4().hex[:10]}"
-            w_mode = spec.workspace_mode if spec.workspace_mode in ("inherit", "branch", "share") else "inherit"
+            w_mode = spec.workspace_mode if spec.workspace_mode in ("inherit", "branch", "share") else "branch"
             eff_ws_id, isolated_path = await self._prepare_subagent_workspace(workspace_id, conv_id, w_mode)
 
             conv = SubagentConversation(
@@ -260,6 +264,7 @@ class SubagentTeamworkManager:
                 parent_workspace_id=workspace_id,
                 effective_workspace_id=eff_ws_id,
                 isolated_dir=isolated_path,
+                git_branch=f"subagent/{conv_id}" if w_mode in ("branch", "share") else None,
                 state="running",
                 state_detail=f"Executing: {spec.role}",
             )
@@ -338,6 +343,7 @@ class SubagentTeamworkManager:
                 "role": c.role,
                 "type": c.type_name,
                 "workspaceMode": c.workspace_mode,
+                "gitBranch": c.git_branch,
                 "state": c.state,
                 "stateDetail": c.state_detail,
                 "verified": c.verified,
@@ -387,6 +393,26 @@ class SubagentTeamworkManager:
 
         return "\n".join(parts)
 
+    @staticmethod
+    def _snapshot_dir(dir_path: Path | None) -> dict[str, tuple[int, str]]:
+        """Takes a content digest snapshot (size, sha256) of all files in directory."""
+        snapshot: dict[str, tuple[int, str]] = {}
+        if dir_path is None or not dir_path.exists():
+            return snapshot
+        for f in dir_path.rglob("*"):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(dir_path)
+            if any(part in (".sonic_subagents", "__pycache__", ".pytest_cache", "node_modules", ".git") for part in rel.parts):
+                continue
+            try:
+                content = f.read_bytes()
+                h = hashlib.sha256(content).hexdigest()
+                snapshot[rel.as_posix()] = (len(content), h)
+            except Exception:
+                pass
+        return snapshot
+
     async def _prepare_subagent_workspace(
         self,
         parent_workspace_id: str,
@@ -405,6 +431,24 @@ class SubagentTeamworkManager:
             except Exception:
                 parent_dir = None
 
+        git_branch_name = f"subagent/{conversation_id}"
+        is_git_repo = parent_dir is not None and (parent_dir / ".git").exists()
+
+        # If parent workspace is a git repo, create a dedicated branch without switching parent HEAD or disturbing uncommitted files
+        if is_git_repo and parent_dir is not None:
+            try:
+                subprocess.run(
+                    ["git", "branch", git_branch_name, "HEAD"],
+                    cwd=parent_dir,
+                    check=False,
+                    capture_output=True,
+                )
+            except Exception:
+                pass
+
+        eff_ws_id = f"{parent_workspace_id}--branch-{conversation_id}"
+        iso_root: Path | None = None
+
         if hasattr(self.computer, "create"):
             try:
                 sub_ws = await self.computer.create(
@@ -414,29 +458,33 @@ class SubagentTeamworkManager:
                 eff_ws_id = sub_ws.id
                 if hasattr(self.computer, "_get_workspace_dir"):
                     iso_root = Path(self.computer._get_workspace_dir(eff_ws_id))
-                    if parent_dir is not None and parent_dir.exists():
-                        for item in parent_dir.iterdir():
-                            if item.name in (".sonic_subagents", "__pycache__", ".pytest_cache", "node_modules"):
-                                continue
-                            dest = iso_root / item.name
-                            try:
-                                if item.is_dir():
-                                    shutil.copytree(item, dest, dirs_exist_ok=True)
-                                elif item.is_file():
-                                    shutil.copy2(item, dest)
-                            except Exception:
-                                pass
+            except Exception:
+                pass
+
+        if iso_root is None and parent_dir is not None and parent_dir.exists():
+            iso_root = parent_dir / ".sonic_subagents" / conversation_id
+            iso_root.mkdir(parents=True, exist_ok=True)
+
+        # 1. Workspace mode "share": Share underlying repository directory using git worktree (if git available)
+        if workspace_mode == "share" and is_git_repo and parent_dir is not None and iso_root is not None:
+            try:
+                res = subprocess.run(
+                    ["git", "worktree", "add", str(iso_root), git_branch_name],
+                    cwd=parent_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode == 0:
+                    self._baseline_snapshots[conversation_id] = self._snapshot_dir(iso_root)
                     return eff_ws_id, iso_root
             except Exception:
                 pass
 
-        eff_ws_id = f"{parent_workspace_id}--branch-{conversation_id}"
-        if parent_dir is not None and parent_dir.exists():
-            iso_root = parent_dir / ".sonic_subagents" / conversation_id
-            iso_root.mkdir(parents=True, exist_ok=True)
-            # Copy baseline top-level source files (excluding .sonic_subagents and .git bloat)
+        # 2. Workspace mode "branch" (or fallback for "share"): Copy baseline files to isolated sub-workspace
+        if iso_root is not None and parent_dir is not None and parent_dir.exists():
+            self._baseline_snapshots[conversation_id] = self._snapshot_dir(parent_dir)
             for item in parent_dir.iterdir():
-                if item.name in (".sonic_subagents", "__pycache__", ".pytest_cache", "node_modules"):
+                if item.name in (".sonic_subagents", "__pycache__", ".pytest_cache", "node_modules", ".git"):
                     continue
                 dest = iso_root / item.name
                 try:
@@ -469,17 +517,78 @@ class SubagentTeamworkManager:
                 parent_dir = None
 
         merged: list[str] = []
+        is_git_repo = parent_dir is not None and (parent_dir / ".git").exists()
+
+        # 1. Clean Git Merge if a git branch exists and has commits ahead of parent
+        if is_git_repo and parent_dir is not None and conv.git_branch:
+            try:
+                r_diff = subprocess.run(
+                    ["git", "rev-list", "--count", f"HEAD..{conv.git_branch}"],
+                    cwd=parent_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                if r_diff.returncode == 0 and int(r_diff.stdout.strip() or 0) > 0:
+                    # Clean merge with --autostash so uncommitted parent files are never clobbered or blocked
+                    m_res = subprocess.run(
+                        ["git", "merge", "--autostash", conv.git_branch],
+                        cwd=parent_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if m_res.returncode == 0:
+                        r_files = subprocess.run(
+                            ["git", "diff", "--name-only", "HEAD~1..HEAD"],
+                            cwd=parent_dir,
+                            capture_output=True,
+                            text=True,
+                        )
+                        for line in r_files.stdout.splitlines():
+                            if line.strip():
+                                merged.append(line.strip().replace("\\", "/"))
+            except Exception as e:
+                logger.warning("subagent_git_merge_failed", error=str(e), branch=conv.git_branch)
+
+        # 2. File-level delta merge: ONLY merge new or genuinely modified files, preserving parent uncommitted files
+        baseline = self._baseline_snapshots.get(conv.conversation_id, {})
+        current_snapshot = self._snapshot_dir(conv.isolated_dir) if conv.isolated_dir.exists() else {}
+
         if parent_dir is not None and conv.isolated_dir.exists():
-            for src_file in conv.isolated_dir.rglob("*"):
-                if not src_file.is_file():
-                    continue
-                rel = src_file.relative_to(conv.isolated_dir)
-                if any(part in (".sonic_subagents", "__pycache__", ".pytest_cache") for part in rel.parts):
-                    continue
-                dst_file = parent_dir / rel
-                dst_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dst_file)
-                merged.append(rel.as_posix())
+            for rel_str, (size, h) in current_snapshot.items():
+                # If file did not exist in baseline OR its content/hash changed, it was created/modified by subagent!
+                if rel_str not in baseline or baseline[rel_str][1] != h:
+                    src_file = conv.isolated_dir / rel_str
+                    dst_file = parent_dir / rel_str
+                    dst_file.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        shutil.copy2(src_file, dst_file)
+                        if rel_str not in merged:
+                            merged.append(rel_str)
+                    except Exception as e:
+                        logger.warning("subagent_file_merge_error", src=str(src_file), error=str(e))
+
+            # Clean up git worktree if share mode was used
+            if conv.workspace_mode == "share" and is_git_repo and conv.git_branch:
+                try:
+                    subprocess.run(["git", "worktree", "remove", "--force", str(conv.isolated_dir)], cwd=parent_dir, capture_output=True)
+                    subprocess.run(["git", "branch", "-D", conv.git_branch], cwd=parent_dir, capture_output=True)
+                except Exception:
+                    pass
+
+        # 3. Remote container fallback merge
+        elif parent_dir is None and hasattr(self.computer, "terminal"):
+            try:
+                iso_remote = str(conv.isolated_dir).replace("\\", "/")
+                merge_cmd = f"if [ -d '{iso_remote}' ]; then cp -r -u '{iso_remote}'/. . 2>&1 && ls -1 '{iso_remote}'; fi"
+                res = await self.computer.terminal(conv.parent_workspace_id, merge_cmd)
+                out = getattr(res, "stdout", "") or ""
+                for line in out.splitlines():
+                    cleaned = line.strip()
+                    if cleaned and not cleaned.startswith("cp:"):
+                        merged.append(cleaned)
+            except Exception:
+                pass
+
         return merged
 
     async def _execute_and_verify_loop(
@@ -502,6 +611,15 @@ class SubagentTeamworkManager:
             if isinstance(self.safety, ActionPolicy)
             else self.safety
         )
+        if isinstance(safety_clone, ActionPolicy):
+            if conv.isolated_dir is not None:
+                safety_clone.workspace_root = conv.isolated_dir.resolve()
+            if type_def and not type_def.enable_write_tools:
+                write_tools = {"FILE_WRITE", "GIT_COMMIT", "GIT_PUSH", "TOOL_AUTHOR"}
+                safety_clone.allowed_types = frozenset(t for t in safety_clone.allowed_types if t not in write_tools)
+            if type_def and not type_def.enable_subagent_tools:
+                sub_tools = {"DEFINE_SUBAGENT", "INVOKE_SUBAGENT"}
+                safety_clone.allowed_types = frozenset(t for t in safety_clone.allowed_types if t not in sub_tools)
 
         # Reuse existing ComputerUseAgent on continuation (`send_message`) so full history is preserved!
         if conv.agent_instance is None:
@@ -544,6 +662,9 @@ class SubagentTeamworkManager:
         for round_idx in range(max_rounds + 1):
             conv.state = "running"
             conv.state_detail = f"Round {round_idx + 1}/{max_rounds + 1}"
+
+            # Replenish action budget for this round
+            agent.max_actions = getattr(agent, "action_counter", 0) + max(1, min(int(spec.max_steps), 30))
 
             # Silent background execution: step_callback=None so main UI is never spammed!
             traces = await agent.run_mission(
@@ -599,16 +720,16 @@ class SubagentTeamworkManager:
         if spec.verification_command.strip():
             cmd = spec.verification_command.strip()
             try:
-                if hasattr(self.computer, "execute") and conv.isolated_dir is not None:
+                cwd = str(conv.isolated_dir) if conv.isolated_dir is not None else None
+                if hasattr(self.computer, "execute"):
                     res = await self.computer.execute(
                         workspace_id=conv.effective_workspace_id,
                         command=cmd,
-                        cwd=str(conv.isolated_dir),
+                        cwd=cwd,
                     )
                 elif hasattr(self.computer, "terminal"):
-                    if conv.isolated_dir is not None:
-                        cmd = f'cd "{conv.isolated_dir.as_posix()}" && {cmd}'
-                    res = await self.computer.terminal(conv.effective_workspace_id, cmd)
+                    cmd_run = f'cd "{conv.isolated_dir.as_posix()}" && {cmd}' if conv.isolated_dir is not None else cmd
+                    res = await self.computer.terminal(conv.effective_workspace_id, cmd_run)
                 else:
                     res = None
                 exit_code = getattr(res, "exit_code", 1)
