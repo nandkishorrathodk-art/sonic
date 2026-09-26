@@ -18,9 +18,9 @@ import re
 import time
 import uuid
 from collections.abc import Callable
-from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -414,7 +414,7 @@ class BrowserAgent:
                     "button:visible, [role='button']:visible, "
                     "input[type='submit']:visible, input[type='button']:visible"
                 )
-                labels = ("accept", "agree", "allow", "continue", "confirm", "ok", "close", "dismiss")
+                labels = ("accept", "agree", "continue", "confirm", "ok", "close", "dismiss")
                 clicked = False
                 for index in range(await action.count()):
                     candidate = action.nth(index)
@@ -427,7 +427,7 @@ class BrowserAgent:
                             await candidate.get_attribute("value"),
                         )
                     ).strip().lower()
-                    if any(token in label for token in labels):
+                    if any(re.search(rf"\b{re.escape(token)}\b", label) for token in labels):
                         await candidate.click(timeout=3000)
                         clicked = True
                         break
@@ -484,7 +484,7 @@ class BrowserAgent:
         page that is still loading.
         """
         if not self._using_playwright or not self._page:
-            return True
+            return False
         try:
             await self._page.wait_for_selector(selector, state="visible", timeout=timeout_ms)
             return True
@@ -1011,4 +1011,3 @@ Respond ONLY with a JSON object:
         return self.traces
 
     run_task = run_mission
-

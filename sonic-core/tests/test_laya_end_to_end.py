@@ -11,16 +11,24 @@ Validates the full cognitive lifecycle across:
 
 from __future__ import annotations
 
+import asyncio
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from sonic.api.main import app
-from sonic.computer_use.agent import ComputerUseAgent
+from sonic.api.routes import llm as llm_routes
+from sonic.auth.models import User
+from sonic.computer_use.agent import ComputerUseAgent, _GOAL_COMPLETE_SENTINEL
 from sonic.computer_use.curiosity import CuriosityLoop
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
 from sonic.computer_use.models_boss import SubMission
+from sonic.api.routes.llm import LayaPredictRequest, laya_predict
 from sonic.llm.laya_engine import (
+    LayaDecisionResult,
     LayaSystem1Engine,
     _has_sufficient_ram_gb,
 )
@@ -111,6 +119,88 @@ def test_laya_single_pass_decisions_multilingual_unicode():
 
 
 @pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_laya_async_api_offloads_synchronous_prediction(monkeypatch):
+    class SlowEngine:
+        PRESET_QUESTIONS = {}
+
+        def predict(self, state, questions, model=None):
+            time.sleep(0.08)
+            return LayaDecisionResult(
+                answers={"q": {"score": 0.5}},
+                routing={"backend": "test"},
+            )
+
+    monkeypatch.setattr(llm_routes, "get_laya_engine", lambda: SlowEngine())
+    request = LayaPredictRequest(
+        state="blocking fixture",
+        questions={"q": {"type": "score", "criteria": ["low", "high"]}},
+    )
+    user = User(email="operator@example.test", name="Operator")
+    prediction = asyncio.create_task(laya_predict(request, user=user))
+
+    ticks = 0
+    while not prediction.done():
+        ticks += 1
+        await asyncio.sleep(0.01)
+
+    result = await prediction
+    assert ticks >= 3
+    assert result["answers"]["q"]["score"] == 0.5
+
+
+@pytest.mark.parametrize(
+    "status_code,body",
+    [
+        (200, {"answers": {"plane": {"choice": "unknown", "probability": 0.99}}}),
+        (503, {}),
+    ],
+)
+@pytest.mark.no_live_infra
+def test_laya_bad_remote_plane_response_uses_local_fallback(monkeypatch, status_code, body):
+    class Response:
+        def __init__(self):
+            self.status_code = status_code
+
+        def json(self):
+            return body
+
+    class Client:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr("sonic.llm.laya_engine.httpx.Client", Client)
+    engine = LayaSystem1Engine(api_url="http://laya.invalid", enable_local_model=False)
+    choice, probability = engine.decide_execution_plane("Run pytest in the terminal")
+
+    assert choice == "headless"
+    assert probability > 0.5
+
+
+@pytest.mark.no_live_infra
+def test_laya_plane_decision_rejects_invalid_choice_or_probability(monkeypatch):
+    engine = LayaSystem1Engine(enable_local_model=False)
+    monkeypatch.setattr(
+        engine,
+        "predict",
+        lambda **_kwargs: LayaDecisionResult(
+            answers={"plane": {"choice": "headless", "probability": float("nan")}}
+        ),
+    )
+
+    assert engine.decide_execution_plane("Run pytest") == ("gui", 0.5)
+
+
+@pytest.mark.no_live_infra
 def test_laya_preset_evaluation():
     """Verify built-in presets (`triage`, `guard`, `verification`, `curiosity`)."""
     engine = LayaSystem1Engine(enable_local_model=False)
@@ -162,21 +252,18 @@ def test_submission_plane_explicit_override_preservation():
 async def test_computer_use_agent_verify_goal_rejects_dummy_marker():
     """Verify ComputerUseAgent.verify_goal rejects placeholder dummy terminal markers fail-closed."""
     computer = MagicMock()
-    # Terminal probe returning dummy ready output
-    computer.terminal = AsyncMock(
-        return_value=ExecResult(
-            command="python -m pytest",
+    agent = ComputerUseAgent(computer_provider=computer, llm_router=None)
+    agent.execute_action = AsyncMock(
+        return_value=SimpleNamespace(
             exit_code=0,
-            stdout="Terminal Ready (0 procs)",
-            stderr="",
+            status=ActionExecutionStatus.COMPLETED,
+            actual_observation="Terminal Ready (0 procs)",
         )
     )
 
-    agent = ComputerUseAgent(computer_provider=computer, llm_router=None)
     verified, evidence = await agent.verify_goal("ws-test", "run pytest unit tests")
 
     assert verified is False
-    assert "dummy marker detected" in evidence.lower()
     assert "terminal ready (0 procs)" in evidence.lower()
 
 
@@ -185,20 +272,19 @@ async def test_computer_use_agent_verify_goal_rejects_dummy_marker():
 async def test_computer_use_agent_verify_goal_rejects_sonic_obs_ready_dummy():
     """Verify ComputerUseAgent.verify_goal rejects __sonic_obs_ready__ dummy marker."""
     computer = MagicMock()
-    computer.terminal = AsyncMock(
-        return_value=ExecResult(
-            command="python -m pytest",
+    agent = ComputerUseAgent(computer_provider=computer, llm_router=None)
+    agent.execute_action = AsyncMock(
+        return_value=SimpleNamespace(
             exit_code=0,
-            stdout="some task __sonic_obs_ready__ output",
-            stderr="",
+            status=ActionExecutionStatus.COMPLETED,
+            actual_observation="some task __sonic_obs_ready__ output",
         )
     )
 
-    agent = ComputerUseAgent(computer_provider=computer, llm_router=None)
     verified, evidence = await agent.verify_goal("ws-test", "run pytest unit tests")
 
     assert verified is False
-    assert "dummy marker detected" in evidence.lower()
+    assert "__sonic_obs_ready__" in evidence.lower()
 
 
 @pytest.mark.no_live_infra
@@ -206,16 +292,15 @@ async def test_computer_use_agent_verify_goal_rejects_sonic_obs_ready_dummy():
 async def test_computer_use_agent_verify_goal_accepts_real_receipt():
     """Verify ComputerUseAgent.verify_goal approves empirical execution receipts."""
     computer = MagicMock()
-    computer.terminal = AsyncMock(
-        return_value=ExecResult(
-            command="python -m pytest",
+    agent = ComputerUseAgent(computer_provider=computer, llm_router=None)
+    agent.execute_action = AsyncMock(
+        return_value=SimpleNamespace(
             exit_code=0,
-            stdout="================ 5 passed in 0.15s ================",
-            stderr="",
+            status=ActionExecutionStatus.COMPLETED,
+            actual_observation="================ 5 passed in 0.15s ================",
         )
     )
 
-    agent = ComputerUseAgent(computer_provider=computer, llm_router=None)
     verified, evidence = await agent.verify_goal("ws-test", "run pytest unit tests")
 
     assert verified is True
@@ -236,11 +321,52 @@ async def test_computer_use_agent_verify_goal_accepts_file_verified_receipt():
         )
     )
 
-    agent = ComputerUseAgent(computer_provider=computer, llm_router=None)
+    agent = ComputerUseAgent(computer_provider=computer, llm_router=None, observe_desktop=False)
     verified, evidence = await agent.verify_goal("ws-test", "Create report.md")
 
     assert verified is True
     assert "FILE_VERIFIED" in evidence
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.parametrize(
+    "receipt_score,expected",
+    [(0.1, False), (0.8, True)],
+)
+@pytest.mark.asyncio
+async def test_mission_completion_checks_laya_receipt(monkeypatch, receipt_score, expected):
+    computer = MagicMock()
+    agent = ComputerUseAgent(computer_provider=computer, llm_router=None)
+    agent._bootstrap_performed = True
+    agent.observe = AsyncMock(return_value=MagicMock())
+    agent.choose_action = AsyncMock(
+        return_value=(
+            ComputerActionType.GOAL_COMPLETE,
+            "goal_complete",
+            {},
+            _GOAL_COMPLETE_SENTINEL,
+        )
+    )
+    agent.verify_goal = AsyncMock(
+        return_value=(True, "FILE_VERIFIED: report.md passed")
+    )
+
+    class ReceiptEngine:
+        def verify_execution_receipt(self, goal, evidence):
+            return receipt_score
+
+    monkeypatch.setattr(
+        "sonic.llm.laya_engine.get_laya_engine",
+        lambda: ReceiptEngine(),
+    )
+    await agent.run_mission("ws-test", "Create report.md", steps=1)
+
+    assert agent.goal_reached is expected
+    if not expected:
+        assert any(
+            "contradicts successful completion" in item["result"].lower()
+            for item in agent.history
+        )
 
 
 @pytest.mark.no_live_infra

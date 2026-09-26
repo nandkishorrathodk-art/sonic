@@ -681,5 +681,3 @@ async def test_computer_use_agent_dynamic_subagent_lifecycle_actions(tmp_path: P
     assert kill_trace.status == ActionExecutionStatus.COMPLETED
     kill_listing = json.loads(kill_trace.actual_observation)
     assert kill_listing[0]["state"] == "canceled"
-
-
