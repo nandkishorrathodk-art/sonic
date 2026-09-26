@@ -46,7 +46,7 @@ class SubMission(BaseModel):
         # Preserve explicit plane ("gui" or "headless") when provided by caller.
         if "plane" in self.model_fields_set and self.plane:
             plane_lower = str(self.plane).lower().strip()
-            if plane_lower in ("gui", "headless"):
+            if plane_lower in ("gui", "headless", "browser"):
                 self.plane = plane_lower
                 return self
 

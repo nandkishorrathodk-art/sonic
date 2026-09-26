@@ -12,7 +12,12 @@ from __future__ import annotations
 
 import base64
 import inspect
+import json
 import os
+import re
+import time
+import uuid
+from collections.abc import Callable
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -67,6 +72,14 @@ class BrowserAgent:
         scope_config: dict[str, Any] | None = None,
         allow_javascript: bool = False,
         require_scope: bool = False,
+        llm_router: Any | None = None,
+        safety: Any | None = None,
+        tenant_id: str = "default",
+        being: Any | None = None,
+        being_mind: Any | None = None,
+        craft: Any | None = None,
+        agent_id: str | None = None,
+        execution_plane: str = "gui",
     ):
         self.headless = headless
         self.timeout = timeout
@@ -81,6 +94,18 @@ class BrowserAgent:
         self.scope_config = scope_config
         self.allow_javascript = allow_javascript
         self.require_scope = require_scope
+        self.llm_router = llm_router
+        self.safety = safety
+        self.tenant_id = tenant_id
+        self.being = being
+        self.being_mind = being_mind
+        self.craft = craft
+        self.agent_id = agent_id or f"browser-{uuid.uuid4().hex[:8]}"
+        self.execution_plane = execution_plane
+        self.traces: list[Any] = []
+        self.history: list[Any] = []
+        self.mission_summary: str = ""
+        self._last_status_code: int = 200
 
     @staticmethod
     def _profile_is_owned(profile_dir: Path) -> bool | None:
@@ -744,3 +769,246 @@ class BrowserAgent:
         except Exception as exc:
             logger.debug("browser_interactive_observation_failed", error=str(exc))
         return observation
+
+    async def run_mission(
+        self,
+        workspace_id: str = "",
+        goal: str = "",
+        steps: int = 5,
+        step_callback: Callable | None = None,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """Execute a browser automation sub-mission as a first-class specialist subagent.
+
+        Runs an observe -> reason -> act loop directly on the browser, capturing
+        structured traces with observations and verdicts.
+        """
+        max_steps = max(1, int(steps or 5))
+        self.traces = []
+        self.history = []
+        self.mission_summary = ""
+
+        # Ensure browser is launched
+        if not self._using_playwright and self._page is None:
+            launched = await self.launch()
+            if not launched and not self._using_playwright:
+                logger.warning("browser_agent_run_mission_launch_fallback", goal=goal[:100])
+
+        url_match = re.search(r"https?://[^\s\"'>]+", goal)
+        target_url = url_match.group(0) if url_match else ""
+
+        for step_idx in range(max_steps):
+            t_step_start = time.perf_counter()
+            current_url, current_title = await self.current_page_state()
+            page_obs = await self.current_page_observation()
+
+            action_type = "NAVIGATE"
+            target = target_url
+            text_payload = ""
+            thought = f"Execute browser action for goal: {goal}"
+
+            # 1. Reason via LLM router if available
+            decided_by_llm = False
+            if self.llm_router is not None and callable(getattr(self.llm_router, "complete", None)):
+                try:
+                    from sonic.llm.schemas import LLMRequest, Message, MessageRole
+
+                    interactive = page_obs.get("interactive_elements", [])[:25]
+                    interactive_summary = "\n".join(
+                        f"  - [{e.get('tag')}]: text='{e.get('text', '')[:40]}' selector='{e.get('selector')}'"
+                        for e in interactive
+                        if e.get("selector")
+                    )[:1500]
+
+                    history_summary = "\n".join(
+                        f"  Step {t.get('step_index')}: {t.get('action_type')} on {t.get('target_resource')} -> {t.get('actual_observation')}"
+                        for t in self.traces[-5:]
+                    ) if self.traces else "None"
+
+                    prompt = f"""You are BrowserAgent, an autonomous specialist web agent operating a browser.
+GOAL: {goal}
+
+CURRENT BROWSER STATE:
+- URL: {current_url}
+- Title: {current_title}
+- Body Text Snippet: {page_obs.get('text', '')[:800]}
+- Interactive Elements:
+{interactive_summary or '  (None detected)'}
+
+PREVIOUS ACTIONS:
+{history_summary}
+
+Choose the single next browser action to achieve the goal.
+Respond ONLY with a JSON object:
+{{
+  "action": "NAVIGATE | CLICK | TYPE | SELECT | PRESS_KEY | SCROLL | WAIT | DOWNLOAD | SCREENSHOT | GOAL_COMPLETE",
+  "target": "URL for NAVIGATE, CSS selector for CLICK/TYPE/WAIT/DOWNLOAD, key for PRESS_KEY, or empty",
+  "text": "text to type for TYPE or option label for SELECT",
+  "thought": "brief reasoning"
+}}"""
+                    req = LLMRequest(
+                        messages=[
+                            Message(role=MessageRole.SYSTEM, content="You are BrowserAgent, an expert autonomous browser operator. Respond ONLY with valid JSON."),
+                            Message(role=MessageRole.USER, content=prompt),
+                        ],
+                        task_type="reasoning",
+                        max_tokens=300,
+                        temperature=0.2,
+                    )
+                    resp = await self.llm_router.complete(req)
+                    raw_content = (resp.content or "").strip()
+                    parsed = None
+                    if "{" in raw_content and "}" in raw_content:
+                        json_str = raw_content[raw_content.find("{"):raw_content.rfind("}") + 1]
+                        parsed = json.loads(json_str)
+
+                    if isinstance(parsed, dict) and parsed.get("action"):
+                        action_type = str(parsed.get("action", "")).upper().strip()
+                        target = str(parsed.get("target", "")).strip()
+                        text_payload = str(parsed.get("text", "")).strip()
+                        thought = str(parsed.get("thought", "")).strip() or thought
+                        decided_by_llm = True
+                except Exception as llm_err:
+                    logger.debug("browser_agent_llm_reasoning_fallback", error=str(llm_err))
+
+            # 2. Heuristic fallback when LLM is unavailable or goal is direct
+            if not decided_by_llm:
+                navigated_already = any("NAVIGATE" in t.get("action_type", "") for t in self.traces)
+                if target_url and not navigated_already:
+                    action_type = "NAVIGATE"
+                    target = target_url
+                    thought = f"Navigate directly to requested URL {target_url}"
+                elif step_idx > 0 or (current_url and current_url != "about:blank"):
+                    action_type = "GOAL_COMPLETE"
+                    target = current_url
+                    thought = f"Successfully inspected page {current_url} ({current_title})"
+                else:
+                    action_type = "SCREENSHOT"
+                    target = ""
+                    thought = "Inspect current page state"
+
+            # 3. Action execution
+            status = "SUCCESS"
+            exit_code = 0
+            actual_obs = ""
+
+            try:
+                clean_act = action_type.replace("BROWSER_", "").upper()
+                if clean_act == "GOAL_COMPLETE":
+                    actual_obs = "GOAL_COMPLETE"
+                    self.mission_summary = thought or f"Browser mission completed: {current_url}"
+                    trace = {
+                        "step_index": step_idx + 1,
+                        "action_type": "GOAL_COMPLETE",
+                        "target_resource": target or current_url,
+                        "thought": thought,
+                        "actual_observation": "GOAL_COMPLETE",
+                        "observation": "GOAL_COMPLETE",
+                        "status": "SUCCESS",
+                        "exit_code": 0,
+                        "duration_seconds": round(time.perf_counter() - t_step_start, 3),
+                    }
+                    self.traces.append(trace)
+                    self.history.append(trace)
+                    if step_callback:
+                        cb_res = step_callback(trace)
+                        if inspect.isawaitable(cb_res):
+                            await cb_res
+                    break
+                elif clean_act == "NAVIGATE":
+                    snap = await self.navigate(target)
+                    actual_obs = f"Navigated to {snap.url} (status: {snap.status_code}, title: {snap.title})"
+                    self._last_status_code = snap.status_code
+                elif clean_act == "CLICK":
+                    ok = await self.click(target)
+                    status = "SUCCESS" if ok else "FAILED"
+                    exit_code = 0 if ok else 1
+                    actual_obs = f"Click '{target}': {'success' if ok else 'element not found/clickable'}"
+                elif clean_act == "TYPE":
+                    ok = await self.type_text(target, text_payload)
+                    status = "SUCCESS" if ok else "FAILED"
+                    exit_code = 0 if ok else 1
+                    actual_obs = f"Type into '{target}': {'success' if ok else 'failed'}"
+                elif clean_act == "SELECT":
+                    ok = await self.select_option(target, text_payload)
+                    status = "SUCCESS" if ok else "FAILED"
+                    exit_code = 0 if ok else 1
+                    actual_obs = f"Select '{text_payload}' in '{target}': {'success' if ok else 'failed'}"
+                elif clean_act == "PRESS_KEY":
+                    ok = await self.press_key(target or text_payload or "Enter")
+                    status = "SUCCESS" if ok else "FAILED"
+                    exit_code = 0 if ok else 1
+                    actual_obs = f"Press key '{target or text_payload}': {'success' if ok else 'failed'}"
+                elif clean_act == "SCROLL":
+                    ok = await self.scroll(0, 500)
+                    status = "SUCCESS" if ok else "FAILED"
+                    exit_code = 0 if ok else 1
+                    actual_obs = f"Scroll viewport: {'success' if ok else 'failed'}"
+                elif clean_act == "WAIT":
+                    ok = await self.wait_for_element(target, 5000)
+                    status = "SUCCESS" if ok else "FAILED"
+                    exit_code = 0 if ok else 1
+                    actual_obs = f"Wait for '{target}': {'visible' if ok else 'timed out'}"
+                elif clean_act == "DOWNLOAD":
+                    ok = await self.download(target, text_payload or "downloaded_artifact")
+                    status = "SUCCESS" if ok else "FAILED"
+                    exit_code = 0 if ok else 1
+                    actual_obs = f"Download from '{target}': {'success' if ok else 'failed'}"
+                elif clean_act == "SCREENSHOT":
+                    snap = await self.screenshot()
+                    actual_obs = f"Captured screenshot of {snap.url} ({snap.title})"
+                else:
+                    status = "FAILED"
+                    exit_code = 1
+                    actual_obs = f"Unsupported browser action '{action_type}'"
+            except Exception as act_err:
+                status = "FAILED"
+                exit_code = 1
+                actual_obs = f"Browser action failed: {str(act_err)}"
+
+            trace_act_type = f"BROWSER_{clean_act}" if not action_type.startswith("BROWSER_") else action_type
+            trace = {
+                "step_index": step_idx + 1,
+                "action_type": trace_act_type,
+                "target_resource": target,
+                "thought": thought,
+                "actual_observation": actual_obs,
+                "observation": actual_obs,
+                "status": status,
+                "exit_code": exit_code,
+                "duration_seconds": round(time.perf_counter() - t_step_start, 3),
+            }
+            self.traces.append(trace)
+            self.history.append(trace)
+            if step_callback:
+                cb_res = step_callback(trace)
+                if inspect.isawaitable(cb_res):
+                    await cb_res
+
+            # When running without LLM and a navigation succeeds on a single-step mission
+            if not decided_by_llm and status == "SUCCESS" and clean_act == "NAVIGATE":
+                gc_trace = {
+                    "step_index": step_idx + 2,
+                    "action_type": "GOAL_COMPLETE",
+                    "target_resource": target,
+                    "thought": f"Browser navigation verified: {actual_obs}",
+                    "actual_observation": "GOAL_COMPLETE",
+                    "observation": "GOAL_COMPLETE",
+                    "status": "SUCCESS",
+                    "exit_code": 0,
+                    "duration_seconds": 0.01,
+                }
+                self.traces.append(gc_trace)
+                self.history.append(gc_trace)
+                self.mission_summary = actual_obs
+                if step_callback:
+                    cb_res = step_callback(gc_trace)
+                    if inspect.isawaitable(cb_res):
+                        await cb_res
+                break
+
+        await self.save_state_to_vault()
+        return self.traces
+
+    run_task = run_mission
+

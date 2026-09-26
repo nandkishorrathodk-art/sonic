@@ -2189,9 +2189,17 @@ class ComputerUseAgent:
             "SHELL": ComputerActionType.TERMINAL_EXEC,
             "CMD": ComputerActionType.TERMINAL_EXEC,
             "DEFINE_SUBAGENT": ComputerActionType.DEFINE_SUBAGENT,
+            "SUBAGENT_DEFINE": ComputerActionType.DEFINE_SUBAGENT,
             "INVOKE_SUBAGENT": ComputerActionType.INVOKE_SUBAGENT,
+            "SUBAGENT_INVOKE": ComputerActionType.INVOKE_SUBAGENT,
+            "INVOKE_SUBAGENTS": ComputerActionType.INVOKE_SUBAGENT,
+            "SUBAGENTS_INVOKE": ComputerActionType.INVOKE_SUBAGENT,
             "SEND_MESSAGE": ComputerActionType.SEND_MESSAGE,
+            "SUBAGENT_MESSAGE": ComputerActionType.SEND_MESSAGE,
+            "SUBAGENT_SEND": ComputerActionType.SEND_MESSAGE,
             "MANAGE_SUBAGENTS": ComputerActionType.MANAGE_SUBAGENTS,
+            "MANAGE_SUBAGENT": ComputerActionType.MANAGE_SUBAGENTS,
+            "SUBAGENT_MANAGE": ComputerActionType.MANAGE_SUBAGENTS,
             # GOAL_COMPLETE is handled by the caller as a no-op terminator.
             "GOAL_COMPLETE": ComputerActionType.TERMINAL_EXEC,
         }
@@ -4220,9 +4228,30 @@ class ComputerUseAgent:
 
             elif action_type == ComputerActionType.GIT_BRANCH:
                 branch_name = str(payload.get("branch") or payload.get("name") or target_resource or "main").strip()
-                res = await self.computer.terminal(workspace_id, f"git checkout -b {shlex.quote(branch_name)} || git checkout {shlex.quote(branch_name)}")
+                # 1. Try branch creation or switch with 3-way merge (-m / --merge) so uncommitted changes are preserved
+                res = await self.computer.terminal(
+                    workspace_id,
+                    f"git checkout -m -b {shlex.quote(branch_name)} || git checkout --merge {shlex.quote(branch_name)}",
+                )
                 action_exit_code = getattr(res, "exit_code", 0)
-                actual_obs_str = (_safe_str(getattr(res, "stdout", "")) or _safe_str(getattr(res, "stderr", "")) or f"Switched to branch {branch_name}").strip()
+                # 2. If checkout --merge collided on uncommitted working tree changes, protect them with auto-stash
+                if action_exit_code != 0:
+                    stash_cmd = (
+                        f"git stash push -m sonic-auto-stash --include-untracked && "
+                        f"(git checkout -b {shlex.quote(branch_name)} || git checkout {shlex.quote(branch_name)}) && "
+                        f"git stash pop"
+                    )
+                    res = await self.computer.terminal(workspace_id, stash_cmd)
+                    action_exit_code = getattr(res, "exit_code", 0)
+
+                obs_parts = []
+                if _safe_str(getattr(res, "stdout", "")).strip():
+                    obs_parts.append(_safe_str(getattr(res, "stdout", "")).strip())
+                if _safe_str(getattr(res, "stderr", "")).strip():
+                    obs_parts.append(_safe_str(getattr(res, "stderr", "")).strip())
+                if action_exit_code == 0:
+                    obs_parts.append(f"Switched to branch {branch_name}")
+                actual_obs_str = "\n".join(obs_parts).strip()
                 if action_exit_code != 0:
                     status = ActionExecutionStatus.FAILED
 
@@ -5089,19 +5118,21 @@ class ComputerUseAgent:
                         safety=self.safety,
                         tenant_id=self.tenant_id,
                     )
-                sub_name = str(payload.get("name") or target_resource or "").strip()
-                sub_desc = str(payload.get("description") or "")
-                sub_sys = str(payload.get("system_prompt") or "")
-                enable_write = bool(payload.get("enable_write_tools", True))
+                sub_name = str(payload.get("name") or payload.get("Name") or target_resource or "").strip()
+                sub_desc = str(payload.get("description") or payload.get("Description") or "")
+                sub_sys = str(payload.get("system_prompt") or payload.get("SystemPrompt") or payload.get("systemPrompt") or "")
+                enable_write = bool(payload.get("enable_write_tools") if "enable_write_tools" in payload else payload.get("enableWriteTools", True))
+                enable_sub = bool(payload.get("enable_subagent_tools") if "enable_subagent_tools" in payload else payload.get("enableSubagentTools", False))
                 spec = self._teamwork_manager.define_subagent(
                     name=sub_name,
                     description=sub_desc,
                     system_prompt=sub_sys,
                     enable_write_tools=enable_write,
+                    enable_subagent_tools=enable_sub,
                 )
                 actual_obs_str = (
                     f"Defined subagent type '{spec.name}' "
-                    f"(write_tools={spec.enable_write_tools}): {spec.description}"
+                    f"(write_tools={spec.enable_write_tools}, subagent_tools={spec.enable_subagent_tools}): {spec.description}"
                 )
                 status = ActionExecutionStatus.VERIFIED
 
@@ -5120,14 +5151,16 @@ class ComputerUseAgent:
                 if not subagents_arg:
                     subagents_arg = [
                         {
-                            "type_name": str(payload.get("type_name") or "self"),
-                            "role": str(payload.get("role") or target_resource or "Autonomous Subagent"),
-                            "prompt": str(payload.get("prompt") or payload.get("goal") or target_resource or ""),
-                            "requirements": list(payload.get("requirements") or []),
-                            "acceptance_criteria": list(payload.get("acceptance_criteria") or []),
-                            "verification_command": str(payload.get("verification_command") or ""),
-                            "workspace_mode": str(payload.get("workspace_mode") or payload.get("workspace") or "inherit"),
-                            "max_steps": int(payload.get("max_steps") or 12),
+                            "type_name": str(payload.get("type_name") or payload.get("TypeName") or "self"),
+                            "role": str(payload.get("role") or payload.get("Role") or target_resource or "Autonomous Subagent"),
+                            "prompt": str(payload.get("prompt") or payload.get("Prompt") or payload.get("goal") or target_resource or ""),
+                            "requirements": list(payload.get("requirements") or payload.get("Requirements") or []),
+                            "acceptance_criteria": list(payload.get("acceptance_criteria") or payload.get("AcceptanceCriteria") or []),
+                            "verification_command": str(payload.get("verification_command") or payload.get("VerificationCommand") or ""),
+                            "workspace_mode": str(payload.get("workspace_mode") or payload.get("Workspace") or payload.get("workspace") or "branch"),
+                            "model_tier": str(payload.get("model_tier") or payload.get("Model") or "inherit"),
+                            "max_steps": int(payload.get("max_steps") or payload.get("MaxSteps") or 12),
+                            "max_correction_rounds": int(payload.get("max_correction_rounds") if payload.get("max_correction_rounds") is not None else 2),
                         }
                     ]
                 convs = await self._teamwork_manager.invoke_subagents(workspace_id, subagents_arg)
@@ -5152,11 +5185,15 @@ class ComputerUseAgent:
                     )
                 recipient = str(payload.get("recipient") or payload.get("Recipient") or target_resource or "").strip()
                 msg_text = str(payload.get("message") or payload.get("Message") or "")
+                ac = list(payload.get("acceptance_criteria") or payload.get("AcceptanceCriteria") or [])
+                vc = str(payload.get("verification_command") or payload.get("VerificationCommand") or "")
+                max_s = int(payload.get("max_steps") or payload.get("MaxSteps") or 8)
                 conv = await self._teamwork_manager.send_message(
                     conversation_id=recipient,
                     message=msg_text,
-                    acceptance_criteria=list(payload.get("acceptance_criteria") or []),
-                    verification_command=str(payload.get("verification_command") or ""),
+                    acceptance_criteria=ac,
+                    verification_command=vc,
+                    max_steps=max_s,
                 )
                 actual_obs_str = (
                     f"[{conv.conversation_id} | judge={conv.judge_verdict}]: {conv.last_summary}"
