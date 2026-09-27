@@ -287,7 +287,7 @@ class TestAgentFailureIntegration:
 
     @pytest.mark.asyncio
     async def test_reasoning_context_contains_forced_cognitive_fields_and_strategies(self):
-        """Reasoning context must contain all mandatory cognitive fields and explicit strategy tracking."""
+        """The observation carries cognitive state while the prompt allows natural reasoning."""
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider)
         obs = await agent.observe("ws-test")
@@ -312,10 +312,11 @@ class TestAgentFailureIntegration:
         assert "Strategy A:" in obs_summary
         assert "Strategy B:" in obs_summary
 
-        # Check system prompt also enforces these fields
-        assert "WHAT DO I KNOW?" in system_prompt
-        assert "WHAT FAILED?" in system_prompt
-        assert "WHAT HYPOTHESIS DOES THIS SUPPORT/DISPROVE?" in system_prompt
+        # Keep the model state-aware without forcing the observation's headings
+        # into its own reasoning format.
+        assert "## COGNITIVE STATE" in system_prompt
+        assert "what remains unknown" in system_prompt
+        assert "highest-information next action" in system_prompt
 
     @pytest.mark.asyncio
     async def test_missing_observation_outputs_unknown(self):
@@ -358,7 +359,7 @@ class TestAgentFailureIntegration:
 
     @pytest.mark.asyncio
     async def test_failure_budget_exhaustion_blocks_retry(self):
-        """When strategy budget is exhausted, agent blocks retry with status FAILED."""
+        """When strategy budget is exhausted, agent blocks retry without dispatch."""
         provider = _mock_provider()
         provider.terminal.return_value = MagicMock(
             stdout="",
@@ -377,8 +378,8 @@ class TestAgentFailureIntegration:
             await agent.execute_action(
                 workspace_id="ws-test",
                 action_type=ComputerActionType.TERMINAL_EXEC,
-                target_resource="nmap 127.0.0.1",
-                payload={"command": "nmap 127.0.0.1"},
+                target_resource="nmap --version",
+                payload={"command": "nmap --version"},
                 predicted_outcome="expect scan",
             )
 
@@ -389,12 +390,12 @@ class TestAgentFailureIntegration:
         trace = await agent.execute_action(
             workspace_id="ws-test",
             action_type=ComputerActionType.TERMINAL_EXEC,
-            target_resource="nmap 127.0.0.1",
-            payload={"command": "nmap 127.0.0.1"},
+            target_resource="nmap --version",
+            payload={"command": "nmap --version"},
             predicted_outcome="expect scan",
         )
 
-        assert trace.status == ActionExecutionStatus.FAILED
+        assert trace.status == ActionExecutionStatus.BLOCKED
         assert "Strategy exhausted" in trace.actual_observation
         assert provider.terminal.call_count == 0  # Not retried!
 
@@ -442,4 +443,3 @@ class TestAgentFailureIntegration:
         assert outage_trace.status == ActionExecutionStatus.BLOCKED
         assert "SUBSTRATE_OUTAGE_DETECTED" in outage_trace.actual_observation
         assert provider.terminal.call_count == 0
-

@@ -76,7 +76,7 @@ class TestHackerAgentIntegration:
             test_file="",
         )
 
-        assert "HACKER SCRATCHPAD (Working Loot & Memory):" in obs_summary
+        assert "WORKING MEMORY & ARTIFACT LEDGER:" in obs_summary
         assert "recon_jwt_1=eyJhbGciOi... (truncated)" in obs_summary
         assert "user_id" in obs_summary
 

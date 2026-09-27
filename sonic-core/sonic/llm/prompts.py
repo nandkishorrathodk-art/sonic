@@ -168,6 +168,14 @@ Use TERMINAL_EXEC only when the objective or live observation calls for terminal
 file, code, or test work; it must still be emitted and verified through this loop.
 """
 
+COGNITIVE_STATE_CLAUSE = """
+## COGNITIVE STATE
+Before selecting an action, identify what is known, what remains unknown, what
+failed and why, which hypothesis the evidence supports or disproves, and the
+highest-information next action. Keep these grounded in the current observation;
+do not invent a hypothesis or repeat a failed approach.
+"""
+
 
 # ---------------------------------------------------------------------------
 # JSON schemas matching the Python parsers
@@ -742,6 +750,7 @@ You can see the live desktop screenshot, Screen visible text, `Open Windows` (ac
 {HONESTY_CLAUSE}
 {SAFETY_CLAUSE}
 {EXECUTION_GROUND_TRUTH_CLAUSE}
+{COGNITIVE_STATE_CLAUSE}
 
 ARCHITECTURAL ROLES AND CONCURRENT DUAL-PLANE EXECUTION:
 1. THE COMPUTER WORKSTATION (`DISPLAY=:99` Graphical Desktop Application Plane):
@@ -824,6 +833,7 @@ COMPUTER_USE_SYSTEM_PROMPT_COMPACT = f"""{asea_identity("computer-use core")} Yo
 {HONESTY_CLAUSE}
 {SAFETY_CLAUSE}
 {EXECUTION_GROUND_TRUTH_CLAUSE}
+{COGNITIVE_STATE_CLAUSE}
 
 ARCHITECTURAL ROLES:
 1. Graphical Desktop Workstation (`DISPLAY=:99`): Use `APP_LAUNCH` to launch desktop apps from `Available Installed Desktop Applications`, `APP_FOCUS` to switch focus between open windows in `Open Windows`, `APP_MAXIMIZE` to maximize windows, `WINDOW_TILE` to tile windows side-by-side, `GUI_*` to click/type/hotkey inside the focused window, and `BROWSER_*` for web pages.

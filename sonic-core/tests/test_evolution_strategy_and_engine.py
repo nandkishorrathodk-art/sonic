@@ -222,10 +222,11 @@ class TestEvolutionEngine:
 
     def test_north_star_goal_registered_and_accessible(self):
         evo = EvolutionEngine()
-        assert "CTF (Capture The Flag)" in evo.north_star
-        assert "Binary Exploitation & Pwn" in evo.north_star
-        assert "Precision Desktop Application Control" in evo.north_star
-        assert "Non-Puppet Empirical Verification" in evo.north_star
+        assert "general-purpose AI-Human Digital Being workstation mastery" in evo.north_star
+        assert "Graphical Desktop Application Plane" in evo.north_star
+        assert "Dedicated Headless Terminal/Sandbox Plane" in evo.north_star
+        assert "Sealed Safety & Confinement" in evo.north_star
+        assert "Empirical Falsification" in evo.north_star
 
 
 class TestCTFStrategyFeedback:
@@ -280,7 +281,7 @@ class TestAgentAndBossEvolutionWiring:
         assert hasattr(agent, "evolution_engine")
         assert agent.evolution_engine is not None
         assert isinstance(agent.evolution_engine, EvolutionEngine)
-        assert "CTF (Capture The Flag)" in agent.evolution_engine.north_star
+        assert "general-purpose AI-Human Digital Being workstation mastery" in agent.evolution_engine.north_star
 
     def test_boss_agent_wires_evolution_engine_to_subagent(self):
         from sonic.computer_use.boss import BossAgent
@@ -289,5 +290,4 @@ class TestAgentAndBossEvolutionWiring:
         assert hasattr(boss, "evolution_engine")
         assert boss.evolution_engine is not None
         assert isinstance(boss.evolution_engine, EvolutionEngine)
-
 

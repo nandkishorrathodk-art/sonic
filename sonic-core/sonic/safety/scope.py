@@ -201,6 +201,12 @@ class ScopeChecker:
     _INTRUSIVE_PATTERNS = [
         re.compile(r"\bcurl\b.*\|\s*(sh|bash)", re.IGNORECASE),  # curl|sh
         re.compile(r"\bwget\b.*\|\s*(sh|bash)", re.IGNORECASE),
+        re.compile(r"(?<![\w-])-s(?:s|u|a|n|f|x)(?=\s|$)", re.IGNORECASE),
+        re.compile(
+            r"(?=.*(?:^|\s)-[lL]\s+\S+)(?=.*(?:^|\s)-[pP]\s+\S+)",
+            re.IGNORECASE,
+        ),
+        re.compile(r"(?:^|\s)-u\s+https?://\S+\?\S+=", re.IGNORECASE),
     ]
 
     def classify_command_risk(self, command: str) -> RiskLevel:
@@ -471,4 +477,3 @@ class SandboxTierRouter:
 def classify_command_risk(command: str) -> RiskLevel:
     """Module-level convenience wrapper for ScopeChecker().classify_command_risk."""
     return ScopeChecker().classify_command_risk(command)
-

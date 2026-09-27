@@ -1273,7 +1273,7 @@ class ComputerUseAgent:
                     await self.computer._docker_exec("DISPLAY=:99 wmctrl -a :ACTIVE:")
             except Exception:
                 pass
-            actual_obs_str += " | [WATCHDOG]: Refocused active window to clear input stalls."
+            actual_obs_str += " | [WATCHDOG ADAPTIVE RECOVERY (count=2)]: Triggered window refocus."
             return actual_obs_str, False
         elif unchanged == 3:
             try:
@@ -1286,7 +1286,7 @@ class ComputerUseAgent:
                     await self.computer._docker_exec("DISPLAY=:99 xdotool key --clearmodifiers alt+f")
             except Exception:
                 pass
-            actual_obs_str += " | [WATCHDOG]: Triggered Alt+F accelerator to unstuck navigation."
+            actual_obs_str += " | [WATCHDOG ADAPTIVE RECOVERY (count=3)]: Triggered Alt+F accelerator."
             return actual_obs_str, False
         elif unchanged >= 4:
             actual_obs_str += " | [WATCHDOG_ABORT]: Screen state perpetually stuck; aborting mission early to prevent quota burning."
@@ -2445,6 +2445,14 @@ class ComputerUseAgent:
                     if act in ans_val:
                         fields["ACTION"] = act
                         break
+            for field_name in ("TARGET", "PAYLOAD", "EXPECTED"):
+                inline_field = re.search(
+                    rf"(?:^|[,;\s]){field_name}\s*:\s*(.*?)(?=(?:[,;\s]+)(?:TARGET|PAYLOAD|EXPECTED)\s*:|$)",
+                    ans_val,
+                    re.IGNORECASE | re.DOTALL,
+                )
+                if inline_field:
+                    fields.setdefault(field_name, inline_field.group(1).strip(" ,;\t\r\n"))
 
         # Fallback to freeform completion or command detection if no ACTION in fields
         if "ACTION" not in fields:
@@ -3103,10 +3111,20 @@ class ComputerUseAgent:
         actual_obs_str = ""
         status = ActionExecutionStatus.COMPLETED
         recovery_needed = False
+        visual_stall_detected = False
         action_exit_code: int | None = None
         action_stderr: str = ""
         browser_status_code: int | None = None
         browser_response_body = ""
+        typing_validation_error = ""
+        if action_type == ComputerActionType.GUI_TYPE:
+            raw_text = str(payload.get("text") or payload.get("value") or payload.get("input") or "")
+            invalid_text, text_reason = self._validate_typing_text(sanitize_typing_text(raw_text))
+            invalid_field, field_reason = self._validate_typing_field(target_resource)
+            if invalid_text:
+                typing_validation_error = text_reason
+            elif invalid_field:
+                typing_validation_error = f"wrong field: {field_reason}"
         before_state = self._current_experience_state()
         self._experience_before_graph = self._current_experience_graph()
 
@@ -3140,10 +3158,10 @@ class ComputerUseAgent:
             ComputerActionType.GUI_SCROLL,
             ComputerActionType.GUI_DRAG,
         }
-        status_method = getattr(type(self.computer), "status", None)
+        status_method = getattr(self.computer, "status", None)
         is_test_double = type(self.computer).__module__ == "unittest.mock"
         if action_type in gui_actions:
-            if status_method is None and not is_test_double:
+            if not callable(status_method) and not is_test_double:
                 actual_obs_str = "GUI action blocked before dispatch: active-window ownership cannot be verified"
                 status = ActionExecutionStatus.BLOCKED
                 action_exit_code = 126
@@ -3537,12 +3555,20 @@ class ComputerUseAgent:
 
         # ----- Substrate Outage Detection (Failure Budget) -----
         # If 3 consecutive provider errors occurred, STOP target actions and switch to substrate diagnostic action.
-        provider_name = type(self.computer).__name__
+        provider_name = self._get_provider_name()
         tool_name = (
             payload.get("tool_name") or target_resource or action_type.value
             if isinstance(payload, dict) and action_type == ComputerActionType.SECURITY_TOOL
             else (action_type.value if hasattr(action_type, "value") else str(action_type))
         )
+        if action_type == ComputerActionType.TERMINAL_EXEC and isinstance(payload, dict):
+            command = str(payload.get("command") or payload.get("cmd") or "")
+            try:
+                command_tokens = shlex.split(command)
+            except ValueError:
+                command_tokens = []
+            if command_tokens:
+                tool_name = os.path.basename(command_tokens[0]) or command_tokens[0]
         if self.failure_budget.substrate_outage:
             diag_info = self.failure_budget.diagnose_substrate_health()
             actual_obs_str = (
@@ -3631,6 +3657,17 @@ class ComputerUseAgent:
                 "3 times consecutively without state progression. "
                 "This action is BLOCKED. Advance to a different action (e.g. alternative command, script authoring, GUI interaction, or conclude)."
             )
+            if (
+                action_type in (
+                    ComputerActionType.GUI_CLICK,
+                    ComputerActionType.GUI_DOUBLE_CLICK,
+                )
+                and self._consecutive_unchanged_screens
+            ):
+                self._consecutive_unchanged_screens += 1
+                actual_obs_str, self._watchdog_aborted = await self._handle_visual_stall_watchdog(
+                    workspace_id, action_type, actual_obs_str
+                )
             status = ActionExecutionStatus.BLOCKED
             logger.warning(
                 "action_loop_breaker_triggered",
@@ -3883,7 +3920,12 @@ class ComputerUseAgent:
             return trace
 
         try:
-            if action_type == ComputerActionType.GUI_CLICK:
+            if action_type == ComputerActionType.GUI_TYPE and typing_validation_error:
+                actual_obs_str = f"[TYPING VERIFICATION FAILED]: {typing_validation_error}"
+                status = ActionExecutionStatus.BLOCKED
+                action_exit_code = 126
+
+            elif action_type == ComputerActionType.GUI_CLICK:
                 if payload.get("x") is None or payload.get("y") is None:
                     actual_obs_str = f"GUI_CLICK failed: integer pixel coordinates x,y required or visual target '{target_resource}' could not be resolved"
                     recovery_needed = True
@@ -3912,11 +3954,15 @@ class ComputerUseAgent:
                         self._consecutive_unchanged_screens += 1
                         status = ActionExecutionStatus.FAILED
                         recovery_needed = True
+                        visual_stall_detected = True
                         actual_obs_str = (
-                            f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged | "
+                            f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after click | "
                             f"[ANTI-STALL ALERT]: Click produced zero visual change "
                             f"at ({x}, {y}). Re-observe and choose a different strategy; "
                             "the action is not treated as successful."
+                        )
+                        actual_obs_str, self._watchdog_aborted = await self._handle_visual_stall_watchdog(
+                            workspace_id, action_type, actual_obs_str
                         )
                     elif post_screen_b64:
                         self._consecutive_unchanged_screens = 0
@@ -3950,11 +3996,15 @@ class ComputerUseAgent:
                         self._consecutive_unchanged_screens += 1
                         status = ActionExecutionStatus.FAILED
                         recovery_needed = True
+                        visual_stall_detected = True
                         actual_obs_str = (
-                            f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged | "
+                            f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after double-click | "
                             f"[ANTI-STALL ALERT]: Double-click produced zero "
                             f"visual change at ({x}, {y}). Re-observe and re-ground; the action "
                             "is not treated as successful."
+                        )
+                        actual_obs_str, self._watchdog_aborted = await self._handle_visual_stall_watchdog(
+                            workspace_id, action_type, actual_obs_str
                         )
                     elif post_screen_b64:
                         self._consecutive_unchanged_screens = 0
@@ -4293,6 +4343,32 @@ class ComputerUseAgent:
                         else:
                             actual_obs_str = f"APP_FOCUS notice: window '{app_name}' is not currently open. Use APP_LAUNCH to start '{app_name}'."
                             status = ActionExecutionStatus.FAILED
+
+            elif action_type in (
+                ComputerActionType.APP_MAXIMIZE,
+                ComputerActionType.WINDOW_MAXIMIZE,
+            ):
+                window_target = str(
+                    payload.get("window_id") or payload.get("app_name") or target_resource or ""
+                ).strip()
+                action = GUIAction(
+                    action=GUIActionType.APP_MAXIMIZE,
+                    window_id=window_target,
+                    app_name=window_target,
+                )
+                await self.computer.gui_action(workspace_id, action)
+                actual_obs_str = (
+                    f"Maximized window: {window_target}"
+                    if window_target
+                    else "Maximized active window"
+                )
+
+            elif action_type == ComputerActionType.WINDOW_TILE:
+                await self.computer.gui_action(
+                    workspace_id,
+                    GUIAction(action=GUIActionType.WINDOW_TILE),
+                )
+                actual_obs_str = "Tiled workstation windows"
 
             elif action_type == ComputerActionType.APP_INSTALL:
                 # Install a package via the provider's install_application(),
@@ -4867,7 +4943,11 @@ class ComputerUseAgent:
                     or ""
                 )
 
-                if self.browser is not None:
+                if not text.strip():
+                    actual_obs_str = f"BROWSER_TYPE blocked: no text supplied for {selector or 'target'}"
+                    status = ActionExecutionStatus.BLOCKED
+                    action_exit_code = 126
+                elif self.browser is not None:
                     ok = await self.browser.type_text(selector, text)
                     actual_obs_str = f"Typed {len(text)} chars into {selector}" if ok else f"Type failed: {selector}"
                     if not ok:
@@ -4919,7 +4999,9 @@ class ComputerUseAgent:
                             await self.computer.gui_action(workspace_id, GUIAction(action=GUIActionType.KEYPRESS, key="Return"))
                         actual_obs_str = f"Typed {len(text)} chars via GUI keyboard: {text[:40]}"
                     else:
-                        actual_obs_str = f"Typed 0 chars via GUI keyboard (empty text for {selector})"
+                        actual_obs_str = f"BROWSER_TYPE blocked: no text supplied for {selector or 'target'}"
+                        status = ActionExecutionStatus.BLOCKED
+                        action_exit_code = 126
 
             elif action_type == ComputerActionType.BROWSER_SCREENSHOT:
                 if self.browser is not None:
@@ -5554,7 +5636,8 @@ class ComputerUseAgent:
             if self.recovery_events < self.max_recovery_attempts:
                 rec_trace = await self.recover(workspace_id, action_type, actual_obs_str)
                 actual_obs_str = f"{actual_obs_str} | Recovered: {rec_trace}"
-                status = ActionExecutionStatus.RECOVERED
+                if not visual_stall_detected:
+                    status = ActionExecutionStatus.RECOVERED
             else:
                 if status in (ActionExecutionStatus.COMPLETED, ActionExecutionStatus.SUCCESS):
                     status = ActionExecutionStatus.FAILED
@@ -6087,6 +6170,51 @@ class ComputerUseAgent:
 
         do_llm = use_llm if use_llm is not None else getattr(self, "enable_llm_verification", False)
         g = goal.lower().strip()
+        browser = getattr(self, "browser", None)
+        if browser is not None and hasattr(browser, "current_page_state"):
+            try:
+                page_state = browser.current_page_state()
+                if inspect.isawaitable(page_state):
+                    page_state = await page_state
+                if isinstance(page_state, tuple) and len(page_state) >= 2:
+                    page_url, page_title = str(page_state[0] or ""), str(page_state[1] or "")
+                    page_state_text = f"{page_url} {page_title}".lower()
+                    evidence = f"Observed browser state: url={page_url!r}; title={page_title!r}"
+                    auth_goal = any(term in g for term in ("log in", "login", "sign in", "authenticate"))
+                    auth_landing = any(
+                        term in page_state_text
+                        for term in ("dashboard", "account", "profile", "logout", "sign out", "welcome")
+                    )
+                    health_goal = any(term in g for term in ("health", "healthy", "service status"))
+                    healthy_state = any(term in page_state_text for term in ("healthy", "health: ok", "status: ok", "ready"))
+                    if auth_goal and auth_landing and page_url and page_url != self._last_navigated_url:
+                        return True, evidence + "; authenticated landing state observed"
+                    if health_goal and healthy_state and any(
+                        term in page_state_text for term in ("health", "status", "ready")
+                    ):
+                        return True, evidence + "; positive service state observed"
+            except Exception as exc:
+                logger.warning("browser_goal_verification_failed", error=str(exc))
+
+        tool_result = getattr(self, "_last_tool_result", None)
+        if tool_result is not None:
+            tool_status = getattr(tool_result, "status", "")
+            tool_status = getattr(tool_status, "value", tool_status)
+            tool_exit_code = getattr(tool_result, "exit_code", None)
+            tool_output = str(getattr(tool_result, "raw_stdout", "") or "").strip()
+            tool_findings = getattr(tool_result, "parsed_data", []) or []
+            if (
+                str(tool_status).lower() in {"completed", "success", "succeeded"}
+                and tool_exit_code == 0
+                and (tool_output or tool_findings)
+            ):
+                evidence = (
+                    f"Verified {getattr(tool_result, 'tool_name', 'tool')} execution receipt: "
+                    f"exit_code={tool_exit_code}; output={tool_output[:1200]!r}; "
+                    f"findings={len(tool_findings)}"
+                )
+                return True, evidence
+
         if (
             self._verification_probe_for_goal(goal) is None
             and any(k in g for k in ("run", "start", "serve", "launch", "open"))
@@ -6145,6 +6273,12 @@ class ComputerUseAgent:
             "blocked",
             "failed",
         )
+        rejected_marker = next(
+            (marker for marker in rejected_receipt_markers if marker in probe_output),
+            None,
+        )
+        if rejected_marker == "__sonic_obs_ready__":
+            evidence += "; rejected dummy marker from the observation handshake"
         verified = (
             exit_code == 0
             and trace.status in (
@@ -6153,7 +6287,7 @@ class ComputerUseAgent:
                 ActionExecutionStatus.VERIFIED,
             )
             and bool(probe_output)
-            and not any(marker in probe_output for marker in rejected_receipt_markers)
+            and rejected_marker is None
         )
 
         if verified and do_llm and self.llm_router is not None:
@@ -6255,7 +6389,9 @@ class ComputerUseAgent:
         """Runs an end-to-end closed-loop autonomous engineering mission."""
         t_start = time.perf_counter()
         self._interrupted = False
+        self._watchdog_aborted = False
         goal_reached = False
+        self._last_tool_result = None
         if getattr(self, "_last_mission_goal", None) != goal:
             self._last_mission_goal = goal
             self._replan_count = 0
@@ -6389,6 +6525,13 @@ class ComputerUseAgent:
                         await cb_res
                 except Exception as cb_err:
                     logger.warning("run_mission_step_callback_failed", error=str(cb_err))
+
+            if self._watchdog_aborted:
+                self.history.append({
+                    "action": "WATCHDOG_ABORT",
+                    "result": str(getattr(trace, "actual_observation", "")),
+                })
+                break
 
             # A policy denial is a terminal state for this mission attempt.
             # Continuing would only repeat the same unauthorized action and

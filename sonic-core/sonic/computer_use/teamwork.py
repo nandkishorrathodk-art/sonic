@@ -749,7 +749,6 @@ class SubagentTeamworkManager:
             goal=spec.prompt or conv.role,
             role=conv.role,
             max_steps=spec.max_steps,
-            plane="gui",
         )
         has_ok_trace = any(
             str(getattr(t, "status", "") if not isinstance(t, dict) else t.get("status", "")).upper()

@@ -1548,12 +1548,20 @@ while True:
                 self._last_screenshot_time = 0.0
                 return True
 
+        retry_args = list(args)
+        for flag in reversed(("--no-sandbox", "--disable-dev-shm-usage")):
+            if flag not in retry_args:
+                retry_args.insert(0, flag)
+        retry_spawn = (
+            f"DISPLAY={disp} nohup {shlex.quote(resolved_bin)} "
+            f"{' '.join(shlex.quote(arg) for arg in retry_args)} "
+            ">/tmp/sonic_app_launch.log 2>&1 & "
+        )
         spawn = (
-            f"DISPLAY={disp} xdotool key Escape 2>/dev/null; "
             f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 & "
             f"app_pid=$!; sleep 0.4; "
             f"if ! kill -0 \"$app_pid\" 2>/dev/null && grep -q -- '--no-sandbox' /tmp/sonic_app_launch.log 2>/dev/null; then "
-            f"  DISPLAY={disp} nohup {shlex.quote(resolved_bin)} --no-sandbox --disable-dev-shm-usage {' '.join(shlex.quote(a) for a in args)} >/tmp/sonic_app_launch.log 2>&1 & "
+            f"  {retry_spawn}"
             f"  app_pid=$!; sleep 0.4; "
             f"fi; "
             f"kill -0 \"$app_pid\" 2>/dev/null || pgrep -f -- {bin_base} >/dev/null 2>&1"

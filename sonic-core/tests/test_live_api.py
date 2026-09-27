@@ -12,8 +12,12 @@ from sonic.auth.models import User, UserRole
 client = TestClient(app)
 
 # Helper to generate test tokens
-def get_auth_headers(role: UserRole = UserRole.OPERATOR, email: str = "operator@target.com"):
-    user = User(email=email, name="Test Operator", google_id="g-123", role=role)
+def get_auth_headers(
+    role: UserRole = UserRole.OPERATOR,
+    email: str = "operator@target.com",
+    tenant_id: str = "default",
+):
+    user = User(email=email, name="Test Operator", google_id="g-123", role=role, tenant_id=tenant_id)
     token = create_jwt_token(user)
     return {"Authorization": f"Bearer {token.access_token}"}, token.access_token
 
@@ -44,7 +48,7 @@ def test_authenticated_live_stats():
 
 def test_authenticated_live_findings_flow():
     """Test registering tenant finding and retrieving it."""
-    headers, _ = get_auth_headers(email="tenant-a@target.com")
+    headers, _ = get_auth_headers(email="tenant-a@target.com", tenant_id="tenant-a@target.com")
 
     record_finding({
         "title": "Tenant A Finding",

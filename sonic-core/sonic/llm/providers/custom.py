@@ -380,9 +380,10 @@ class CustomLLMProvider(LLMProvider):
                             image_parts.append({"type": "image_url", "image_url": {"url": img.url}})
                     if msg.content:
                         text_sections.append(msg.content)
-            content_parts: list[dict] = list(image_parts)
+            content_parts: list[dict] = []
             if text_sections:
                 content_parts.append({"type": "text", "text": "\n\n".join(text_sections)})
+            content_parts.extend(image_parts)
             return [{"role": "user", "content": content_parts}]
 
         messages = []
