@@ -124,15 +124,18 @@ class ModelRouter:
         return provider
 
     @classmethod
-    def from_config(cls, config_path: str | Path, env_vars: dict[str, str] | None = None) -> ModelRouter:
+    def from_config(cls, config_path: str | Path | None = None, env_vars: dict[str, str] | None = None) -> ModelRouter:
         """
         Create a fully configured ModelRouter from a YAML config file.
 
         Args:
-            config_path: Path to models.yaml
+            config_path: Path to models.yaml (defaults to configs/models.yaml).
             env_vars: Dict of environment variables (for API keys).
                       If None, reads from os.environ.
         """
+        if config_path is None:
+            from sonic.config import PROJECT_ROOT
+            config_path = PROJECT_ROOT / "configs" / "models.yaml"
         import os
         env = dict(os.environ)
         try:

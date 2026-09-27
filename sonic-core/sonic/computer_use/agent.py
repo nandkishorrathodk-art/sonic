@@ -326,6 +326,12 @@ class ComputerUseAgent:
         self.mode = mode
         self.max_actions = max_actions
         self.max_recovery_attempts = max_recovery_attempts
+        if llm_router is None:
+            try:
+                from sonic.llm.router import ModelRouter
+                llm_router = ModelRouter.from_config()
+            except Exception:
+                llm_router = None
         self.llm_router = llm_router  # ModelRouter for LLM-driven reasoning
         # Optional BrowserAgent so the same observe->reason->act loop can drive a
         # real web browser (navigate/click/type/screenshot) — unified computer-use.
