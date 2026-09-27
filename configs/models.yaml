@@ -215,14 +215,14 @@ routing_rules:
   vision:
     description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
     provider: nvidia
-    model: nvidia/nemotron-3-super-120b-a12b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
 
   computer_use:
     description: 'Autonomous computer vision and desktop interaction'
     provider: nvidia
-    model: nvidia/nemotron-3-super-120b-a12b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
 
 # ---- Global Fallback Chain ----
 # If the preferred provider for a task fails, try these in order
