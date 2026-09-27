@@ -280,8 +280,14 @@ class SubagentTeamworkManager:
 
         if len(specs) == 1:
             return [await _launch_one(specs[0])]
-        results = await asyncio.gather(*(_launch_one(s) for s in specs), return_exceptions=False)
-        return list(results)
+        raw_results = await asyncio.gather(*(_launch_one(s) for s in specs), return_exceptions=True)
+        results: list[SubagentConversation] = []
+        for r in raw_results:
+            if isinstance(r, Exception):
+                logger.error("subagent_launch_exception", error=str(r))
+            elif isinstance(r, SubagentConversation):
+                results.append(r)
+        return results
 
     # ------------------------------------------------------------------
     # 3. SEND_MESSAGE (Continue / Redirect / Fix an Existing Subagent)
@@ -805,13 +811,14 @@ class SubagentTeamworkManager:
                     max_tokens=250,
                     temperature=0.1,
                 )
-                resp = await self.llm_router.complete(req)
+                resp = await asyncio.wait_for(self.llm_router.complete(req), timeout=30.0)
                 raw = (resp.content or "").strip()
                 m = json.loads(raw[raw.find("{"): raw.rfind("}") + 1]) if "{" in raw and "}" in raw else {}
                 if m.get("passed") is False:
                     return False, JudgeVerdict.FALSIFIED.value, str(m.get("notes") or "Acceptance criteria not met.")
-            except Exception:
-                pass
+            except Exception as judge_err:
+                logger.warning("judge_acceptance_criteria_eval_failed", error=str(judge_err))
+                return False, JudgeVerdict.FALSIFIED.value, f"Acceptance criteria verification error: {judge_err}"
 
         if has_ok_trace:
             return True, JudgeVerdict.CONFIRMED.value, eval_res.notes or "All acceptance criteria verified."

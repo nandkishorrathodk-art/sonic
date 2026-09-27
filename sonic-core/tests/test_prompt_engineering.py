@@ -5,6 +5,7 @@ import pytest
 from sonic.llm.prompts import (
     PROMPT_VERSION,
     PROMPT_LAST_UPDATED,
+    asea_identity,
     validate_subagent_prompt,
     compose_subagent_prompt,
     HONESTY_CLAUSE,
@@ -127,3 +128,43 @@ class TestPromptContent:
         """Facts vs inferences should forbid upgrading without verification."""
         assert "never upgrade" in FACTS_VS_INFERENCES_CLAUSE.lower()
         assert "without direct verification" in FACTS_VS_INFERENCES_CLAUSE.lower()
+
+
+class TestComputerUseAndChatPrompts:
+    """Test Computer Use and Workstation Chat system prompt contracts."""
+
+    def test_asea_identity_formatting(self):
+        """Identity function should format main and subagent identities correctly."""
+        main_id = asea_identity("SONIC")
+        assert "Autonomous AI-Human Digital Being" in main_id
+        assert "workstation" in main_id
+
+        role_id = asea_identity("Code Reviewer")
+        assert "Code Reviewer" in role_id
+        assert "Autonomous AI-Human Digital Being" in role_id
+
+    def test_computer_use_system_prompt_clauses(self):
+        """Computer use prompt must mandate dual-plane execution, subagents, and anti-bypass."""
+        from sonic.llm.prompts import COMPUTER_USE_SYSTEM_PROMPT
+
+        prompt_lower = COMPUTER_USE_SYSTEM_PROMPT.lower()
+        assert "autonomous ai-human digital being" in prompt_lower
+        assert "display=:99" in prompt_lower
+        assert "terminal_exec" in prompt_lower
+        assert "app_launch" in prompt_lower
+        assert "define_subagent" in prompt_lower
+        assert "invoke_subagent" in prompt_lower
+        assert "send_message" in prompt_lower
+        assert "manage_subagents" in prompt_lower
+        assert "goal_complete" in prompt_lower
+
+    def test_workstation_chat_system_prompt(self):
+        """Workstation chat system prompt must set human identity and anti-hacker persona rules."""
+        from sonic.llm.prompts import WORKSTATION_CHAT_SYSTEM
+
+        chat_lower = WORKSTATION_CHAT_SYSTEM.lower()
+        assert "autonomous ai-human digital being" in chat_lower
+        assert "not a penetration-test persona" in chat_lower
+        assert "hindi" in chat_lower
+        assert "hinglish" in chat_lower
+

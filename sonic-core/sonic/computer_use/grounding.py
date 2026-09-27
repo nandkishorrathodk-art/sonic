@@ -31,8 +31,8 @@ _COMMON_UI_LANDMARKS: dict[str, tuple[float, float]] = {}
 
 def _parse_grounding_coords(
     text: str,
-    width: int = 1280,
-    height: int = 800,
+    width: int = 1920,
+    height: int = 1080,
 ) -> tuple[int, int] | None:
     """Parse grounding model coordinate text, scaling [0, 1000] tagged boxes to screen dimensions."""
     return extract_bbox_midpoint(text, width=width, height=height)
@@ -40,8 +40,8 @@ def _parse_grounding_coords(
 
 def extract_bbox_midpoint(
     bbox_response: Any,
-    width: int = 1280,
-    height: int = 800,
+    width: int = 1920,
+    height: int = 1080,
     is_normalized_1000: bool | None = None,
     *,
     screen_width: int | None = None,

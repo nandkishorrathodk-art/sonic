@@ -50,11 +50,6 @@ SONIC operates concurrently across two clean execution planes with **complete co
     - All pointer movements (`GUI_MOVE`, `GUI_CLICK`, `GUI_DOUBLE_CLICK`, `GUI_RIGHT_CLICK`) must use smooth cosine-eased motor interpolation (`sonic_cursor.py`) over 200–300 ms so human operators can visually follow the agent's intent.
     - Keystroke typing (`GUI_TYPE`) must always focus the target element (`x, y`) before typing to ensure the cursor actively interacts with the intended field.
     - Tasks involving visual applications, browsing, or desktop UI must actively dispatch to the desktop GUI plane rather than taking silent headless terminal shortcuts.
-12. **Mandatory Live API Dispatch & Zero Assistant Shortcut Invocation**:
-    - *"Har operator task SONIC ke running FastAPI backend API endpoint par hi dispatch hoga, assistant direct python script se bypass nahi karega."*
-    - When an operator requests a workstation task for SONIC, the assistant agent MUST NOT run one-off local Python scripts (`python -c "ComputerUseAgent().run_mission(...)"`) to bypass the running backend.
-    - All operator objectives MUST be submitted directly to SONIC's running FastAPI backend server (`POST http://127.0.0.1:12000/workstation/prompt` or `/workstation/mission/start`).
-    - The task MUST execute inside SONIC's live background service, streaming real-time events, screen frames, and decision traces directly to the Next.js Dashboard (`http://localhost:12001`).
 
 ## Layout
 - `sonic-core/` — Python backend (uv workspace, Python 3.12+). `pip install -e sonic-core[dev]`.

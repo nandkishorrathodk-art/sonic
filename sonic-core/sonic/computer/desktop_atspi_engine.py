@@ -140,8 +140,9 @@ class CoordinateTranslator:
         scaled_w = int(round(rw * dpr)) if dpr != 1.0 else int(rw)
         scaled_h = int(round(rh * dpr)) if dpr != 1.0 else int(rh)
 
+        top_chrome = int(top_chrome_offset) if int(top_chrome_offset) > 0 else 85
         abs_x = int(window_x) + int(left_chrome_offset) + scaled_x
-        abs_y = int(window_y) + int(top_chrome_offset) + scaled_y
+        abs_y = int(window_y) + top_chrome + scaled_y
 
         return (abs_x, abs_y, max(0, scaled_w), max(0, scaled_h))
 

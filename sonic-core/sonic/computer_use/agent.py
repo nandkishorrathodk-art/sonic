@@ -685,13 +685,13 @@ class ComputerUseAgent:
             return SubGoalChecklist(top_level_goal=goal, sub_goals=sub_goals, active_index=0)
 
         # 2. Try LLM-driven goal decomposition when enabled and a router is available
-        if getattr(self, "enable_llm_decomposition", False) and self.llm_router is not None:
+        if getattr(self, "enable_llm_decomposition", True) and self.llm_router is not None:
             llm_checklist = await self._llm_decompose_goal(goal)
             if llm_checklist is not None:
                 return llm_checklist
 
-        # 3. Dynamic clause extraction from user's explicit multi-part goal
-        parts = [p.strip() for p in re.split(r'\b(?:and then|then|and)\b|[;\n]', goal, flags=re.IGNORECASE) if len(p.strip()) > 3]
+        # 3. Dynamic clause extraction from user's explicit multi-part goal (supports Hinglish/English)
+        parts = [p.strip() for p in re.split(r'\b(?:and then|then|and|aur|phir|uske baad|baad me)\b|[;\n]', goal, flags=re.IGNORECASE) if len(p.strip()) > 3]
         if len(parts) >= 2:
             sub_goals = [SubGoal(description=part) for part in parts[:5]]
             return SubGoalChecklist(top_level_goal=goal, sub_goals=sub_goals, active_index=0)
@@ -899,8 +899,8 @@ class ComputerUseAgent:
                 adjusted_bbox = (
                     int(bbox[0] + win_offset_x),
                     int(bbox[1] + win_offset_y),
-                    int(bbox[2] + win_offset_x),
-                    int(bbox[3] + win_offset_y),
+                    int(bbox[2]),
+                    int(bbox[3]),
                 )
                 self.perception_bus.register_target(
                     query,
@@ -2045,12 +2045,9 @@ class ComputerUseAgent:
                 Message(role=MessageRole.USER, content=user_text, images=images),
             ],
             task_type="reasoning",
-            max_tokens=8192,
-            # Vision-capable instruction models commonly reject provider-
-            # specific reasoning_effort values even though they accept image
-            # content. Let the provider use its native default for multimodal
-            # requests; retain explicit high effort for text-only reasoning.
-            reasoning_effort=None if images else "high",
+            max_tokens=1024 if images else 2048,
+            # Concise action selection for real-time computer use (< 3s per step).
+            reasoning_effort=None if images else "medium",
         )
         t_thought_start = time.perf_counter()
         heartbeat_task: asyncio.Task[Any] | None = None
@@ -2326,7 +2323,7 @@ class ComputerUseAgent:
             except Exception:
                 pass
 
-        pattern = r'(?:^|\n)\s*(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?:\s*(.*?)(?=(?:^|\n)\s*(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\:|$)'
+        pattern = r'(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:\s*(.*?)(?=(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:|$)'
         matches = re.findall(pattern, parse_target_text, re.DOTALL | re.IGNORECASE)
         # Use setdefault to preserve the FIRST action in case of multiple blocks
         raw_fields: dict[str, str] = {}
@@ -6004,7 +6001,8 @@ class ComputerUseAgent:
         Called BEFORE ``execute_action`` so the step is never wasted.
         """
         if action_type == ComputerActionType.TERMINAL_EXEC:
-            cmd = (payload.get("command") or target or "").strip().rstrip(',;').strip().lower()
+            payload_cmd = payload.get("command") if isinstance(payload, dict) else str(payload or "")
+            cmd = (payload_cmd or target or "").strip().rstrip(',;').strip().lower()
             # Strip trailing semicolons/commas/whitespace for matching
             cmd_clean = cmd.rstrip(",; \t")
             if cmd_clean in self._TRIVIAL_COMMANDS:
@@ -6531,6 +6529,11 @@ class ComputerUseAgent:
                         await cb_res
                 except Exception as cb_err:
                     logger.warning("run_mission_step_callback_failed", error=str(cb_err))
+
+            if self._interrupted or (callable(interrupt_check) and interrupt_check()):
+                self._interrupted = True
+                logger.info("mission_interrupted_by_user", step=step)
+                break
 
             if self._watchdog_aborted:
                 self.history.append({
