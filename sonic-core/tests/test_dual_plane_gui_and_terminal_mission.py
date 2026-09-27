@@ -15,7 +15,11 @@ Verifies:
 
 from __future__ import annotations
 
+import base64
+from io import BytesIO
+
 import pytest
+from PIL import Image
 
 from sonic.being.identity import get_or_create_being, reset_being_singleton
 from sonic.computer.docker_computer import DockerComputerProvider
@@ -139,14 +143,27 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
 
     from sonic.computer.models import ScreenObservation
 
+    visual_revision = {"value": 0}
+
     def _make_screen(active_window: str, open_windows: list[str]) -> ScreenObservation:
+        image = Image.new("RGB", (1, 1), (18, 22, 31))
+        image.putpixel((0, 0), (18 + visual_revision["value"], 22, 31))
+        image_buffer = BytesIO()
+        image.save(image_buffer, format="PNG")
         return ScreenObservation(
             width=1280,
             height=800,
-            screenshot_base64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            screenshot_base64=base64.b64encode(image_buffer.getvalue()).decode("ascii"),
             active_window=active_window,
             visible_text=f"Active Window: {active_window}\nOpen Windows: {', '.join(open_windows)}",
-            detected_controls=[],
+            detected_controls=(
+                [
+                    {"name": active_window, "role": "window", "bbox": (0, 0, 1280, 800)},
+                    {"name": "editor", "role": "textbox", "bbox": (100, 120, 600, 400)},
+                ]
+                if active_window != "Desktop"
+                else []
+            ),
             desktop_state="INTERACTIVE",
         )
 
@@ -210,10 +227,12 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
                 self.gui_events.append(("FOCUS", target))
             elif atype == "TYPE":
                 self.gui_events.append(("TYPE", f"{self.active_window}:{action.text}"))
+                visual_revision["value"] = 1
             elif atype == "CLICK":
                 self.gui_events.append(("CLICK", f"{self.active_window}:({action.x},{action.y})"))
             elif atype in ("KEYPRESS", "HOTKEY"):
                 self.gui_events.append(("KEY", f"{self.active_window}:{action.key}"))
+                visual_revision["value"] += 1
             return _make_screen(self.active_window, self.open_windows)
 
         async def terminal(self, workspace_id: str, command: str):
@@ -273,6 +292,7 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
     )
     assert t3.status == ActionExecutionStatus.COMPLETED
     assert ws.active_window == "text-editor-app"
+    await agent.observe("ws-1")
     agent._recent_action_signatures.append(("APP_FOCUS", "text-editor-app", "text-editor-app"))
 
     t4 = await agent.execute_action(

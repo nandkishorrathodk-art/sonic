@@ -206,7 +206,7 @@ async def attack_surface(
             surfaces.append({"name": "Workstation", "endpoint": path, "protocol": "WS" if "ws" in path else "HTTP", "auth_required": "JWT", "tenant_check": "Yes", "risk": "CRITICAL"})
         elif "engagements" in path and ("run" in path or "replan" in path):
             surfaces.append({"name": "Engagement Control", "endpoint": path, "protocol": "HTTP", "auth_required": "JWT (Operator)", "tenant_check": "Yes", "risk": "CRITICAL"})
-        elif path in ("/health", "/health/detailed"):
+        elif path.rstrip("/").endswith(("/health", "/health/detailed")):
             surfaces.append({"name": "Public Health", "endpoint": path, "protocol": "HTTP", "auth_required": "NONE", "tenant_check": "No", "risk": "LOW"})
         elif methods:
             surfaces.append({"name": "API", "endpoint": path, "protocol": "HTTP", "auth_required": "JWT", "tenant_check": "Yes", "risk": "MEDIUM"})

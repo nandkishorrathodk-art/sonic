@@ -168,7 +168,7 @@ async def test_typing_verification_rejects_garbage_and_sentinel_text():
             p,
             "Type into input",
         )
-        assert trace.status == ActionExecutionStatus.FAILED, f"Payload {p} was falsely marked as {trace.status}"
+        assert trace.status == ActionExecutionStatus.BLOCKED, f"Payload {p} was not fail-closed: {trace.status}"
         assert "[TYPING VERIFICATION FAILED]" in trace.actual_observation
 
 
@@ -193,7 +193,7 @@ async def test_typing_verification_rejects_wrong_field_targets():
             {"text": "valid_user_text"},
             f"Type into {target}",
         )
-        assert trace.status == ActionExecutionStatus.FAILED, f"Target {target} was falsely marked as {trace.status}"
+        assert trace.status == ActionExecutionStatus.BLOCKED, f"Target {target} was not fail-closed: {trace.status}"
         assert "[TYPING VERIFICATION FAILED]" in trace.actual_observation
         assert "wrong field" in trace.actual_observation.lower()
 

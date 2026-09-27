@@ -68,12 +68,6 @@ def _safe_discovery_context(items: list[str]) -> str:
     for item in items[-3:]:
         text = " ".join(str(item).split()).replace("`", "")
         lowered = text.lower()
-        text = re.sub(
-            r"\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?::\d{1,5})?\b",
-            "[address omitted]",
-            text,
-        )
-        lowered = text.lower()
         if not text or any(marker in lowered for marker in (
             "ignore previous", "ignore the rules", "system message",
             "assistant:", "developer:", "run ", "execute ", "curl ",
@@ -304,7 +298,18 @@ class BossAgent:
         if result.evidence_verified and (result.key_discoveries or summary_lower.strip()):
             return ReplanTrigger.NEW_HIGH_CONFIDENCE_FINDING
 
-        if any(tok in summary_lower for tok in ("open port", "new service", "new endpoint", "discovered port")):
+        if any(
+            tok in summary_lower
+            for tok in (
+                "open port",
+                "new service",
+                "new endpoint",
+                "discovered port",
+                "url endpoint",
+                "search parameter",
+                "route mapped",
+            )
+        ):
             return ReplanTrigger.NEW_ATTACK_SURFACE
 
         return None
@@ -966,7 +971,7 @@ Rules:
                 else self.safety
             )
 
-            if self.browser is not None and isinstance(self.browser, BrowserAgent):
+            if self.browser is not None and callable(getattr(self.browser, "run_mission", None)):
                 browser_agent = self.browser
                 browser_agent.vault = self.vault
                 browser_agent.being = self.being

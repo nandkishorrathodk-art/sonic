@@ -1,11 +1,4 @@
-"""
-Tests for the Hypothesis Generator's deterministic prioritization engine.
-
-When no LLM is configured, the generator now synthesizes a prioritized
-hypothesis queue from the discovered attack surface — scoring each asset by
-"richness" (auth hints, juicy paths, parameters) so the juiciest targets are
-tested first. The system stays useful with zero model configuration.
-"""
+"""Tests for evidence-grounded hypothesis behavior when no LLM is configured."""
 
 from __future__ import annotations
 
@@ -42,8 +35,8 @@ def test_hypotheses_synth_without_llm():
         assert isinstance(h["priority"], int) and 1 <= h["priority"] <= 10
 
 
-def test_hypothesis_prioritizes_auth_endpoints_higher():
-    """Login/auth endpoints should outrank static assets."""
+def test_fallback_preserves_observed_asset_order_without_keyword_scoring():
+    """The no-LLM fallback must not infer risk classes from URL words."""
     gen = _make_generator(router=None)
     assets = [
         {"type": "url", "value": "https://app.test/static/img.png"},
@@ -51,30 +44,31 @@ def test_hypothesis_prioritizes_auth_endpoints_higher():
         {"type": "endpoint", "value": "https://app.test/api/admin/users"},
     ]
     hyps = gen._synth_hypotheses_from_assets("app.test", assets, [], [])
-    titles = [h["title"] for h in hyps]
-    # The auth/login hypothesis must appear before the static asset one.
-    auth_idx = next(i for i, h in enumerate(hyps) if "Auth" in h["vulnerability_class"] or "auth" in h["title"])
-    static_idx = next((i for i, h in enumerate(hyps) if "static" in h["title"]), len(hyps))
-    assert auth_idx < static_idx
+    assert [h["title"] for h in hyps] == [
+        f"Verify behavior and access boundary on {asset['value']}" for asset in assets
+    ]
+    assert {h["vulnerability_class"] for h in hyps} == {"Logic"}
 
 
-def test_hypothesis_tech_stack_hints():
-    """Detected technologies produce tech-specific hypotheses."""
+def test_technology_names_do_not_create_unobserved_hypotheses():
+    """Technology labels alone do not generate canned exploit hypotheses."""
     gen = _make_generator(router=None)
     hyps = gen._synth_hypotheses_from_assets("app.test", [], ["WordPress", "PHP"], [])
-    classes = {h["vulnerability_class"] for h in hyps}
-    assert "RCE" in classes or "LFI/RCE" in classes
+    assert hyps == []
 
 
-def test_hypothesis_chaining_when_findings_exist():
-    """Existing findings trigger a chaining hypothesis."""
+def test_findings_do_not_trigger_a_canned_chaining_hypothesis():
+    """The fallback does not fabricate a chain solely from vulnerability labels."""
     gen = _make_generator(router=None)
-    hyps = gen._synth_hypotheses_from_assets(
+    with_findings = gen._synth_hypotheses_from_assets(
         "app.test", [{"type": "url", "value": "https://app.test/x"}], [],
         [{"vulnerability_class": "IDOR"}, {"vulnerability_class": "XSS"}],
     )
-    chain = [h for h in hyps if h["vulnerability_class"] == "Chaining"]
-    assert chain and chain[0]["priority"] == 9
+    without_findings = gen._synth_hypotheses_from_assets(
+        "app.test", [{"type": "url", "value": "https://app.test/x"}], [], []
+    )
+    assert with_findings == without_findings
+    assert all(h["vulnerability_class"] != "Chaining" for h in with_findings)
 
 
 def test_hypothesis_run_returns_without_llm():

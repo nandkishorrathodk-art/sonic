@@ -76,27 +76,30 @@ def test_planner_orients_to_target_domain():
 def test_director_organic_hypotheses():
     director = MissionDirector(computer_provider=_StubComputer())
 
-    # SQL injection objective
+    # Domain-neutral objective framing preserves the operator's wording.
     stmt, counter, vclass, claim = director._derive_hypothesis_from_objective(
         "Find SQL injection flaws in user login endpoint", "http://login.local"
     )
-    assert vclass == "sql_injection"
+    assert vclass == "objective_fulfillment"
+    assert claim == "state_convergence"
     assert "SQL injection" in stmt
-    assert "parametrizes" in counter or "sanitizes" in counter
+    assert "lacks empirical verification" in counter
 
-    # Recon objective
+    # A different objective is retained without mapping keywords to a fixed class.
     stmt, counter, vclass, claim = director._derive_hypothesis_from_objective(
         "Enumerate active network services and open ports", "10.0.0.1"
     )
-    assert vclass == "attack_surface"
-    assert "attack surface" in stmt.lower() or "services" in stmt.lower()
+    assert vclass == "objective_fulfillment"
+    assert claim == "state_convergence"
+    assert "active network services and open ports" in stmt
 
-    # Auth bypass objective
+    # Authentication objectives use the same empirical convergence contract.
     stmt, counter, vclass, claim = director._derive_hypothesis_from_objective(
         "Verify JWT signature verification and authentication controls", "auth_service"
     )
-    assert vclass == "authentication_authorization"
-    assert "authentication" in stmt.lower() or "authorization" in stmt.lower()
+    assert vclass == "objective_fulfillment"
+    assert claim == "state_convergence"
+    assert "authentication controls" in stmt
 
     # General objective
     stmt, counter, vclass, claim = director._derive_hypothesis_from_objective(
@@ -157,4 +160,3 @@ def test_creative_autonomy_evaluates_terminal_and_browser_evidence():
     # Hypothesis evidence reflects the real traces without needing canned security tools
     assert summary.confidence == 1.0
     assert any("OpenAPI" in str(k) or "endpoints" in str(k) for k in summary.what_we_know)
-

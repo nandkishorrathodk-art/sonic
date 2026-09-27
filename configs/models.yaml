@@ -103,6 +103,11 @@ providers:
         cost_per_1k_input: 0.0003
         cost_per_1k_output: 0.0006
         capabilities: [vision, computer_use, multimodal]
+      - id: openai/gpt-oss-20b
+        speed_tier: fast
+        cost_per_1k_input: 0.0002
+        cost_per_1k_output: 0.0004
+        capabilities: [reasoning, coding, fast_tasks, classification]
 
   claude:
     name: Anthropic Claude
@@ -216,8 +221,8 @@ routing_rules:
   computer_use:
     description: 'Autonomous computer vision and desktop interaction'
     provider: nvidia
-    model: nvidia/nemotron-3-super-120b-a12b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
 
 # ---- Global Fallback Chain ----
 # If the preferred provider for a task fails, try these in order

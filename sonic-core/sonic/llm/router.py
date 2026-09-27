@@ -388,14 +388,11 @@ class ModelRouter:
         # Use request's task_type if not explicitly provided
         effective_task = task_type or request.task_type
 
-        # Only route to the dedicated vision model when the caller explicitly
-        # requests task_type="vision" (e.g. VisualGrounder coordinate extraction)
-        # or provides no task_type at all on an image-only prompt.
-        # Do NOT hijack "reasoning", "planning", or "coding" down to an 11B vision model!
+        # Requests containing pixels require a vision-capable model even when
+        # their caller labels the surrounding task as reasoning or computer use.
         has_images = any(getattr(msg, "has_images", False) for msg in request.messages)
-        if has_images and not effective_task:
-            if "vision" in self.routing_rules:
-                effective_task = "vision"
+        if has_images and "vision" in self.routing_rules:
+            effective_task = "vision"
 
         provider, model_override = self._resolve_provider(provider_name, effective_task)
 

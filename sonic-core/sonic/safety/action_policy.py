@@ -24,6 +24,8 @@ self-directed exploration cannot escape the envelope.
 
 from __future__ import annotations
 
+import base64
+import ipaddress
 import os
 import re
 import sqlite3
@@ -300,16 +302,72 @@ class ActionPolicy:
         r"169\.254\.169\.254"
         r"|instance-data(?:\.ec2\.internal)?\b"
         r"|metadata\.google\.internal\b"
-        r"|metadata\.azure\.com\b",
+        r"|metadata\.azure\.com\b"
+        r"|100\.100\.100\.200"
+        r"|fd00:ec2::254",
         re.IGNORECASE,
     )
+
+    @staticmethod
+    def _canonical_ipv4_reference(value: str) -> str | None:
+        """Normalize dotted, octal, hexadecimal, and integer IPv4 spellings."""
+        try:
+            return str(ipaddress.IPv4Address(value))
+        except ipaddress.AddressValueError:
+            pass
+
+        parts = value.split(".")
+        if not 1 <= len(parts) <= 4:
+            return None
+        numbers: list[int] = []
+        for part in parts:
+            if not part:
+                return None
+            try:
+                if part.lower().startswith("0x"):
+                    number = int(part[2:], 16)
+                elif len(part) > 1 and part.startswith("0"):
+                    number = int(part, 8)
+                else:
+                    number = int(part, 10)
+            except ValueError:
+                return None
+            numbers.append(number)
+
+        if any(number > 255 for number in numbers[:-1]):
+            return None
+        last_bits = 8 * (5 - len(numbers))
+        if numbers[-1] >= 1 << last_bits:
+            return None
+        packed = sum(number << (24 - 8 * index) for index, number in enumerate(numbers[:-1]))
+        packed |= numbers[-1]
+        return str(ipaddress.IPv4Address(packed))
+
+    @classmethod
+    def _contains_cloud_metadata_reference(cls, command: str) -> bool:
+        if cls._CLOUD_METADATA_RE.search(command):
+            return True
+
+        tokens = re.findall(r"(?<![\w.-])(?:0x[0-9a-f]+|[\da-fx]+(?:\.[\da-fx]+){0,3})(?![\w.-])", command, re.IGNORECASE)
+        if any(cls._canonical_ipv4_reference(token) in {"169.254.169.254", "100.100.100.200"} for token in tokens):
+            return True
+
+        if re.search(r"\bbase64\b", command, re.IGNORECASE):
+            for token in re.findall(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{12,}={0,2}(?![A-Za-z0-9+/])", command):
+                try:
+                    decoded = base64.b64decode(token + "=" * (-len(token) % 4), validate=True).decode("utf-8", errors="ignore")
+                except (ValueError, base64.binascii.Error):
+                    continue
+                if cls._contains_cloud_metadata_reference(decoded):
+                    return True
+        return False
 
     def _check_command(self, command: str) -> PolicyVerdict:
         # TERMINAL_EXEC bypasses the URL-egress filter (it runs shell howeverthe
         # operator/being chooses). Close the metadata hole explicitly: a shell
         # command must never reach the cloud metadata endpoint ??? on the host Or
         # inside an egress-unrestricted container???
-        if self._CLOUD_METADATA_RE.search(command or ""):
+        if self._contains_cloud_metadata_reference(command or ""):
             return PolicyVerdict(False, "cloud metadata access blocked in terminal command")
         # Shell commands are another egress surface (curl, wget, python
         # requests, etc.). When an engagement target allowlist is active,

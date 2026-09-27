@@ -371,7 +371,7 @@ class JudgeAgent:
                     )
 
         # 4.5 Workstation Application & Desktop Window Check (Rule 5 & Rule 7):
-        is_gui_mission = getattr(sub_mission, "plane", "") == "gui" or any(
+        is_gui_mission = getattr(sub_mission, "plane", "") == "gui" and any(
             w in goal_lower
             for w in ("desktop", "browser", "window", "gui", "open application", "launch application")
         )
@@ -382,7 +382,31 @@ class JudgeAgent:
                 for t in traces
             )
             gui_verified = has_gui_action
-            if self.computer and hasattr(self.computer, "terminal"):
+            status_checked = False
+            if self.computer and callable(getattr(self.computer, "status", None)):
+                try:
+                    state = await self.computer.status(workspace_id)
+                    open_windows = getattr(state, "open_applications", None)
+                    if open_windows is None:
+                        open_windows = getattr(state, "windows", [])
+                    active_window = (
+                        getattr(state, "active_window", "")
+                        or getattr(state, "active_application", "")
+                    )
+                    generic_windows = {"", "desktop", "headless", "terminal", "headless_terminal"}
+                    gui_verified = any(
+                        str(window).strip().lower() not in generic_windows
+                        for window in (open_windows or [])
+                    ) or str(active_window).strip().lower() not in generic_windows
+                    status_checked = True
+                except Exception as exc:
+                    logger.warning(
+                        "judge_gui_status_verification_failed",
+                        workspace_id=workspace_id,
+                        error=str(exc),
+                    )
+                    status_checked = False
+            if not gui_verified and not status_checked and self.computer and hasattr(self.computer, "terminal"):
                 try:
                     wm_res = await self.computer.terminal(
                         workspace_id,
@@ -394,8 +418,6 @@ class JudgeAgent:
                     ]
                     if open_wins:
                         gui_verified = True
-                    else:
-                        gui_verified = False
                 except Exception:
                     pass
 

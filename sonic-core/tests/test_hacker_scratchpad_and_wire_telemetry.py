@@ -123,7 +123,7 @@ class TestHackerScratchpad:
         scratchpad.add_note("Target login rate limit bypassed via X-Forwarded-For")
 
         hud = scratchpad.render_hud_markdown()
-        assert "HACKER SCRATCHPAD (Working Loot & Memory):" in hud
+        assert "WORKING MEMORY & ARTIFACT LEDGER:" in hud
         assert "Tokens: jwt_1=eyJhbGciOi... (truncated), bearer_auth=bearer_secret..." in hud
         assert "Parameters: id, redirect, debug" in hud
         assert "Discovered Endpoints: /api/v1/user, /login" in hud
@@ -241,4 +241,3 @@ class TestWireTelemetryEngine:
         summary = engine.format_wire_summary(events)
         assert "LAST ACTION NETWORK WIRE (HTTP Stream):" in summary
         assert "[1] GET /api/v2/metrics?filter=all -> 200 OK (Response: {\"metrics\":[]})" in summary
-

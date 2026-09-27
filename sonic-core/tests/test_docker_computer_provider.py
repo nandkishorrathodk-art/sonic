@@ -130,39 +130,46 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
 
     success = await provider.launch_application("ws-1", "chromium https://target.local")
     assert success is True
-    called_cmd = provider._docker_exec.call_args[0][0]
+    called_cmds = [call.args[0] for call in provider._docker_exec.call_args_list]
     # Mock returns exit 0 for the --no-sandbox probe, so flags are injected
-    expected_spawn = "DISPLAY=:99 nohup chromium --no-sandbox --disable-dev-shm-usage https://target.local >/tmp/sonic_app_launch.log 2>&1 &"
-    assert called_cmd == expected_spawn
+    spawn = next(cmd for cmd in called_cmds if "nohup chromium" in cmd)
+    assert "DISPLAY=:99 nohup chromium --no-sandbox --disable-dev-shm-usage https://target.local" in spawn
+    assert "kill -0" in spawn
+    assert "grep -q -- '--no-sandbox'" in spawn
+    assert "retry_args=(" not in spawn
 
     # Also test an argument with spaces / special characters that requires escaping
     provider._docker_exec.reset_mock()
     success2 = await provider.launch_application("ws-1", "chromium 'https://target.local/path with spaces'")
     assert success2 is True
-    called_cmd2 = provider._docker_exec.call_args[0][0]
-    expected_spawn2 = "DISPLAY=:99 nohup chromium --no-sandbox --disable-dev-shm-usage 'https://target.local/path with spaces' >/tmp/sonic_app_launch.log 2>&1 &"
-    assert called_cmd2 == expected_spawn2
+    called_cmds2 = [call.args[0] for call in provider._docker_exec.call_args_list]
+    spawn2 = next(cmd for cmd in called_cmds2 if "nohup chromium" in cmd)
+    assert (
+        "DISPLAY=:99 nohup chromium --no-sandbox --disable-dev-shm-usage "
+        "'https://target.local/path with spaces' >/tmp/sonic_app_launch.log 2>&1 &"
+    ) in spawn2
 
     # Also test multi-word application query (e.g. 'google chrome')
     provider._docker_exec.reset_mock()
     success3 = await provider.launch_application("ws-1", "google chrome https://target.local")
     assert success3 is True
-    called_cmd3 = provider._docker_exec.call_args[0][0]
-    assert "DISPLAY=:99 nohup" in called_cmd3
-    assert "https://target.local" in called_cmd3
+    called_cmds3 = [call.args[0] for call in provider._docker_exec.call_args_list]
+    spawn3 = next(cmd for cmd in called_cmds3 if "nohup" in cmd)
+    assert "DISPLAY=:99 nohup" in spawn3
+    assert "https://target.local" in spawn3
     # Mock returns exit 0 for probe so flags are injected
-    assert "--no-sandbox" in called_cmd3
+    assert "--no-sandbox" in spawn3
 
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
 async def test_daytona_computer_display_and_launch_quoting(monkeypatch):
-    """Proves DaytonaComputerProvider uses :0 default, checks DISPLAY, and quotes launch arguments."""
+    """Proves DaytonaComputerProvider uses the workstation display and quotes launch arguments."""
     from sonic.sandbox.provider import ExecResult
 
     monkeypatch.delenv("DISPLAY", raising=False)
     provider = DaytonaComputerProvider(api_key="")
-    assert provider._get_display("ws-1") == ":0"
+    assert provider._get_display("ws-1") == ":99"
 
     monkeypatch.setenv("DISPLAY", ":1")
     assert provider._get_display("ws-1") == ":1"
