@@ -91,6 +91,25 @@ def test_screen_analysis_observes_without_starting_an_action_loop():
     assert _is_observation_only_prompt("click the visible button") is False
 
 
+def test_negated_actions_do_not_turn_read_only_observation_into_a_mission():
+    prompt = (
+        "Read-only observation only: inspect the current desktop once and describe "
+        "what is visibly present. Do not click, type into the desktop, navigate, "
+        "open or close applications, run commands, or write files. Report screenshot "
+        "observations separately from OCR and stop after one observation."
+    )
+
+    assert _is_observation_only_prompt(prompt) is True
+    assert _is_action_prompt(prompt) is False
+
+
+def test_positive_desktop_action_stays_actionable_with_a_negative_constraint():
+    prompt = "Open the browser and inspect the page, but do not click anything."
+
+    assert _is_observation_only_prompt(prompt) is False
+    assert _is_action_prompt(prompt) is True
+
+
 @pytest.mark.asyncio
 async def test_workstation_routes_complex_prompt_to_boss_agent(monkeypatch):
     """Verify that a complex prompt in Workstation triggers BossAgent and streams all events."""
