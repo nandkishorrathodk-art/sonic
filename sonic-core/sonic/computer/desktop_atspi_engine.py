@@ -26,7 +26,6 @@ import socket
 import struct
 import time
 from typing import Any, Callable
-from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, Field
