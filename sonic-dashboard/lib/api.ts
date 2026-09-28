@@ -387,6 +387,33 @@ export const api = {
   getExperimentHistory: () =>
     apiClient<any>("/experiments/history/timeline"),
 
+  // Organization / AI Employees
+  getOrganization: () => apiClient<any>("/organization/"),
+
+  createEmployee: (payload: any) =>
+    apiClient<any>("/organization/employees", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  createOrganizationProject: (payload: any) =>
+    apiClient<any>("/organization/projects", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  createWorkItem: (payload: any) =>
+    apiClient<any>("/organization/work-items", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateWorkItemStatus: (workItemId: string, status: string) =>
+    apiClient<any>(`/organization/work-items/${encodeURIComponent(workItemId)}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
+
   // Agents
   getAgents: () =>
     apiClient<any>("/agents/"),
