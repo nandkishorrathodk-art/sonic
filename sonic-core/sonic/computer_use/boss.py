@@ -1125,8 +1125,7 @@ Rules:
             # Judge evaluation
             if hasattr(self, "judge") and self.judge:
                 try:
-                    from sonic.agents.judge import JudgeVerdict
-                    judge_eval = await self.judge.evaluate_sub_mission(
+                                judge_eval = await self.judge.evaluate_sub_mission(
                         workspace_id=workspace_id,
                         sub_mission=sub_mission,
                         result=sub_result,

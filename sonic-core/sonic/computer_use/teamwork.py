@@ -124,6 +124,8 @@ class SubagentTaskSpec:
     model_tier: str = "inherit"      # "inherit" | "flash" | "pro"
     max_steps: int = 12
     max_correction_rounds: int = 2
+    employee_id: str | None = None
+    employee_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -134,6 +136,8 @@ class SubagentConversation:
     type_name: str
     role: str
     workspace_mode: str
+    employee_id: str | None = None
+    employee_context: dict[str, Any] = field(default_factory=dict)
     parent_workspace_id: str
     effective_workspace_id: str
     isolated_dir: Path | None = None
@@ -245,6 +249,7 @@ class SubagentTeamworkManager:
                         model_tier=str(raw.get("model_tier") or raw.get("Model") or "inherit").lower().strip(),
                         max_steps=int(raw.get("max_steps") or 12),
                         max_correction_rounds=int(raw.get("max_correction_rounds") if raw.get("max_correction_rounds") is not None else 2),
+                        employee_id=str(raw.get("employee_id") or "").strip() or None,
                     )
                 )
 
@@ -256,10 +261,23 @@ class SubagentTeamworkManager:
             w_mode = spec.workspace_mode if spec.workspace_mode in ("inherit", "branch", "share") else "branch"
             eff_ws_id, isolated_path = await self._prepare_subagent_workspace(workspace_id, conv_id, w_mode)
 
+            employee_context: dict[str, Any] = {}
+            if spec.employee_id:
+                from sonic.organization.store import get_organization_store
+                employee = await get_organization_store().get_employee(
+                    self.tenant_id, spec.employee_id
+                )
+                if employee is None:
+                    raise ValueError(
+                        f"Unknown employee '{spec.employee_id}' for tenant '{self.tenant_id}'"
+                    )
+                employee_context = employee
             conv = SubagentConversation(
                 conversation_id=conv_id,
                 type_name=spec.type_name,
                 role=spec.role,
+                employee_id=spec.employee_id,
+                employee_context=employee_context,
                 workspace_mode=w_mode,
                 parent_workspace_id=workspace_id,
                 effective_workspace_id=eff_ws_id,
@@ -316,6 +334,8 @@ class SubagentTeamworkManager:
             acceptance_criteria=list(acceptance_criteria or []),
             verification_command=verification_command,
             workspace_mode=conv.workspace_mode,
+            employee_id=conv.employee_id,
+            employee_context=dict(conv.employee_context),
             max_steps=max_steps,
             max_correction_rounds=1,
         )
@@ -378,6 +398,16 @@ class SubagentTeamworkManager:
         else:
             parts.append(f"[ROLE]: {spec.role}")
 
+        if spec.employee_id:
+            ctx = spec.employee_context
+            parts.append(
+                "\n## Employee Ownership Context\n"
+                f"- Employee: {ctx.get('name', spec.employee_id)} ({spec.employee_id})\n"
+                f"- Role: {ctx.get('role', spec.role)}\n"
+                f"- Department: {ctx.get('department_id', 'unknown')}\n"
+                f"- Team: {ctx.get('team_id', 'unknown')}\n"
+                f"- Owned subsystems: {', '.join(ctx.get('subsystem_ids', []))}\n"
+            )
         parts.append(f"\n## Objective (Specify What, Not How)\n{spec.prompt.strip()}")
 
         if isolated_dir is not None:
@@ -620,9 +650,21 @@ class SubagentTeamworkManager:
         if isinstance(safety_clone, ActionPolicy):
             if conv.isolated_dir is not None:
                 safety_clone.workspace_root = conv.isolated_dir.resolve()
-            if type_def and not type_def.enable_write_tools:
+            if conv.employee_context.get("read_only"):
+                read_only_types = {
+                    "FILE_READ", "GIT_STATUS", "GIT_DIFF",
+                    "GUI_SCREENSHOT", "GUI_WAIT",
+                    "BROWSER_NAVIGATE", "BROWSER_SCREENSHOT", "BROWSER_WAIT",
+                    "WAIT_FOR_HUMAN", "GOAL_COMPLETE",
+                }
+                safety_clone.allowed_types = frozenset(
+                    t for t in safety_clone.allowed_types if t in read_only_types
+                )
+            elif type_def and not type_def.enable_write_tools:
                 write_tools = {"FILE_WRITE", "GIT_COMMIT", "GIT_PUSH", "TOOL_AUTHOR"}
-                safety_clone.allowed_types = frozenset(t for t in safety_clone.allowed_types if t not in write_tools)
+                safety_clone.allowed_types = frozenset(
+                    t for t in safety_clone.allowed_types if t not in write_tools
+                )
             if type_def and not type_def.enable_subagent_tools:
                 sub_tools = {"DEFINE_SUBAGENT", "INVOKE_SUBAGENT"}
                 safety_clone.allowed_types = frozenset(t for t in safety_clone.allowed_types if t not in sub_tools)
@@ -634,6 +676,10 @@ class SubagentTeamworkManager:
                 "subagent_role": conv.role,
                 "workspace_mode": conv.workspace_mode,
                 "silent_background": True,
+                "employee_id": conv.employee_id or "",
+                "employee_department": conv.employee_context.get("department_id", ""),
+                "employee_team": conv.employee_context.get("team_id", ""),
+                "employee_subsystems": list(conv.employee_context.get("subsystem_ids", [])),
             }
             if conv.isolated_dir is not None:
                 scoped_ctx["isolated_working_dir"] = conv.isolated_dir.as_posix()

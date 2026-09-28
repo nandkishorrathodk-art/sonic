@@ -16,7 +16,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any, Iterable
+from typing import Any
 
 _RE_SPACES = re.compile(r"\s+")
 _RE_KEBAB = re.compile(r"[\s_]+")

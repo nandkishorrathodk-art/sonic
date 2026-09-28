@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from sonic.auth.middleware import require_admin, require_auth
 from sonic.auth.models import User
-from sonic.api.routes.workstation import _resolve_tenant_id, _tenant_workstations
+from sonic.api.routes.workstation import _tenant_workstations
 from sonic.computer.daytona_computer import DaytonaComputerProvider
 from sonic.computer.models import ComputerProfile, ComputerWorkspaceType
 from sonic.logger import get_logger

@@ -116,6 +116,84 @@ class FindingModel(Base):
     )
 
 
+
+class AIEmployeeModel(Base):
+    """Persistent tenant-scoped AI employee profile."""
+    __tablename__ = "ai_employees"
+
+    id = Column(String(64), primary_key=True)
+    tenant_id = Column(String(64), nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    role = Column(String(160), nullable=False)
+    employee_type = Column(String(32), default="ai", nullable=False)
+    department_id = Column(String(64), nullable=False, index=True)
+    team_id = Column(String(64), nullable=False, index=True)
+    subsystem_ids = Column(JSON, default=list, nullable=False)
+    read_only = Column(Boolean, default=False, nullable=False)
+    prompt = Column(Text, default="", nullable=False)
+    status = Column(String(32), default="active", nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class OrganizationProjectModel(Base):
+    """Persistent tenant-scoped project coordinated by one optional lead employee."""
+    __tablename__ = "organization_projects"
+
+    id = Column(String(64), primary_key=True)
+    tenant_id = Column(String(64), nullable=False, index=True)
+    name = Column(String(180), nullable=False)
+    description = Column(Text, default="", nullable=False)
+    lead_employee_id = Column(String(64), nullable=True, index=True)
+    status = Column(String(32), default="planned", nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class OrganizationWorkItemModel(Base):
+    """Persistent implementation task tied to one canonical subsystem owner."""
+    __tablename__ = "organization_work_items"
+
+    id = Column(String(64), primary_key=True)
+    tenant_id = Column(String(64), nullable=False, index=True)
+    project_id = Column(String(64), nullable=False, index=True)
+    title = Column(String(240), nullable=False)
+    description = Column(Text, default="", nullable=False)
+    subsystem_id = Column(String(64), nullable=False, index=True)
+    department_id = Column(String(64), nullable=False, index=True)
+    team_id = Column(String(64), nullable=False, index=True)
+    assignee_employee_id = Column(String(64), nullable=False, index=True)
+    github_repo = Column(String(255), default="", nullable=False)
+    github_issue_number = Column(Integer, nullable=True)
+    github_pr_number = Column(Integer, nullable=True)
+    development_branch = Column(String(255), default="", nullable=False)
+    status = Column(String(32), default="assigned", nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class GitHubReceiptModel(Base):
+    """Immutable receipt proving an external GitHub review or CI event occurred."""
+    __tablename__ = "organization_github_receipts"
+
+    id = Column(String(64), primary_key=True)
+    tenant_id = Column(String(64), nullable=False, index=True)
+    event_type = Column(String(64), nullable=False)
+    repository = Column(String(255), nullable=False, index=True)
+    ref = Column(String(255), default="", nullable=False)
+    external_id = Column(String(128), nullable=False, index=True)
+    approved = Column(Boolean, default=False, nullable=False)
+    ci_success = Column(Boolean, default=False, nullable=False)
+    received_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_org_receipt_tenant_repo_external",
+            "tenant_id",
+            "repository",
+            "external_id",
+        ),
+    )
+
+
 class AuditLogModel(Base):
     """Immutable audit trail of security operations."""
     __tablename__ = "audit_logs"

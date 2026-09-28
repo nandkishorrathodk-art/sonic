@@ -2234,3 +2234,18 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
   - Upgraded `_consecutive_unchanged_screens` into an active watchdog that refocuses windows, retries with accelerators, and prevents infinite loops from burning step quotas.
   - Fixed `JudgeAgent` (`judge.py`) to verify real on-disk artifacts and application state rather than accepting completion on superficial process status or unsaved text (`*untitled`).
   - Gated Laya System-1 receipt verification to reject syntax errors, broken commands, and unsaved file claims.
+
+
+## Organizational architecture invariant
+
+SONIC software ownership is formally divided by department, team and subsystem. The authoritative registry is `sonic-core/sonic/organization/architecture.py`.
+
+- Cognitive Systems owns brain, agents, llm, memory, being, evolution and swarm.
+- Computer & Interaction owns computer_use, computer, browser, perception and world.
+- Platform & Systems owns api, execution, kernel, queue, tools, integrations, db, config, logger and cli.
+- Security & Safety owns auth, safety, sandbox and net.
+- Evaluation & Reliability owns evidence, health, observability and mission_engine.
+- Experience & Interface owns dashboard/operator UI surfaces.
+- Research & Evolution Lab owns research, researcher, meta and orchestration research surfaces.
+
+Every declared subsystem has exactly one authoritative department and team. Employee assignments must resolve to a declared subsystem/path scope; vague ownership is not valid. Cross-functional projects may span departments, but technical subsystem ownership remains singular. Unknown repository paths must fail ownership resolution rather than receive an implicit default owner.
