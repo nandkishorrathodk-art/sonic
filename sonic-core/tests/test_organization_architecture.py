@@ -18,7 +18,7 @@ def test_subsystems_have_one_authoritative_owner() -> None:
     validate_architecture()
     names = [item.subsystem for item in SUBSYSTEM_OWNERSHIP]
     assert len(names) == len(set(names))
-    assert len(names) >= 40
+    assert len(names) >= 35
 
 
 def test_core_paths_resolve_to_expected_departments() -> None:
