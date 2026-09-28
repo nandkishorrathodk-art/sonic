@@ -2249,3 +2249,60 @@ SONIC software ownership is formally divided by department, team and subsystem. 
 - Research & Evolution Lab owns research, researcher, meta and orchestration research surfaces.
 
 Every declared subsystem has exactly one authoritative department and team. Employee assignments must resolve to a declared subsystem/path scope; vague ownership is not valid. Cross-functional projects may span departments, but technical subsystem ownership remains singular. Unknown repository paths must fail ownership resolution rather than receive an implicit default owner.
+
+## Employee organization runtime and current delivery status
+
+The employee organization runtime is implemented on the feature branch
+`agents/sonic-features-audit-request` and is ready for review against
+`development`. The latest `development` history has been merged into the
+feature branch; do not describe these changes as merged to `development` until
+the pull request is actually accepted.
+
+The implemented ownership chain is:
+
+```text
+Department → Team → Employee → Project → Work Item → Subagent/Teamwork
+```
+
+The runtime now includes:
+
+- Canonical department, team, and subsystem ownership from
+  `sonic-core/sonic/organization/architecture.py`.
+- Tenant-scoped persistent organization storage for employees, projects, work
+  items, assignments, GitHub references, reviews, evaluations, and release
+  receipts.
+- Ownership validation so a work item cannot assign an employee to an
+  unrelated subsystem.
+- Employee-aware subagent context, including department, team, owned
+  subsystems, and read-only capability restrictions.
+- Organization API routes and the dashboard organization surface.
+- GitHub webhook receipt configuration through `SONIC_GITHUB_WEBHOOK_SECRET`;
+  delivery/review/evaluation state must come from signed repository events.
+- Self-coder persistence and branchless candidate-application hardening,
+  including rollback/conflict handling and Windows SQLite/worktree cleanup.
+- Brain fail-closed validation: completed experiments without real baseline
+  and probe observations remain `INCONCLUSIVE`, and world-model transitions
+  reject unknown actors or resources.
+
+### Verification recorded for the current feature branch
+
+- Organization, brain, and self-coder regression scope: **77 passed**.
+- Ruff for the modified organization, teamwork, brain, API, and test scope:
+  **clean**.
+- `git diff --check`: **clean**.
+- The feature branch is pushed to `origin` and contains the latest
+  `origin/development` history.
+- A pull request against `development` is still required before claiming
+  integration. Full CI and post-merge runtime smoke tests remain release
+  gates.
+
+### Required workflow for future department audits
+
+Use a narrow department/team/subsystem scope. First inspect the canonical
+ownership entry and its call sites, then classify findings as confirmed bug,
+possible issue, architectural concern, or test gap. Reproduce confirmed bugs,
+add a focused regression test, make the smallest safe fix, run the relevant
+tests and lint, and report cross-department findings to the owning subsystem
+instead of silently editing unrelated code. Do not claim a feature works based
+only on unit-test success; distinguish local verification, CI verification,
+and live workstation verification.

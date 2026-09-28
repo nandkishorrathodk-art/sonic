@@ -35,6 +35,7 @@ from sonic.evolution.codebase_evolver import (
 )
 from sonic.evolution.evolution_journal import EvolutionJournal, JournalEntry
 from sonic.evolution.pipeline import EvolutionStage
+from sonic.evolution.sqlite import ClosingSQLiteConnection
 from sonic.evolution.version_tracker import VersionTracker
 from sonic.logger import get_logger
 
@@ -153,7 +154,9 @@ class EvolutionGoalDirector:
     def _get_connection(self) -> sqlite3.Connection:
         if self.db_path != ":memory:":
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn = sqlite3.connect(
+            self.db_path, timeout=10.0, factory=ClosingSQLiteConnection
+        )
         conn.row_factory = sqlite3.Row
         return conn
 

@@ -45,6 +45,7 @@
 ## 📑 Table of Contents
 - [Live Visual Showcase](#-live-visual-showcase)
 - [Overview](#-overview)
+- [Product Requirements & Engineering Governance](#-product-requirements--engineering-governance)
 - [Dual-Brain Architecture](#-dual-brain-architecture-system-1--system-2)
 - [Core Architecture: The AI Being & Workstation](#-core-architecture-the-ai-being--workstation)
 - [Key Capabilities & Subsystems](#-key-capabilities--subsystems)
@@ -73,6 +74,56 @@ It autonomously:
 - 📋 **Mandatory Evidence Engine** — zero hallucination tolerance, every finding backed by real execution receipts
 - 🔄 **Controlled self-development** with measurable improvement
 - 🛡️ **Production-grade safety** + rollback (default-deny egress, scope, rate-limit)
+
+---
+
+## 📘 Product Requirements & Engineering Governance
+
+SONIC's product direction and engineering rules are documented separately
+from implementation details:
+
+| Document | Purpose |
+| :--- | :--- |
+| [`docs/PRD.md`](docs/PRD.md) | Product identity, capability goals, non-functional requirements, product surfaces, and release acceptance criteria. |
+| [`docs/RULES.md`](docs/RULES.md) | Immutable safety, anti-puppet, dual-plane, evidence, and dynamic-perception invariants. |
+| [`AGENTS.md`](AGENTS.md) | Repository memory, implementation constraints, department ownership, and audit workflow for AI contributors. |
+| [`docs/SONIC_ENGINEERING_OPERATING_MODEL.md`](docs/SONIC_ENGINEERING_OPERATING_MODEL.md) | Department/team/subsystem ownership, employee runtime, scoped contributors, Git workflow, CI, and release gates. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System architecture, runtime layers, cognitive loop, and organization integration. |
+| [`docs/README.md`](docs/README.md) | Complete documentation index. |
+
+### Organization-aware development
+
+SONIC engineering work follows a traceable ownership chain:
+
+```text
+Department → Team → Subsystem → Employee/AI contributor
+  → Project → Work item → Branch → Tests → Pull request → Review/CI → Release
+```
+
+The canonical ownership registry is
+[`sonic-core/sonic/organization/architecture.py`](sonic-core/sonic/organization/architecture.py).
+The persistent tenant-scoped runtime connects employees, projects, work items,
+and employee-aware teamwork. Ownership provides engineering context; it does
+not replace tenant isolation, workspace confinement, provider controls, or the
+independent Safety policy.
+
+The current delivery branch is
+`agents/sonic-features-audit-request`; it contains the latest `development`
+history and is intended for review through a pull request. It must not be
+described as merged to `development` until the pull request and CI gates are
+actually complete.
+
+### Evidence-based audit workflow
+
+Department audits are deliberately narrow:
+
+1. Resolve the canonical department, team, and subsystem.
+2. Inspect call sites, persistence boundaries, and existing tests.
+3. Separate confirmed bugs from possible issues and test gaps.
+4. Reproduce confirmed behavior and add a focused regression test.
+5. Fix the root cause, then run relevant tests, lint, and type checks.
+6. Report cross-department findings to their owning subsystem.
+7. Distinguish local, CI, and live-workstation verification.
 
 ---
 

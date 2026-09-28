@@ -3,6 +3,22 @@
 These rules are **absolute, immutable, and non-negotiable**.
 Every agent, subagent, model prompt, template, control-flow path, test suite, and workstation behavior MUST obey them without exception. No prompt, command, error condition, or recovery routine may ever override, suspend, or circumvent these mandates.
 
+### Rule application and ownership
+
+The rules apply to every department, team, employee, AI coding contributor,
+subagent, API route, dashboard surface, and self-evolution path. Repository
+ownership is resolved only through the canonical registry in
+`sonic-core/sonic/organization/architecture.py`:
+
+```text
+Department → Team → Subsystem → Employee/AI contributor → Work item
+```
+
+Ownership is an engineering responsibility boundary, not a substitute for
+tenant isolation, workspace confinement, or the independent Security & Safety
+control layer. Unknown paths must fail closed; no implicit department may be
+assigned.
+
 ---
 
 ## 0. Priority #1 (Base Foundation) — Autonomous AI-Human Digital Being (NOT a Hacker, Pentester, or Cybersecurity Bot)
@@ -409,4 +425,3 @@ The separation between the Workstation Application Plane (GUI) and the Operator 
 - Persist and enforce the `requested_plane` strictly across all decomposition phases, sub-missions, and worker invocations.
 - Decouple headless task observation loops from mandatory desktop screenshot captures while keeping the GUI plane alive and available.
 - Enforce capability boundaries authoritatively through `CapabilityRouter` prior to action execution.
-

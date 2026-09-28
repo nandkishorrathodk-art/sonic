@@ -9,9 +9,9 @@ Claude-Code style) on its **own** non-safety source tree:
 
 Default posture is **REPORT-ONLY**: the coder verifies the change it proposes
 (AST, tests, security regression) and restores its worktree. API/background
-callers add an isolated Git worktree and persist a tested candidate; after all
-verification gates pass, the candidate is committed automatically to a separate
-local branch. The active branch and remote are never changed.
+callers verify candidates in an isolated Git worktree, then apply a passing
+candidate to the active checkout only when its touched files still match the
+candidate base. That in-place application is not committed or pushed.
 
 Unlike the old evolution queue (which only ran from a manual CLI and, when it
 ran, appended a timestamp comment), this loop:
@@ -26,7 +26,8 @@ ran, appended a timestamp comment), this loop:
 3. **Verifies** through the existing `CodebaseEvolver` gates (AST pre-flight,
    tests that must actually run, fail-closed security regression) with a target
    test subset derived from what changed.
-4. **Waits for operator approval** before an API/background candidate is committed.
+4. **Applies verified API/background candidates in-place** only after checking
+   for conflicts on every touched active-worktree path.
 5. **Reports** a structured, honest summary of every cycle.
 
 Safety: every write goes through the evolver's protected-component guard and the
@@ -39,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,7 +86,7 @@ class SelfCoderCycle:
     lines_removed: int = 0
     # The real unified diff the coder wrote and verified (for the operator).
     proposed_diff: str = ""
-    # What happened to the tree: "rolled_back" (report-only) or "committed"/"left".
+    # What happened to the tree: "rolled_back" (report-only) or "applied".
     tree_action: str = "rolled_back"
     # Root-cause diagnosis produced by the tool-using coding agent.
     diagnosis: str = ""
@@ -104,7 +106,7 @@ class SelfCoderReport:
             f"- Started:  `{self.started_at}`",
             f"- Finished: `{self.finished_at or _now()}`",
             f"- Cycles:   {len(self.cycles)}",
-            f"- Writes committed: {'yes' if self.changed else 'no (report-only)'}",
+            f"- Verified updates applied: {'yes' if self.changed else 'no'}",
             "",
         ]
         for i, c in enumerate(self.cycles, 1):
@@ -128,7 +130,11 @@ class SelfCoderReport:
                 lines.append(c.diagnosis.strip()[:2000])
             if c.proposed_diff:
                 lines.append("")
-                lines.append("Proposed fix (verified against tests, then rolled back):")
+                lines.append(
+                    "Applied fix (isolated tests passed):"
+                    if c.tree_action == "applied"
+                    else "Proposed fix (verified against tests, then rolled back):"
+                )
                 lines.append("```diff")
                 lines.append(c.proposed_diff.strip()[:4000])
                 lines.append("```")
@@ -201,7 +207,8 @@ class SelfCoder:
         from sonic.evolution.version_tracker import VersionTracker
 
         root = Path(repo_root).resolve()
-        db_path = root / "sonic_data" / "self_coder_evolution.db"
+        temporary_storage = tempfile.TemporaryDirectory(prefix="sonic-self-coder-")
+        db_path = Path(temporary_storage.name) / "self_coder_evolution.db"
         pipeline = EvolutionPipeline()
         evolver = CodebaseEvolver(
             repo_root=root,
@@ -233,7 +240,7 @@ class SelfCoder:
             llm_client=self.llm,
             queue_self_update_goal=False,
         )
-        return SelfCoder(
+        isolated = SelfCoder(
             repo_root=root,
             llm=engine.llm_client,
             evolver=engine.codebase_evolver,
@@ -246,6 +253,14 @@ class SelfCoder:
             agentic=self.agentic,
             max_agent_steps=self.max_agent_steps,
         )
+        isolated._temporary_storage = temporary_storage
+        return isolated
+
+    def close(self) -> None:
+        """Release temporary evolution state created for an isolated candidate."""
+        if self._temporary_storage is not None:
+            self._temporary_storage.cleanup()
+            self._temporary_storage = None
 
     # ------------------------------------------------------------------
     # 1. Observe real signals
@@ -447,6 +462,10 @@ class SelfCoder:
     # ------------------------------------------------------------------
     async def run_cycle(self, signal: str, target_file: str, category: str) -> SelfCoderCycle:
         cycle = SelfCoderCycle(signal=signal, target_file=target_file, category=category)
+        if self.allow_writes:
+            cycle.stage = "blocked"
+            cycle.reason = "Write-enabled cycles must run through isolated candidate verification"
+            return cycle
         if self._is_protected(target_file):
             cycle.stage = "rejected"
             cycle.reason = "target is a protected safety component"
@@ -637,6 +656,48 @@ class SelfCoder:
             report.finished_at = _now()
             return report
         cycles = max_cycles if max_cycles is not None else self.max_cycles
+        if self.allow_writes:
+            if self.push:
+                raise ValueError("Self-coder verified updates never commit or push")
+            if not 1 <= cycles <= 10:
+                raise ValueError("max_cycles must be between 1 and 10")
+            from sonic.evolution.self_coder_candidates import SelfCoderCandidateStore
+
+            def execute_candidates() -> dict[str, Any]:
+                async def run_candidates() -> dict[str, Any]:
+                    store = SelfCoderCandidateStore(self.repo_root)
+                    return await store.run_candidate(
+                        "default",
+                        cycles,
+                        lambda candidate_root: self.isolated_copy(candidate_root),
+                    )
+
+                return asyncio.run(run_candidates())
+
+            result = await asyncio.to_thread(execute_candidates)
+            for candidate in result.get("candidates", []):
+                applied = candidate.get("status") == "applied"
+                report.cycles.append(
+                    SelfCoderCycle(
+                        signal=str(candidate.get("description", "")),
+                        target_file=str(candidate.get("target_file", "")),
+                        stage=str(candidate.get("status", "failed")),
+                        reason=str(candidate.get("error", "")),
+                        diagnosis=str(candidate.get("diagnosis", "")),
+                        patch_files=list(candidate.get("files", [])),
+                        proposed_diff=str(candidate.get("diff", "")),
+                        tree_action="applied" if applied else "rolled_back",
+                    )
+                )
+                report.changed = report.changed or applied
+            report.finished_at = _now()
+            logger.info(
+                "self_coder_candidate_cycle_complete",
+                candidates=len(report.cycles),
+                applied=sum(cycle.tree_action == "applied" for cycle in report.cycles),
+            )
+            return report
+
         signals = self.discover_signals()
         if excluded_signals:
             signals = [
@@ -659,7 +720,7 @@ class SelfCoder:
                 logger.warning("self_coder_cycle_error", error=str(exc))
                 cycle = SelfCoderCycle(signal=signal, target_file=target, stage="error", reason=str(exc))
             report.cycles.append(cycle)
-            if cycle.stage == EvolutionStage.PROMOTED.value:
+            if cycle.stage == EvolutionStage.PROMOTED.value or cycle.tree_action == "applied":
                 report.changed = True
             done += 1
 

@@ -269,6 +269,11 @@ class DynamicWorldModel:
         resource_id: str,
         side_effects: list[str] | None = None,
     ) -> StateTransition:
+        if actor_id not in self.actors:
+            raise ValueError(f"Unknown actor '{actor_id}' cannot record a transition.")
+        if resource_id not in self.resources:
+            raise ValueError(f"Unknown resource '{resource_id}' cannot record a transition.")
+
         t = StateTransition(
             source_state=source_state,
             target_state=target_state,

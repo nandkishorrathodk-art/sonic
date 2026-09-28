@@ -125,7 +125,7 @@ def _new_candidate(root: Path, storage: Path, tenant: str = "tenant-a"):
     return store, result["candidates"][0]
 
 
-def test_candidate_run_isolated_from_active_checkout(candidate_repo):
+def test_verified_candidate_is_applied_to_active_worktree_without_branch_or_commit(candidate_repo):
     root, storage = candidate_repo
     before_head = _git(root, "rev-parse", "HEAD")
     before_branch = _git(root, "branch", "--show-current")
@@ -133,20 +133,23 @@ def test_candidate_run_isolated_from_active_checkout(candidate_repo):
 
     store, candidate = _new_candidate(root, storage)
 
-    assert candidate["status"] == "auto_promoted"
+    assert candidate["status"] == "applied"
     assert candidate["verification"]["full_test_suite"] is True
     assert candidate["verification"]["security_regression"] is True
-    assert candidate["commit"]
-    assert candidate["commit_branch"].startswith("sonic/self-coder/")
+    assert candidate["verification"]["active_worktree"]["full_test_suite"] is True
+    assert candidate["verification"]["active_worktree"]["security_regression"] is True
+    assert candidate["commit"] == ""
+    assert candidate["commit_branch"] == ""
     assert "Expected impact" in candidate["report"]
     assert _git(root, "rev-parse", "HEAD") == before_head
     assert _git(root, "branch", "--show-current") == before_branch
-    assert _git(root, "status", "--porcelain") == before_status
-    assert "base" in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
+    assert _git(root, "status", "--porcelain") != before_status
+    assert 'return "candidate"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
+    assert not _git(root, "branch", "--list", "sonic/self-coder/*")
     assert store.get(candidate["candidate_id"], "tenant-a")["diff"] == DIFF
 
 
-def test_candidate_run_preserves_dirty_active_checkout(candidate_repo):
+def test_candidate_run_preserves_unrelated_dirty_active_checkout(candidate_repo):
     root, storage = candidate_repo
     (root / "operator-work.txt").write_text("keep this change\n", encoding="utf-8")
     store = SelfCoderCandidateStore(root, storage)
@@ -160,12 +163,13 @@ def test_candidate_run_preserves_dirty_active_checkout(candidate_repo):
     assert (root / "operator-work.txt").read_text(encoding="utf-8") == (
         "keep this change\n"
     )
-    assert result["candidates"][0]["status"] == "auto_promoted"
+    assert result["candidates"][0]["status"] == "applied"
+    assert 'return "candidate"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
     assert "operator-work.txt" in result["candidates"][0]["working_tree_changes_excluded"]
     assert not list((storage / "worktrees").iterdir())
 
 
-def test_candidate_auto_commits_to_local_branch_without_approval(candidate_repo):
+def test_verified_candidate_application_does_not_change_head_branch_or_create_commit(candidate_repo):
     root, storage = candidate_repo
     original_branch = _git(root, "branch", "--show-current")
     original_head = _git(root, "rev-parse", "HEAD")
@@ -173,27 +177,27 @@ def test_candidate_auto_commits_to_local_branch_without_approval(candidate_repo)
 
     assert _git(root, "rev-parse", "HEAD") == original_head
     assert _git(root, "branch", "--show-current") == original_branch
-    assert candidate["status"] == "auto_promoted"
+    assert candidate["status"] == "applied"
 
-    promoted = store.get(candidate["candidate_id"], "tenant-a")
+    applied = store.get(candidate["candidate_id"], "tenant-a")
 
-    assert promoted["status"] == "auto_promoted"
-    assert promoted["commit"]
-    assert promoted["commit_branch"].startswith("sonic/self-coder/")
+    assert applied["status"] == "applied"
+    assert applied["commit"] == ""
+    assert applied["commit_branch"] == ""
     assert _git(root, "branch", "--show-current") == original_branch
     assert _git(root, "rev-parse", "HEAD") == original_head
-    candidate_head = _git(root, "rev-parse", promoted["commit_branch"])
-    assert candidate_head != original_head
-    assert "candidate" in _git(root, "show", f"{promoted['commit_branch']}:sonic-core/app.py")
-    with pytest.raises(ValueError, match="retained for audit"):
-        store.cleanup(promoted["candidate_id"], "tenant-a")
+    assert not _git(root, "branch", "--list", "sonic/self-coder/*")
+    assert 'return "candidate"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="applied candidate records are retained"):
+        store.cleanup(applied["candidate_id"], "tenant-a")
 
 
 def test_legacy_verified_candidate_can_still_be_manually_promoted(candidate_repo):
     root, storage = candidate_repo
     store, candidate = _new_candidate(root, storage)
-    branch = candidate["commit_branch"]
-    _git(root, "branch", "-D", branch)
+    (root / "sonic-core" / "app.py").write_text(
+        'def value():\n    return "base"\n', encoding="utf-8"
+    )
     candidate["status"] = "verified"
     candidate["commit"] = ""
     candidate["commit_branch"] = ""
@@ -202,9 +206,10 @@ def test_legacy_verified_candidate_can_still_be_manually_promoted(candidate_repo
 
     approved = store.approve(candidate["candidate_id"], "tenant-a")
 
-    assert approved["status"] == "approved"
-    assert approved["commit"]
-    assert approved["commit_branch"] == branch
+    assert approved["status"] == "applied"
+    assert approved["commit"] == ""
+    assert approved["commit_branch"] == ""
+    assert 'return "candidate"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
 
 
 def test_handled_signal_is_excluded_from_later_candidate_runs(candidate_repo):
@@ -236,7 +241,9 @@ def test_handled_signal_is_excluded_from_later_candidate_runs(candidate_repo):
 def test_rejection_and_stale_revalidation_do_not_commit(candidate_repo):
     root, storage = candidate_repo
     store, rejected = _new_candidate(root, storage)
-    _git(root, "branch", "-D", rejected["commit_branch"])
+    (root / "sonic-core" / "app.py").write_text(
+        'def value():\n    return "base"\n', encoding="utf-8"
+    )
     rejected["status"] = "verified"
     rejected["commit"] = ""
     rejected["commit_branch"] = ""
@@ -256,8 +263,6 @@ def test_rejection_and_stale_revalidation_do_not_commit(candidate_repo):
     _git(root, "commit", "-m", "advance base")
     current_head = _git(root, "rev-parse", "HEAD")
     stale_record = store.get(stale["candidate_id"], "tenant-a")
-    old_branch = stale_record["commit_branch"]
-    _git(root, "branch", "-D", old_branch)
     stale_record["status"] = "verified"
     stale_record["commit"] = ""
     stale_record["commit_branch"] = ""
@@ -273,7 +278,9 @@ def test_rejection_and_stale_revalidation_do_not_commit(candidate_repo):
 def test_tampered_candidate_is_not_approved(candidate_repo):
     root, storage = candidate_repo
     store, candidate = _new_candidate(root, storage)
-    _git(root, "branch", "-D", candidate["commit_branch"])
+    (root / "sonic-core" / "app.py").write_text(
+        'def value():\n    return "base"\n', encoding="utf-8"
+    )
     candidate["status"] = "verified"
     candidate["commit"] = ""
     candidate["commit_branch"] = ""
@@ -289,6 +296,46 @@ def test_tampered_candidate_is_not_approved(candidate_repo):
         store.approve(candidate["candidate_id"], "tenant-a")
     assert _git(root, "rev-parse", "HEAD") == before_head
     assert store.get(candidate["candidate_id"], "tenant-a")["status"] == "tampered"
+
+
+def test_candidate_conflict_blocks_without_overwriting_touched_operator_edit(candidate_repo):
+    root, storage = candidate_repo
+    active_file = root / "sonic-core" / "app.py"
+    operator_edit = b'def value():\r\n    return "operator edit"\r\n'
+    active_file.write_bytes(operator_edit)
+    store = SelfCoderCandidateStore(root, storage)
+
+    result = asyncio.run(
+        store.run_candidate("tenant-a", 1, lambda worktree: _coder_factory(worktree))
+    )
+
+    candidate = result["candidates"][0]
+    assert candidate["status"] == "blocked_conflict"
+    assert "sonic-core/app.py" in candidate["error"]
+    assert active_file.read_bytes() == operator_edit
+    assert not _git(root, "branch", "--list", "sonic/self-coder/*")
+
+
+def test_post_apply_failure_restores_exact_touched_file_bytes(candidate_repo, monkeypatch):
+    root, storage = candidate_repo
+    active_file = root / "sonic-core" / "app.py"
+    before = b'def value():\r\n    return "base"\r\n'
+    active_file.write_bytes(before)
+    store = SelfCoderCandidateStore(root, storage)
+    monkeypatch.setattr(
+        store,
+        "_verify_active_application",
+        lambda *_args: (False, {"error": "post-apply regression"}),
+    )
+
+    result = asyncio.run(
+        store.run_candidate("tenant-a", 1, lambda worktree: _coder_factory(worktree))
+    )
+
+    candidate = result["candidates"][0]
+    assert candidate["status"] == "failed_application"
+    assert "post-apply regression" in candidate["error"]
+    assert active_file.read_bytes() == before
 
 
 def test_candidate_tenant_isolation_and_operator_dependency(candidate_repo):
