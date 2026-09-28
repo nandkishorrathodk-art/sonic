@@ -197,7 +197,8 @@ class SubagentTeamworkManager:
         self.judge = JudgeAgent(computer_provider=self.computer, judge_id=f"teamwork-judge-{tenant_id}")
         self._baseline_snapshots: dict[str, dict[str, tuple[int, str]]] = {}
 
-    # ------------------------------------------------------------------    # 1. DEFINE_SUBAGENT
+    # ------------------------------------------------------------------
+    # 1. DEFINE_SUBAGENT
     # ------------------------------------------------------------------
 
     def define_subagent(
@@ -396,6 +397,7 @@ class SubagentTeamworkManager:
             parts.append(f"[ROLE MANDATE ({spec.role})]: {type_def.system_prompt}")
         else:
             parts.append(f"[ROLE]: {spec.role}")
+
         if spec.employee_id:
             ctx = spec.employee_context
             parts.append(
@@ -595,7 +597,8 @@ class SubagentTeamworkManager:
                     dst_file = parent_dir / rel_str
                     dst_file.parent.mkdir(parents=True, exist_ok=True)
                     try:
-                        shutil.copy2(src_file, dst_file)                        if rel_str not in merged:
+                        shutil.copy2(src_file, dst_file)
+                        if rel_str not in merged:
                             merged.append(rel_str)
                     except Exception as e:
                         logger.warning("subagent_file_merge_error", src=str(src_file), error=str(e))
@@ -845,3 +848,38 @@ class SubagentTeamworkManager:
                             role=MessageRole.USER,
                             content=(
                                 f"Acceptance Criteria:\n{criteria_list}\n\n"
+                                f"Subagent Execution Evidence:\n{trace_digest}\n\n"
+                                f"Subagent Summary:\n{summary}"
+                            ),
+                        ),
+                    ],
+                    task_type="verification",
+                    max_tokens=250,
+                    temperature=0.1,
+                )
+                resp = await asyncio.wait_for(self.llm_router.complete(req), timeout=30.0)
+                raw = (resp.content or "").strip()
+                m = json.loads(raw[raw.find("{"): raw.rfind("}") + 1]) if "{" in raw and "}" in raw else {}
+                if m.get("passed") is False:
+                    return False, JudgeVerdict.FALSIFIED.value, str(m.get("notes") or "Acceptance criteria not met.")
+            except Exception as judge_err:
+                logger.warning("judge_acceptance_criteria_eval_failed", error=str(judge_err))
+                return False, JudgeVerdict.FALSIFIED.value, f"Acceptance criteria verification error: {judge_err}"
+
+        if has_ok_trace:
+            return True, JudgeVerdict.CONFIRMED.value, eval_res.notes or "All acceptance criteria verified."
+        return False, eval_res.verdict.value, eval_res.notes or "No successful execution evidence recorded."
+
+    @staticmethod
+    def _summarize_traces(traces: list[Any]) -> str:
+        if not traces:
+            return "No actions executed."
+        lines: list[str] = []
+        for t in traces[-8:]:
+            act = getattr(t, "action_type", "") if not isinstance(t, dict) else t.get("action_type", "")
+            act_str = act.value if hasattr(act, "value") else str(act)
+            tgt = getattr(t, "target_resource", "") if not isinstance(t, dict) else t.get("target_resource", "")
+            obs = getattr(t, "actual_observation", "") if not isinstance(t, dict) else t.get("actual_observation", "")
+            status = getattr(t, "status", "") if not isinstance(t, dict) else t.get("status", "")
+            lines.append(f"[{status}] {act_str} ({tgt}): {str(obs)[:200]}")
+        return "\n".join(lines)
