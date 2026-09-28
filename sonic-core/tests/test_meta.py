@@ -3,13 +3,11 @@ Unit tests for Meta / Self-Development & Self-Evolution Engine.
 """
 
 import asyncio
-import pytest
-from sonic.meta.benchmark import BenchmarkLab, BenchmarkResult, ChallengeFixture
+from sonic.meta.benchmark import BenchmarkResult, ChallengeFixture
 from sonic.meta.canary import CanaryPipeline
-from sonic.meta.evaluator import Decision, EvaluationReport, SelfEvaluationEngine
+from sonic.meta.evaluator import Decision, SelfEvaluationEngine
 from sonic.meta.experiment import (
     ExperimentManager,
-    ExperimentProposal,
     ExperimentStatus,
     ExperimentType,
 )
@@ -45,7 +43,7 @@ def test_experiment_safety_boundary_enforcement():
 def test_self_evaluation_decision_rules():
     baseline = BenchmarkResult(
         suite_id="base",
-        total_challenges=5,
+        total_challenges=6,
         true_positives=4,
         false_positives=0,
         false_negatives=1,
@@ -61,7 +59,7 @@ def test_self_evaluation_decision_rules():
     # 1. Candidate with IMPROVED Recall & Zero FP -> PROMOTE
     candidate_good = BenchmarkResult(
         suite_id="cand-good",
-        total_challenges=5,
+        total_challenges=6,
         true_positives=5,
         false_positives=0,
         false_negatives=0,
@@ -80,7 +78,7 @@ def test_self_evaluation_decision_rules():
     # 2. Candidate with False Positive Regression -> REJECT
     candidate_fp = BenchmarkResult(
         suite_id="cand-fp",
-        total_challenges=5,
+        total_challenges=7,
         true_positives=5,
         false_positives=2,  # Hallucinated 2 non-existent bugs!
         false_negatives=0,
@@ -96,10 +94,62 @@ def test_self_evaluation_decision_rules():
     assert report_fp.decision == Decision.REJECT
     assert "False positive" in report_fp.reason
 
+    # A candidate with any false positive is rejected, even if baseline also had one.
+    candidate_fp_no_regression = BenchmarkResult(
+        suite_id="cand-fp-no-regression",
+        total_challenges=6,
+        true_positives=5,
+        false_positives=1,
+        false_negatives=0,
+        true_negatives=0,
+        precision=0.83,
+        recall=1.0,
+        f1_score=0.91,
+        safety_violations=0,
+        avg_duration_seconds=5.0,
+        passed=False,
+    )
+    baseline_with_fp = BenchmarkResult(
+        suite_id="base-fp",
+        total_challenges=6,
+        true_positives=4,
+        false_positives=1,
+        false_negatives=1,
+        true_negatives=0,
+        precision=0.8,
+        recall=0.8,
+        f1_score=0.8,
+        safety_violations=0,
+        avg_duration_seconds=5.0,
+        passed=False,
+    )
+    report_fp_no_regression = SelfEvaluationEngine.evaluate(baseline_with_fp, candidate_fp_no_regression)
+    assert report_fp_no_regression.decision == Decision.REJECT
+    assert "false positives" in report_fp_no_regression.reason.lower()
+
+    # A failed benchmark cannot be promoted just because its metrics improved.
+    candidate_failed = BenchmarkResult(
+        suite_id="cand-failed",
+        total_challenges=6,
+        true_positives=4,
+        false_positives=0,
+        false_negatives=1,
+        true_negatives=1,
+        precision=1.0,
+        recall=0.80,
+        f1_score=0.8889,
+        safety_violations=0,
+        avg_duration_seconds=4.0,
+        passed=False,
+    )
+    report_failed = SelfEvaluationEngine.evaluate(baseline, candidate_failed)
+    assert report_failed.decision == Decision.REJECT
+    assert "benchmark did not pass" in report_failed.reason.lower()
+
     # 3. Candidate with Safety Violation -> REJECT (Hard Block)
     candidate_violation = BenchmarkResult(
         suite_id="cand-violation",
-        total_challenges=5,
+        total_challenges=6,
         true_positives=5,
         false_positives=0,
         false_negatives=0,
@@ -144,5 +194,41 @@ def test_canary_pipeline_execution():
         report = await pipeline.execute_canary_run(prop.id, baseline_eval, candidate_eval)
         assert report.decision == Decision.PROMOTE
         assert prop.status == ExperimentStatus.PROMOTED
+        assert prop.benchmark_completed is True
+        assert prop.benchmark_passed is True
+        assert prop.benchmark_eligible is True
+        assert prop.benchmark_suite_id == f"canary-{prop.id}"
+
+    asyncio.run(_run())
+
+
+def test_failed_canary_does_not_create_promotion_receipt():
+    async def _run():
+        mgr = ExperimentManager()
+        ok, proposal, _ = mgr.propose(
+            title="Candidate with failed benchmark",
+            description="Regression case",
+            experiment_type=ExperimentType.AGENT_STRATEGY,
+            target_component="agents/reasoning.py",
+            diff_or_payload="candidate implementation",
+        )
+        assert ok
+
+        async def baseline_eval(fix: ChallengeFixture):
+            return {"found_vulnerability": fix.expected_vulnerable}
+
+        async def failed_candidate_eval(fix: ChallengeFixture):
+            return {"found_vulnerability": False}
+
+        report = await CanaryPipeline(mgr).execute_canary_run(
+            proposal.id, baseline_eval, failed_candidate_eval
+        )
+
+        assert report.decision == Decision.REJECT
+        assert proposal.status == ExperimentStatus.REJECTED
+        assert proposal.benchmark_completed is True
+        assert proposal.benchmark_passed is False
+        assert proposal.benchmark_eligible is False
+        assert proposal.benchmark_suite_id == f"canary-{proposal.id}"
 
     asyncio.run(_run())

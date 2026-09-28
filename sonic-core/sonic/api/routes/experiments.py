@@ -153,6 +153,16 @@ async def promote_experiment(
             status_code=409,
             detail=f"Experiment must be in canary_testing or benchmarking to promote (currently '{exp.status}').",
         )
+    if (
+        not exp.benchmark_completed
+        or not exp.benchmark_passed
+        or not exp.benchmark_eligible
+        or not exp.benchmark_suite_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Experiment cannot be promoted without a completed, passing, promotion-eligible benchmark.",
+        )
     ok = _experiment_manager.update_status(
         experiment_id,
         ExperimentStatus.PROMOTED,
