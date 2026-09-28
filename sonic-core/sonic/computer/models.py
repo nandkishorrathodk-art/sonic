@@ -150,6 +150,8 @@ class GUIAction(BaseModel):
 class ScreenObservation(BaseModel):
     """Visual and state perception of the computer desktop screen."""
     screenshot_base64: str = ""
+    capture_timestamp_ns: int | None = Field(default=None, ge=0)
+    capture_age_ms: float | None = Field(default=None, ge=0)
     width: int = 1920
     height: int = 1080
     active_window: str = "Desktop"

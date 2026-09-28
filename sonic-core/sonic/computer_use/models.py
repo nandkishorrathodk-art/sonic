@@ -284,6 +284,8 @@ class ComputerWorldObservation(BaseModel):
     git_clean: bool = True
     perception_version: int = 0
     perception_latency_ns: int = 0
+    observation_age_ms: float | None = Field(default=None, ge=0)
+    observation_received_monotonic_ns: int | None = Field(default=None, exclude=True, ge=0)
     timestamp: str = Field(default_factory=_now)
 
     @property

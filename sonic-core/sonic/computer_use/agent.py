@@ -737,6 +737,7 @@ class ComputerUseAgent:
                 detected_controls=[],
                 desktop_state="NOT_REQUESTED",
             )
+        screen_received_at_ns = time.perf_counter_ns()
         # Store screenshot for vision-in-the-loop (VLM image input)
         self._last_screenshot_b64 = getattr(screen_obs, "screenshot_base64", "")
         # Track real screen dimensions so coordinate actions can be validated
@@ -961,6 +962,13 @@ class ComputerUseAgent:
             git_clean=git_st.is_clean if hasattr(git_st, "is_clean") else True,
             perception_version=perception_snapshot.version,
             perception_latency_ns=self.perception_bus.last_update_latency_ns,
+            observation_age_ms=(
+                screen_obs.capture_age_ms
+                + (time.perf_counter_ns() - screen_received_at_ns) / 1_000_000
+                if screen_obs.capture_age_ms is not None
+                else None
+            ),
+            observation_received_monotonic_ns=screen_received_at_ns,
         )
 
     async def _observe_browser(self) -> dict[str, Any]:
@@ -1036,6 +1044,7 @@ class ComputerUseAgent:
 
         Returns: (action_type, target_resource, payload_dict, predicted_outcome)
         """
+        self._refresh_observation_age(observation)
         target_files = observation.filesystem_files or []
         code_files = [f for f in target_files if f.endswith((".py", ".js", ".ts", ".go", ".rs", ".sh")) and not f.startswith("test_")]
         test_files = [f for f in target_files if f.startswith("test_") or f.endswith(("_test.py", ".test.js", ".test.ts"))]
@@ -1061,6 +1070,16 @@ class ComputerUseAgent:
             return await self._llm_choose_action(goal, observation, step_index, primary_file, test_file)
 
         return self._diagnostic_fallback(primary_file)
+
+    @staticmethod
+    def _refresh_observation_age(observation: ComputerWorldObservation) -> None:
+        received_at_ns = observation.observation_received_monotonic_ns
+        capture_age_ms = observation.screen.capture_age_ms
+        if received_at_ns is None or capture_age_ms is None:
+            observation.observation_age_ms = None
+            return
+        elapsed_ns = max(0, time.perf_counter_ns() - received_at_ns)
+        observation.observation_age_ms = capture_age_ms + elapsed_ns / 1_000_000
 
     @staticmethod
     def _gui_only_recovery_action(
