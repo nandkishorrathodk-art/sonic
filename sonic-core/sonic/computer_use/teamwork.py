@@ -136,10 +136,10 @@ class SubagentConversation:
     type_name: str
     role: str
     workspace_mode: str
-    employee_id: str | None = None
-    employee_context: dict[str, Any] = field(default_factory=dict)
     parent_workspace_id: str
     effective_workspace_id: str
+    employee_id: str | None = None
+    employee_context: dict[str, Any] = field(default_factory=dict)
     isolated_dir: Path | None = None
     git_branch: str | None = None
     state: str = "running"  # "running" | "verifying" | "idle" | "completed" | "errored" | "canceled"
