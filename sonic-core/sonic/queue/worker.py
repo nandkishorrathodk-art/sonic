@@ -7,6 +7,7 @@ executes security tools/browser tasks, and produces structured evidence.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,6 +36,7 @@ class SonicWorker:
         self.provider = provider or get_compute_provider()
         self.worker_id = worker_id
         self._running = False
+        self._queue_initialized = False
         self._tools: dict[str, Any] = {}
         try:
             from sonic.tools.registry import build_security_tools
@@ -138,6 +140,8 @@ class SonicWorker:
                 raise RuntimeError(f"Tool execution blocked: {res.error_message}")
             if res.status == ToolStatus.TIMED_OUT:
                 raise TimeoutError(f"Tool execution timed out: {res.error_message}")
+            if res.status == ToolStatus.FAILED:
+                raise RuntimeError(f"Tool execution failed: {res.error_message or res.raw_stderr}")
 
             return {
                 "tool": tool_name,
@@ -158,6 +162,11 @@ class SonicWorker:
         res = await self.provider.execute(job.workspace_id, cmd, timeout=job.timeout_seconds)
         if getattr(res, "exit_code", None) == 126:
             raise RuntimeError(f"Tool execution blocked: {getattr(res, 'stderr', '') or 'exit code 126'}")
+        if getattr(res, "exit_code", None) != 0:
+            raise RuntimeError(
+                f"Tool execution failed with exit code {getattr(res, 'exit_code', None)}: "
+                f"{getattr(res, 'stderr', '')}"
+            )
         return {
             "tool": tool_name,
             "status": "success" if getattr(res, "exit_code", None) == 0 else "failed",
@@ -313,7 +322,27 @@ class SonicWorker:
 
     async def run_once(self) -> Job | None:
         """Poll and execute one job from queue."""
+        if not self._queue_initialized:
+            await self.queue.ensure_connected()
+            self._queue_initialized = True
         job = await self.queue.dequeue_job(timeout_seconds=0.5)
         if job:
-            return await self.execute_job(job)
+            async def renew_lease() -> None:
+                while True:
+                    await asyncio.sleep(self.queue.visibility_timeout_seconds / 3)
+                    await self.queue.renew_job_lease(job)
+
+            lease_task = asyncio.create_task(renew_lease())
+            try:
+                processed = await self.execute_job(job)
+                if processed.status == JobStatus.QUEUED:
+                    await self.queue.enqueue_job(processed)
+                await self.queue.acknowledge_job(processed)
+                return processed
+            finally:
+                lease_task.cancel()
+                try:
+                    await lease_task
+                except asyncio.CancelledError:
+                    pass
         return None

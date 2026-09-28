@@ -89,7 +89,6 @@ def get_engagement_manager():
             compute_provider=compute_provider,
             computer_provider=computer_provider,
             bug_bounty_client=bugbounty_client,
-            bugbounty_client=bugbounty_client,
         )
     return _engagement_manager
 

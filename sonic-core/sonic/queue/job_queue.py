@@ -9,12 +9,37 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 from sonic.logger import get_logger
 from sonic.queue.models import Job, JobEvent, JobPriority, JobStatus
 
 logger = get_logger(__name__)
 
+_CLAIM_JOB_SCRIPT = """
+for i = 1, #KEYS / 2 do
+    local job_id = redis.call('RPOP', KEYS[i])
+    if job_id then
+        redis.call('ZADD', KEYS[i + (#KEYS / 2)], ARGV[1], job_id)
+        return {job_id, i}
+    end
+end
+return nil
+"""
+
+_REQUEUE_EXPIRED_SCRIPT = """
+local requeued = 0
+for i = 1, #KEYS / 2 do
+    local expired = redis.call('ZRANGEBYSCORE', KEYS[i + (#KEYS / 2)], '-inf', ARGV[1])
+    for _, job_id in ipairs(expired) do
+        if redis.call('ZREM', KEYS[i + (#KEYS / 2)], job_id) == 1 then
+            redis.call('LPUSH', KEYS[i], job_id)
+            requeued = requeued + 1
+        end
+    end
+end
+return requeued
+"""
 
 class RedisJobQueue:
     """
@@ -24,6 +49,7 @@ class RedisJobQueue:
     def __init__(self, redis_url: str | None = None):
         self.redis_url = redis_url or os.environ.get("REDIS_URL")
         self._redis_client = None
+        self.visibility_timeout_seconds = 120
         # In-memory queues by priority
         self._memory_queues: dict[JobPriority, asyncio.Queue[Job]] = {
             JobPriority.CRITICAL: asyncio.Queue(),
@@ -37,6 +63,12 @@ class RedisJobQueue:
 
     async def connect(self) -> bool:
         """Initialize Redis connection if available."""
+        if self._redis_client is not None:
+            try:
+                await self._redis_client.ping()
+                return True
+            except Exception:
+                self._redis_client = None
         if self.redis_url:
             try:
                 import redis.asyncio as aioredis
@@ -49,9 +81,36 @@ class RedisJobQueue:
                 self._redis_client = None
         return False
 
+    async def ensure_connected(self) -> bool:
+        """Connect the queue and prohibit an in-memory production queue."""
+        connected = await self.connect()
+        if not connected and self._is_production():
+            raise RuntimeError("Production Queue Failure: Redis is required but unavailable")
+        return connected
+
+    @staticmethod
+    def _is_production() -> bool:
+        from sonic.config import get_settings
+
+        return (
+            os.environ.get("APP_ENV", "").lower() == "production"
+            or get_settings().is_production
+        )
+
+    async def close(self) -> None:
+        """Close the Redis client cleanly during service shutdown."""
+        if self._redis_client is None:
+            return
+        client, self._redis_client = self._redis_client, None
+        close = getattr(client, "aclose", None) or getattr(client, "close", None)
+        if close is not None:
+            result = close()
+            if asyncio.iscoroutine(result):
+                await result
+
     async def enqueue_job(self, job: Job) -> str:
         """Add job to priority queue."""
-        is_production = os.environ.get("APP_ENV") == "production"
+        is_production = self._is_production()
         job.status = JobStatus.QUEUED
         self._jobs_store[job.id] = job
 
@@ -107,16 +166,41 @@ class RedisJobQueue:
         # 1. Try Redis queues in priority order (Critical -> High -> Medium -> Low)
         if self._redis_client:
             try:
-                for priority in [JobPriority.CRITICAL, JobPriority.HIGH, JobPriority.MEDIUM, JobPriority.LOW]:
-                    job_id = await self._redis_client.rpop(f"sonic:queue:{priority.value}")
-                    if job_id:
-                        raw_data = await self._redis_client.hget(f"sonic:job:{job_id}", "data")
-                        if raw_data:
-                            job = Job.model_validate_json(raw_data)
-                            self._jobs_store[job.id] = job
-                            return job
+                priorities = [
+                    JobPriority.CRITICAL, JobPriority.HIGH,
+                    JobPriority.MEDIUM, JobPriority.LOW,
+                ]
+                queue_keys = [f"sonic:queue:{priority.value}" for priority in priorities]
+                processing_keys = [
+                    f"sonic:queue:processing:{priority.value}" for priority in priorities
+                ]
+                keys = [*queue_keys, *processing_keys]
+                now = time.time()
+                await self._redis_client.eval(
+                    _REQUEUE_EXPIRED_SCRIPT, len(keys), *keys, now
+                )
+                claimed = await self._redis_client.eval(
+                    _CLAIM_JOB_SCRIPT,
+                    len(keys),
+                    *keys,
+                    now + self.visibility_timeout_seconds,
+                )
+                if claimed:
+                    job_id, priority_index = claimed
+                    if isinstance(job_id, bytes):
+                        job_id = job_id.decode()
+                    raw_data = await self._redis_client.hget(f"sonic:job:{job_id}", "data")
+                    if raw_data:
+                        job = Job.model_validate_json(raw_data)
+                        self._jobs_store[job.id] = job
+                        return job
+                    await self._redis_client.zrem(
+                        processing_keys[int(priority_index) - 1], job_id
+                    )
             except Exception as e:
                 logger.error("redis_dequeue_error", error=str(e))
+                if self._is_production():
+                    raise RuntimeError(f"Production Queue Failure: Redis dequeue failed ({e})") from e
 
         # 2. In-memory queues in priority order
         for priority in [JobPriority.CRITICAL, JobPriority.HIGH, JobPriority.MEDIUM, JobPriority.LOW]:
@@ -126,6 +210,23 @@ class RedisJobQueue:
                 return job
 
         return None
+
+    async def renew_job_lease(self, job: Job) -> None:
+        """Extend a claimed Redis job's visibility lease while a worker runs it."""
+        if self._redis_client is None:
+            return
+        await self._redis_client.zadd(
+            f"sonic:queue:processing:{job.priority.value}",
+            {job.id: time.time() + self.visibility_timeout_seconds},
+        )
+
+    async def acknowledge_job(self, job: Job) -> None:
+        """Remove a completed Redis job from its processing lease set."""
+        if self._redis_client is None:
+            return
+        await self._redis_client.zrem(
+            f"sonic:queue:processing:{job.priority.value}", job.id
+        )
 
     async def get_job(self, job_id: str, tenant_id: str | None = None) -> Job | None:
         """Retrieve job by ID with optional tenant isolation."""
@@ -159,8 +260,10 @@ class RedisJobQueue:
                     "data": job.model_dump_json(),
                     "status": job.status.value,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                if self._is_production():
+                    raise RuntimeError(f"Production Queue Failure: Redis job update failed ({e})") from e
+                logger.warning("redis_job_update_failed", job_id=job.id, error=str(e))
 
     async def emit_event(self, event: JobEvent) -> None:
         """Broadcast job telemetry event to subscribers."""

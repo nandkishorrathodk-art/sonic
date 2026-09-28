@@ -46,6 +46,16 @@ def test_authenticated_live_stats():
     assert data["user"] == "operator@target.com"
 
 
+def test_authenticated_live_graph_includes_being_mind():
+    headers, _ = get_auth_headers()
+    response = client.get("/live/graph", headers=headers)
+
+    assert response.status_code == 200
+    mind_nodes = [node for node in response.json()["nodes"] if node["type"] == "BeingMind"]
+    assert len(mind_nodes) == 1
+    assert "idle_cycles" in mind_nodes[0]["properties"]
+
+
 def test_authenticated_live_findings_flow():
     """Test registering tenant finding and retrieving it."""
     headers, _ = get_auth_headers(email="tenant-a@target.com", tenant_id="tenant-a@target.com")
