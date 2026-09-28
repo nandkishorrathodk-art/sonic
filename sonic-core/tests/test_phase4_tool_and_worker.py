@@ -10,20 +10,19 @@ Comprehensive Test Suite for Phase 4:
 
 import asyncio
 import pytest
+from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from sonic.api.main import app
 from sonic.auth.google_auth import create_jwt_token
 from sonic.auth.models import User, UserRole
 from sonic.browser.container_runtime import BrowserAction, ContainerizedBrowser
-from sonic.queue.job_queue import RedisJobQueue, get_job_queue
+from sonic.queue.job_queue import RedisJobQueue
 from sonic.queue.models import Job, JobPriority, JobStatus, JobType
 from sonic.queue.worker import SonicWorker
 from sonic.sandbox.egress import is_target_allowed
-from sonic.sandbox.provider import WorkspaceConfig
 from sonic.sandbox.providers.local_dev_provider import LocalDevProvider
 from sonic.tools.adapters.ffuf_adapter import FFUFAdapter
-from sonic.tools.adapters.http_adapter import HTTPClientAdapter
 from sonic.tools.adapters.nmap_adapter import NmapAdapter
 from sonic.tools.adapters.nuclei_adapter import NucleiAdapter
 from sonic.tools.base import ToolRequest, ToolStatus
@@ -172,6 +171,139 @@ def test_job_queue_and_worker_execution():
         assert processed_job.id == job_id
         # Because provider is safety locked, worker records failure gracefully
         assert processed_job.status in (JobStatus.QUEUED, JobStatus.FAILED)
+
+    asyncio.run(_run())
+
+
+def test_failed_security_tool_does_not_succeed_job(monkeypatch):
+    from sonic.tools.base import ToolStatus
+
+    async def _run():
+        queue = RedisJobQueue()
+        worker = SonicWorker(queue=queue, provider=LocalDevProvider(allow_host_execution=False))
+        worker._tools = {
+            "failing": SimpleNamespace(
+                execute=lambda request: _failed_tool_result()
+            )
+        }
+        monkeypatch.setattr(
+            "sonic.safety.scope.get_scope_checker",
+            lambda: SimpleNamespace(kill_switch_enabled=True),
+        )
+        monkeypatch.setattr(
+            "sonic.safety.runtime_stop.get_runtime_stop_state",
+            lambda: SimpleNamespace(is_stopped=lambda tenant_id: False, reason=lambda tenant_id: ""),
+        )
+        job = Job(
+            tenant_id="tenant-worker-failure",
+            engagement_id="eng-failure",
+            job_type=JobType.TOOL_EXECUTION,
+            payload={"tool_name": "failing", "target": "target"},
+            max_retries=0,
+        )
+        result = await worker.execute_job(job)
+        assert result.status == JobStatus.FAILED
+        assert "Tool execution failed" in result.error_message
+
+    async def _failed_tool_result():
+        return SimpleNamespace(
+            status=ToolStatus.FAILED,
+            error_message="exit code 1",
+            raw_stderr="failed",
+        )
+
+    asyncio.run(_run())
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.lists = {}
+        self.sorted_sets = {}
+        self.hashes = {}
+
+    async def eval(self, script, numkeys, *values):
+        keys = values[:numkeys]
+        now = float(values[-1])
+        half = numkeys // 2
+        if "local requeued = 0" in script:
+            moved = 0
+            for index in range(half):
+                queue_key = keys[index]
+                processing_key = keys[index + half]
+                expired = [
+                    job_id for job_id, lease in self.sorted_sets.get(processing_key, {}).items()
+                    if lease <= now
+                ]
+                for job_id in expired:
+                    self.sorted_sets[processing_key].pop(job_id)
+                    self.lists.setdefault(queue_key, []).insert(0, job_id)
+                    moved += 1
+            return moved
+
+        for index, queue_key in enumerate(keys[:half], start=1):
+            queue = self.lists.setdefault(queue_key, [])
+            if queue:
+                job_id = queue.pop()
+                self.sorted_sets.setdefault(keys[index - 1 + half], {})[job_id] = now
+                return [job_id, index]
+        return None
+
+    async def hset(self, key, mapping):
+        self.hashes[key] = dict(mapping)
+
+    async def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+
+    async def hget(self, key, field):
+        return self.hashes.get(key, {}).get(field)
+
+    async def zrem(self, key, job_id):
+        return int(self.sorted_sets.setdefault(key, {}).pop(job_id, None) is not None)
+
+    async def zadd(self, key, mapping):
+        self.sorted_sets.setdefault(key, {}).update(mapping)
+
+
+def test_production_queue_requires_redis(monkeypatch):
+    from sonic.config import get_settings
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("REDIS_URL", "")
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="Redis is required"):
+            asyncio.run(RedisJobQueue().ensure_connected())
+    finally:
+        get_settings.cache_clear()
+
+
+def test_redis_dequeue_recovers_expired_job_and_acknowledges(monkeypatch):
+    from sonic.queue import job_queue as queue_module
+
+    async def _run():
+        queue = RedisJobQueue(redis_url="redis://unused")
+        redis = _FakeRedis()
+        queue._redis_client = redis
+        job = Job(
+            tenant_id="tenant-lease",
+            engagement_id="eng-lease",
+            priority=JobPriority.HIGH,
+            payload={"tool_name": "noop"},
+        )
+        await queue.enqueue_job(job)
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(queue_module.time, "time", lambda: clock["now"])
+        claimed = await queue.dequeue_job()
+        assert claimed is not None and claimed.id == job.id
+        processing_key = f"sonic:queue:processing:{job.priority.value}"
+        assert job.id in redis.sorted_sets[processing_key]
+
+        clock["now"] += queue.visibility_timeout_seconds + 1
+        reclaimed = await queue.dequeue_job()
+        assert reclaimed is not None and reclaimed.id == job.id
+        await queue.acknowledge_job(reclaimed)
+        assert job.id not in redis.sorted_sets[processing_key]
 
     asyncio.run(_run())
 

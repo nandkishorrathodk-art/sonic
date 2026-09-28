@@ -978,7 +978,10 @@ while True:
                 dy = action.y2 if action.y2 is not None else sy
                 _validate_coords(sx, sy)
                 _validate_coords(dx, dy)
-                await exec_gui(f"DISPLAY={disp} xdotool mousemove --sync {sx} {sy} sleep 0.1 mousedown 1 sleep 0.1 mousemove --sync {dx} {dy} sleep 0.1 mouseup 1")
+                cursor = "test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py"
+                await exec_gui(
+                    f"export DISPLAY={disp}; {cursor} drag {sx} {sy} {dx} {dy}"
+                )
 
             elif atype == GUIActionType.TYPE:
                 if not action.text:

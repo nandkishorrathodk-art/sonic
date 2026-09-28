@@ -304,6 +304,12 @@ async def lifespan(app: FastAPI):
         logger.warning("jwt_secret_weak_dev", reason=jwt_reason)
     logger.info("jwt_secret_validated", production=settings.is_production)
 
+    from sonic.queue.job_queue import get_job_queue
+    job_queue = get_job_queue()
+    queue_connected = await job_queue.ensure_connected()
+    if not queue_connected:
+        logger.info("job_queue_using_in_memory_backend", env=settings.app_env)
+
     # Load safety rules (immutable after this point)
     get_scope_checker()
     logger.info("safety_layer_loaded")
@@ -347,6 +353,10 @@ async def lifespan(app: FastAPI):
             await self_coder_loop.stop()
         except Exception as e:
             logger.warning("self_coder_background_loop_stop_failed", error=str(e))
+    try:
+        await job_queue.close()
+    except Exception as e:
+        logger.warning("job_queue_close_failed", error=str(e))
     if life_loop_task is not None:
         try:
             await life_loop_task.stop()

@@ -56,6 +56,7 @@ router = APIRouter()
 
 _primary_computer_instance: Any | None = None
 _daytona_provider_instance: Any | None = None
+_foreground_operator_lock = asyncio.Lock()
 
 
 def _assert_runtime_execution_enabled(tenant_id: str) -> None:
@@ -204,14 +205,26 @@ def _strip_model_thinking(text: str) -> str:
 
 
 async def _run_foreground_operator_task(coro: Any) -> Any:
-    """Give an operator mission exclusive use of the shared desktop."""
-    from sonic.being.life_loop import pause_for_operator, resume_after_operator
+    """Serialize operator missions that share the physical workstation."""
+    from sonic.being.life_loop import (
+        pause_for_operator,
+        resume_after_operator,
+        wait_for_operator_quiescence,
+    )
 
-    pause_for_operator()
+    entered_lock = False
     try:
-        return await coro
+        async with _foreground_operator_lock:
+            entered_lock = True
+            pause_for_operator()
+            try:
+                await wait_for_operator_quiescence()
+                return await coro
+            finally:
+                resume_after_operator()
     finally:
-        resume_after_operator()
+        if not entered_lock and asyncio.iscoroutine(coro):
+            coro.close()
 
 
 async def _run_prompt_reasoning_with_timeout(

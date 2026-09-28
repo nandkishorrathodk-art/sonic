@@ -3151,6 +3151,42 @@ class ComputerUseAgent:
         elif not isinstance(payload, dict):
             payload = {} if payload is None else {"raw": payload}
 
+        async def resolve_visible_desktop_target(query: str) -> tuple[int, int] | None:
+            """Ground a visible control on the shared desktop, independent of app vendor."""
+            if not query or not self._last_screenshot_b64:
+                return None
+            screen_w = getattr(self, "_screen_width", 1280)
+            screen_h = getattr(self, "_screen_height", 800)
+            perception_bus = getattr(self, "perception_bus", None)
+            if perception_bus is not None:
+                semantic_match = perception_bus.resolve(query)
+                if semantic_match is not None:
+                    bx, by, bw, bh = semantic_match.bbox
+                    return bx + max(0, bw // 2), by + max(0, bh // 2)
+            if not getattr(self, "llm_router", None):
+                return None
+
+            async def ground(query_text: str, screenshot: str) -> tuple[int, int] | None:
+                return await query_multimodal_grounding(
+                    llm_router=self.llm_router,
+                    query=query_text,
+                    screenshot_b64=screenshot,
+                    width=screen_w,
+                    height=screen_h,
+                )
+
+            return await resolve_ui_target_async(
+                query,
+                screenshot_b64=self._last_screenshot_b64,
+                width=screen_w,
+                height=screen_h,
+                screen_width=screen_w,
+                screen_height=screen_h,
+                grounding_fn=ground,
+                allow_landmarks=False,
+                coordinate_space=payload.get("coordinate_space"),
+            )
+
         gui_actions = {
             ComputerActionType.GUI_CLICK,
             ComputerActionType.GUI_DOUBLE_CLICK,
@@ -4902,9 +4938,49 @@ class ComputerUseAgent:
                     if not ok:
                         status = ActionExecutionStatus.FAILED
                 else:
-                    await self.computer.gui_action(workspace_id, GUIAction(action=GUIActionType.TYPE, text=val))
-                    await self.computer.gui_action(workspace_id, GUIAction(action=GUIActionType.KEYPRESS, key="Return"))
-                    actual_obs_str = f"Selected '{val}' via GUI keyboard"
+                    selector_coords = await resolve_visible_desktop_target(selector)
+                    if selector_coords is None or not val:
+                        actual_obs_str = (
+                            f"Could not visually resolve the selection control and option "
+                            f"'{val}' on the shared desktop"
+                        )
+                        status = ActionExecutionStatus.FAILED
+                    else:
+                        select_obs = await self.computer.gui_action(
+                            workspace_id,
+                            GUIAction(
+                                action=GUIActionType.CLICK,
+                                x=selector_coords[0],
+                                y=selector_coords[1],
+                            ),
+                        )
+                        self._update_screen_dims(select_obs)
+                        select_image = getattr(select_obs, "screenshot_base64", "")
+                        if not select_image:
+                            actual_obs_str = (
+                                f"Opened selection control '{selector}', but the updated desktop "
+                                "image is unavailable; option selection was not attempted"
+                            )
+                            status = ActionExecutionStatus.FAILED
+                        else:
+                            self._last_screenshot_b64 = select_image
+                            option_coords = await resolve_visible_desktop_target(val)
+                            if option_coords is None:
+                                actual_obs_str = (
+                                    f"Opened selection control '{selector}', but option '{val}' "
+                                    "could not be grounded on the updated desktop"
+                                )
+                                status = ActionExecutionStatus.FAILED
+                            else:
+                                await self.computer.gui_action(
+                                    workspace_id,
+                                    GUIAction(
+                                        action=GUIActionType.CLICK,
+                                        x=option_coords[0],
+                                        y=option_coords[1],
+                                    ),
+                                )
+                                actual_obs_str = f"Selected visible option '{val}' via desktop grounding"
 
             elif action_type == ComputerActionType.BROWSER_KEYPRESS:
                 key = str(payload.get("key") or target_resource or "Return").strip()
@@ -4956,55 +5032,29 @@ class ComputerUseAgent:
                     if not ok:
                         recovery_needed = True
                 else:
-                    res_coords: tuple[int, int] | None = None
-                    if selector:
-                        if getattr(self, "perception_bus", None) is not None:
-                            semantic_match = self.perception_bus.resolve(str(selector))
-                            if semantic_match is not None:
-                                bx, by, bw, bh = semantic_match.bbox
-                                res_coords = (bx + max(0, bw // 2), by + max(0, bh // 2))
-                        if res_coords is None:
-                            screen_w = getattr(self, "_screen_width", 1280)
-                            screen_h = getattr(self, "_screen_height", 800)
-
-                            async def _ground_browser_type(
-                                q: str, b64: str, w: int = screen_w, h: int = screen_h
-                            ) -> tuple[int, int] | None:
-                                return await query_multimodal_grounding(
-                                    llm_router=self.llm_router,
-                                    query=q,
-                                    screenshot_b64=b64,
-                                    width=w,
-                                    height=h,
-                                )
-
-                            res_coords = await resolve_ui_target_async(
-                                str(selector),
-                                screenshot_b64=self._last_screenshot_b64,
-                                width=screen_w,
-                                height=screen_h,
-                                screen_width=screen_w,
-                                screen_height=screen_h,
-                                grounding_fn=_ground_browser_type if getattr(self, "llm_router", None) else None,
-                                allow_landmarks=False,
-                            )
-                        if res_coords is not None:
-                            cx, cy = res_coords
-                            await self.computer.gui_action(
-                                workspace_id,
-                                GUIAction(action=GUIActionType.CLICK, x=cx, y=cy),
-                            )
-                            await asyncio.sleep(0.1)
-
-                    if text:
-                        await self.computer.gui_action(workspace_id, GUIAction(action=GUIActionType.TYPE, text=text))
-                        if payload.get("submit") is True or payload.get("press_enter") is True:
-                            await self.computer.gui_action(workspace_id, GUIAction(action=GUIActionType.KEYPRESS, key="Return"))
-                        actual_obs_str = f"Typed {len(text)} chars via GUI keyboard: {text[:40]}"
-                    else:
+                    res_coords = await resolve_visible_desktop_target(selector)
+                    if not text.strip():
                         actual_obs_str = f"BROWSER_TYPE blocked: no text supplied for {selector or 'target'}"
                         status = ActionExecutionStatus.BLOCKED
                         action_exit_code = 126
+                    elif res_coords is None:
+                        actual_obs_str = (
+                            f"BROWSER_TYPE failed: visible desktop control '{selector or 'target'}' "
+                            "could not be grounded; no text was typed"
+                        )
+                        status = ActionExecutionStatus.FAILED
+                    else:
+                        cx, cy = res_coords
+                        await self.computer.gui_action(
+                            workspace_id,
+                            GUIAction(action=GUIActionType.TYPE, x=cx, y=cy, text=text),
+                        )
+                        if payload.get("submit") is True or payload.get("press_enter") is True:
+                            await self.computer.gui_action(
+                                workspace_id,
+                                GUIAction(action=GUIActionType.KEYPRESS, key="Return"),
+                            )
+                        actual_obs_str = f"Typed {len(text)} chars into visually grounded desktop control '{selector}'"
 
             elif action_type == ComputerActionType.BROWSER_SCREENSHOT:
                 if self.browser is not None:

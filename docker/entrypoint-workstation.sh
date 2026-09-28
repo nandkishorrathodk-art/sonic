@@ -62,22 +62,30 @@ def smooth_move(tx, ty, steps=25, duration=0.25):
         ease = 0.5 - 0.5 * math.cos(t * math.pi)
         cx = int(sx + (tx - sx) * ease)
         cy = int(sy + (ty - sy) * ease)
-        subprocess.run(['xdotool', 'mousemove', str(cx), str(cy)], env={'DISPLAY': ':99'})
+        subprocess.run(['xdotool', 'mousemove', str(cx), str(cy)], env={'DISPLAY': ':99'}, check=True)
         time.sleep(dt)
 
 def click(button=1, repeat=1):
-    subprocess.run(['xdotool', 'click', '--repeat', str(repeat), str(button)], env={'DISPLAY': ':99'})
+    subprocess.run(['xdotool', 'click', '--repeat', str(repeat), str(button)], env={'DISPLAY': ':99'}, check=True)
 
 def move_and_click(tx, ty, button=1, repeat=1, steps=25, duration=0.25):
     smooth_move(tx, ty, steps, duration)
     time.sleep(0.05)
     click(button, repeat)
 
+def drag(sx, sy, tx, ty):
+    smooth_move(sx, sy)
+    subprocess.run(['xdotool', 'mousedown', '1'], env={'DISPLAY': ':99'}, check=True)
+    try:
+        smooth_move(tx, ty)
+    finally:
+        subprocess.run(['xdotool', 'mouseup', '1'], env={'DISPLAY': ':99'}, check=True)
+
 def type_text(text, delay=40):
-    subprocess.run(['xdotool', 'type', '--delay', str(delay), text], env={'DISPLAY': ':99'})
+    subprocess.run(['xdotool', 'type', '--delay', str(delay), text], env={'DISPLAY': ':99'}, check=True)
 
 def key(k):
-    subprocess.run(['xdotool', 'key', k], env={'DISPLAY': ':99'})
+    subprocess.run(['xdotool', 'key', k], env={'DISPLAY': ':99'}, check=True)
 
 if __name__ == '__main__':
     cmd = sys.argv[1] if len(sys.argv) > 1 else 'help'
@@ -93,6 +101,8 @@ if __name__ == '__main__':
             move_and_click(int(sys.argv[2]), int(sys.argv[3]), repeat=2)
         else:
             click(repeat=2)
+    elif cmd == 'drag':
+        drag(*(int(value) for value in sys.argv[2:6]))
     elif cmd == 'type':
         type_text(sys.argv[2])
     elif cmd == 'key':

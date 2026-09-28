@@ -64,6 +64,12 @@ def resume_after_operator() -> None:
         _active_life_loop.resume_after_operator()
 
 
+async def wait_for_operator_quiescence() -> None:
+    """Wait for any idle cycle already using the workstation to finish."""
+    if _active_life_loop is not None:
+        await _active_life_loop.wait_for_tick_completion()
+
+
 def get_life_loop_status() -> dict[str, Any]:
     """Return observable process-local life-loop and self-coder state."""
     loop = _active_life_loop
@@ -201,6 +207,7 @@ class BeingLifeLoop:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._operator_active = asyncio.Event()
+        self._tick_lock = asyncio.Lock()
         self.cycles_completed = 0
         self.before_tick_hooks: list = []
         self.bus: EventBus = EventBus()
@@ -287,7 +294,17 @@ class BeingLifeLoop:
 
     async def tick(self) -> Any:
         """Run ONE self-directed curiosity cycle as the being."""
-        return await self._run_one_tick()
+        if self._operator_active.is_set():
+            return None
+        async with self._tick_lock:
+            if self._operator_active.is_set():
+                return None
+            return await self._run_one_tick()
+
+    async def wait_for_tick_completion(self) -> None:
+        """Wait until the current idle cycle releases the workstation."""
+        async with self._tick_lock:
+            pass
 
     async def _maybe_self_improve(self) -> None:
         """Every N ticks, create an isolated verified candidate for approval."""
