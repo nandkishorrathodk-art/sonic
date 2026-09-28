@@ -352,4 +352,31 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
     assert t8.status == ActionExecutionStatus.COMPLETED
     assert ("KEY", "text-editor-app:ctrl+s") in ws.gui_events
     assert ("TERMINAL", "ls -la /home/sonic/workspace") in ws.gui_events
+
+    assert ComputerUseAgent._window_matches_application(
+        "some-editor /home/sonic/workspace/notes.txt",
+        "New Document - Some Editor",
+    )
+    assert not ComputerUseAgent._window_matches_application(
+        "missing-application",
+        ws.active_window,
+    )
+
+    async def report_launch_without_opening_window(workspace_id, app_request):
+        return True
+
+    ws.launch_application = report_launch_without_opening_window
+    failed_launch = await agent.execute_action(
+        workspace_id="ws-1",
+        action_type=ComputerActionType.APP_LAUNCH,
+        target_resource="missing-application",
+        payload={"app_name": "missing-application"},
+        predicted_outcome="A new GUI application window opens and receives focus",
+    )
+    assert failed_launch.status in (
+        ActionExecutionStatus.FAILED,
+        ActionExecutionStatus.RECOVERED,
+    )
+    assert failed_launch.status != ActionExecutionStatus.COMPLETED
+    assert "did not produce a verified, focused GUI window" in failed_launch.actual_observation
     reset_being_singleton()

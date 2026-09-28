@@ -3047,10 +3047,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             logger.info("workstation_preserving_desktop_provider", desktop_id=desktop_id)
                         else:
                             computer = resolved_comp
-                        # The visible X11 desktop is the only Computer surface.
-                        # Do not create a hidden Playwright browser with an
-                        # independent page state.
-                        browser_agent = None
                         from sonic.safety.sealed import seal_default
                         state["interrupted"] = False
 
@@ -3268,7 +3264,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 llm_router=llm_router,
                                 safety=safety_policy,
                                 security_tools=security_tools,
-                                browser=browser_agent,
                                 tenant_id=tenant_id,
                                 being=being,
                                 being_mind=mind,
@@ -3356,17 +3351,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     )
                                 _persist_workstation_state()
 
-                            try:
-                                boss_report = await boss.run(
-                                    workspace_id=desktop_id,
-                                    objective=effective_goal,
-                                    phase_callback=_on_boss_event,
-                                    interrupt_check=lambda: bool(state.get("interrupted")),
-                                )
-                                report = boss_report
-                            finally:
-                                if browser_agent is not None:
-                                    await browser_agent.close()
+                            boss_report = await boss.run(
+                                workspace_id=desktop_id,
+                                objective=effective_goal,
+                                phase_callback=_on_boss_event,
+                                interrupt_check=lambda: bool(state.get("interrupted")),
+                            )
+                            report = boss_report
                             summary_msg = report.findings_summary
 
                             boss_waiting_human = (
@@ -3462,7 +3453,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 lessons_ledger=lessons_ledger,
                                 safety=safety_policy,
                                 self_host=True,
-                                browser=browser_agent,
                                 security_tools=security_tools,
                                 gui_only=False,
                                 compact_prompt=True,
@@ -3498,17 +3488,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 _persist_workstation_state()
 
                             agent._heartbeat_callback = _on_heartbeat
-                            try:
-                                traces = await agent.run_mission(
-                                    workspace_id=desktop_id,
-                                    goal=effective_goal,
-                                    steps=agent.max_actions,
-                                    step_callback=_on_step,
-                                    interrupt_check=lambda: bool(state.get("interrupted")),
-                                )
-                            finally:
-                                if browser_agent is not None:
-                                    await browser_agent.close()
+                            traces = await agent.run_mission(
+                                workspace_id=desktop_id,
+                                goal=effective_goal,
+                                steps=agent.max_actions,
+                                step_callback=_on_step,
+                                interrupt_check=lambda: bool(state.get("interrupted")),
+                            )
 
                             # Final summary
                             succeeded = sum(1 for t in traces if t.status in ("SUCCESS", "RECOVERED"))

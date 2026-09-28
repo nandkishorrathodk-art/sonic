@@ -71,7 +71,6 @@ async def test_visual_verification_detects_unchanged_screen():
     agent.safety = None
     agent.self_host = False
     agent.autonomy_level = None
-    agent.browser = None
     agent.security_tools = {}
     agent.recovery_events = 0
     agent.max_recovery_attempts = 2
