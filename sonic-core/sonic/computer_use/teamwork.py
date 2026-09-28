@@ -247,8 +247,8 @@ class SubagentTeamworkManager:
                         verification_command=str(raw.get("verification_command") or ""),
                         workspace_mode=str(raw.get("workspace_mode") or raw.get("Workspace") or "branch").lower().strip(),
                         model_tier=str(raw.get("model_tier") or raw.get("Model") or "inherit").lower().strip(),
-                        max_steps=int(raw.get("max_steps") or 12),
-                        max_correction_rounds=int(raw.get("max_correction_rounds") if raw.get("max_correction_rounds") is not None else 2),
+                        max_steps=int(str(raw.get("max_steps") or 12)),
+                        max_correction_rounds=int(str(raw.get("max_correction_rounds") if raw.get("max_correction_rounds") is not None else 2)),
                         employee_id=str(raw.get("employee_id") or "").strip() or None,
                     )
                 )
