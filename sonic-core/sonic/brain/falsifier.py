@@ -69,6 +69,18 @@ class FalsificationJudge:
                 evidence_valid=False,
             )
 
+        # A completed status without observations is not empirical evidence.
+        # Do not turn an empty provider response into either a falsification or
+        # a vulnerability confirmation.
+        if not result.baseline_observation.strip() or not result.probe_observation.strip():
+            logger.info("experiment_missing_observations", exp_id=experiment.experiment_id)
+            return JudgeEvaluation(
+                verdict=EpistemicVerdict.INCONCLUSIVE,
+                confidence_delta=0.0,
+                reason="Experiment completed without baseline and probe observations.",
+                evidence_valid=False,
+            )
+
         # Rule 2: No behavioral difference between baseline and probe -> Falsifies vulnerability hypothesis
         if not result.behavioral_difference_detected or (
             result.baseline_observation and result.baseline_observation == result.probe_observation

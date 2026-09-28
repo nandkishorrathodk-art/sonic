@@ -5,10 +5,12 @@ SONIC — Self-Coder API (observe SONIC improving its own source)
 Exposes isolated self-coder candidates so an operator can:
     * inspect the real signals the coder sees (`GET /self-coder/signals`),
     * generate and test proposals in a detached Git worktree,
-    * approve an exact proposal for local commit on a dedicated branch, and
+    * apply a verified proposal to the active working tree without committing, and
     * reject or clean up unapproved candidates.
 
-Candidate generation never mutates the active checkout, commits, or pushes.
+Candidate verification is isolated; a passing proposal is applied in-place only
+when none of its touched files conflict with active worktree edits. No commit or
+push is performed.
 """
 
 from __future__ import annotations
@@ -168,7 +170,7 @@ async def self_coder_run(
     req: SelfCoderRunRequest = SelfCoderRunRequest(),
     user: User = Depends(require_operator),
 ):
-    """Generate, verify, and locally commit candidates on isolated branches."""
+    """Generate and verify candidates, then apply safe updates in-place."""
     if req.push:
         raise HTTPException(status_code=400, detail="Self-coder candidates never push to a remote")
     if req.max_cycles < 1 or req.max_cycles > 10:
@@ -192,10 +194,14 @@ async def self_coder_run(
     report_dict = {
         "candidates": result["candidates"],
         "changed": any(
-            item.get("status") == "auto_promoted"
+            item.get("status") == "applied"
             for item in result["candidates"]
         ),
         "active_branch_changed": False,
+        "active_worktree_changed": any(
+            item.get("status") == "applied"
+            for item in result["candidates"]
+        ),
         "text": result["report"],
     }
     tenant_id = _tenant_id(user)

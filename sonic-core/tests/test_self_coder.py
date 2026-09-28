@@ -411,8 +411,8 @@ def test_self_coder_end_to_end_commits_a_real_change(repo: Path, tmp_path: Path)
     )
 
 
-def test_self_coder_allow_writes_commits(repo: Path, tmp_path: Path):
-    """With allow_writes=True the verified change is committed locally."""
+def test_self_coder_write_mode_applies_verified_candidate_without_commit(repo: Path, tmp_path: Path):
+    """Write mode applies verified updates in-place without changing Git refs."""
     db = str(tmp_path / "evo.db")
     (repo / "sonic-core" / "tests" / "test_widget.py").write_text(
         "from sonic.agents.widget import total\n\n"
@@ -465,9 +465,15 @@ def test_self_coder_allow_writes_commits(repo: Path, tmp_path: Path):
         allow_writes=True,
         agentic=False,
     )
+    before_head = _git(repo, "rev-parse", "HEAD")
+    before_branch = _git(repo, "branch", "--show-current")
     report = asyncio.run(coder.run(max_cycles=1))
     assert report.changed is True
-    assert report.cycles[0].tree_action == "committed"
+    assert report.cycles[0].tree_action == "applied"
+    assert report.cycles[0].commit_hash == ""
+    assert _git(repo, "rev-parse", "HEAD") == before_head
+    assert _git(repo, "branch", "--show-current") == before_branch
+    assert not _git(repo, "branch", "--list", "sonic/self-coder/*")
     assert "is not None" in (repo / "sonic-core" / "sonic" / "agents" / "widget.py").read_text()
 
 

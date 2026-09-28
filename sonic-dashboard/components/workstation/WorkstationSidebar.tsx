@@ -16,6 +16,7 @@ import {
   BrainCircuit,
   FlaskConical,
   Cpu,
+  UsersRound,
 } from "lucide-react";
 import Link from "next/link";
 import { BrandMark } from "../common/BrandMark";
@@ -38,6 +39,7 @@ const NAV = [
   { href: "/missions", label: "Missions", icon: <Compass className="w-4 h-4 text-primary-400" /> },
   { href: "/graph", label: "Graph Memory", icon: <Share2 className="w-4 h-4 text-accent-400" /> },
   { href: "/agents", label: "Agents", icon: <Cpu className="w-4 h-4 text-secondary-400" /> },
+  { href: "/organization", label: "Organization", icon: <UsersRound className="w-4 h-4 text-primary-400" /> },
 ];
 
 export function WorkstationSidebar({

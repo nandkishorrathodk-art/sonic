@@ -1,4 +1,4 @@
-"""Isolated, verified self-coder candidates with safe local branch promotion."""
+"""Isolated verification and guarded in-place application of self-coder candidates."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import threading
 import uuid
@@ -125,7 +126,15 @@ class SelfCoderCandidateStore:
 
     def _remove_worktree(self, path: Path) -> None:
         if path.exists():
-            self._git(["worktree", "remove", "--force", str(path)])
+            try:
+                self._git(["worktree", "remove", "--force", str(path)])
+            except CandidateWorkflowError as git_error:
+                try:
+                    shutil.rmtree(path)
+                except OSError as remove_error:
+                    raise CandidateWorkflowError(
+                        f"{git_error}; fallback worktree cleanup failed: {remove_error}"
+                    ) from remove_error
         self._git(["worktree", "prune"])
 
     async def run_candidate(
@@ -186,6 +195,7 @@ class SelfCoderCandidateStore:
             in {
                 "verified",
                 "rejected",
+                "applied",
                 "approved",
                 "auto_promoted",
                 "failed",
@@ -210,6 +220,10 @@ class SelfCoderCandidateStore:
                 )
             except Exception as exc:
                 raise CandidateWorkflowError(f"Self-coder execution failed: {exc}") from exc
+            finally:
+                close = getattr(coder, "close", None)
+                if callable(close):
+                    close()
             cycles = list(getattr(report, "cycles", []))
             for cycle in cycles:
                 verification = {
@@ -339,34 +353,35 @@ class SelfCoderCandidateStore:
                 raise CandidateWorkflowError(
                     f"Candidate worktree cleanup failed; no candidate is available: {cleanup_error}"
                 )
-        promoted: list[dict[str, Any]] = []
+        applied_candidates: list[dict[str, Any]] = []
         for record in persisted:
             if record["status"] == "verified":
                 try:
-                    promoted.append(
-                        self.auto_promote(record["candidate_id"], tenant_id)
-                    )
+                    applied_candidates.append(self.auto_promote(record["candidate_id"], tenant_id))
                 except Exception as exc:
                     latest = self.get(record["candidate_id"], tenant_id) or record
-                    if latest["status"] not in {"auto_promoted", "approval_cleanup_failed"}:
-                        latest["status"] = "promotion_failed"
-                        latest["error"] = f"Automatic branch promotion failed: {exc}"
-                    latest["promotion_error"] = str(exc)
+                    if latest["status"] not in {
+                        "applied", "failed_application", "blocked_conflict",
+                        "stale", "tampered", "rollback_failed",
+                    }:
+                        latest["status"] = "application_failed"
+                        latest["error"] = f"Could not apply verified candidate: {exc}"
+                    latest["application_error"] = str(exc)
                     self.save(latest)
-                    promoted.append(latest)
+                    applied_candidates.append(latest)
             else:
-                promoted.append(record)
-        report_text = self._append_promotion_report(report_text, promoted)
-        for record in promoted:
+                applied_candidates.append(record)
+        report_text = self._append_application_report(report_text, applied_candidates)
+        for record in applied_candidates:
             record["report"] = report_text
             self.save(record)
-        return {"candidates": promoted, "report": report_text}
+        return {"candidates": applied_candidates, "report": report_text}
 
     @staticmethod
-    def _append_promotion_report(
+    def _append_application_report(
         report: str, records: list[dict[str, Any]]
     ) -> str:
-        lines = [report.rstrip(), "", "## Candidate impact and promotion receipts"]
+        lines = [report.rstrip(), "", "## Candidate impact and application receipts"]
         for record in records:
             lines.extend([
                 f"- Candidate: `{record['candidate_id']}` — **{record['status']}**",
@@ -376,11 +391,8 @@ class SelfCoderCandidateStore:
                 f"  - Files: {', '.join(record.get('files', [])) or 'none'}",
                 f"  - Verification: {record.get('verification', {})}",
             ])
-            if record.get("commit_branch"):
-                lines.append(
-                    f"  - Local commit: `{record.get('commit')}` on "
-                    f"`{record['commit_branch']}` (active branch unchanged)"
-                )
+            if record.get("status") == "applied":
+                lines.append("  - Verified patch applied to the active working tree; no commit or push was made")
             if record.get("working_tree_changes_excluded"):
                 lines.append(
                     "  - Uncommitted active-checkout changes were excluded from "
@@ -395,7 +407,7 @@ class SelfCoderCandidateStore:
         return self._promote(candidate_id, tenant_id, automatic=False)
 
     def auto_promote(self, candidate_id: str, tenant_id: str) -> dict[str, Any]:
-        """Commit an already verified candidate to its isolated local branch."""
+        """Apply an already verified candidate to the active working tree."""
         return self._promote(candidate_id, tenant_id, automatic=True)
 
     def _promote(
@@ -419,59 +431,165 @@ class SelfCoderCandidateStore:
                 self.save(record)
                 raise ValueError(record["error"])
 
-            branch = f"sonic/self-coder/{candidate_id}"
-            worktree = self.worktrees_dir / f"approve-{candidate_id}"
-            report = None
-            branch_created = False
-            committed = False
-            cleanup_errors: list[str] = []
+            evolver = CodebaseEvolver(repo_root=self.repo_root)
+            diff = str(record.get("diff", ""))
+            if diff and not diff.endswith("\n"):
+                diff += "\n"
+            files = list(record.get("files", []))
             try:
-                self._git(["worktree", "add", "-b", branch, str(worktree), current_commit])
-                branch_created = True
-                evolver = CodebaseEvolver(repo_root=worktree)
-                target = record["files"][0]
-                report = evolver.evolve(
-                    target_component=target,
-                    description=record["description"],
-                    code_diff=record["diff"],
-                    auto_promote=True,
-                    push=False,
-                    test_paths=record["test_paths"] or None,
+                diff_paths = evolver._validate_diff_paths(diff, allowed_files=files)
+                if set(diff_paths) != {Path(path).as_posix() for path in files}:
+                    raise ValueError("Candidate diff paths do not match its verified file set")
+                if not files:
+                    raise ValueError("Candidate contains no verified target files")
+                if not all(record.get("verification", {}).get(key) for key in (
+                    "full_test_suite", "security_regression"
+                )):
+                    raise ValueError("Candidate is missing passing test and security receipts")
+            except Exception as exc:
+                record["status"] = "failed_revalidation"
+                record["error"] = f"Candidate validation failed: {exc}"
+                self.save(record)
+                raise ValueError(record["error"]) from exc
+
+            snapshots: dict[Path, tuple[bytes | None, int | None]] = {}
+            try:
+                active_files: list[tuple[Path, bytes | None, int | None]] = []
+                for relative_path in diff_paths:
+                    path = (self.repo_root / relative_path).resolve()
+                    base_bytes = self._git_bytes(["show", f"{current_commit}:{relative_path}"])
+                    current_bytes = path.read_bytes() if path.is_file() else None
+                    if self._normalize_line_endings(current_bytes) != self._normalize_line_endings(base_bytes):
+                        record["status"] = "blocked_conflict"
+                        record["error"] = (
+                            f"Active worktree conflict on {relative_path}; "
+                            "the active file differs from the verified candidate base"
+                        )
+                        self.save(record)
+                        raise ValueError(record["error"])
+                    mode = path.stat().st_mode if path.exists() else None
+                    active_files.append((path, current_bytes, mode))
+                snapshots = {
+                    path: (contents, mode)
+                    for path, contents, mode in active_files
+                }
+
+                check = subprocess.run(
+                    ["git", "apply", "--check", "--recount", "--whitespace=fix"],
+                    cwd=str(self.repo_root),
+                    input=diff,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
                 )
-                if report.stage != EvolutionStage.PROMOTED or not report.git_committed:
-                    record["status"] = "failed_revalidation"
-                    record["error"] = report.error_reason or "Candidate failed current-base revalidation"
-                    self.save(record)
-                    raise ValueError(record["error"])
-                record["status"] = "auto_promoted" if automatic else "approved"
-                record["commit"] = report.git_commit_hash
-                record["commit_branch"] = branch
+                if check.returncode:
+                    raise CandidateWorkflowError(
+                        f"Verified patch no longer applies cleanly: "
+                        f"{(check.stderr or check.stdout).strip()}"
+                    )
+                applied = subprocess.run(
+                    ["git", "apply", "--recount", "--whitespace=fix"],
+                    cwd=str(self.repo_root),
+                    input=diff,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if applied.returncode:
+                    raise CandidateWorkflowError(
+                        f"Applying verified patch failed: "
+                        f"{(applied.stderr or applied.stdout).strip()}"
+                    )
+
+                post_ok, post_verification = self._verify_active_application(
+                    evolver, diff_paths, record.get("test_paths") or []
+                )
+                record["verification"]["active_worktree"] = post_verification
+                if not post_ok:
+                    raise CandidateWorkflowError(
+                        post_verification.get("error", "Post-application verification failed")
+                    )
+                record["status"] = "applied"
                 record["error"] = ""
+                record["commit"] = ""
+                record["commit_branch"] = ""
                 record["promotion"] = (
-                    "automatically committed after passing candidate and revalidation gates"
-                    if automatic else "operator approved after revalidation"
+                    "verified patch applied to active working tree; no commit or push"
+                    if automatic else "operator-approved patch applied to active working tree; no commit or push"
                 )
                 self.save(record)
-                committed = True
                 return record
-            finally:
-                if worktree.exists():
-                    try:
-                        self._remove_worktree(worktree)
-                    except CandidateWorkflowError as exc:
-                        cleanup_errors.append(str(exc))
-                if branch_created and not committed:
-                    try:
-                        self._git(["branch", "-D", branch])
-                    except CandidateWorkflowError as exc:
-                        cleanup_errors.append(str(exc))
-                if cleanup_errors:
-                    record["status"] = "approval_cleanup_failed"
-                    record["error"] = "; ".join(cleanup_errors)
-                    self.save(record)
-                    raise CandidateWorkflowError(
-                        f"Approval cleanup failed: {record['error']}"
+            except Exception as exc:
+                if snapshots and not self._restore_exact(snapshots):
+                    record["status"] = "rollback_failed"
+                    record["error"] = (
+                        f"{exc}; exact pre-apply restoration failed for one or more touched files"
                     )
+                elif record.get("status") != "blocked_conflict":
+                    record["status"] = "failed_application"
+                    record["error"] = str(exc)
+                self.save(record)
+                if record["status"] == "blocked_conflict":
+                    raise ValueError(record["error"]) from exc
+                return record
+
+    def _git_bytes(self, args: list[str]) -> bytes | None:
+        """Read exact committed bytes, returning None for paths absent at the base."""
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(self.repo_root),
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode:
+            return None
+        return result.stdout
+
+    @staticmethod
+    def _normalize_line_endings(contents: bytes | None) -> bytes | None:
+        if contents is None:
+            return None
+        return contents.replace(b"\r\n", b"\n")
+
+    @staticmethod
+    def _restore_exact(snapshots: dict[Path, tuple[bytes | None, int | None]]) -> bool:
+        """Restore touched paths byte-for-byte, including removing candidate new files."""
+        success = True
+        for path, (contents, mode) in snapshots.items():
+            try:
+                if contents is None:
+                    if path.exists():
+                        path.unlink()
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(contents)
+                    if mode is not None:
+                        path.chmod(mode)
+            except OSError:
+                success = False
+        return success
+
+    @staticmethod
+    def _verify_active_application(
+        evolver: CodebaseEvolver, files: list[str], test_paths: list[str]
+    ) -> tuple[bool, dict[str, Any]]:
+        imports_ok, import_message = evolver.run_import_checks(files)
+        tests = evolver.run_tests(test_paths)
+        security_ok = evolver.run_security_regression()
+        verification = {
+            "import_check": import_message,
+            "full_test_suite": tests.passed,
+            "security_regression": security_ok,
+            "passed_tests": tests.passed_tests,
+            "failed_tests": tests.failed_tests,
+            "test_output": tests.raw_output[-4000:],
+            "error": (
+                import_message if not imports_ok else
+                tests.error_message if not tests.passed else
+                "Security regression suite failed" if not security_ok else ""
+            ),
+        }
+        return imports_ok and tests.passed and security_ok, verification
 
     def reject(self, candidate_id: str, tenant_id: str, reason: str) -> dict[str, Any]:
         with self._lock(candidate_id):
@@ -493,7 +611,7 @@ class SelfCoderCandidateStore:
             if record["status"] == "verified":
                 raise ValueError("Reject a verified candidate before cleanup")
             if record["status"] in {
-                "approved", "auto_promoted", "approval_cleanup_failed"
+                "applied", "approved", "auto_promoted", "approval_cleanup_failed"
             }:
-                raise ValueError("Committed candidate records are retained for audit")
+                raise ValueError("applied candidate records are retained for audit")
             self.delete(candidate_id, tenant_id)
