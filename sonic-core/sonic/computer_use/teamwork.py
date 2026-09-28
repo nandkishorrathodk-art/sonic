@@ -135,9 +135,9 @@ class SubagentConversation:
     conversation_id: str
     type_name: str
     role: str
+    workspace_mode: str
     employee_id: str | None = None
     employee_context: dict[str, Any] = field(default_factory=dict)
-    workspace_mode: str
     parent_workspace_id: str
     effective_workspace_id: str
     isolated_dir: Path | None = None
