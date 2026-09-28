@@ -1,435 +1,226 @@
 "use client";
 
-import { type FormEvent, useCallback, useEffect, useState } from "react";
-import {
-  AlertCircle,
-  BriefcaseBusiness,
-  Building2,
-  Plus,
-  RefreshCw,
-  UsersRound,
-} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { BriefcaseBusiness, Building2, CheckCircle2, Users } from "lucide-react";
 import { api } from "../../lib/api";
-import { PageHeader, PageShell, StateBlock } from "../../components/common/PageShell";
 
-interface Department {
-  id: string;
-  name: string;
-  mission: string;
-}
-
-interface Team {
-  id: string;
-  department_id: string;
-  name: string;
-  mission: string;
-}
-
-interface Employee {
-  id: string;
-  team_id: string;
-  name: string;
-  role: string;
-  level: string;
-  status: string;
-  capability_mode: "read_only" | "engineering";
-  primary_ownership: string[];
-  secondary_ownership: string[];
-}
-
-interface Project {
-  id: string;
-  name: string;
-  description: string;
-  status: string;
-  lead_employee_id: string | null;
-  github_repository: string;
-}
-
-interface WorkItem {
-  id: string;
-  project_id: string;
-  title: string;
-  description: string;
-  item_type: string;
-  status: string;
-  priority: string;
-  assignee_employee_id: string | null;
-  github_issue_url: string;
-  branch_name: string;
-  pull_request_url: string;
-  review_status: string;
-  evaluation_status: string;
-}
-
-interface OrganizationState {
-  departments: Department[];
-  teams: Team[];
-  employees: Employee[];
-  projects: Project[];
-  work_items: WorkItem[];
-}
-
-const emptyState: OrganizationState = {
-  departments: [],
-  teams: [],
-  employees: [],
-  projects: [],
-  work_items: [],
+type Organization = {
+  departments: string[];
+  teams: { id: string; department_id: string; mission: string }[];
+  subsystems: { id: string; department_id: string; team_id: string; path_prefixes: string[]; responsibility: string }[];
+  employees: { id: string; name: string; role: string; department_id: string; team_id: string; subsystem_ids: string[]; read_only: boolean; status: string }[];
+  projects: { id: string; name: string; description: string; lead_employee_id?: string | null; status: string }[];
+  work_items: { id: string; project_id: string; title: string; subsystem_id: string; department_id: string; team_id: string; assignee_employee_id: string; github_repo: string; github_issue_number?: number | null; github_pr_number?: number | null; development_branch: string; status: string }[];
 };
 
-const inputClass =
-  "w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-xs text-white outline-none focus:border-primary-500";
+function label(value: string) {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+const emptyEmployee = {
+  name: "",
+  role: "AI Agent Engineer",
+  department_id: "cognitive_systems",
+  team_id: "reasoning_orchestration",
+  subsystem_ids: ["agents"],
+  read_only: false,
+  employee_type: "ai",
+  prompt: "",
+};
 
 export default function OrganizationPage() {
-  const [organization, setOrganization] = useState<OrganizationState>(emptyState);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [employeeName, setEmployeeName] = useState("");
-  const [employeeRole, setEmployeeRole] = useState("");
-  const [employeeTeam, setEmployeeTeam] = useState("");
-  const [employeeOwnership, setEmployeeOwnership] = useState("");
-  const [employeeMode, setEmployeeMode] = useState<"read_only" | "engineering">("engineering");
-  const [projectName, setProjectName] = useState("");
-  const [projectDescription, setProjectDescription] = useState("");
-  const [projectRepository, setProjectRepository] = useState("");
-  const [projectLead, setProjectLead] = useState("");
-  const [workTitle, setWorkTitle] = useState("");
-  const [workProject, setWorkProject] = useState("");
-  const [workAssignee, setWorkAssignee] = useState("");
+  const [org, setOrg] = useState<Organization | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [employee, setEmployee] = useState(emptyEmployee);
+  const [project, setProject] = useState({ name: "", description: "", lead_employee_id: "" });
+  const [workItem, setWorkItem] = useState({
+    project_id: "", title: "", description: "", subsystem_id: "", employee_id: "",
+    github_repo: "", github_issue_number: "", github_pr_number: "", development_branch: "",
+  });
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  async function refresh() {
     try {
-      const data = (await api.getOrganization()) as OrganizationState;
-      setOrganization(data);
-      setEmployeeTeam((current) => current || data.teams[0]?.id || "");
-      setWorkProject((current) => current || data.projects[0]?.id || "");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load the organization.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  async function submit(
-    event: FormEvent,
-    operation: () => Promise<unknown>,
-  ) {
-    event.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      await operation();
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "The change could not be saved.");
-    } finally {
-      setSaving(false);
+      setOrg(await api.getOrganization());
+      setError("");
+    } catch (err: any) {
+      setError(err?.message || "Failed to load organization.");
     }
   }
 
-  const employeeNameById = new Map(
-    organization.employees.map((employee) => [employee.id, employee.name]),
+  useEffect(() => { void refresh(); }, []);
+
+  const teams = useMemo(
+    () => org?.teams.filter((team) => team.department_id === employee.department_id) || [],
+    [org, employee.department_id],
+  );
+  const employeeSubsystems = useMemo(
+    () => org?.subsystems.filter((item) => item.department_id === employee.department_id && item.team_id === employee.team_id) || [],
+    [org, employee.department_id, employee.team_id],
+  );
+  const assignableEmployees = useMemo(
+    () => org?.employees.filter((item) => item.subsystem_ids.includes(workItem.subsystem_id)) || [],
+    [org, workItem.subsystem_id],
   );
 
+  async function run(action: () => Promise<unknown>) {
+    setBusy(true);
+    setError("");
+    try {
+      await action();
+      await refresh();
+    } catch (err: any) {
+      setError(err?.message || "Organization operation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!org) return <div className="p-6 text-sm text-muted">{error || "Loading organization..."}</div>;
+
   return (
-    <PageShell>
-      <PageHeader
-        accent="primary"
-        icon={<UsersRound className="h-6 w-6 text-primary-400" />}
-        title="SONIC ORGANIZATION"
-        badge={`${organization.employees.length} AI roles · ${organization.projects.length} projects`}
-        subtitle="Persistent departments, role profiles, ownership, and assigned work"
-        actions={
-          <button
-            onClick={() => void refresh()}
-            disabled={loading}
-            className="btn-ghost inline-flex items-center gap-2 text-xs font-mono"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-            REFRESH
-          </button>
-        }
-      />
+    <div className="min-h-screen bg-ink-950 text-slate-200 p-6 space-y-6">
+      <div>
+        <h1 className="text-2xl font-semibold text-white">SONIC Organization</h1>
+        <p className="text-sm text-muted mt-1">Department → Team → Employee → Subsystem → Project → Work Item → Evaluation.</p>
+      </div>
 
-      {error && (
-        <div className="flex items-center gap-2 rounded-xl border border-danger/30 bg-danger/10 p-4 text-xs text-danger">
-          <AlertCircle className="h-4 w-4 shrink-0" />
-          {error}
-        </div>
-      )}
+      {error && <div className="rounded border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
 
-      <StateBlock
-        loading={loading}
-        loadingText="Loading tenant organization…"
-        empty={false}
-        emptyIcon={<Building2 className="h-6 w-6" />}
-        emptyTitle="Organization unavailable"
-        emptyText="The organization API did not return its structure."
-        children={
-          <div className="space-y-8">
-            <section className="space-y-3">
-              <div>
-                <h2 className="text-sm font-bold text-white">Departments & teams</h2>
-                <p className="mt-1 text-xs text-muted">
-                  Cross-functional research stays separate from permanent delivery ownership.
-                </p>
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <section className="panel p-4">
+          <div className="flex items-center gap-2 font-semibold text-white"><Building2 className="w-4 h-4" /> Departments</div>
+          <div className="mt-3 space-y-2">
+            {org.departments.map((id) => (
+              <div key={id} className="rounded-lg border border-ink-800 bg-ink-950 p-3">
+                <div className="text-white">{label(id)}</div>
+                <div className="text-[11px] text-muted">{org.teams.filter((team) => team.department_id === id).map((team) => label(team.id)).join(" · ")}</div>
               </div>
-              <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                {organization.departments.map((department) => (
-                  <article key={department.id} className="glass-card rounded-xl p-4">
-                    <h3 className="text-sm font-semibold text-white">{department.name}</h3>
-                    <p className="mt-1 text-xs text-muted">{department.mission}</p>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {organization.teams
-                        .filter((team) => team.department_id === department.id)
-                        .map((team) => (
-                          <span
-                            key={team.id}
-                            className="rounded-md border border-ink-700 bg-ink-900 px-2 py-1 text-[10px] text-secondary-300"
-                            title={team.mission}
-                          >
-                            {team.name}
-                          </span>
-                        ))}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-
-            <section className="space-y-3">
-              <div>
-                <h2 className="text-sm font-bold text-white">AI employee profiles</h2>
-                <p className="mt-1 text-xs text-muted">
-                  Role profiles organize work; they are not human accounts or proof of a running agent.
-                </p>
-              </div>
-              <form
-                className="glass-card grid gap-2 rounded-xl p-4 md:grid-cols-[1fr_1fr_1fr_1fr_auto]"
-                onSubmit={(event) =>
-                  void submit(event, () =>
-                    api.createOrganizationEmployee({
-                      name: employeeName,
-                      role: employeeRole,
-                      team_id: employeeTeam,
-                      primary_ownership: employeeOwnership
-                        .split(",")
-                        .map((item) => item.trim())
-                        .filter(Boolean),
-                      capability_mode: employeeMode,
-                    }),
-                  )
-                }
-              >
-                <input
-                  className={inputClass}
-                  value={employeeName}
-                  onChange={(event) => setEmployeeName(event.target.value)}
-                  placeholder="Role profile name"
-                  required
-                  maxLength={128}
-                />
-                <input
-                  className={inputClass}
-                  value={employeeRole}
-                  onChange={(event) => setEmployeeRole(event.target.value)}
-                  placeholder="Role / responsibility"
-                  required
-                  maxLength={128}
-                />
-                <input
-                  className={inputClass}
-                  value={employeeOwnership}
-                  onChange={(event) => setEmployeeOwnership(event.target.value)}
-                  placeholder="Subsystem ownership (comma separated)"
-                  maxLength={500}
-                />
-                <select
-                  className={inputClass}
-                  value={employeeTeam}
-                  onChange={(event) => setEmployeeTeam(event.target.value)}
-                  required
-                >
-                  {organization.teams.map((team) => (
-                    <option key={team.id} value={team.id}>{team.name}</option>
-                  ))}
-                </select>
-                <select
-                  className={inputClass}
-                  value={employeeMode}
-                  onChange={(event) => setEmployeeMode(event.target.value as "read_only" | "engineering")}
-                  aria-label="Employee capability mode"
-                >
-                  <option value="engineering">Engineering access</option>
-                  <option value="read_only">Read only</option>
-                </select>
-                <button className="btn-primary inline-flex items-center justify-center gap-1 px-3 text-xs" disabled={saving}>
-                  <Plus className="h-3 w-3" /> ADD ROLE
-                </button>
-              </form>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {organization.employees.map((employee) => {
-                  const team = organization.teams.find((item) => item.id === employee.team_id);
-                  const department = organization.departments.find(
-                    (item) => item.id === team?.department_id,
-                  );
-                  return (
-                    <article key={employee.id} className="glass-card rounded-xl p-4">
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <h3 className="text-sm font-semibold text-white">{employee.name}</h3>
-                          <p className="text-xs text-muted">{employee.role} · {employee.level}</p>
-                        </div>
-                        <span className="rounded border border-success/30 px-2 py-0.5 text-[10px] uppercase text-success">
-                          {employee.status}
-                        </span>
-                      </div>
-                      <p className="mt-2 text-[11px] text-muted-dim">{department?.name} / {team?.name}</p>
-                      <p className="mt-2 text-[11px] text-muted">
-                        {employee.capability_mode.replaceAll("_", " ")} · Owns: {[...employee.primary_ownership, ...employee.secondary_ownership].join(", ") || "No subsystem ownership assigned"}
-                      </p>
-                    </article>
-                  );
-                })}
-              </div>
-            </section>
-
-            <section className="grid gap-5 xl:grid-cols-2">
-              <div className="space-y-3">
-                <div>
-                  <h2 className="text-sm font-bold text-white">Projects</h2>
-                  <p className="mt-1 text-xs text-muted">Each project has an accountable lead and repository reference.</p>
-                </div>
-                <form
-                  className="glass-card space-y-2 rounded-xl p-4"
-                  onSubmit={(event) =>
-                    void submit(event, () =>
-                      api.createOrganizationProject({
-                        name: projectName,
-                        description: projectDescription,
-                        lead_employee_id: projectLead || null,
-                        github_repository: projectRepository,
-                      }),
-                    )
-                  }
-                >
-                  <input className={inputClass} value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Project name" required maxLength={160} />
-                  <textarea className={inputClass} value={projectDescription} onChange={(event) => setProjectDescription(event.target.value)} placeholder="Objective and acceptance outcome" rows={2} />
-                  <input className={inputClass} value={projectRepository} onChange={(event) => setProjectRepository(event.target.value)} placeholder="Repository URL (optional)" maxLength={500} />
-                  <select className={inputClass} value={projectLead} onChange={(event) => setProjectLead(event.target.value)}>
-                    <option value="">No lead assigned</option>
-                    {organization.employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
-                  </select>
-                  <button className="btn-primary inline-flex items-center gap-1 px-3 text-xs" disabled={saving}><Plus className="h-3 w-3" /> CREATE PROJECT</button>
-                </form>
-                <div className="space-y-2">
-                  {organization.projects.map((project) => (
-                    <article key={project.id} className="glass-card rounded-xl p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <h3 className="text-xs font-semibold text-white">{project.name}</h3>
-                        <span className="text-[10px] uppercase text-secondary-300">{project.status}</span>
-                      </div>
-                      <p className="mt-1 text-[11px] text-muted">{project.description || "No project description."}</p>
-                      <p className="mt-1 text-[10px] text-muted-dim">Lead: {project.lead_employee_id ? employeeNameById.get(project.lead_employee_id) : "Unassigned"} · Repository: {project.github_repository || "Not linked"}</p>
-                    </article>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div>
-                  <h2 className="text-sm font-bold text-white">Work items & delivery gates</h2>
-                  <p className="mt-1 text-xs text-muted">Track assignment, issue/PR references, review, and evaluation receipts.</p>
-                </div>
-                <form
-                  className="glass-card space-y-2 rounded-xl p-4"
-                  onSubmit={(event) =>
-                    void submit(event, () =>
-                      api.createOrganizationWorkItem({
-                        project_id: workProject,
-                        title: workTitle,
-                        assignee_employee_id: workAssignee || null,
-                      }),
-                    )
-                  }
-                >
-                  <input className={inputClass} value={workTitle} onChange={(event) => setWorkTitle(event.target.value)} placeholder="Task / issue title" required maxLength={255} />
-                  <select className={inputClass} value={workProject} onChange={(event) => setWorkProject(event.target.value)} required>
-                    <option value="">Choose project</option>
-                    {organization.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-                  </select>
-                  <select className={inputClass} value={workAssignee} onChange={(event) => setWorkAssignee(event.target.value)}>
-                    <option value="">Unassigned</option>
-                    {organization.employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
-                  </select>
-                  <button className="btn-primary inline-flex items-center gap-1 px-3 text-xs" disabled={saving || organization.projects.length === 0}><Plus className="h-3 w-3" /> CREATE WORK ITEM</button>
-                </form>
-                <div className="space-y-2">
-                  {organization.work_items.map((item) => (
-                    <form
-                      key={item.id}
-                      className="glass-card space-y-2 rounded-xl p-3"
-                      onSubmit={(event) => {
-                        const form = new FormData(event.currentTarget);
-                        void submit(event, () =>
-                          api.updateOrganizationWorkItem(item.id, {
-                            status: form.get("status"),
-                            assignee_employee_id: form.get("assignee_employee_id") || null,
-                            github_issue_url: form.get("github_issue_url") || "",
-                            branch_name: form.get("branch_name") || "",
-                            pull_request_url: form.get("pull_request_url") || "",
-                          }),
-                        );
-                      }}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <h3 className="text-xs font-semibold text-white">{item.title}</h3>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-dim">
-                        <span>{item.priority} priority</span>
-                        <span>Owner: {item.assignee_employee_id ? employeeNameById.get(item.assignee_employee_id) : "Unassigned"}</span>
-                        <span>Review: {item.review_status}</span>
-                        <span>Evaluation: {item.evaluation_status}</span>
-                      </div>
-                      <select className={inputClass} name="assignee_employee_id" defaultValue={item.assignee_employee_id || ""}>
-                        <option value="">Unassigned</option>
-                        {organization.employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
-                      </select>
-                      <select className={inputClass} name="status" defaultValue={item.status}>
-                        {["backlog", "ready", "in_progress", "blocked", "in_review", "evaluated"].map((status) => (
-                          <option key={status} value={status}>{status.replaceAll("_", " ")}</option>
-                        ))}
-                      </select>
-                      <div className="grid gap-2 md:grid-cols-3">
-                        <input className={inputClass} name="github_issue_url" defaultValue={item.github_issue_url} placeholder="Issue URL" />
-                        <input className={inputClass} name="branch_name" defaultValue={item.branch_name} placeholder="Development branch reference" />
-                        <input className={inputClass} name="pull_request_url" defaultValue={item.pull_request_url} placeholder="PR URL" />
-                      </div>
-                      <button className="btn-ghost px-3 py-1 text-[10px]" disabled={saving}>SAVE ASSIGNMENT / REFERENCES</button>
-                    </form>
-                  ))}
-                  {organization.work_items.length === 0 && (
-                    <div className="glass-card rounded-xl p-4 text-xs text-muted">No work items recorded for this tenant.</div>
-                  )}
-                </div>
-              </div>
-            </section>
-
-            <div className="flex items-center gap-2 border-t border-ink-800 pt-4 text-[10px] text-muted-dim">
-              <BriefcaseBusiness className="h-3 w-3" />
-              Issue/PR links and work status are operator-maintained records. This registry does not create branches, execute CI, approve reviews, merge, or release changes.
-            </div>
+            ))}
           </div>
-        }
-      />
-    </PageShell>
+        </section>
+
+        <section className="panel p-4">
+          <div className="flex items-center gap-2 font-semibold text-white"><Users className="w-4 h-4" /> AI Employees</div>
+          <div className="mt-3 space-y-2">
+            {org.employees.map((item) => (
+              <div key={item.id} className="rounded-lg border border-ink-800 bg-ink-950 p-3">
+                <div className="text-white font-medium">{item.name}</div>
+                <div className="text-xs text-muted">{item.role}</div>
+                <div className="text-[11px] text-secondary-300 mt-1">{label(item.department_id)} / {label(item.team_id)}</div>
+                <div className="text-[11px] text-muted-dim mt-1">{item.subsystem_ids.join(", ")}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="panel p-4">
+          <div className="flex items-center gap-2 font-semibold text-white"><BriefcaseBusiness className="w-4 h-4" /> Projects</div>
+          <div className="mt-3 space-y-2">
+            {org.projects.map((item) => (
+              <div key={item.id} className="rounded-lg border border-ink-800 bg-ink-950 p-3">
+                <div className="text-white font-medium">{item.name}</div>
+                <div className="text-xs text-muted">{item.description || "No description"}</div>
+                <div className="text-[11px] text-muted-dim mt-1">{item.status}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <section className="panel p-4 space-y-3">
+          <h2 className="font-semibold text-white">Create AI Employee</h2>
+          <input className="input-field" placeholder="Name" value={employee.name} onChange={(e) => setEmployee({ ...employee, name: e.target.value })} />
+          <input className="input-field" placeholder="Role" value={employee.role} onChange={(e) => setEmployee({ ...employee, role: e.target.value })} />
+          <select className="input-field" value={employee.department_id} onChange={(e) => {
+            const department_id = e.target.value;
+            const next = org.teams.find((team) => team.department_id === department_id);
+            setEmployee({ ...employee, department_id, team_id: next?.id || "", subsystem_ids: [] });
+          }}>
+            {org.departments.map((id) => <option key={id} value={id}>{label(id)}</option>)}
+          </select>
+          <select className="input-field" value={employee.team_id} onChange={(e) => {
+            const team_id = e.target.value;
+            const next = org.subsystems.find((item) => item.department_id === employee.department_id && item.team_id === team_id);
+            setEmployee({ ...employee, team_id, subsystem_ids: next ? [next.id] : [] });
+          }}>
+            {teams.map((team) => <option key={team.id} value={team.id}>{label(team.id)}</option>)}
+          </select>
+          <select className="input-field" value={employee.subsystem_ids[0] || ""} onChange={(e) => setEmployee({ ...employee, subsystem_ids: [e.target.value] })}>
+            {employeeSubsystems.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}
+          </select>
+          <label className="text-xs text-muted flex items-center gap-2">
+            <input type="checkbox" checked={employee.read_only} onChange={(e) => setEmployee({ ...employee, read_only: e.target.checked })} /> Read-only employee
+          </label>
+          <button disabled={busy} className="btn-primary" onClick={() => run(async () => {
+            await api.createEmployee(employee);
+            setEmployee({ ...emptyEmployee });
+          })}>Create Employee</button>
+        </section>
+
+        <section className="panel p-4 space-y-3">
+          <h2 className="font-semibold text-white">Create Project</h2>
+          <input className="input-field" placeholder="Project name" value={project.name} onChange={(e) => setProject({ ...project, name: e.target.value })} />
+          <textarea className="input-field min-h-24" placeholder="Description" value={project.description} onChange={(e) => setProject({ ...project, description: e.target.value })} />
+          <select className="input-field" value={project.lead_employee_id} onChange={(e) => setProject({ ...project, lead_employee_id: e.target.value })}>
+            <option value="">No lead</option>
+            {org.employees.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <button disabled={busy} className="btn-primary" onClick={() => run(async () => {
+            await api.createOrganizationProject({ ...project, lead_employee_id: project.lead_employee_id || null });
+            setProject({ name: "", description: "", lead_employee_id: "" });
+          })}>Create Project</button>
+        </section>
+
+        <section className="panel p-4 space-y-3">
+          <h2 className="font-semibold text-white">Assign Work Item</h2>
+          <select className="input-field" value={workItem.project_id} onChange={(e) => setWorkItem({ ...workItem, project_id: e.target.value })}>
+            <option value="">Project</option>
+            {org.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <input className="input-field" placeholder="Work item title" value={workItem.title} onChange={(e) => setWorkItem({ ...workItem, title: e.target.value })} />
+          <select className="input-field" value={workItem.subsystem_id} onChange={(e) => setWorkItem({ ...workItem, subsystem_id: e.target.value, employee_id: "" })}>
+            <option value="">Subsystem</option>
+            {org.subsystems.map((item) => <option key={item.id} value={item.id}>{item.id} — {label(item.team_id)}</option>)}
+          </select>
+          <select className="input-field" value={workItem.employee_id} onChange={(e) => setWorkItem({ ...workItem, employee_id: e.target.value })}>
+            <option value="">Employee</option>
+            {assignableEmployees.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <input className="input-field" placeholder="GitHub repo (owner/repo)" value={workItem.github_repo} onChange={(e) => setWorkItem({ ...workItem, github_repo: e.target.value })} />
+          <input className="input-field" placeholder="Development branch" value={workItem.development_branch} onChange={(e) => setWorkItem({ ...workItem, development_branch: e.target.value })} />
+          <button disabled={busy} className="btn-primary" onClick={() => run(async () => {
+            await api.createWorkItem({
+              ...workItem,
+              github_issue_number: workItem.github_issue_number ? Number(workItem.github_issue_number) : null,
+              github_pr_number: workItem.github_pr_number ? Number(workItem.github_pr_number) : null,
+            });
+            setWorkItem({ project_id: "", title: "", description: "", subsystem_id: "", employee_id: "", github_repo: "", github_issue_number: "", github_pr_number: "", development_branch: "" });
+          })}>Assign Work Item</button>
+        </section>
+      </div>
+
+      <section className="panel p-4">
+        <div className="flex items-center gap-2 font-semibold text-white"><CheckCircle2 className="w-4 h-4" /> Work Items</div>
+        <div className="mt-3 space-y-2">
+          {org.work_items.map((item) => (
+            <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-ink-800 bg-ink-950 p-3">
+              <div>
+                <div className="text-white">{item.title}</div>
+                <div className="text-[11px] text-muted">{item.department_id} / {item.team_id} / {item.subsystem_id}</div>
+                <div className="text-[11px] text-muted-dim">
+                  {item.github_repo || "No GitHub reference"}
+                  {item.github_pr_number ? " PR #" + item.github_pr_number : ""}
+                </div>
+              </div>
+              <select className="input-field w-40" value={item.status} onChange={(e) => run(() => api.updateWorkItemStatus(item.id, e.target.value))}>
+                {["assigned", "in_progress", "review", "evaluating", "blocked", "released"].map((status) => <option key={status} value={status}>{status}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
   );
 }

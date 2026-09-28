@@ -55,79 +55,73 @@ class SubsystemOwnership:
     responsibility: str
 
 
-DEPARTMENTS = tuple(Department)
+DEPARTMENTS: tuple[Department, ...] = tuple(Department)
 
-TEAMS = tuple(
-    TeamDefinition(department, team, team.value.replace("_", " ").title())
-    for department, team in (
-        (Department.COGNITIVE_SYSTEMS, Team.REASONING_ORCHESTRATION),
-        (Department.COGNITIVE_SYSTEMS, Team.MODEL_MEMORY),
-        (Department.COGNITIVE_SYSTEMS, Team.IDENTITY_EVOLUTION),
-        (Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL),
-        (Department.COMPUTER_INTERACTION, Team.BROWSER_WEB),
-        (Department.COMPUTER_INTERACTION, Team.PERCEPTION_MOTOR),
-        (Department.PLATFORM_SYSTEMS, Team.API_SERVICES),
-        (Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME),
-        (Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE),
-        (Department.SECURITY_SAFETY, Team.TRUST_SAFETY),
-        (Department.SECURITY_SAFETY, Team.SANDBOX_ISOLATION),
-        (Department.SECURITY_SAFETY, Team.IDENTITY_ACCESS),
-        (Department.EVALUATION_RELIABILITY, Team.VERIFICATION_BENCHMARKS),
-        (Department.EVALUATION_RELIABILITY, Team.RELIABILITY_OBSERVABILITY),
-        (Department.EVALUATION_RELIABILITY, Team.EVIDENCE_RELEASE),
-        (Department.EXPERIENCE_INTERFACE, Team.PRODUCT_UI),
-        (Department.EXPERIENCE_INTERFACE, Team.MISSION_OPERATOR_UX),
-        (Department.RESEARCH_EVOLUTION, Team.AGENT_RESEARCH),
-        (Department.RESEARCH_EVOLUTION, Team.METHODS_EXPERIMENTS),
-    )
+TEAMS: tuple[TeamDefinition, ...] = (
+    TeamDefinition(Department.COGNITIVE_SYSTEMS, Team.REASONING_ORCHESTRATION, "Reasoning, planning, orchestration and agent runtime."),
+    TeamDefinition(Department.COGNITIVE_SYSTEMS, Team.MODEL_MEMORY, "LLM routing, model interfaces, memory and knowledge."),
+    TeamDefinition(Department.COGNITIVE_SYSTEMS, Team.IDENTITY_EVOLUTION, "Being identity, persistent mind, curiosity and controlled evolution."),
+    TeamDefinition(Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, "Desktop/workstation control and computer-use execution."),
+    TeamDefinition(Department.COMPUTER_INTERACTION, Team.BROWSER_WEB, "Browser sessions and web interaction."),
+    TeamDefinition(Department.COMPUTER_INTERACTION, Team.PERCEPTION_MOTOR, "Visual grounding, world state and human-grade motor interaction."),
+    TeamDefinition(Department.PLATFORM_SYSTEMS, Team.API_SERVICES, "FastAPI routes, service contracts and backend wiring."),
+    TeamDefinition(Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, "Execution, kernel, queues and runtime tooling."),
+    TeamDefinition(Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, "Database, integrations, configuration and logging."),
+    TeamDefinition(Department.SECURITY_SAFETY, Team.TRUST_SAFETY, "Action policy, network controls, secrets and security invariants."),
+    TeamDefinition(Department.SECURITY_SAFETY, Team.SANDBOX_ISOLATION, "Workspace isolation and sandbox execution containment."),
+    TeamDefinition(Department.SECURITY_SAFETY, Team.IDENTITY_ACCESS, "Authentication, authorization and tenant access boundaries."),
+    TeamDefinition(Department.EVALUATION_RELIABILITY, Team.VERIFICATION_BENCHMARKS, "Tests, benchmarks, replay and falsification."),
+    TeamDefinition(Department.EVALUATION_RELIABILITY, Team.RELIABILITY_OBSERVABILITY, "Health, telemetry, metrics and runtime reliability."),
+    TeamDefinition(Department.EVALUATION_RELIABILITY, Team.EVIDENCE_RELEASE, "Evidence custody and release-gate evidence."),
+    TeamDefinition(Department.EXPERIENCE_INTERFACE, Team.PRODUCT_UI, "Dashboard pages, components and operator-facing interfaces."),
+    TeamDefinition(Department.EXPERIENCE_INTERFACE, Team.MISSION_OPERATOR_UX, "Mission, workstation and intervention UX contracts."),
+    TeamDefinition(Department.RESEARCH_EVOLUTION, Team.AGENT_RESEARCH, "Experimental agent architectures and research prototypes."),
+    TeamDefinition(Department.RESEARCH_EVOLUTION, Team.METHODS_EXPERIMENTS, "Methods, experiments and reproducibility."),
 )
 
 
-def _owner(subsystem: str, department: Department, team: Team, path: str, responsibility: str):
-    return SubsystemOwnership(subsystem, department, team, (path,), responsibility)
-
-
-SUBSYSTEM_OWNERSHIP = (
-    _owner("brain", Department.COGNITIVE_SYSTEMS, Team.REASONING_ORCHESTRATION, "sonic-core/sonic/brain", "Cognition and reasoning."),
-    _owner("agents", Department.COGNITIVE_SYSTEMS, Team.REASONING_ORCHESTRATION, "sonic-core/sonic/agents", "Agent implementations and orchestration."),
-    _owner("llm", Department.COGNITIVE_SYSTEMS, Team.MODEL_MEMORY, "sonic-core/sonic/llm", "Model routing and inference."),
-    _owner("memory", Department.COGNITIVE_SYSTEMS, Team.MODEL_MEMORY, "sonic-core/sonic/memory", "Persistent memory and knowledge."),
-    _owner("being", Department.COGNITIVE_SYSTEMS, Team.IDENTITY_EVOLUTION, "sonic-core/sonic/being", "Being identity and durable self."),
-    _owner("evolution", Department.COGNITIVE_SYSTEMS, Team.IDENTITY_EVOLUTION, "sonic-core/sonic/evolution", "Controlled self-improvement."),
-    _owner("swarm", Department.COGNITIVE_SYSTEMS, Team.REASONING_ORCHESTRATION, "sonic-core/sonic/swarm.py", "Multi-agent coordination."),
-    _owner("computer_use", Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, "sonic-core/sonic/computer_use", "Computer-use execution."),
-    _owner("computer", Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, "sonic-core/sonic/computer", "Workstation providers."),
-    _owner("browser", Department.COMPUTER_INTERACTION, Team.BROWSER_WEB, "sonic-core/sonic/browser", "Browser interaction."),
-    _owner("perception", Department.COMPUTER_INTERACTION, Team.PERCEPTION_MOTOR, "sonic-core/sonic/perception", "Visual perception."),
-    _owner("world", Department.COMPUTER_INTERACTION, Team.PERCEPTION_MOTOR, "sonic-core/sonic/world", "World state representation."),
-    _owner("api", Department.PLATFORM_SYSTEMS, Team.API_SERVICES, "sonic-core/sonic/api", "HTTP API and service composition."),
-    _owner("execution", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, "sonic-core/sonic/execution", "Execution-plane control."),
-    _owner("kernel", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, "sonic-core/sonic/kernel", "Native kernel boundary."),
-    _owner("queue", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, "sonic-core/sonic/queue", "Background work queues."),
-    _owner("tools", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, "sonic-core/sonic/tools", "Tool adapters."),
-    _owner("integrations", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, "sonic-core/sonic/integrations", "External integrations."),
-    _owner("db", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, "sonic-core/sonic/db", "Database persistence."),
-    _owner("config", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, "sonic-core/sonic/config.py", "Runtime configuration."),
-    _owner("logger", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, "sonic-core/sonic/logger.py", "Structured logging."),
-    _owner("auth", Department.SECURITY_SAFETY, Team.IDENTITY_ACCESS, "sonic-core/sonic/auth", "Authentication and tenant access."),
-    _owner("safety", Department.SECURITY_SAFETY, Team.TRUST_SAFETY, "sonic-core/sonic/safety", "Fail-closed safety controls."),
-    _owner("sandbox", Department.SECURITY_SAFETY, Team.SANDBOX_ISOLATION, "sonic-core/sonic/sandbox", "Sandbox containment."),
-    _owner("net", Department.SECURITY_SAFETY, Team.TRUST_SAFETY, "sonic-core/sonic/net", "Network boundary and egress."),
-    _owner("evidence", Department.EVALUATION_RELIABILITY, Team.EVIDENCE_RELEASE, "sonic-core/sonic/evidence", "Evidence custody."),
-    _owner("health", Department.EVALUATION_RELIABILITY, Team.RELIABILITY_OBSERVABILITY, "sonic-core/sonic/health.py", "Operational health."),
-    _owner("observability", Department.EVALUATION_RELIABILITY, Team.RELIABILITY_OBSERVABILITY, "sonic-core/sonic/observability", "Runtime diagnostics."),
-    _owner("mission_engine", Department.EVALUATION_RELIABILITY, Team.VERIFICATION_BENCHMARKS, "sonic-core/sonic/mission_engine", "Mission evaluation."),
-    _owner("research", Department.RESEARCH_EVOLUTION, Team.AGENT_RESEARCH, "sonic-core/sonic/research", "Research workflows."),
-    _owner("researcher", Department.RESEARCH_EVOLUTION, Team.AGENT_RESEARCH, "sonic-core/sonic/researcher", "Research workers."),
-    _owner("meta", Department.RESEARCH_EVOLUTION, Team.METHODS_EXPERIMENTS, "sonic-core/sonic/meta", "Controlled experiments."),
-    _owner("orchestration", Department.RESEARCH_EVOLUTION, Team.METHODS_EXPERIMENTS, "sonic-core/sonic/orchestration", "Cross-cutting orchestration research."),
-    _owner("dashboard", Department.EXPERIENCE_INTERFACE, Team.PRODUCT_UI, "sonic-dashboard", "Operator dashboard."),
-    _owner("cli", Department.PLATFORM_SYSTEMS, Team.API_SERVICES, "sonic-cli", "CLI operator interface."),
+SUBSYSTEM_OWNERSHIP: tuple[SubsystemOwnership, ...] = (
+    SubsystemOwnership("brain", Department.COGNITIVE_SYSTEMS, Team.REASONING_ORCHESTRATION, ("sonic-core/sonic/brain",), "Cognition and reasoning."),
+    SubsystemOwnership("agents", Department.COGNITIVE_SYSTEMS, Team.REASONING_ORCHESTRATION, ("sonic-core/sonic/agents",), "Agent implementations and orchestration specialists."),
+    SubsystemOwnership("llm", Department.COGNITIVE_SYSTEMS, Team.MODEL_MEMORY, ("sonic-core/sonic/llm",), "Model clients, routing and inference contracts."),
+    SubsystemOwnership("memory", Department.COGNITIVE_SYSTEMS, Team.MODEL_MEMORY, ("sonic-core/sonic/memory",), "Persistent graph, vector and cognitive memory."),
+    SubsystemOwnership("being", Department.COGNITIVE_SYSTEMS, Team.IDENTITY_EVOLUTION, ("sonic-core/sonic/being",), "Persistent Being identity, mind, craft and vault."),
+    SubsystemOwnership("evolution", Department.COGNITIVE_SYSTEMS, Team.IDENTITY_EVOLUTION, ("sonic-core/sonic/evolution",), "Curiosity, adaptation and controlled evolution."),
+    SubsystemOwnership("swarm", Department.COGNITIVE_SYSTEMS, Team.REASONING_ORCHESTRATION, ("sonic-core/sonic/swarm.py",), "Higher-order multi-agent coordination."),
+    SubsystemOwnership("computer_use", Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, ("sonic-core/sonic/computer_use",), "Computer-use agents and execution contracts."),
+    SubsystemOwnership("computer", Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, ("sonic-core/sonic/computer",), "Workstation providers and desktop control."),
+    SubsystemOwnership("browser", Department.COMPUTER_INTERACTION, Team.BROWSER_WEB, ("sonic-core/sonic/browser",), "Browser sessions and web interaction."),
+    SubsystemOwnership("perception", Department.COMPUTER_INTERACTION, Team.PERCEPTION_MOTOR, ("sonic-core/sonic/perception",), "Visual grounding and perception."),
+    SubsystemOwnership("world", Department.COMPUTER_INTERACTION, Team.PERCEPTION_MOTOR, ("sonic-core/sonic/world",), "World/workstation state representation."),
+    SubsystemOwnership("api", Department.PLATFORM_SYSTEMS, Team.API_SERVICES, ("sonic-core/sonic/api",), "HTTP API and service composition."),
+    SubsystemOwnership("execution", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, ("sonic-core/sonic/execution",), "Execution-plane contracts and process control."),
+    SubsystemOwnership("kernel", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, ("sonic-core/sonic/kernel",), "Native/system kernel boundary."),
+    SubsystemOwnership("queue", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, ("sonic-core/sonic/queue",), "Background work and queue consumers."),
+    SubsystemOwnership("tools", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, ("sonic-core/sonic/tools",), "Tool registry and execution adapters."),
+    SubsystemOwnership("integrations", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, ("sonic-core/sonic/integrations",), "External integration contracts."),
+    SubsystemOwnership("db", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, ("sonic-core/sonic/db",), "Relational persistence and database sessions."),
+    SubsystemOwnership("config", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, ("sonic-core/sonic/config.py",), "Runtime configuration."),
+    SubsystemOwnership("logger", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, ("sonic-core/sonic/logger.py",), "Structured logging primitives."),
+    SubsystemOwnership("auth", Department.SECURITY_SAFETY, Team.IDENTITY_ACCESS, ("sonic-core/sonic/auth",), "Authentication, authorization and tenant access."),
+    SubsystemOwnership("safety", Department.SECURITY_SAFETY, Team.TRUST_SAFETY, ("sonic-core/sonic/safety",), "Action policy, scope and immutable safety controls."),
+    SubsystemOwnership("sandbox", Department.SECURITY_SAFETY, Team.SANDBOX_ISOLATION, ("sonic-core/sonic/sandbox",), "Workspace isolation and sandbox safety."),
+    SubsystemOwnership("net", Department.SECURITY_SAFETY, Team.TRUST_SAFETY, ("sonic-core/sonic/net",), "Network boundary and egress policy."),
+    SubsystemOwnership("evidence", Department.EVALUATION_RELIABILITY, Team.EVIDENCE_RELEASE, ("sonic-core/sonic/evidence",), "Evidence custody and verifiable artifacts."),
+    SubsystemOwnership("health", Department.EVALUATION_RELIABILITY, Team.RELIABILITY_OBSERVABILITY, ("sonic-core/sonic/health.py",), "Health state and operational readiness."),
+    SubsystemOwnership("observability", Department.EVALUATION_RELIABILITY, Team.RELIABILITY_OBSERVABILITY, ("sonic-core/sonic/observability",), "Metrics and runtime diagnostics."),
+    SubsystemOwnership("mission_engine", Department.EVALUATION_RELIABILITY, Team.VERIFICATION_BENCHMARKS, ("sonic-core/sonic/mission_engine",), "Mission evaluation and benchmarks."),
+    SubsystemOwnership("research", Department.RESEARCH_EVOLUTION, Team.AGENT_RESEARCH, ("sonic-core/sonic/research",), "Research workflows and experimental inquiry."),
+    SubsystemOwnership("researcher", Department.RESEARCH_EVOLUTION, Team.AGENT_RESEARCH, ("sonic-core/sonic/researcher",), "Research-oriented autonomous workers."),
+    SubsystemOwnership("meta", Department.RESEARCH_EVOLUTION, Team.METHODS_EXPERIMENTS, ("sonic-core/sonic/meta",), "Experiments and controlled self-modification methods."),
+    SubsystemOwnership("orchestration", Department.RESEARCH_EVOLUTION, Team.METHODS_EXPERIMENTS, ("sonic-core/sonic/orchestration",), "Cross-cutting orchestration research."),
+    SubsystemOwnership("dashboard", Department.EXPERIENCE_INTERFACE, Team.PRODUCT_UI, ("sonic-dashboard",), "Operator dashboard and visual interfaces."),
+    SubsystemOwnership("cli", Department.PLATFORM_SYSTEMS, Team.API_SERVICES, ("sonic-cli",), "Command-line operator interface."),
+    SubsystemOwnership("organization", Department.PLATFORM_SYSTEMS, Team.API_SERVICES, ("sonic-core/sonic/organization",), "Tenant-scoped employee, project and work-item control plane."),
 )
 
 
 def _norm(path: str) -> str:
-    value = str(path).replace("\\", "/").lstrip("./")
+    value = str(path).replace("\\\\", "/").replace("\\", "/").lstrip("./")
     while "//" in value:
         value = value.replace("//", "/")
     return value
@@ -135,19 +129,19 @@ def _norm(path: str) -> str:
 
 def ownership_for_path(path: str) -> SubsystemOwnership:
     normalized = _norm(path)
-    matches = [
-        item
-        for item in SUBSYSTEM_OWNERSHIP
-        if any(
-            normalized == prefix
-            or PurePosixPath(prefix) in PurePosixPath(normalized).parents
-            for prefix in item.path_prefixes
-        )
-    ]
+    matches: list[SubsystemOwnership] = []
+    for item in SUBSYSTEM_OWNERSHIP:
+        for prefix in item.path_prefixes:
+            p = PurePosixPath(prefix)
+            n = PurePosixPath(normalized)
+            if normalized == prefix or p in n.parents:
+                matches.append(item)
+                break
     if not matches:
         raise KeyError(f"No SONIC department owns repository path: {path}")
     if len(matches) != 1:
-        raise RuntimeError(f"Ambiguous SONIC ownership for {path}")
+        names = ", ".join(item.subsystem for item in matches)
+        raise RuntimeError(f"Ambiguous SONIC ownership for {path}: {names}")
     return matches[0]
 
 
