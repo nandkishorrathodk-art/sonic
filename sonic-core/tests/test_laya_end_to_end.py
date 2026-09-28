@@ -461,7 +461,7 @@ def test_laptop_ram_protection_check():
     # Graceful fallback on unexpected system query error
     with patch.dict("sys.modules", {"psutil": None, "ctypes": None}):
         with patch("builtins.open", side_effect=FileNotFoundError):
-            assert _has_sufficient_ram_gb(1.5) is True
+            assert _has_sufficient_ram_gb(1.5) is False
 
 
 @pytest.mark.no_live_infra
