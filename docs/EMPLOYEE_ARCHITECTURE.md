@@ -319,3 +319,30 @@ Time alone is not a promotion criterion.
 SONIC is an autonomous system. Therefore organizational quality must mirror system quality:
 
 **clear ownership, independent verification, observable evidence, controlled execution, and no success-by-decree.**
+
+
+## Software architecture ownership contract
+
+The organizational model is also a code-ownership model. The canonical registry lives in `sonic-core/sonic/organization/architecture.py` and assigns every declared SONIC subsystem to exactly one department and one team.
+
+| Department | Teams | Primary subsystems |
+|---|---|---|
+| Cognitive Systems | Reasoning & Orchestration; Model & Memory; Identity & Evolution | brain, agents, llm, memory, being, evolution, swarm |
+| Computer & Interaction | Desktop Control; Browser & Web; Perception & Motor | computer_use, computer, browser, perception, world |
+| Platform & Systems | API & Services; Systems Runtime; Data & Infrastructure | api, execution, kernel, queue, tools, integrations, db, config, logger, cli |
+| Security & Safety | Trust & Safety; Sandbox & Isolation; Identity & Access | auth, safety, sandbox, net |
+| Evaluation & Reliability | Verification & Benchmarks; Reliability & Observability; Evidence & Release | evidence, health, observability, mission_engine |
+| Experience & Interface | Product UI; Mission & Operator UX | dashboard |
+| Research & Evolution Lab | Agent Research; Methods & Experiments | research, researcher, meta, orchestration |
+
+Ownership is resolved from repository paths with no implicit default department. An unowned path must fail validation instead of silently receiving an owner. A cross-functional project may involve multiple departments, but each repository subsystem retains one authoritative technical owner.
+
+### Employee assignment rule
+
+An AI employee profile must resolve to:
+
+```
+Department -> Team -> Subsystem -> Repository path scope
+```
+
+Projects and work items may span departments, but implementation ownership must point to a declared subsystem. This prevents an employee from being assigned a vague responsibility such as "work on SONIC" and makes GitHub issues, branches, reviews and release evidence traceable to an architectural owner.
