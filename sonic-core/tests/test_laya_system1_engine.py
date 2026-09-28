@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from sonic.computer_use.models_boss import SubMission
+from sonic.llm import laya_engine
 from sonic.llm.laya_engine import (
     LayaSystem1Engine,
     _detect_script_and_model,
@@ -87,3 +88,63 @@ def test_laya_curiosity_affect_and_ram_guard():
     assert 0.0 <= res["worth_learning_prob"] <= 1.0
     assert isinstance(_has_sufficient_ram_gb(0.1), bool)
 
+
+@pytest.mark.no_live_infra
+def test_laya_verification_requires_positive_non_negated_evidence():
+    engine = LayaSystem1Engine(enable_local_model=False)
+
+    assert engine.verify_execution_receipt("Complete the task", "done") < 0.30
+    assert engine.verify_execution_receipt(
+        "Run tests", "Tests did not pass; no test output"
+    ) < 0.30
+    assert engine.verify_execution_receipt(
+        "Run tests", "Tests passed: 5 passed, 0 failed"
+    ) >= 0.65
+    assert engine.verify_execution_receipt(
+        "Run tests", "Tests passed, but 1 failed"
+    ) < 0.30
+
+
+@pytest.mark.no_live_infra
+def test_laya_guard_respects_negated_destructive_actions():
+    engine = LayaSystem1Engine(enable_local_model=False)
+    result = engine.predict_preset("Do not delete or destroy any files", preset="guard")
+
+    assert result.get_noul("is_dangerous") < 0.30
+    assert result.get_choice("risk_tier") == "l0"
+
+
+@pytest.mark.no_live_infra
+def test_laya_ram_probe_fails_closed_when_measurement_is_unavailable(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        laya_engine,
+        "os",
+        SimpleNamespace(name="unsupported", path=SimpleNamespace(exists=lambda _path: False)),
+    )
+
+    assert _has_sufficient_ram_gb(1.5) is False
+
+
+@pytest.mark.no_live_infra
+def test_laya_status_reports_last_successful_backend(monkeypatch):
+    engine = LayaSystem1Engine(enable_local_model=True)
+    monkeypatch.setattr(laya_engine, "_has_sufficient_ram_gb", lambda _minimum: True)
+
+    status_before_prediction = engine.status()
+    assert status_before_prediction["backend"] == "laya_vector_projection"
+    assert status_before_prediction["configured_backend"] == "laya_local"
+
+    class _LocalRouter:
+        def predict(self, *_args, **_kwargs):
+            return {"answers": {"score": {"score": 0.7}}, "routing": {}}
+
+    engine._local_router = _LocalRouter()
+    result = engine.predict(
+        state="measured state",
+        questions={"score": {"type": "score", "criteria": ["low", "high"]}},
+    )
+
+    assert result.routing["backend"] == "laya_local"
+    assert engine.status()["backend"] == "laya_local"
