@@ -298,6 +298,50 @@ def test_life_loop_starts_and_stops_cleanly():
     assert loop.cycles_completed >= 1
 
 
+def test_operator_pause_waits_for_in_progress_idle_cycle():
+    comp = _StubComputer()
+    being = get_or_create_being("operator-pause@example.com")
+    cycle_started = asyncio.Event()
+    finish_cycle = asyncio.Event()
+    calls = []
+
+    class _BlockingAgent:
+        safety = object()
+
+        async def idle_cycle(self, workspace_id, curiosity):
+            calls.append(workspace_id)
+            cycle_started.set()
+            await finish_cycle.wait()
+            return None
+
+    loop = BeingLifeLoop(
+        being,
+        _BlockingAgent(),
+        object(),
+        comp.workspace_id,
+        tick_interval=0,
+    )
+
+    async def scenario():
+        task = loop.start()
+        await cycle_started.wait()
+        loop.pause_for_operator()
+        quiescence = asyncio.create_task(loop.wait_for_tick_completion())
+        await asyncio.sleep(0)
+        assert not quiescence.done()
+
+        finish_cycle.set()
+        await quiescence
+        await asyncio.sleep(0.02)
+        assert calls == [comp.workspace_id]
+
+        loop.resume_after_operator()
+        await loop.stop(timeout=2.0)
+        assert task.done() or task.cancelled()
+
+    _run(scenario())
+
+
 def test_life_loop_survives_failed_tick():
     """A tick that raises must not kill the loop."""
     comp = _StubComputer()
