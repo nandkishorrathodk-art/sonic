@@ -228,8 +228,8 @@ class OrganizationStore:
                 raise ValueError("Work item not found in tenant")
             if normalized == "released":
                 await self._assert_release_receipts(session, item)
-            item.status = normalized
-            item.updated_at = self._now()
+            setattr(item, "status", normalized)
+            setattr(item, "updated_at", self._now())
             await session.commit()
             return self._work_item_dict(item)
 

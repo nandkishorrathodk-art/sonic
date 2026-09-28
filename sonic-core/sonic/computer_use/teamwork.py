@@ -136,10 +136,10 @@ class SubagentConversation:
     type_name: str
     role: str
     workspace_mode: str
-    employee_id: str | None = None
-    employee_context: dict[str, Any] = field(default_factory=dict)
     parent_workspace_id: str
     effective_workspace_id: str
+    employee_id: str | None = None
+    employee_context: dict[str, Any] = field(default_factory=dict)
     isolated_dir: Path | None = None
     git_branch: str | None = None
     state: str = "running"  # "running" | "verifying" | "idle" | "completed" | "errored" | "canceled"
@@ -247,8 +247,8 @@ class SubagentTeamworkManager:
                         verification_command=str(raw.get("verification_command") or ""),
                         workspace_mode=str(raw.get("workspace_mode") or raw.get("Workspace") or "branch").lower().strip(),
                         model_tier=str(raw.get("model_tier") or raw.get("Model") or "inherit").lower().strip(),
-                        max_steps=int(raw.get("max_steps") or 12),
-                        max_correction_rounds=int(raw.get("max_correction_rounds") if raw.get("max_correction_rounds") is not None else 2),
+                        max_steps=int(str(raw.get("max_steps") or 12)),
+                        max_correction_rounds=int(str(raw.get("max_correction_rounds") if raw.get("max_correction_rounds") is not None else 2)),
                         employee_id=str(raw.get("employee_id") or "").strip() or None,
                     )
                 )
