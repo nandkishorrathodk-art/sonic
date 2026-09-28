@@ -14,6 +14,7 @@ This directory contains the master architectural blueprints, core system invaria
 | **Master Blueprint** | [`BLUEPRINT.md`](BLUEPRINT.md) | High-level system design, terminology glossary, and subsystem interactions. |
 | **AI Agent Guide** | [`AI_AGENT_GUIDE.md`](AI_AGENT_GUIDE.md) | Onboarding guide, 60-second mental model, and orientation for autonomous agents. |
 | **Core Invariants & Rules** | [`RULES.md`](RULES.md) | Mandatory invariants (*Aisa Karna Mana Hai*), anti-puppet rules, and prohibitions. |
+| **Product Requirements** | [`PRD.md`](PRD.md) | Product identity, capability goals, non-functional requirements, and release acceptance criteria. |
 | **Engineering Operating Model** | [`SONIC_ENGINEERING_OPERATING_MODEL.md`](SONIC_ENGINEERING_OPERATING_MODEL.md) | Department ownership, scoped AI contributors, audit workflow, Git strategy, and release gates. |
 | **Proprietary License** | [`LICENSE`](LICENSE) | Official proprietary terms of use, reservation of rights, and copyright notice. |
 
