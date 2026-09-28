@@ -6,6 +6,7 @@ import os
 import base64
 import shutil
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
 from sonic.computer.daytona_computer import DaytonaComputerProvider
@@ -159,6 +160,56 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
     assert "https://target.local" in spawn3
     # Mock returns exit 0 for probe so flags are injected
     assert "--no-sandbox" in spawn3
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_drag_uses_smooth_cursor_helper():
+    provider = DockerComputerProvider()
+    provider._nsi_request = AsyncMock(return_value=None)
+    provider._docker_exec = AsyncMock(return_value=(0, "", ""))
+    provider.screenshot = AsyncMock()
+
+    await provider.gui_action(
+        "ws-1",
+        GUIAction(action=GUIActionType.DRAG, x=10, y=20, x2=300, y2=400),
+    )
+
+    command = provider._docker_exec.await_args.args[0]
+    assert "sonic_cursor.py drag 10 20 300 400" in command
+    assert "xdotool mousemove --sync" not in command
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_daytona_smooth_cursor_interpolates_and_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONIC_WORKSTATION_STATE_PATH", str(tmp_path / "workstations.json"))
+    provider = DaytonaComputerProvider(api_key="")
+    commands = []
+
+    class Process:
+        async def exec(self, command):
+            commands.append(command)
+            if "getmouselocation" in command:
+                return SimpleNamespace(exit_code=0, result="X=0\nY=0\nSCREEN=0\nWINDOW=1\n")
+            return SimpleNamespace(exit_code=0, result="")
+
+    sandbox = SimpleNamespace(process=Process())
+    await provider._move_mouse_smoothly(sandbox, "ws-1", 100, 200)
+
+    moves = [cmd for cmd in commands if "xdotool mousemove" in cmd]
+    assert len(moves) == 25
+    assert moves[0] != moves[-1]
+    assert moves[-1].endswith("mousemove 100 200")
+
+    class UnavailableProcess:
+        async def exec(self, command):
+            return SimpleNamespace(exit_code=126, result="")
+
+    with pytest.raises(RuntimeError, match="Unable to read cursor position"):
+        await provider._move_mouse_smoothly(
+            SimpleNamespace(process=UnavailableProcess()), "ws-1", 100, 200
+        )
 
 
 @pytest.mark.no_live_infra

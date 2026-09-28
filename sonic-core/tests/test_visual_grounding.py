@@ -2,6 +2,8 @@
 Tests for visual grounding engine (adapted from open-computer-use).
 """
 
+import pytest
+
 from sonic.computer_use.grounding import extract_bbox_midpoint, draw_action_marker
 
 
@@ -55,6 +57,39 @@ def test_resolve_ui_target_grounding_fn():
     assert pt == (640, 400)
 
 
+def test_resolve_ui_target_applies_coordinate_space_to_callback_tuple():
+    from sonic.computer_use.grounding import resolve_ui_target
+
+    dummy_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    pt = resolve_ui_target(
+        "visible application control",
+        screenshot_b64=dummy_b64,
+        width=1280,
+        height=800,
+        grounding_fn=lambda *_: (500, 400),
+        coordinate_space="normalized_1000",
+    )
+
+    assert pt == (640, 320)
+
+
+@pytest.mark.asyncio
+async def test_resolve_ui_target_async_applies_coordinate_space_to_callback_tuple():
+    from sonic.computer_use.grounding import resolve_ui_target_async
+
+    dummy_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    pt = await resolve_ui_target_async(
+        "visible application control",
+        screenshot_b64=dummy_b64,
+        width=1280,
+        height=800,
+        grounding_fn=lambda *_: (500, 400),
+        coordinate_space="normalized_1000",
+    )
+
+    assert pt == (640, 320)
+
+
 def test_draw_action_marker_styles():
     dummy_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
     m_click = draw_action_marker(dummy_b64, (20, 20), label="CLICK")
@@ -64,7 +99,6 @@ def test_draw_action_marker_styles():
     assert len(m_click) > 0
 
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ComputerActionType
@@ -136,3 +170,62 @@ async def test_agent_gui_right_click_dispatch():
     assert gui_call.x == 48
     assert gui_call.y == 12
 
+
+@pytest.mark.asyncio
+async def test_browser_fallback_does_not_type_when_desktop_target_is_unresolved(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    import sonic.computer_use.agent as agent_module
+
+    computer = MagicMock()
+    computer.gui_action = AsyncMock(return_value=ScreenObservation(width=1280, height=800))
+    agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
+    agent._last_screenshot_b64 = "visible-screen"
+    monkeypatch.setattr(agent_module, "query_multimodal_grounding", AsyncMock(return_value=None))
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.BROWSER_TYPE,
+        "search field",
+        {"selector": "search field", "text": "hello"},
+        "type into the visible search field",
+    )
+
+    assert trace.status == "FAILED"
+    computer.gui_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_browser_fallback_selects_grounded_visible_option(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    import sonic.computer_use.agent as agent_module
+
+    computer = MagicMock()
+    computer.gui_action = AsyncMock(
+        side_effect=[
+            ScreenObservation(screenshot_base64="updated-menu", width=1280, height=800),
+            ScreenObservation(screenshot_base64="selected-menu", width=1280, height=800),
+        ]
+    )
+    agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
+    agent._last_screenshot_b64 = "initial-screen"
+    grounding = AsyncMock(side_effect=[(300, 200), (500, 400)])
+    monkeypatch.setattr(agent_module, "query_multimodal_grounding", grounding)
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.BROWSER_SELECT,
+        "country selector",
+        {"selector": "country selector", "value": "visible country"},
+        "select the visible option",
+    )
+
+    assert trace.status == "SUCCESS"
+    assert grounding.await_count == 2
+    assert [call.args[1].action for call in computer.gui_action.await_args_list] == [
+        GUIActionType.CLICK,
+        GUIActionType.CLICK,
+    ]
+    assert (computer.gui_action.await_args_list[0].args[1].x,
+            computer.gui_action.await_args_list[0].args[1].y) == (300, 200)
+    assert (computer.gui_action.await_args_list[1].args[1].x,
+            computer.gui_action.await_args_list[1].args[1].y) == (500, 400)

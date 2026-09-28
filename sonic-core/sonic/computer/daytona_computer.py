@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
+import re
 import shlex
 from datetime import UTC, datetime
 from pathlib import Path
@@ -793,6 +795,36 @@ class DaytonaComputerProvider(ComputerProvider):
         normalized = [key_map.get(t.lower(), t) for t in tokens]
         return "+".join(normalized) if normalized else raw_key
 
+    async def _move_mouse_smoothly(self, sandbox: Any, workspace_id: str, x: int, y: int) -> None:
+        """Move the visible pointer along an eased path using the active sandbox."""
+        display = self._get_display(workspace_id)
+        position = await sandbox.process.exec(
+            f"DISPLAY={display} xdotool getmouselocation --shell"
+        )
+        if getattr(position, "exit_code", 1) != 0:
+            raise RuntimeError("Unable to read cursor position for smooth movement")
+        output = str(getattr(position, "result", "") or "")
+        x_match = re.search(r"(?m)^X=(\d+)$", output)
+        y_match = re.search(r"(?m)^Y=(\d+)$", output)
+        if x_match is None or y_match is None:
+            raise RuntimeError("Cursor position response was incomplete")
+
+        start_x, start_y = int(x_match.group(1)), int(y_match.group(1))
+        for step in range(1, 26):
+            progress = step / 25
+            eased = 0.5 - 0.5 * math.cos(progress * math.pi)
+            next_x = round(start_x + (x - start_x) * eased)
+            next_y = round(start_y + (y - start_y) * eased)
+            if hasattr(sandbox, "computer_use"):
+                await sandbox.computer_use.mouse.move(next_x, next_y)
+            else:
+                movement = await sandbox.process.exec(
+                    f"DISPLAY={display} xdotool mousemove {next_x} {next_y}"
+                )
+                if getattr(movement, "exit_code", 1) != 0:
+                    raise RuntimeError("Cursor movement failed during smooth interpolation")
+            await asyncio.sleep(0.01)
+
     async def gui_action(
         self,
         workspace_id: str,
@@ -845,22 +877,36 @@ class DaytonaComputerProvider(ComputerProvider):
             if hasattr(sandbox, "computer_use"):
                 cu = sandbox.computer_use
                 if action_type in [GUIActionType.CLICK, GUIActionType.DOUBLE_CLICK]:
-                    await cu.mouse.click(action.x, action.y, button="left", double=(action_type == GUIActionType.DOUBLE_CLICK))
+                    await self._move_mouse_smoothly(sandbox, workspace_id, action.x, action.y)
+                    mouse_button = {1: "left", 2: "middle", 3: "right"}.get(action.button or 1)
+                    if mouse_button is None:
+                        raise ValueError(f"Unsupported mouse button: {action.button}")
+                    await cu.mouse.click(
+                        action.x,
+                        action.y,
+                        button=mouse_button,
+                        double=(action_type == GUIActionType.DOUBLE_CLICK),
+                    )
                 elif action_type == GUIActionType.RIGHT_CLICK:
+                    await self._move_mouse_smoothly(sandbox, workspace_id, action.x, action.y)
                     await cu.mouse.click(action.x, action.y, button="right")
                 elif action_type == GUIActionType.MOVE:
-                    await cu.mouse.move(action.x, action.y)
+                    await self._move_mouse_smoothly(sandbox, workspace_id, action.x, action.y)
                 elif action_type == GUIActionType.DRAG:
                     sx, sy = action.x, action.y
                     dx, dy = action.x2, action.y2
                     if sx is not None and sy is not None and dx is not None and dy is not None:
-                        await cu.mouse.move(sx, sy)
+                        await self._move_mouse_smoothly(sandbox, workspace_id, sx, sy)
                         await cu.mouse.down()
-                        await cu.mouse.move(dx, dy)
-                        await cu.mouse.up()
+                        try:
+                            await self._move_mouse_smoothly(sandbox, workspace_id, dx, dy)
+                        finally:
+                            await cu.mouse.up()
                 elif action_type == GUIActionType.TYPE and action.text:
                     if action.x is not None and action.y is not None:
-                        await cu.mouse.move(action.x, action.y)
+                        await self._move_mouse_smoothly(
+                            sandbox, workspace_id, action.x, action.y
+                        )
                         await cu.mouse.click(action.x, action.y, button="left")
                     await cu.keyboard.type(action.text)
                 elif action_type in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
@@ -869,23 +915,40 @@ class DaytonaComputerProvider(ComputerProvider):
                 # Direct X11 dispatch via xdotool on DISPLAY={disp}
                 disp = self._get_display(workspace_id)
                 if action_type in [GUIActionType.CLICK, GUIActionType.DOUBLE_CLICK]:
+                    await self._move_mouse_smoothly(sandbox, workspace_id, action.x, action.y)
                     repeat = " --repeat 2" if action_type == GUIActionType.DOUBLE_CLICK else ""
-                    await sandbox.process.exec(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} click{repeat} 1")
+                    clicked = await sandbox.process.exec(f"DISPLAY={disp} xdotool click{repeat} 1")
+                    if getattr(clicked, "exit_code", 1) != 0:
+                        raise RuntimeError("Mouse click failed after smooth movement")
                 elif action_type == GUIActionType.RIGHT_CLICK:
-                    await sandbox.process.exec(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y} click 3")
+                    await self._move_mouse_smoothly(sandbox, workspace_id, action.x, action.y)
+                    clicked = await sandbox.process.exec(f"DISPLAY={disp} xdotool click 3")
+                    if getattr(clicked, "exit_code", 1) != 0:
+                        raise RuntimeError("Right-click failed after smooth movement")
                 elif action_type == GUIActionType.MOVE:
-                    await sandbox.process.exec(f"DISPLAY={disp} xdotool mousemove {action.x} {action.y}")
+                    await self._move_mouse_smoothly(sandbox, workspace_id, action.x, action.y)
                 elif action_type == GUIActionType.DRAG:
                     sx, sy, dx, dy = action.x, action.y, action.x2, action.y2
                     if sx is not None and sy is not None and dx is not None and dy is not None:
-                        await sandbox.process.exec(f"DISPLAY={disp} xdotool mousemove {sx} {sy} mousedown 1 mousemove {dx} {dy} mouseup 1")
+                        await self._move_mouse_smoothly(sandbox, workspace_id, sx, sy)
+                        pressed = await sandbox.process.exec(f"DISPLAY={disp} xdotool mousedown 1")
+                        if getattr(pressed, "exit_code", 1) != 0:
+                            raise RuntimeError("Mouse press failed before drag")
+                        try:
+                            await self._move_mouse_smoothly(sandbox, workspace_id, dx, dy)
+                        finally:
+                            released = await sandbox.process.exec(f"DISPLAY={disp} xdotool mouseup 1")
+                            if getattr(released, "exit_code", 1) != 0:
+                                raise RuntimeError("Mouse release failed after drag")
                 elif action_type == GUIActionType.TYPE and action.text:
                     safe_text = shlex.quote(action.text)
                     focus = ""
                     if action.x is not None and action.y is not None:
                         focus = (
-                            f"DISPLAY={disp} xdotool mousemove --sync {int(action.x)} {int(action.y)} && "
                             f"DISPLAY={disp} xdotool click 1 && "
+                        )
+                        await self._move_mouse_smoothly(
+                            sandbox, workspace_id, int(action.x), int(action.y)
                         )
                     await sandbox.process.exec(
                         f"{focus}DISPLAY={disp} xdotool type --delay {int(action.delay_ms)} "

@@ -341,7 +341,14 @@ def resolve_ui_target(
             grounding_output = _invoke_grounding_fn(grounding_fn, query, screenshot_b64, width, height)
             if grounding_output:
                 if isinstance(grounding_output, (tuple, list)) and len(grounding_output) >= 2:
-                    return int(grounding_output[0]), int(grounding_output[1])
+                    return extract_bbox_midpoint(
+                        grounding_output,
+                        width,
+                        height,
+                        screen_width=screen_width,
+                        screen_height=screen_height,
+                        coordinate_space=coordinate_space,
+                    )
                 output_space = grounding_output.get("coordinate_space") if isinstance(grounding_output, dict) else coordinate_space
                 coords = extract_bbox_midpoint(
                     grounding_output,
@@ -413,7 +420,14 @@ async def resolve_ui_target_async(
                 grounding_output = res
             if grounding_output:
                 if isinstance(grounding_output, (tuple, list)) and len(grounding_output) >= 2:
-                    return int(grounding_output[0]), int(grounding_output[1])
+                    return extract_bbox_midpoint(
+                        grounding_output,
+                        width,
+                        height,
+                        screen_width=screen_width,
+                        screen_height=screen_height,
+                        coordinate_space=coordinate_space,
+                    )
                 output_space = grounding_output.get("coordinate_space") if isinstance(grounding_output, dict) else coordinate_space
                 coords = extract_bbox_midpoint(
                     grounding_output,
@@ -590,4 +604,3 @@ def map_crop_to_screen(
 ) -> tuple[int, int]:
     """Translate coordinates detected inside a micro-crop back to absolute desktop screen coordinates."""
     return local_coords[0] + offset[0], local_coords[1] + offset[1]
-
