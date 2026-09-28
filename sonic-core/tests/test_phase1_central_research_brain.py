@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from sonic.brain.decision import DecisionAction, DecisionEngine
-from sonic.brain.experiment import Experiment, ExperimentDesigner, ExperimentResult
+from sonic.brain.experiment import ExperimentDesigner, ExperimentResult
 from sonic.brain.falsifier import EpistemicVerdict, FalsificationJudge
 from sonic.brain.hypothesis import HypothesisEngine, HypothesisStatus
 from sonic.brain.unknowns import UnknownDomain, UnknownTracker
@@ -129,6 +129,33 @@ def test_falsifier_confirms_when_behavioral_difference_and_evidence():
 
 
 @pytest.mark.no_live_infra
+def test_falsifier_does_not_classify_empty_completed_result():
+    engine = HypothesisEngine()
+    h_primary, _ = engine.create_hypothesis_pair(
+        statement="Empty provider output proves a vulnerability",
+        vulnerability_class="general",
+        target_asset="/probe",
+    )
+    judge = FalsificationJudge(hypothesis_engine=engine)
+    exp = ExperimentDesigner.design_for_hypothesis(h_primary)
+
+    evaluation = judge.evaluate(
+        exp,
+        ExperimentResult(
+            experiment_id=exp.experiment_id,
+            hypothesis_id=h_primary.hypothesis_id,
+            status="completed",
+            behavioral_difference_detected=True,
+            evidence_payload={"placeholder": True},
+        ),
+    )
+
+    assert evaluation.verdict == EpistemicVerdict.INCONCLUSIVE
+    assert evaluation.evidence_valid is False
+    assert engine.get(h_primary.hypothesis_id).confidence == 0.5
+
+
+@pytest.mark.no_live_infra
 def test_decision_engine_detects_dead_end_and_pivots():
     decision = DecisionEngine(failure_threshold_for_pivot=3)
 
@@ -169,3 +196,30 @@ def test_dynamic_world_model_state_transitions():
     assert summary["actors_count"] == 1
     assert summary["resources_count"] == 1
     assert summary["transitions_count"] == 1
+
+
+@pytest.mark.no_live_infra
+def test_world_model_rejects_transitions_with_unknown_entities():
+    model = DynamicWorldModel(target="https://app.local")
+    model.register_actor("actor")
+    model.register_resource("resource", uri="/resource")
+
+    with pytest.raises(ValueError, match="Unknown actor"):
+        model.record_transition(
+            source_state="a",
+            target_state="b",
+            action_taken="GET /resource",
+            actor_id="missing-actor",
+            resource_id="resource",
+        )
+
+    with pytest.raises(ValueError, match="Unknown resource"):
+        model.record_transition(
+            source_state="a",
+            target_state="b",
+            action_taken="GET /missing",
+            actor_id="actor",
+            resource_id="missing-resource",
+        )
+
+    assert model.transitions == []

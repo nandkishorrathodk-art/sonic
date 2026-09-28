@@ -59,7 +59,7 @@ async def test_self_coder_tenant_scoped_reports():
 
     class MockStore:
         async def run_candidate(self, tenant_id, max_cycles, coder_factory):
-            return {"candidates": [{"tenant_id": tenant_id, "status": "auto_promoted"}],
+            return {"candidates": [{"tenant_id": tenant_id, "status": "applied"}],
                     "report": f"Report for {tenant_id}"}
 
     with patch("sonic.api.routes.self_coder._candidate_store", return_value=MockStore()):
@@ -67,6 +67,7 @@ async def test_self_coder_tenant_scoped_reports():
 
     assert run_res_a["changed"] is True
     assert run_res_a["active_branch_changed"] is False
+    assert run_res_a["active_worktree_changed"] is True
     assert run_res_a["text"] == "Report for tenant_alpha"
     assert run_res_a["candidates"][0]["tenant_id"] == "tenant_alpha"
     assert "tenant_alpha" in _last_reports_by_tenant

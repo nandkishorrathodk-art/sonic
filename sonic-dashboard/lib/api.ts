@@ -421,6 +421,34 @@ export const api = {
   getAgent: (agentId: string) =>
     apiClient<any>(`/agents/${encodeURIComponent(agentId)}`),
 
+  // Persistent AI employee organization and work ownership
+  getOrganization: () =>
+    apiClient<any>("/organization/"),
+
+  createOrganizationEmployee: (payload: Record<string, unknown>) =>
+    apiClient<any>("/organization/employees", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  createOrganizationProject: (payload: Record<string, unknown>) =>
+    apiClient<any>("/organization/projects", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  createOrganizationWorkItem: (payload: Record<string, unknown>) =>
+    apiClient<any>("/organization/work-items", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateOrganizationWorkItem: (workItemId: string, payload: Record<string, unknown>) =>
+    apiClient<any>(`/organization/work-items/${encodeURIComponent(workItemId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
   // Laya System-1 Decision Engine
   getLayaStatus: () =>
     apiClient<any>("/llm/laya/status"),

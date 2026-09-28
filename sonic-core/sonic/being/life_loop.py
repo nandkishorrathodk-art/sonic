@@ -344,8 +344,14 @@ class BeingLifeLoop:
             being_id=self.being.being_id,
             cycle=self.cycles_completed,
             candidates=len(candidates),
-            verified=sum(item.get("status") == "verified" for item in candidates),
-            failed=sum(item.get("status") != "verified" for item in candidates),
+            verified=sum(
+                item.get("status") in {"verified", "applied", "approved", "auto_promoted"}
+                for item in candidates
+            ),
+            failed=sum(
+                item.get("status") not in {"verified", "applied", "approved", "auto_promoted"}
+                for item in candidates
+            ),
         )
 
     async def _run(self) -> None:

@@ -46,6 +46,32 @@ cannot widen at runtime.
 
 ---
 
+## Persistent AI Employee Organization
+
+`sonic/organization/architecture.py` is the canonical repository ownership
+manifest. It maps cognitive, computer, platform, safety, evaluation,
+experience, and research subsystems to departments and teams. The
+tenant-scoped `sonic/organization/store.py` mirrors that manifest in a
+persistent subsystem registry and validates employee ownership and work-item
+assignment against it. The dashboard organization page reads and updates this
+data through `/organization`. Role profiles are
+not human user accounts and do not claim that an agent is currently running.
+Subagent calls may include an `employee_id`; the runtime resolves that profile
+within the active tenant, uses its role prompt and ownership context, and
+derives a sealed, read-only action allowlist when the profile is read-only.
+
+Issue and pull-request URLs are references rather than an outbound GitHub
+automation feature. Configure `SONIC_GITHUB_WEBHOOK_SECRET` and a GitHub webhook
+for `pull_request`, `pull_request_review`, and `check_suite` to record signed
+review and aggregate CI receipts. Only those verified webhook events can set
+review/evaluation results or release a merged work item. This registry does not
+create GitHub issues, branches, or pull requests, or merge/push code. Ordinary
+work-item status and assignment remain operator-managed. A work item can now
+follow the enforced chain `department -> team -> subsystem -> employee ->
+project -> work item`; release still requires signed external GitHub receipts.
+
+---
+
 ## 3. The Six-Layer Architecture
 
 ```

@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from sonic.evolution.sqlite import ClosingSQLiteConnection
 from sonic.logger import get_logger
 
 logger = get_logger(__name__)
@@ -61,7 +62,9 @@ class VersionTracker:
     def _get_connection(self) -> sqlite3.Connection:
         if self.db_path != ":memory:":
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn = sqlite3.connect(
+            self.db_path, timeout=10.0, factory=ClosingSQLiteConnection
+        )
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -262,4 +265,3 @@ class VersionTracker:
         except Exception as e:
             logger.warning("evolution_git_tag_failed", tag=tag_name, error=str(e))
             return False
-

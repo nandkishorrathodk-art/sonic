@@ -1,4 +1,4 @@
-"""Periodic background runner for isolated, automatically promoted candidates."""
+"""Periodic background runner for isolated, verified in-place self-coder updates."""
 
 from __future__ import annotations
 
@@ -103,8 +103,8 @@ class SelfCoderBackgroundLoop:
             "self_coder_background_cycle_complete",
             tenant_id=self.tenant_id,
             candidates=len(self.last_candidate_statuses),
-            auto_promoted=sum(
-                item["status"] == "auto_promoted"
+            applied=sum(
+                item["status"] == "applied"
                 for item in self.last_candidate_statuses
             ),
         )

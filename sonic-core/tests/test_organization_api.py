@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 from sonic.organization.store import OrganizationStore

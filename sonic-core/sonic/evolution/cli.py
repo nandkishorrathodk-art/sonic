@@ -135,8 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     selfcoder_parser = subparsers.add_parser("selfcode", help="Inspect SONIC's own source and verify fixes (report-only by default)")
     selfcoder_parser.add_argument("--cycles", type=int, default=1, help="Maximum improvement cycles to run")
-    selfcoder_parser.add_argument("--push", action="store_true", default=False, help="Git push to origin after a successful commit")
-    selfcoder_parser.add_argument("--write", action="store_true", default=False, help="Apply + commit the verified change (default is report-only)")
+    selfcoder_parser.add_argument("--push", action="store_true", default=False, help="Deprecated; self-coder never commits or pushes")
+    selfcoder_parser.add_argument("--write", action="store_true", default=False, help="Apply verified changes in-place after isolated tests (no commit)")
 
     audit_parser = subparsers.add_parser("audit", help="Read-only full-codebase check: health, defects, failing tests")
     audit_parser.add_argument("--no-tests", action="store_true", default=False, help="Skip running the test suite")
@@ -191,6 +191,10 @@ def main() -> int:
         from sonic.evolution.codebase_auditor import CodebaseAuditor
         from sonic.evolution.codebase_report import narrate
         from sonic.evolution.self_coder import SelfCoder
+
+        if args.push:
+            print("Self-coder verified updates never commit or push.")
+            return 2
 
         # Always look at the codebase first, then propose/verify fixes.
         auditor = CodebaseAuditor(repo_root=evolver.repo_root)

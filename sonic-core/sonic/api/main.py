@@ -397,6 +397,7 @@ app.include_router(experiments.router, prefix="/experiments", tags=["Experiments
 app.include_router(terminal.router, prefix="/terminal", tags=["Terminal"])
 app.include_router(live.router, prefix="/live", tags=["Live Dashboard"])
 app.include_router(jobs.router, prefix="/jobs", tags=["Async Jobs"])
+app.include_router(organization.router, prefix="/organization", tags=["Organization"])
 app.include_router(workstation.router, tags=["Workstation"])
 app.include_router(checkpoints.router, tags=["Workstation Checkpoints"])
 app.include_router(security.router, prefix="/security", tags=["Self-Security Lab"])
