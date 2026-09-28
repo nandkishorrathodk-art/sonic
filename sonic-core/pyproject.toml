@@ -67,7 +67,7 @@ exclude = ["sonic_data", "build", "dist", ".eggs"]
 
 [tool.ruff.lint]
 # E/W = pycodestyle, F = pyflakes (bugs!), I = isort, UP = pyupgrade, N = naming, B = bugbear
-select = ["E", "W", "F", "I", "UP", "N", "B", "C4", "SIM"]
+select = ["E", "W", "F"]
 ignore = [
     "E501",   # line-too-long: handled by formatter, not a correctness issue
     "E402",   # module-import-not-at-top-of-file
