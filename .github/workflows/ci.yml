@@ -60,7 +60,7 @@ jobs:
           pip install -e "sonic-core[dev]"
 
       - name: Run mypy
-        run: python -m mypy sonic-core/sonic
+        run: python -m mypy --config-file sonic-core/pyproject.toml sonic-core/sonic
 
   test:
     name: Backend Tests
