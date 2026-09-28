@@ -116,6 +116,7 @@ SUBSYSTEM_OWNERSHIP: tuple[SubsystemOwnership, ...] = (
     SubsystemOwnership("orchestration", Department.RESEARCH_EVOLUTION, Team.METHODS_EXPERIMENTS, ("sonic-core/sonic/orchestration",), "Cross-cutting orchestration research."),
     SubsystemOwnership("dashboard", Department.EXPERIENCE_INTERFACE, Team.PRODUCT_UI, ("sonic-dashboard",), "Operator dashboard and visual interfaces."),
     SubsystemOwnership("cli", Department.PLATFORM_SYSTEMS, Team.API_SERVICES, ("sonic-cli",), "Command-line operator interface."),
+    SubsystemOwnership("organization", Department.PLATFORM_SYSTEMS, Team.API_SERVICES, ("sonic-core/sonic/organization",), "Tenant-scoped employee, project and work-item control plane."),
 )
 
 
