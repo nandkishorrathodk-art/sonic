@@ -54,10 +54,9 @@ def _agent(provider: _ObservationProvider) -> ComputerUseAgent:
     agent._last_screenshot_b64 = ""
     agent._last_action_output = {}
     agent._last_gui_action_result = {}
-    agent._last_navigated_url = ""
+    agent._last_gui_navigation_target = ""
     agent._recent_action_signatures = []
     agent.llm_router = None
-    agent.browser = None
     agent.perception_bus = PerceptionBus()
     return agent
 

@@ -176,7 +176,7 @@ class TestHackerAgentIntegration:
             MagicMock(exit_code=0, stdout="", stderr=""),         # nav_cmd
         ]
 
-        agent = ComputerUseAgent(computer_provider=provider, browser=None)
+        agent = ComputerUseAgent(computer_provider=provider)
         agent.motor.enforce_tab_budget = AsyncMock(return_value=1)
 
         trace = await agent.execute_action(

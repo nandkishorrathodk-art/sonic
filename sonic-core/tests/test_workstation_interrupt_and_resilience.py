@@ -300,11 +300,8 @@ async def test_mission_director_coordinate_end_to_end():
     assert mission_id in director.missions
 
     # Coordinate mission
-    with patch("sonic.agents.browser_agent.BrowserAgent") as MockBrowser, \
-         patch("sonic.mission_engine.director.ComputerUseAgent") as MockAgentClass, \
+    with patch("sonic.mission_engine.director.ComputerUseAgent") as MockAgentClass, \
          patch("sonic.tools.registry.get_default_registry") as MockRegistry:
-        mock_browser = AsyncMock()
-        MockBrowser.return_value = mock_browser
         mock_agent = MagicMock()
         mock_agent.run_mission = AsyncMock(return_value=[])
         MockAgentClass.return_value = mock_agent

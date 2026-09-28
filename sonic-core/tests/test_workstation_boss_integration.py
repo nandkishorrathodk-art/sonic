@@ -264,8 +264,7 @@ async def test_director_coordinates_with_boss_agent():
         findings_summary="Vulnerability resolved across 2 phases.",
     )
 
-    with patch("sonic.computer_use.boss.BossAgent.run", new=AsyncMock(return_value=mock_report)) as mock_boss_run, \
-         patch("sonic.agents.browser_agent.BrowserAgent.launch", new=AsyncMock()):
+    with patch("sonic.computer_use.boss.BossAgent.run", new=AsyncMock(return_value=mock_report)) as mock_boss_run:
         result_state = await director.coordinate(state.mission_id)
 
         assert mock_boss_run.called

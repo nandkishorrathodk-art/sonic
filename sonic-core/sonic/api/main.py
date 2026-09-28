@@ -147,9 +147,6 @@ async def _maybe_start_being_life_loop(settings):
             agent_id=being.being_id,
             semantic_memory=get_vector_memory(),
         )
-        # Use the visible X11 desktop (:99) as the single computer surface
-        # rather than spawning a hidden headless Playwright instance.
-        browser = None
         from sonic.evolution.engine import EvolutionEngine
         from sonic.evolution.strategy import DynamicStrategyEngine
         evolution_engine = EvolutionEngine(
@@ -165,7 +162,6 @@ async def _maybe_start_being_life_loop(settings):
             computer_provider=provider, llm_router=router,
             security_tools=security_registry.as_dict(),
             safety=safety, self_host=True, tenant_id=tenant_id, agent_id=being.being_id,
-            browser=browser,
             gui_only=False,
             compact_prompt=True,
             observe_desktop=True,
