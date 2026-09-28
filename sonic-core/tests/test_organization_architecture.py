@@ -29,6 +29,7 @@ def test_core_paths_resolve_to_expected_departments() -> None:
     assert owner_for_path("sonic-core/sonic/evidence/custody.py")[0] == Department.EVALUATION_RELIABILITY
     assert owner_for_path("sonic-dashboard/app/page.tsx")[0] == Department.EXPERIENCE_INTERFACE
     assert owner_for_path("sonic-core/sonic/researcher/worker.py")[0] == Department.RESEARCH_EVOLUTION
+    assert owner_for_path("sonic-core/sonic/organization/store.py")[0] == Department.PLATFORM_SYSTEMS
 
 
 def test_team_mapping_is_semantic_not_language_specific() -> None:

@@ -346,3 +346,12 @@ Department -> Team -> Subsystem -> Repository path scope
 ```
 
 Projects and work items may span departments, but implementation ownership must point to a declared subsystem. This prevents an employee from being assigned a vague responsibility such as "work on SONIC" and makes GitHub issues, branches, reviews and release evidence traceable to an architectural owner.
+
+
+## Persistent employee runtime
+
+The employee operating model is implemented by the organization control plane. Employee profiles persist per tenant and carry department, team, subsystem ownership, role, prompt context and read-only state. Projects and work items are also tenant-scoped; every work item records the canonical subsystem owner plus optional GitHub issue/PR and development-branch references.
+
+The organization runtime is itself a declared software subsystem, `organization`, owned by Platform & Systems / API Services. It must use `SUBSYSTEM_OWNERSHIP` from the canonical architecture module rather than maintaining a second subsystem registry.
+
+A work item cannot be assigned to an employee who does not own the requested subsystem. A work item cannot enter `released` until the organization store has receipts for both an approved GitHub review and a successful CI/check-suite event for the referenced PR. The integration records GitHub evidence; it does not create branches, open PRs, merge code or push commits automatically.
