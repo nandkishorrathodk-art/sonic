@@ -5,10 +5,27 @@ Tests for DockerContainerSandbox and DaytonaComputerProvider local fallback.
 import pytest
 import shutil
 import base64
+import subprocess
 from unittest.mock import AsyncMock
 from sonic.computer.docker_sandbox import DockerContainerSandbox
 from sonic.computer.daytona_computer import DaytonaComputerProvider
 from sonic.computer.models import GUIAction, GUIActionType
+
+
+def _container_is_running(container_name: str) -> bool:
+    docker = shutil.which("docker")
+    if not docker:
+        return False
+    try:
+        probe = subprocess.run(
+            [docker, "inspect", "-f", "{{.State.Running}}", container_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0 and probe.stdout.decode().strip() == "true"
 
 
 @pytest.mark.no_live_infra
@@ -16,7 +33,8 @@ from sonic.computer.models import GUIAction, GUIActionType
 async def test_docker_container_sandbox_interface():
     sb = DockerContainerSandbox("sonic-desktop-workstation")
     assert sb.id == "sonic-desktop-workstation"
-    assert sb.state == "started"
+    expected_state = "started" if _container_is_running(sb.id) else "stopped"
+    assert sb.state == expected_state
 
     # Test preview link
     preview = await sb.get_preview_link(6080)

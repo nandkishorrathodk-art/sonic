@@ -14,18 +14,19 @@ from sonic.computer.docker_computer import DockerComputerProvider, _get_display
 from sonic.computer.models import GUIAction, GUIActionType
 
 
-def _docker_daemon_up() -> bool:
+def _workstation_container_up(container_name: str = "sonic-desktop-workstation") -> bool:
     if not shutil.which("docker"):
         return False
     try:
+        probe = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
         return (
-            subprocess.run(
-                ["docker", "info", "--format", "{{.ServerVersion}}"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=10,
-            ).returncode
-            == 0
+            probe.returncode == 0
+            and probe.stdout.decode("utf-8", errors="ignore").strip() == "true"
         )
     except Exception:
         return False
@@ -42,11 +43,12 @@ async def test_docker_computer_provider_lifecycle():
     url = await provider.get_vnc_url(ws.id)
     # A real noVNC listener only exists when the daemon + workstation container
     # are actually up. Fail-closed returns None otherwise — assert accordingly.
-    if _docker_daemon_up():
+    workstation_up = _workstation_container_up(ws.id)
+    if workstation_up:
         assert url is not None
         assert "6080" in url
 
-    if _docker_daemon_up():
+    if workstation_up:
         status = await provider.status(ws.id)
         assert status.workspace_id == "sonic-desktop-workstation"
         assert len(status.running_processes) >= 0
@@ -73,7 +75,7 @@ async def test_docker_computer_provider_files_and_apps():
     provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
     ws_id = "sonic-desktop-workstation"
 
-    if _docker_daemon_up():
+    if _workstation_container_up(ws_id):
         # Test write file
         test_content = "sonic_security_audit_test_file"
         test_path = "/tmp/sonic_test.txt"

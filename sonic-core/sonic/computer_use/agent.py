@@ -3327,7 +3327,20 @@ class ComputerUseAgent:
                     or getattr(prev_trace, "target_resource", "")
                     or ""
                 ).strip()
-                if curr_path and curr_path == prev_path:
+                content_keys = ("content", "code", "file_content", "text", "data")
+                curr_content = next(
+                    (str(payload[key]) for key in content_keys if payload.get(key) is not None),
+                    "",
+                )
+                prev_content = next(
+                    (
+                        str(prev_payload[key])
+                        for key in content_keys
+                        if isinstance(prev_payload, dict) and prev_payload.get(key) is not None
+                    ),
+                    "",
+                )
+                if curr_path and curr_path == prev_path and curr_content == prev_content:
                     actual_obs_str = "Duplicate consecutive FILE_WRITE to the same file blocked. Run TERMINAL_EXEC to verify the file or call GOAL_COMPLETE if finished."
                     trace = ComputerDecisionTrace(
                         step_index=self.action_counter,

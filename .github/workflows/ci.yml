@@ -2,14 +2,15 @@ name: SONIC CI/CD
 
 on:
   push:
-    branches: [development, main]
+    branches: [development, main, "departments/**"]
   pull_request:
-    branches: [development, main]
+    branches: [development, main, "departments/**"]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: sonic-${{ github.workflow }}-${{ github.ref }}
@@ -31,6 +32,10 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            sonic-core/pyproject.toml
+            sonic-cli/pyproject.toml
 
       - name: Install backend and CLI
         run: |
@@ -53,6 +58,10 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            sonic-core/pyproject.toml
+            sonic-cli/pyproject.toml
 
       - name: Install backend
         run: |
@@ -75,6 +84,10 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            sonic-core/pyproject.toml
+            sonic-cli/pyproject.toml
 
       - name: Install backend and CLI
         run: |
@@ -92,18 +105,23 @@ jobs:
       - name: Core test suite
         run: |
           python -m pytest sonic-core/tests/ \
-            --ignore=sonic-core/tests/test_phase13 \
-            --ignore=sonic-core/tests/test_phase14 \
-            --ignore=sonic-core/tests/test_phase15 \
-            --ignore=sonic-core/tests/test_phase16 \
-            --ignore=sonic-core/tests/test_phase17 \
-            --ignore=sonic-core/tests/test_phase18 \
-            --ignore=sonic-core/tests/test_phase19 \
             --ignore=sonic-core/tests/test_phase21_real_graphical_workstation.py \
             -ra --tb=short
 
+  rust:
+    name: Native Kernel Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run kernel tests
+        run: cargo test --locked --manifest-path sonic-kernel-rs/Cargo.toml
+
   dashboard:
-    name: Dashboard Build
+    name: Dashboard Lint, Audit, Type Check & Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,6 +136,18 @@ jobs:
         working-directory: sonic-dashboard
         run: npm ci
 
+      - name: Lint dashboard
+        working-directory: sonic-dashboard
+        run: npm run lint
+
+      - name: Audit production dependencies
+        working-directory: sonic-dashboard
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Type check dashboard
+        working-directory: sonic-dashboard
+        run: npx tsc --noEmit
+
       - name: Build dashboard
         working-directory: sonic-dashboard
         run: npm run build
@@ -126,9 +156,8 @@ jobs:
 
   docker:
     name: Production Container Build
-    needs: [lint, typecheck, test, dashboard]
+    needs: [lint, typecheck, test, rust, dashboard]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
 
