@@ -29,6 +29,7 @@ from sonic.agents.react_engine import (
 from sonic.agents.recon import ReconAgent
 from sonic.agents.state_store import get_state_store
 from sonic.agents.static_reasoning import StaticReasoningAgent
+from sonic.agents.task_graph import GRAPH_ONLY_AGENT_TYPES, TaskStatus
 from sonic.agents.verifier import VerifierAgent
 from sonic.llm.providers.custom import CustomLLMProvider
 from sonic.llm.router import ModelRouter
@@ -132,6 +133,7 @@ class SwarmRunner:
             graph_memory=self.memory,
             scope_checker=self.scope_checker,
             state_store=get_state_store(),
+            available_agent_types=set(self._agents),
         )
 
         self._initialized = True
@@ -320,6 +322,7 @@ class SwarmRunner:
         all_findings: list[dict[str, Any]] = []
         completed = 0
         failed = 0
+        waiting_for_human = False
 
         for iteration in range(max_iterations):
             dispatchable = self.director.get_dispatchable_tasks(engagement_id)
@@ -342,6 +345,14 @@ class SwarmRunner:
                         engagement_id=engagement_id,
                     )
                     break
+                if graph is not None and any(
+                    node.agent_type in GRAPH_ONLY_AGENT_TYPES
+                    and node.status
+                    in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RUNNING}
+                    for node in graph.tasks.values()
+                ):
+                    waiting_for_human = True
+                    break
                 # No dispatchable tasks but not complete — could be running tasks
                 # or blocked. Brief yield then continue.
                 await asyncio.sleep(0.01)
@@ -354,11 +365,21 @@ class SwarmRunner:
                 agent_name = agent_map.get(agent_type)
                 agent = self._agents.get(agent_name) if agent_name else None
                 if agent is None:
+                    if agent_type in GRAPH_ONLY_AGENT_TYPES:
+                        waiting_for_human = True
+                        logger.info(
+                            "human_workflow_task_not_dispatched",
+                            engagement_id=engagement_id,
+                            task_id=task_payload.get("task_id", ""),
+                            agent_type=agent_type,
+                        )
+                        continue
                     # No agent available — mark as failed
                     await self.director.on_task_failed(
                         engagement_id=engagement_id,
                         task_id=task_payload.get("task_id", ""),
                         error=f"No agent for type {agent_type}",
+                        execution_id=task_payload.get("execution_id"),
                     )
                     failed += 1
                     continue
@@ -371,12 +392,18 @@ class SwarmRunner:
                         logger.warning("task_execution_error", error=str(out))
                         failed += 1
                     elif isinstance(out, dict):
-                        all_outputs.append(out)
-                        completed += 1
-                        # Collect findings
-                        for f in out.get("findings", []):
-                            all_findings.append(f)
-                            self.metrics.record_finding(f.get("severity", "medium"))
+                        if self._is_task_failure(out):
+                            failed += 1
+                        else:
+                            all_outputs.append(out)
+                            completed += 1
+                            # Collect findings only from execution results not
+                            # classified as failures.
+                            for f in out.get("findings", []):
+                                all_findings.append(f)
+                                self.metrics.record_finding(f.get("severity", "medium"))
+            if waiting_for_human:
+                break
 
         state = self.director.get_engagement_state(engagement_id)
         graph = self.director.get_task_graph(engagement_id)
@@ -408,11 +435,14 @@ class SwarmRunner:
                 engagement_id,
             )
             if isinstance(pivot_result, dict):
-                all_outputs.append(pivot_result)
-                completed += 1
-                for f in pivot_result.get("findings", []):
-                    all_findings.append(f)
-                    self.metrics.record_finding(f.get("severity", "medium"))
+                if self._is_task_failure(pivot_result):
+                    failed += 1
+                else:
+                    all_outputs.append(pivot_result)
+                    completed += 1
+                    for f in pivot_result.get("findings", []):
+                        all_findings.append(f)
+                        self.metrics.record_finding(f.get("severity", "medium"))
             # Stop pivoting when a round produces no new findings.
             if not (isinstance(pivot_result, dict) and pivot_result.get("findings")):
                 break
@@ -433,11 +463,16 @@ class SwarmRunner:
                 "high": sum(1 for f in all_findings if f.get("severity") == "high"),
                 "medium": sum(1 for f in all_findings if f.get("severity") == "medium"),
                 "status": (
-                    "completed"
+                    "awaiting_human"
+                    if waiting_for_human
+                    else "completed"
                     if completed > 0
-                    and failed == 0
                     and dispatch_graph is not None
                     and dispatch_graph.is_complete()
+                    and all(
+                        node.status == TaskStatus.SUCCEEDED
+                        for node in dispatch_graph.tasks.values()
+                    )
                     else "partial" if completed > 0
                     else "failed"
                 ),
@@ -453,21 +488,89 @@ class SwarmRunner:
         """Run a single agent task and report completion to the Director."""
         task_id = task_payload.get("task_id", "")
         try:
-            result = await agent.run(task_payload)
-            await self.director.on_task_completed(
+            worker_payload = self._translate_task_payload(task_payload)
+            result = await agent.run(worker_payload)
+            if self._is_task_failure(result):
+                reason = (
+                    str(result.get("error") or result.get("reason") or result.get("status") or "worker reported failure")
+                    if isinstance(result, dict)
+                    else "worker returned a non-object failure result"
+                )
+                await self.director.on_task_failed(
+                    engagement_id=engagement_id,
+                    task_id=task_id,
+                    error=reason,
+                    execution_id=task_payload.get("execution_id"),
+                )
+                return result if isinstance(result, dict) else {
+                    "status": "error",
+                    "error": reason,
+                }
+            completion = await self.director.on_task_completed(
                 engagement_id=engagement_id,
                 task_id=task_id,
                 result=result,
+                execution_id=task_payload.get("execution_id"),
             )
-            return result
+            if isinstance(completion, dict) and completion.get("error"):
+                return {
+                    "status": "error",
+                    "error": str(completion["error"]),
+                }
+            return result if isinstance(result, dict) else {"result": result}
         except Exception as e:
             logger.error("single_task_failed", task_id=task_id, error=str(e))
             await self.director.on_task_failed(
                 engagement_id=engagement_id,
                 task_id=task_id,
                 error=str(e),
+                execution_id=task_payload.get("execution_id"),
             )
             raise
+
+    @staticmethod
+    def _translate_task_payload(task_payload: dict[str, Any]) -> dict[str, Any]:
+        """Flatten the Director envelope while preserving task-specific fields."""
+        payload = dict(task_payload)
+        nested = task_payload.get("task_payload")
+        if not isinstance(nested, dict):
+            return payload
+
+        envelope_fields = {
+            "tenant_id",
+            "engagement_id",
+            "task_id",
+            "agent_type",
+            "execution_id",
+            "workspace_id",
+            "cognitive_context",
+            "failed_methods",
+        }
+        for key, value in nested.items():
+            if key not in envelope_fields:
+                payload[key] = value
+        payload["task_payload"] = dict(nested)
+        return payload
+
+    @staticmethod
+    def _is_task_failure(result: Any) -> bool:
+        """Recognize execution failures without interpreting domain verdicts."""
+        if not isinstance(result, dict):
+            return False
+        status = str(result.get("status", "")).strip().lower()
+        return (
+            status in {
+                "blocked",
+                "error",
+                "failed",
+                "not_executed",
+                "skipped",
+                "timeout",
+                "timed_out",
+            }
+            or result.get("success") is False
+            or bool(result.get("error"))
+        )
 
     def get_status(self) -> dict[str, Any]:
         """Get current swarm status."""

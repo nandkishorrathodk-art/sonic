@@ -13,6 +13,9 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from sonic.agents.task_graph import TaskGraph, TaskNode
 from sonic.swarm import SwarmRunner
 
 
@@ -141,5 +144,119 @@ def test_empty_task_graph_is_not_reported_as_completed():
 
         assert result["tasks_completed"] == 0
         assert result["summary"]["status"] == "failed"
+
+    asyncio.run(_run())
+
+
+def test_dispatch_flattens_director_task_payload_for_worker():
+    async def _run():
+        runner = _make_runner()
+        director = MagicMock()
+        director.on_task_completed = AsyncMock()
+        director.on_task_failed = AsyncMock()
+        runner.director = director
+        agent = MagicMock()
+        agent.run = AsyncMock(return_value={"status": "success"})
+        payload = {
+            "agent_type": "recon",
+            "task_id": "task-1",
+            "tenant_id": "tenant-1",
+            "engagement_id": "eng-1",
+            "execution_id": "attempt-1",
+            "target": "outer.test",
+            "task_payload": {
+                "target": "inner.test",
+                "task": "inspect source",
+                "scope": {"allowed_domains": ["inner.test"]},
+            },
+        }
+
+        await runner._execute_single_task(agent, payload, "eng-1")
+
+        worker_payload = agent.run.await_args.args[0]
+        assert worker_payload["target"] == "inner.test"
+        assert worker_payload["task"] == "inspect source"
+        assert worker_payload["scope"] == {"allowed_domains": ["inner.test"]}
+        assert worker_payload["tenant_id"] == "tenant-1"
+        director.on_task_completed.assert_awaited_once_with(
+            engagement_id="eng-1",
+            task_id="task-1",
+            result={"status": "success"},
+            execution_id="attempt-1",
+        )
+        director.on_task_failed.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "worker_result",
+    [
+        {"status": "blocked", "reason": "policy denied"},
+        {"status": "error", "error": "worker crashed"},
+    ],
+)
+def test_dispatch_classifies_blocked_and_error_worker_results_as_failures(worker_result):
+    async def _run():
+        runner = _make_runner()
+        agent = MagicMock()
+        agent.run = AsyncMock(return_value=worker_result)
+        runner._agents = {"recon": agent}
+
+        graph = MagicMock()
+        graph.size = 1
+        graph.tasks = {}
+        graph.is_complete = MagicMock(return_value=True)
+        director = MagicMock()
+        director.get_dispatchable_tasks = MagicMock(
+            side_effect=[
+                [{"agent_type": "recon", "task_id": "task-1"}],
+                [],
+            ]
+        )
+        director._graphs = {"eng-1": graph}
+        director.get_engagement_state = MagicMock(return_value={"target": "app.test"})
+        director.get_task_graph = MagicMock(return_value={})
+        director.on_task_failed = AsyncMock()
+        director.on_task_completed = AsyncMock()
+        runner.director = director
+        runner.metrics = MagicMock()
+
+        result = await runner._run_dispatch_loop("eng-1", "tenant-1", max_iterations=3)
+
+        assert result["tasks_completed"] == 0
+        assert result["tasks_failed"] == 1
+        assert result["summary"]["status"] == "failed"
+        director.on_task_failed.assert_awaited_once()
+        director.on_task_completed.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
+def test_graph_only_human_workflow_is_reported_as_waiting_not_failed():
+    async def _run():
+        runner = _make_runner()
+        graph = TaskGraph("eng-1", "tenant-1")
+        task_id = graph.add_task(
+            TaskNode(name="Operator review", agent_type="human_workflow")
+        )
+        director = MagicMock()
+        director.get_dispatchable_tasks = MagicMock(
+            return_value=[{"agent_type": "human_workflow", "task_id": task_id}]
+        )
+        director._graphs = {"eng-1": graph}
+        director.get_engagement_state = MagicMock(return_value={"target": "app.test"})
+        director.get_task_graph = MagicMock(return_value=graph.to_dict())
+        director.on_task_failed = AsyncMock()
+        director.on_task_completed = AsyncMock()
+        runner.director = director
+        runner.metrics = MagicMock()
+
+        result = await runner._run_dispatch_loop("eng-1", "tenant-1", max_iterations=3)
+
+        assert result["summary"]["status"] == "awaiting_human"
+        assert graph.get_task(task_id).status.value == "ready"
+        director.on_task_failed.assert_not_awaited()
+        director.on_task_completed.assert_not_awaited()
 
     asyncio.run(_run())

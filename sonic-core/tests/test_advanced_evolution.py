@@ -14,13 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from sonic.evolution.codebase_evolver import CodebaseEvolver, SafetyInvariantViolation
+from sonic.evolution.codebase_evolver import CodebaseEvolver
 from sonic.evolution.engine import EvolutionEngine
 from sonic.evolution.evolution_journal import EvolutionJournal, JournalEntry
 from sonic.evolution.goal_director import (
@@ -276,6 +275,8 @@ def test_awaiting_approval_keeps_applied_edits_and_reports_pending_status(temp_e
     target_path = repo_root / target_rel
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo_root, "add", target_rel)
+    _git(repo_root, "commit", "-m", "Add approval fixture")
 
     goal = director.submit_goal(
         title="Require approval for worker update",
@@ -297,6 +298,185 @@ def test_awaiting_approval_keeps_applied_edits_and_reports_pending_status(temp_e
     updated_goal = director.get_goal(goal.goal_id)
     assert updated_goal.status == GoalStatus.AWAITING_APPROVAL
     assert "remain in the working tree" in updated_goal.notes
+    assert updated_goal.approval_manifest["files"] == [target_rel]
+
+    # The operator may resolve the goal after a backend restart.
+    director = EvolutionGoalDirector(
+        repo_root=repo_root,
+        db_path=temp_evolution_env["db_path"],
+        evolver=director.evolver,
+        version_tracker=temp_evolution_env["version_tracker"],
+        journal=temp_evolution_env["journal"],
+    )
+    approved = director.approve_goal(goal.goal_id)
+    assert approved.stage == EvolutionStage.PROMOTED, approved.error_reason
+    assert approved.git_committed
+    assert approved.git_commit_hash
+    assert "evo(" + goal.goal_id + "):" in subprocess.run(
+        ["git", "log", "-1", "--format=%s"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    resolved_goal = director.get_goal(goal.goal_id)
+    assert resolved_goal.status == GoalStatus.PROMOTED
+    assert resolved_goal.version_after == "0.1.1"
+
+
+def test_approval_refuses_working_tree_edits_made_after_verification(temp_evolution_env):
+    director: EvolutionGoalDirector = temp_evolution_env["director"]
+    repo_root: Path = temp_evolution_env["repo_root"]
+    target_rel = "sonic-core/sonic/tools/stale_approval_probe.py"
+    target_path = repo_root / target_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo_root, "add", target_rel)
+    _git(repo_root, "commit", "-m", "Add stale approval fixture")
+    base_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    goal = director.submit_goal(
+        title="Detect post-verification edits",
+        description="Keep approval bound to the exact tested files",
+        category=GoalCategory.BUG_FIX,
+        target_files=[target_rel],
+    )
+    asyncio.run(director.execute_goal(
+        goal.goal_id,
+        custom_patch="VALUE = 2\n",
+        auto_promote=False,
+        test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+    ))
+    target_path.write_text("VALUE = 3\n", encoding="utf-8")
+
+    result = director.approve_goal(goal.goal_id)
+    assert result.stage == EvolutionStage.AWAITING_APPROVAL
+    assert "changed after tests" in result.error_reason
+    assert target_path.read_text(encoding="utf-8") == "VALUE = 3\n"
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip() == base_head
+    assert director.get_goal(goal.goal_id).status == GoalStatus.AWAITING_APPROVAL
+
+
+def test_rejecting_approval_leaves_verified_working_tree_edits_untouched(temp_evolution_env):
+    director: EvolutionGoalDirector = temp_evolution_env["director"]
+    repo_root: Path = temp_evolution_env["repo_root"]
+    target_rel = "sonic-core/sonic/tools/rejected_probe.py"
+    target_path = repo_root / target_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo_root, "add", target_rel)
+    _git(repo_root, "commit", "-m", "Add reject fixture")
+
+    goal = director.submit_goal(
+        title="Reject pending evolution",
+        description="Preserve local edits when an operator declines",
+        category=GoalCategory.BUG_FIX,
+        target_files=[target_rel],
+    )
+    asyncio.run(director.execute_goal(
+        goal.goal_id,
+        custom_patch="VALUE = 2\n",
+        auto_promote=False,
+        test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+    ))
+
+    rejected = director.reject_goal(goal.goal_id)
+    assert rejected.status == GoalStatus.REJECTED
+    assert target_path.read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert "not committed or rolled back" in rejected.notes
+
+
+def test_failed_git_commit_does_not_fabricate_promotion(temp_evolution_env, monkeypatch):
+    director: EvolutionGoalDirector = temp_evolution_env["director"]
+    repo_root: Path = temp_evolution_env["repo_root"]
+    target_rel = "sonic-core/sonic/tools/commit_failure_probe.py"
+    target_path = repo_root / target_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo_root, "add", target_rel)
+    _git(repo_root, "commit", "-m", "Add commit failure fixture")
+    base_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    goal = director.submit_goal(
+        title="Do not fabricate failed promotion",
+        description="A failed real commit must leave the goal pending",
+        category=GoalCategory.BUG_FIX,
+        target_files=[target_rel],
+    )
+    asyncio.run(director.execute_goal(
+        goal.goal_id,
+        custom_patch="VALUE = 2\n",
+        auto_promote=False,
+        test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+    ))
+    monkeypatch.setattr(
+        director.evolver,
+        "commit_and_push",
+        lambda **_kwargs: (False, "", False, "git commit failed: simulated failure"),
+    )
+
+    result = director.approve_goal(goal.goal_id)
+    assert result.stage == EvolutionStage.AWAITING_APPROVAL
+    assert result.git_commit_hash == ""
+    assert director.get_goal(goal.goal_id).status == GoalStatus.AWAITING_APPROVAL
+    assert director.version_tracker.current_version() == "0.1.0"
+    assert target_path.read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip() == base_head
+
+
+def test_report_only_verification_is_not_marked_awaiting_approval(temp_evolution_env):
+    director: EvolutionGoalDirector = temp_evolution_env["director"]
+    repo_root: Path = temp_evolution_env["repo_root"]
+    target_rel = "sonic-core/sonic/tools/report_only_probe.py"
+    target_path = repo_root / target_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo_root, "add", target_rel)
+    _git(repo_root, "commit", "-m", "Add report-only fixture")
+
+    goal = director.submit_goal(
+        title="Verify without applying",
+        description="Report-only evolution must restore the working tree",
+        category=GoalCategory.BUG_FIX,
+        target_files=[target_rel],
+    )
+    report = asyncio.run(director.execute_goal(
+        goal.goal_id,
+        custom_patch="VALUE = 2\n",
+        auto_promote=False,
+        test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+        report_only=True,
+    ))
+
+    assert report.stage == EvolutionStage.AWAITING_APPROVAL
+    updated = director.get_goal(goal.goal_id)
+    assert updated.status == GoalStatus.VERIFIED
+    assert updated.approval_manifest == {}
+    assert target_path.read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 def test_goal_director_capability_add_bumps_minor_version(temp_evolution_env):

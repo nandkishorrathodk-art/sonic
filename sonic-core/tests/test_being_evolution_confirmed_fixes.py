@@ -181,3 +181,36 @@ def test_being_mind_persistence_errors_propagate(operation, monkeypatch):
             mind.record_idle_cycle(was_novel=True, learned_fact="persist this")
         else:
             mind.record_mission_outcome("complete task", success=True)
+
+
+def test_mind_mutations_persist_through_the_constructing_store(tmp_path, monkeypatch):
+    singleton_path = str(tmp_path / "singleton.db")
+    local_path = str(tmp_path / "local-store.db")
+    monkeypatch.setenv("SONIC_BEING_DB_PATH", singleton_path)
+    reset_being_singleton()
+    singleton = get_being_store()
+    local_store = BeingStore(db_path=local_path)
+    being_id = "being-owned-by-local-store"
+
+    # Ensure a global singleton exists; mind mutations must still use their owner.
+    mind = local_store.get_mind(being_id)
+    mind.record_idle_cycle(was_novel=True, learned_fact="local idle fact")
+    mind.record_mission_outcome(
+        "local mission",
+        success=True,
+        facts=["local mission fact"],
+    )
+    local_store.close()
+
+    reopened_store = BeingStore(db_path=local_path)
+    persisted = reopened_store.get_mind(being_id)
+    assert persisted.idle_cycles_run == 1
+    assert persisted.goals_pursued == 2
+    assert persisted.goals_completed == 1
+    assert persisted.learned_facts == ["local idle fact", "local mission fact"]
+
+    assert singleton._db.execute(
+        "SELECT COUNT(*) FROM being_minds WHERE being_id = ?", (being_id,)
+    ).fetchone()[0] == 0
+    singleton.close()
+    reopened_store.close()

@@ -218,6 +218,11 @@ class BeingMind:
     goals_pursued: int = 0
     goals_completed: int = 0
     last_idle_at: str = ""
+    _store: BeingStore | None = field(default=None, repr=False, compare=False)
+
+    def _persist(self) -> None:
+        store = self._store or get_being_store()
+        store.save_mind(self)
 
     def record_idle_cycle(
         self,
@@ -242,8 +247,7 @@ class BeingMind:
             self.satiety = min(1.0, self.satiety + 0.05)
             self.focus = min(1.0, self.focus + 0.04)
             self.curiosity_drive = max(0.1, self.curiosity_drive - 0.05)
-        if _being_store is not None:
-            _being_store.save_mind(self)
+        self._persist()
         return self
 
     def record_mission_outcome(
@@ -282,7 +286,7 @@ class BeingMind:
             self.curiosity_drive = max(0.1, self.curiosity_drive - 0.03)
             self.satiety = max(0.0, self.satiety - 0.02)
 
-        get_being_store().save_mind(self)
+        self._persist()
         return self
 
 
@@ -364,6 +368,7 @@ class BeingStore:
                     goals_pursued=data.get("goals_pursued", 0),
                     goals_completed=data.get("goals_completed", 0),
                     last_idle_at=data.get("last_idle_at", ""),
+                    _store=self,
                 )
             # Vault data is intentionally not hydrated into plaintext caches. Legacy rows
             # are read only by explicit migration or rejected by the retrieval methods.
@@ -527,16 +532,20 @@ class BeingStore:
                         goals_pursued=data.get("goals_pursued", 0),
                         goals_completed=data.get("goals_completed", 0),
                         last_idle_at=data.get("last_idle_at", ""),
+                        _store=self,
                     )
                     self._mind_cache[being_id] = mind
             if mind is None:
-                mind = BeingMind(being_id=being_id)
+                mind = BeingMind(being_id=being_id, _store=self)
                 self._mind_cache[being_id] = mind
                 self._persist_mind_unlocked(mind)
+            else:
+                mind._store = self
             return mind
 
     def save_mind(self, mind: BeingMind) -> None:
         with self._lock:
+            mind._store = self
             self._mind_cache[mind.being_id] = mind
             self._persist_mind_unlocked(mind)
 

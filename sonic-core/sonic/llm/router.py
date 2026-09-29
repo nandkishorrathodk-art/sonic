@@ -754,27 +754,34 @@ class ModelRouter:
             effective_task = "vision"
 
         provider, model_override = self._resolve_provider(provider_name, effective_task)
+        routed_request = request.model_copy(deep=True)
 
         # Override model if routing rule specifies one
-        if model_override and not request.model:
-            request.model = model_override
+        if model_override and not routed_request.model:
+            routed_request.model = model_override
 
         # If the resolved target model is a high-parameter reasoning/coding model
         # (e.g. nemotron-3-super-120b or nemotron-3-ultra-550b) that does not accept
-        # raw image_url blocks, strip image bytes from the message copy so the 120B/550B
-        # brain reasons over the rich text/AT-SPI/VisualGrounder observation without 400 errors.
-        active_model_name = (request.model or getattr(provider, "default_model", "") or "").lower()
-        if has_images and "vision" not in active_model_name and "vl" not in active_model_name and "gpt-4o" not in active_model_name and "claude" not in active_model_name:
-            for msg in request.messages:
+        # raw image_url blocks, strip image bytes only from the primary attempt.
+        # Keep the routed request intact so a vision fallback still receives pixels.
+        active_model_name = (
+            routed_request.model or getattr(provider, "default_model", "") or ""
+        ).lower()
+        if has_images and not self._model_supports_images(active_model_name):
+            primary_request = routed_request.model_copy(deep=True)
+            for msg in primary_request.messages:
                 if getattr(msg, "images", None):
                     msg.images = []
+        else:
+            primary_request = routed_request
 
         # Set task metadata
-        request.task_type = effective_task
+        routed_request.task_type = effective_task
+        primary_request.task_type = effective_task
         request_spent = [Decimal(0)]
 
         try:
-            response = await self._budgeted_complete(provider, request, request_spent)
+            response = await self._budgeted_complete(provider, primary_request, request_spent)
 
             # Check for safety refusal; trigger model fallback if detected
             if is_refusal_response(response):
@@ -785,7 +792,7 @@ class ModelRouter:
                     task_type=effective_task,
                 )
                 return await self._try_fallbacks(
-                    request,
+                    routed_request,
                     provider.name,
                     effective_task,
                     request_spent=request_spent,
@@ -804,11 +811,29 @@ class ModelRouter:
             )
             # Try fallback chain
             return await self._try_fallbacks(
-                request,
+                routed_request,
                 provider.name,
                 effective_task,
                 request_spent=request_spent,
             )
+
+    @staticmethod
+    def _model_supports_images(model_name: str) -> bool:
+        """Best-effort check for model families that accept image payloads."""
+        return any(marker in model_name for marker in ("vision", "vl", "gpt-4o", "claude"))
+
+    def _fallback_candidates(self, task_type: str | None) -> list[tuple[str, str | None]]:
+        """Return configured task and global fallbacks in their configured order."""
+        candidates: list[tuple[str, str | None]] = []
+        if task_type and task_type in self.routing_rules:
+            for fallback in self.routing_rules[task_type].get("fallback", []):
+                if "/" in fallback:
+                    name, model = fallback.split("/", 1)
+                    candidates.append((name, model))
+                else:
+                    candidates.append((fallback, None))
+        candidates.extend((name, None) for name in self.fallback_chain)
+        return candidates
 
     async def _try_fallbacks(
         self,
@@ -820,20 +845,7 @@ class ModelRouter:
         """Try fallback providers when the primary fails."""
         if request_spent is None:
             request_spent = [Decimal(0)]
-        candidates: list[tuple[str, str | None]] = []
-
-        if task_type and task_type in self.routing_rules:
-            rule_fallbacks = self.routing_rules[task_type].get("fallback", [])
-            for fb in rule_fallbacks:
-                if "/" in fb:
-                    parts = fb.split("/", 1)
-                    candidates.append((parts[0], parts[1]))
-                else:
-                    candidates.append((fb, None))
-
-        for p_name in self.fallback_chain:
-            candidates.append((p_name, None))
-
+        candidates = self._fallback_candidates(task_type)
         original_model = request.model
         for fb_name, fb_model in candidates:
             if not self._is_provider_ready(fb_name):
@@ -845,8 +857,9 @@ class ModelRouter:
             logger.info("trying_fallback", provider=fb_name, model=fb_model, task_type=task_type)
             try:
                 fb_provider = self.providers[fb_name]
-                request.model = fb_model  # Assign model appropriate for fallback provider (or None to use default)
-                return await self._budgeted_complete(fb_provider, request, request_spent)
+                fallback_request = request.model_copy(deep=True)
+                fallback_request.model = fb_model
+                return await self._budgeted_complete(fb_provider, fallback_request, request_spent)
             except (LLMBudgetExceededError, LLMBudgetEstimateUnavailableError):
                 raise
             except Exception as e:
@@ -864,35 +877,109 @@ class ModelRouter:
         task_type: str | None = None,
         provider_name: str | None = None,
     ) -> AsyncIterator[LLMChunk]:
-        """Route and stream an LLM request."""
+        """Route and stream, falling back only before the first emitted chunk."""
         effective_task = task_type or request.task_type
+        has_images = any(getattr(msg, "has_images", False) for msg in request.messages)
+        if has_images and "vision" in self.routing_rules:
+            effective_task = "vision"
         provider, model_override = self._resolve_provider(provider_name, effective_task)
 
-        if model_override and not request.model:
-            request.model = model_override
+        routed_request = request.model_copy(deep=True)
+        if model_override and not routed_request.model:
+            routed_request.model = model_override
+        routed_request.task_type = effective_task
+        candidates = [(provider.name, None), *self._fallback_candidates(effective_task)]
+        original_model = routed_request.model
+        request_spent = [Decimal(0)]
+        last_error: Exception | None = None
 
-        if not self._budget_is_enabled():
-            async for chunk in provider.stream(request):
-                yield chunk
+        for candidate_index, (provider_name, fallback_model) in enumerate(candidates):
+            if provider_name != provider.name and not self._is_provider_ready(provider_name):
+                continue
+            if candidate_index > 0 and provider_name == provider.name and (
+                not fallback_model or fallback_model == original_model
+            ):
+                continue
+            attempt_provider = self.providers[provider_name]
+            attempt_request = routed_request.model_copy(deep=True)
+            if fallback_model:
+                attempt_request.model = fallback_model
+            attempt_model = (attempt_request.model or attempt_provider.default_model).lower()
+            if has_images and not self._model_supports_images(attempt_model):
+                for message in attempt_request.messages:
+                    message.images = []
+
+            estimate = await self._reserve_budget(
+                attempt_provider, attempt_request, request_spent
+            )
+            usage_response: LLMResponse | None = None
+            emitted = False
+            try:
+                async for chunk in attempt_provider.stream(attempt_request):
+                    if chunk.is_final and chunk.usage is not None:
+                        response_model = attempt_request.model or attempt_provider.default_model
+                        usage_response = LLMResponse(
+                            request_id=attempt_provider.generate_request_id(),
+                            model=response_model,
+                            provider=attempt_provider.provider_name,
+                            usage=chunk.usage,
+                            cost_usd=attempt_provider._calculate_cost(
+                                chunk.usage, response_model
+                            ),
+                        )
+                    emitted = True
+                    yield chunk
+            except (LLMBudgetExceededError, LLMBudgetEstimateUnavailableError):
+                raise
+            except Exception as error:
+                actual = await self._settle_budget(
+                    attempt_provider, attempt_request, estimate, usage_response
+                )
+                request_spent[0] += actual
+                if emitted:
+                    raise
+                last_error = error
+                logger.warning(
+                    "llm_stream_provider_failed_before_output",
+                    provider=provider_name,
+                    model=attempt_request.model or attempt_provider.default_model,
+                    error=str(error),
+                )
+                continue
+            except BaseException:
+                await self._settle_budget(
+                    attempt_provider, attempt_request, estimate, usage_response
+                )
+                raise
+
+            actual = await self._settle_budget(
+                attempt_provider, attempt_request, estimate, usage_response
+            )
+            request_spent[0] += actual
+            if (
+                self.max_per_request_usd is not None
+                and request_spent[0] > Decimal(str(self.max_per_request_usd))
+                and usage_response is not None
+            ):
+                self._record_budget_overrun(
+                    "per-request",
+                    attempt_request,
+                    request_spent[0],
+                    Decimal(str(self.max_per_request_usd)),
+                    usage_response.request_id,
+                    image_request=has_images,
+                )
             return
 
-        estimate = await self._reserve_budget(provider, request, [Decimal(0)])
-        usage_response: LLMResponse | None = None
-        try:
-            async for chunk in provider.stream(request):
-                if chunk.is_final and chunk.usage is not None:
-                    model = request.model or provider.default_model
-                    usage_response = LLMResponse(
-                        request_id=provider.generate_request_id(),
-                        model=model,
-                        provider=provider.provider_name,
-                        usage=chunk.usage,
-                        cost_usd=provider._calculate_cost(chunk.usage, model),
-                    )
-                yield chunk
-        finally:
-            if estimate is not None:
-                await self._settle_budget(provider, request, estimate, usage_response)
+        if last_error is not None:
+            raise RuntimeError(
+                f"All configured providers failed before streaming output "
+                f"for task_type={effective_task}"
+            ) from last_error
+        raise RuntimeError(
+            f"No configured fallback provider was available for streaming "
+            f"task_type={effective_task} after primary {provider.name!r}"
+        )
 
     # ============================================
     # Info & Stats

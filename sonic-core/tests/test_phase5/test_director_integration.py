@@ -7,7 +7,9 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from sonic.agents.director import Director, AgentOutput
+from sonic.agents.replan import ReplanDecision
 from sonic.agents.state_store import StateStore
+from sonic.agents.task_graph import TaskGraphError
 from sonic.memory.inmemory import InMemoryGraph
 from sonic.safety.scope import ScopeChecker
 from sonic.llm.router import ModelRouter
@@ -188,6 +190,58 @@ def test_director_deterministic_e2e_flow():
     asyncio.run(_run())
 
 
+@pytest.mark.asyncio
+async def test_director_rejects_callbacks_from_a_previous_retry_attempt():
+    director = Director(
+        model_router=get_mock_router(),
+        graph_memory=InMemoryGraph(),
+        scope_checker=ScopeChecker(),
+        state_store=StateStore(redis_client=None),
+        max_parallel=1,
+    )
+    director.replan_engine.evaluate = AsyncMock(
+        return_value=ReplanDecision(should_replan=False)
+    )
+    engagement_id = await director.start_engagement(
+        target="target.com",
+        scope={},
+        tenant_id="tenant-stale-callback",
+    )
+
+    first_attempt = director.get_dispatchable_tasks(engagement_id)[0]
+    await director.on_task_failed(
+        engagement_id,
+        first_attempt["task_id"],
+        "transient failure",
+        execution_id=first_attempt["execution_id"],
+    )
+    retry_attempt = director.get_dispatchable_tasks(engagement_id)[0]
+    assert retry_attempt["task_id"] == first_attempt["task_id"]
+    assert retry_attempt["execution_id"] != first_attempt["execution_id"]
+
+    stale_completion = await director.on_task_completed(
+        engagement_id,
+        retry_attempt["task_id"],
+        {"status": "success"},
+        execution_id=first_attempt["execution_id"],
+    )
+    assert "error" in stale_completion
+
+    await director.on_task_completed(
+        engagement_id,
+        retry_attempt["task_id"],
+        {"status": "success"},
+        execution_id=retry_attempt["execution_id"],
+    )
+    with pytest.raises(TaskGraphError):
+        await director.on_task_failed(
+            engagement_id,
+            retry_attempt["task_id"],
+            "late failure",
+            execution_id=first_attempt["execution_id"],
+        )
+
+
 def test_director_concurrency_limit():
     async def _run():
         mock_router = get_mock_router()
@@ -317,7 +371,7 @@ async def test_director_runs_dispatched_tasks_concurrently_within_limit():
 
     assert max_active == 2
     assert result["completed"] == 2
-    assert result["failed"] == 1
+    assert result["failed"] == 3  # initial attempt plus the two configured retries
     assert len(result["findings"]) == 2
     assert result["graph_complete"] is True
     assert result["status"] == "partial"
@@ -326,8 +380,46 @@ async def test_director_runs_dispatched_tasks_concurrently_within_limit():
         if task.agent_type == "static"
     )
     assert failed_task.status.value == "failed"
+    assert failed_task.retry_count == failed_task.max_retries == 2
     assert failed_task.error == "static worker failed"
     assert not director._graphs[engagement_id].get_running_tasks()
+
+
+@pytest.mark.asyncio
+async def test_director_rejects_graph_only_human_task_and_its_dependents():
+    router = MagicMock(spec=ModelRouter)
+    router.complete = AsyncMock(return_value=LLMResponse(
+    content="""{
+        "assumptions": [],
+        "unknowns": [],
+        "tasks": [
+            {"name": "Operator review", "agent_type": "human"},
+            {
+                "name": "Follow-up",
+                "agent_type": "recon",
+                "depends_on": ["Operator review"]
+            }
+        ]
+    }""",
+    model="test-model",
+    ))
+    director = Director(
+    model_router=router,
+    graph_memory=InMemoryGraph(),
+    scope_checker=ScopeChecker(),
+    state_store=StateStore(redis_client=None),
+    available_agent_types={"recon"},
+    )
+
+    engagement_id = await director.start_engagement(
+    target="target.test",
+    scope={},
+    tenant_id="tenant-human-graph",
+    )
+
+    graph = director._graphs[engagement_id]
+    assert graph.size == 0
+    assert director.get_dispatchable_tasks(engagement_id) == []
 
 
 def test_director_pause_and_resume():

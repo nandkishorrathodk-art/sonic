@@ -14,6 +14,7 @@ from sonic.llm.router import (
 )
 from sonic.llm.schemas import (
     ImageContent,
+    LLMChunk,
     LLMRequest,
     LLMResponse,
     Message,
@@ -166,6 +167,166 @@ async def test_stream_budget_is_checked_before_provider_stream_starts():
             pass
 
     stream_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_falls_back_before_output_and_preserves_images_for_vision_model():
+    router = ModelRouter()
+    router.max_per_request_usd = 0.05
+    router.max_per_engagement_usd = 0.05
+    primary = _provider()
+    primary.default_model = "text-model"
+    primary.model_pricing["text-model"] = {
+        "cost_per_1k_input": 0.001,
+        "cost_per_1k_output": 0.001,
+    }
+    fallback = CustomLLMProvider(
+        name="vision",
+        base_url="https://vision.invalid/v1",
+        api_key="test-key",
+        default_model="vision-model",
+        cost_per_1k_input=0.001,
+        cost_per_1k_output=0.001,
+        max_retries=0,
+    )
+    router.add_provider(primary)
+    router.add_provider(fallback)
+    router.routing_rules["vision"] = {
+        "provider": "openai",
+        "model": "text-model",
+        "fallback": ["vision/vision-model"],
+    }
+    primary_requests = []
+    fallback_requests = []
+
+    async def primary_stream(request):
+        primary_requests.append(request)
+        raise ConnectionError("primary unavailable before output")
+        yield  # Make this an async generator.
+
+    async def fallback_stream(request):
+        fallback_requests.append(request)
+        yield LLMChunk(content="described")
+        yield LLMChunk(
+            is_final=True,
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+        )
+
+    primary.stream = primary_stream
+    fallback.stream = fallback_stream
+    request = _request()
+    request.messages[0].images = [ImageContent(base64="aW1hZ2U=")]
+
+    chunks = [chunk async for chunk in router.stream(request)]
+
+    assert [chunk.content for chunk in chunks if chunk.content] == ["described"]
+    assert primary_requests[0].messages[0].images == []
+    assert fallback_requests[0].messages[0].images == request.messages[0].images
+    assert request.messages[0].images[0].base64 == "aW1hZ2U="
+    assert len(router.cost_records) == 1
+    assert router.cost_records[0].model == "vision-model"
+    budget = router.get_stats()["budget"]
+    assert budget["uncertain_by_engagement_usd"]["eng-1"] > 0
+    assert "eng-1" not in budget["reserved_by_engagement_usd"]
+
+
+@pytest.mark.asyncio
+async def test_completion_keeps_original_image_for_vision_fallback():
+    router = ModelRouter()
+    primary = _provider()
+    primary.default_model = "text-model"
+    fallback = CustomLLMProvider(
+        name="vision",
+        base_url="https://vision.invalid/v1",
+        api_key="test-key",
+        default_model="vision-model",
+        max_retries=0,
+    )
+    router.add_provider(primary)
+    router.add_provider(fallback)
+    router.routing_rules["vision"] = {
+        "provider": "openai",
+        "model": "text-model",
+        "fallback": ["vision/vision-model"],
+    }
+    primary_requests = []
+    fallback_requests = []
+
+    async def fail_primary(request):
+        primary_requests.append(request)
+        raise ConnectionError("primary unavailable")
+
+    async def complete_fallback(request):
+        fallback_requests.append(request)
+        return _response()
+
+    primary.complete_with_timing = fail_primary
+    fallback.complete_with_timing = complete_fallback
+    request = _request()
+    request.messages[0].images = [ImageContent(base64="aW1hZ2U=")]
+
+    response = await router.complete(request)
+
+    assert response.content == "answer"
+    assert primary_requests[0].messages[0].images == []
+    assert fallback_requests[0].messages[0].images == request.messages[0].images
+    assert request.messages[0].images[0].base64 == "aW1hZ2U="
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_fallback_after_emitting_partial_output():
+    router = ModelRouter()
+    primary = _provider()
+    fallback = CustomLLMProvider(
+        name="fallback",
+        base_url="https://fallback.invalid/v1",
+        api_key="test-key",
+        default_model="fallback-model",
+        max_retries=0,
+    )
+    router.add_provider(primary)
+    router.add_provider(fallback)
+    router.routing_rules["reasoning"] = {
+        "provider": "openai",
+        "fallback": ["fallback/fallback-model"],
+    }
+    fallback_stream = Mock()
+
+    async def primary_stream(_request):
+        yield LLMChunk(content="partial")
+        raise ConnectionError("connection lost")
+
+    primary.stream = primary_stream
+    fallback.stream = fallback_stream
+
+    generator = router.stream(_request(), task_type="reasoning")
+    assert (await generator.__anext__()).content == "partial"
+    with pytest.raises(ConnectionError, match="connection lost"):
+        await generator.__anext__()
+    fallback_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_closing_budgeted_stream_settles_reservation():
+    router = ModelRouter()
+    router.max_per_request_usd = 0.1
+    router.max_per_engagement_usd = 0.1
+    provider = _provider()
+    router.add_provider(provider)
+
+    async def provider_stream(_request):
+        yield LLMChunk(content="partial")
+        yield LLMChunk(is_final=True)
+
+    provider.stream = provider_stream
+    generator = router.stream(_request())
+    assert (await generator.__anext__()).content == "partial"
+    await generator.aclose()
+
+    budget = router.get_stats()["budget"]
+    assert "eng-1" not in budget["reserved_by_engagement_usd"]
+    assert budget["uncertain_by_engagement_usd"]["eng-1"] > 0
 
 
 @pytest.mark.asyncio

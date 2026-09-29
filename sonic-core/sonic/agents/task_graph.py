@@ -32,10 +32,12 @@ from pydantic import BaseModel, Field
 
 # Autonomous worker types plus explicitly modelled workflow-stage nodes.
 # Workflow-stage labels are graph state, not SwarmRunner dispatch targets.
-VALID_AGENT_TYPES = frozenset({
+DISPATCHABLE_AGENT_TYPES = frozenset({
     "recon", "static", "dynamic", "hypothesis", "verifier",
-    "exploit_validator", "codefix", "human_workflow", "human",
+    "exploit_validator", "codefix",
 })
+GRAPH_ONLY_AGENT_TYPES = frozenset({"human_workflow", "human"})
+VALID_AGENT_TYPES = DISPATCHABLE_AGENT_TYPES | GRAPH_ONLY_AGENT_TYPES
 
 
 def _new_id() -> str:
@@ -120,13 +122,14 @@ class TaskNode(BaseModel):
 
     # Resource constraints
     timeout_seconds: int = 180
-    max_retries: int = 2
-    retry_count: int = 0
+    max_retries: int = Field(default=2, ge=0)
+    retry_count: int = Field(default=0, ge=0)
 
     # Ownership
     engagement_id: str = ""
     tenant_id: str = ""
     agent_id: str = ""          # Assigned agent instance ID
+    execution_id: str = ""      # Unique token for the current running attempt
     workspace_id: str = ""
 
     # Timestamps
@@ -227,6 +230,8 @@ class TaskGraph:
             raise InvalidAgentTypeError(
                 f"Unknown agent_type '{task.agent_type}'. Valid: {VALID_AGENT_TYPES}"
             )
+        if task.retry_count > task.max_retries:
+            raise TaskGraphError("retry_count cannot exceed max_retries")
 
         # Duplicate check
         if task.id in self._tasks:
@@ -360,14 +365,43 @@ class TaskGraph:
         elif all_met:
             task.status = TaskStatus.READY
 
-    def mark_blocked(self, task_id: str, reason: str) -> list[str]:
+    @staticmethod
+    def _validate_execution_id(task: TaskNode, execution_id: str | None) -> None:
+        """Accept legacy first-attempt callbacks but require retry tokens."""
+        if (
+            task.execution_id
+            and execution_id != task.execution_id
+            and not (execution_id is None and task.retry_count == 0)
+        ):
+            raise TaskGraphError(
+                f"Stale or missing execution_id for task '{task.id}'"
+            )
+
+    def mark_blocked(
+        self,
+        task_id: str,
+        reason: str,
+        execution_id: str | None = None,
+    ) -> list[str]:
         """Mark a task blocked without presenting it as an executed failure."""
         task = self._tasks.get(task_id)
         if not task:
             raise TaskGraphError(f"Task '{task_id}' not found")
+        self._validate_execution_id(task, execution_id)
+        if task.status in (
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.SKIPPED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        ):
+            raise TaskGraphError(
+                f"Cannot block task '{task_id}' in terminal status {task.status}"
+            )
         task.status = TaskStatus.BLOCKED
         task.error = reason
         task.completed_at = _now()
+        task.execution_id = ""
         blocked_ids: list[str] = []
         to_block: deque[str] = deque(self._dependents.get(task_id, set()))
         while to_block:
@@ -393,7 +427,7 @@ class TaskGraph:
         ready.sort(key=lambda t: t.priority.numeric)
         return ready
 
-    def mark_running(self, task_id: str, agent_id: str = "") -> None:
+    def mark_running(self, task_id: str, agent_id: str = "") -> str:
         """Mark a task as currently executing."""
         task = self._tasks.get(task_id)
         if not task:
@@ -405,12 +439,20 @@ class TaskGraph:
         task.status = TaskStatus.RUNNING
         task.started_at = _now()
         task.agent_id = agent_id
+        task.execution_id = uuid.uuid4().hex
+        return task.execution_id
 
-    def mark_completed(self, task_id: str, result: dict[str, Any]) -> None:
+    def mark_completed(
+        self,
+        task_id: str,
+        result: dict[str, Any],
+        execution_id: str | None = None,
+    ) -> None:
         """Mark a task as successfully completed and update dependents."""
         task = self._tasks.get(task_id)
         if not task:
             raise TaskGraphError(f"Task '{task_id}' not found")
+        self._validate_execution_id(task, execution_id)
         if task.status != TaskStatus.RUNNING:
             raise TaskGraphError(
                 f"Task '{task_id}' is {task.status}, not RUNNING"
@@ -420,6 +462,7 @@ class TaskGraph:
         if isinstance(result, dict):
             task.state_delta.update(result.get("state_delta", {}))
         task.completed_at = _now()
+        task.execution_id = ""
 
         # Update dependents' readiness
         for dependent_id in self._dependents.get(task_id, set()):
@@ -519,7 +562,12 @@ class TaskGraph:
             task.tenant_id = self.tenant_id
         return self.inject_tasks(recovery_tasks)
 
-    def mark_failed(self, task_id: str, error: str) -> list[str]:
+    def mark_failed(
+        self,
+        task_id: str,
+        error: str,
+        execution_id: str | None = None,
+    ) -> list[str]:
         """
         Mark a task as failed and cascade BLOCKED to all downstream dependents.
 
@@ -529,10 +577,24 @@ class TaskGraph:
         task = self._tasks.get(task_id)
         if not task:
             raise TaskGraphError(f"Task '{task_id}' not found")
+        self._validate_execution_id(task, execution_id)
+
+        if task.status != TaskStatus.RUNNING:
+            raise TaskGraphError(
+                f"Cannot fail task '{task_id}' in status {task.status}; expected RUNNING"
+            )
+
+        task.error = error
+        if task.retry_count < task.max_retries:
+            task.retry_count += 1
+            task.status = TaskStatus.READY
+            task.completed_at = None
+            task.execution_id = ""
+            return []
 
         task.status = TaskStatus.FAILED
-        task.error = error
         task.completed_at = _now()
+        task.execution_id = ""
 
         # Cascade BLOCKED to all downstream tasks
         blocked_ids: list[str] = []
@@ -561,26 +623,41 @@ class TaskGraph:
         task = self._tasks.get(task_id)
         if not task:
             raise TaskGraphError(f"Task '{task_id}' not found")
-        if task.status in (TaskStatus.RUNNING, TaskStatus.SUCCEEDED):
+        if task.status in (
+            TaskStatus.RUNNING,
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.SKIPPED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        ):
             raise TaskGraphError(
                 f"Cannot skip task '{task_id}' in status {task.status}"
             )
         task.status = TaskStatus.SKIPPED
         task.error = reason or "Skipped by replan engine"
         task.completed_at = _now()
+        task.execution_id = ""
 
     def mark_cancelled(self, task_id: str, reason: str = "") -> None:
         """Cancel a task."""
         task = self._tasks.get(task_id)
         if not task:
             raise TaskGraphError(f"Task '{task_id}' not found")
-        if task.status in (TaskStatus.SUCCEEDED,):
+        if task.status in (
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.SKIPPED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        ):
             raise TaskGraphError(
                 f"Cannot cancel already-completed task '{task_id}'"
             )
         task.status = TaskStatus.CANCELLED
         task.error = reason or "Cancelled"
         task.completed_at = _now()
+        task.execution_id = ""
 
     # ============================================
     # Task Injection (for Replan Engine)

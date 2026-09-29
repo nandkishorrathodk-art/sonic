@@ -375,8 +375,8 @@ class SqliteGraph:
         )
         params: list[Any] = [RelationshipType.HAS_EVIDENCE, finding_id]
         if tenant_id:
-            sql += " AND r.tenant_id = ?"
-            params.append(tenant_id)
+            sql += " AND r.tenant_id = ? AND n.tenant_id = ?"
+            params.extend((tenant_id, tenant_id))
         out: list[dict] = []
         async with self._db.execute(sql, params) as cur:
             for label_val, props_json in await cur.fetchall():
@@ -526,4 +526,3 @@ class SqliteGraph:
                     })
 
         return nodes, edges
-

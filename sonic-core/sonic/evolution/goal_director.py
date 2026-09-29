@@ -17,10 +17,12 @@ Key Capabilities:
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
 import sqlite3
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,6 +34,7 @@ from sonic.evolution.codebase_evolver import (
     CodebaseEvolver,
     EvolutionSummaryReport,
     SafetyInvariantViolation,
+    VerificationTestResult,
 )
 from sonic.evolution.evolution_journal import EvolutionJournal, JournalEntry
 from sonic.evolution.pipeline import EvolutionStage
@@ -64,6 +67,7 @@ class GoalStatus(StrEnum):
     ANALYZING = "analyzing"
     SYNTHESIZING = "synthesizing"
     TESTING = "testing"
+    VERIFIED = "verified"
     PROMOTED = "promoted"
     AWAITING_APPROVAL = "awaiting_approval"
     ROLLED_BACK = "rolled_back"
@@ -103,6 +107,7 @@ class EvolutionGoal:
     attempts: int = 0
     max_attempts: int = 3
     notes: str = ""
+    approval_manifest: dict[str, Any] = field(default_factory=dict)
 
 
 class EvolutionGoalDirector:
@@ -179,9 +184,18 @@ class EvolutionGoalDirector:
                     evolution_report TEXT DEFAULT '',
                     attempts INTEGER DEFAULT 0,
                     max_attempts INTEGER DEFAULT 3,
-                    notes TEXT DEFAULT ''
+                    notes TEXT DEFAULT '',
+                    approval_manifest_json TEXT NOT NULL DEFAULT '{}'
                 )
             """)
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(evolution_goals)")
+            }
+            if "approval_manifest_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE evolution_goals ADD COLUMN "
+                    "approval_manifest_json TEXT NOT NULL DEFAULT '{}'"
+                )
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -284,7 +298,8 @@ class EvolutionGoalDirector:
                     evolution_report = ?,
                     attempts = ?,
                     notes = ?,
-                    target_files_json = ?
+                    target_files_json = ?,
+                    approval_manifest_json = ?
                 WHERE goal_id = ?
             """, (
                 goal.status.value,
@@ -294,6 +309,7 @@ class EvolutionGoalDirector:
                 goal.attempts,
                 goal.notes,
                 json.dumps(goal.target_files),
+                json.dumps(goal.approval_manifest, sort_keys=True),
                 goal.goal_id,
             ))
             conn.commit()
@@ -315,7 +331,328 @@ class EvolutionGoalDirector:
             attempts=row["attempts"],
             max_attempts=row["max_attempts"],
             notes=row["notes"],
+            approval_manifest=json.loads(row["approval_manifest_json"] or "{}"),
         )
+
+    def _make_approval_manifest(
+        self,
+        report: EvolutionSummaryReport,
+    ) -> dict[str, Any]:
+        if (
+            not report.test_result.passed
+            or report.test_result.failed_tests != 0
+            or not report.security_regression_passed
+        ):
+            raise ValueError("verified test and security-regression receipts are required")
+        if not report.files_affected:
+            raise ValueError("the verified report contains no files to promote")
+
+        files: list[str] = []
+        digests: dict[str, str] = {}
+        git_blobs: dict[str, str] = {}
+        for item in report.files_affected:
+            path = Path(item)
+            resolved = (path if path.is_absolute() else self.repo_root / path).resolve()
+            try:
+                relative = resolved.relative_to(self.repo_root).as_posix()
+            except ValueError as exc:
+                raise ValueError(f"approval file escapes repository: {item}") from exc
+            if not resolved.is_file():
+                raise ValueError(f"approval file is missing from the working tree: {relative}")
+            files.append(relative)
+            digests[relative] = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            git_blobs[relative] = subprocess.run(
+                ["git", "hash-object", f"--path={relative}", str(resolved)],
+                cwd=str(self.repo_root),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        head_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(self.repo_root),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        test = report.test_result
+        return {
+            "base_commit": head_result.stdout.strip(),
+            "files": sorted(set(files)),
+            "sha256": digests,
+            "git_blobs": git_blobs,
+            "report": {
+                "target_component": report.target_component,
+                "description": report.description,
+                "files_affected": list(report.files_affected),
+                "lines_added": report.lines_added,
+                "lines_removed": report.lines_removed,
+                "ast_validated": report.ast_validated,
+                "security_regression_passed": report.security_regression_passed,
+                "test_result": {
+                    "passed": test.passed,
+                    "passed_tests": test.passed_tests,
+                    "total_tests": test.total_tests,
+                    "failed_tests": test.failed_tests,
+                    "skipped_tests": test.skipped_tests,
+                    "duration_seconds": test.duration_seconds,
+                    "raw_output": test.raw_output,
+                    "error_message": test.error_message,
+                },
+            },
+        }
+
+    def _approval_report(
+        self,
+        goal: EvolutionGoal,
+        *,
+        error: str = "",
+        stage: EvolutionStage = EvolutionStage.AWAITING_APPROVAL,
+    ) -> EvolutionSummaryReport:
+        manifest = goal.approval_manifest
+        payload = manifest.get("report", {})
+        test_data = payload.get("test_result", {})
+        return EvolutionSummaryReport(
+            proposal_id=goal.goal_id,
+            target_component=payload.get("target_component", ", ".join(goal.target_files)),
+            description=payload.get("description", goal.description),
+            stage=stage,
+            files_affected=list(payload.get("files_affected", manifest.get("files", []))),
+            lines_added=int(payload.get("lines_added", 0)),
+            lines_removed=int(payload.get("lines_removed", 0)),
+            ast_validated=bool(payload.get("ast_validated", False)),
+            test_result=VerificationTestResult(
+                passed=bool(test_data.get("passed", False)),
+                passed_tests=int(test_data.get("passed_tests", 0)),
+                total_tests=int(test_data.get("total_tests", 0)),
+                failed_tests=int(test_data.get("failed_tests", 0)),
+                skipped_tests=int(test_data.get("skipped_tests", 0)),
+                duration_seconds=float(test_data.get("duration_seconds", 0.0)),
+                raw_output=str(test_data.get("raw_output", "")),
+                error_message=str(test_data.get("error_message", "")),
+            ),
+            security_regression_passed=bool(
+                payload.get("security_regression_passed", False)
+            ),
+            error_reason=error,
+        )
+
+    def reject_goal(self, goal_id: str) -> EvolutionGoal:
+        """Reject a pending promotion without silently discarding working-tree edits."""
+        goal = self.get_goal(goal_id)
+        if goal is None:
+            raise ValueError(f"Evolution goal not found: {goal_id}")
+        if goal.status != GoalStatus.AWAITING_APPROVAL:
+            raise ValueError(
+                f"Goal {goal_id} is {goal.status.value}, not awaiting approval"
+            )
+        goal.status = GoalStatus.REJECTED
+        goal.completed_at = _now()
+        goal.notes = (
+            "Operator rejected promotion. Verified working-tree edits were left "
+            "untouched; they were not committed or rolled back."
+        )
+        self._update_goal(goal)
+        return goal
+
+    def approve_goal(self, goal_id: str, *, push: bool = False) -> EvolutionSummaryReport:
+        """Commit a still-identical, previously verified pending patch on operator approval."""
+        goal = self.get_goal(goal_id)
+        if goal is None:
+            raise ValueError(f"Evolution goal not found: {goal_id}")
+        if goal.status != GoalStatus.AWAITING_APPROVAL:
+            raise ValueError(
+                f"Goal {goal_id} is {goal.status.value}, not awaiting approval"
+            )
+
+        manifest = goal.approval_manifest
+        files = manifest.get("files", [])
+        expected_digests = manifest.get("sha256", {})
+        expected_blobs = manifest.get("git_blobs", {})
+        base_commit = manifest.get("base_commit", "")
+        if (
+            not files
+            or not base_commit
+            or set(files) != set(expected_digests)
+            or set(files) != set(expected_blobs)
+        ):
+            report = self._approval_report(
+                goal,
+                error=(
+                    "No complete verified approval manifest is available. "
+                    "The goal cannot be promoted safely; rerun verification."
+                ),
+            )
+            goal.notes = report.error_reason
+            self._update_goal(goal)
+            return report
+
+        try:
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(self.repo_root),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            if head != base_commit:
+                raise ValueError(
+                    "repository HEAD changed after verification; rerun the goal before approval"
+                )
+
+            for relative in files:
+                resolved = (self.repo_root / relative).resolve()
+                resolved.relative_to(self.repo_root)
+                actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+                if actual != expected_digests[relative]:
+                    raise ValueError(
+                        f"verified working-tree file changed after tests: {relative}"
+                    )
+
+            staged = subprocess.run(
+                ["git", "diff", "--cached", "--quiet", "--", *files],
+                cwd=str(self.repo_root),
+                capture_output=True,
+                text=True,
+            )
+            if staged.returncode != 0:
+                raise ValueError(
+                    "approval files have staged changes; unstage and rerun verification"
+                )
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            report = self._approval_report(goal, error=str(exc))
+            goal.notes = (
+                f"Approval blocked; verified edits remain uncommitted and untouched: {exc}"
+            )
+            self._update_goal(goal)
+            return report
+
+        committed, _reported_hash, pushed, push_message = self.evolver.commit_and_push(
+            proposal_id=goal.goal_id,
+            description=goal.title,
+            files=files,
+            push=push,
+        )
+
+        # Confirm the actual commit, its parent, subject, and committed file bytes;
+        # never advance the goal or version based only on the helper's return value.
+        try:
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(self.repo_root),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            parent = subprocess.run(
+                ["git", "rev-parse", "HEAD^"],
+                cwd=str(self.repo_root),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subject = subprocess.run(
+                ["git", "log", "-1", "--format=%s"],
+                cwd=str(self.repo_root),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            changed_files = set(subprocess.run(
+                ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+                cwd=str(self.repo_root),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines())
+            commit_is_verified = (
+                committed
+                and bool(_reported_hash)
+                and head != base_commit
+                and head.startswith(_reported_hash)
+                and parent == base_commit
+                and subject.startswith(f"evo({goal.goal_id}):")
+                and set(files).issubset(changed_files)
+            )
+            if commit_is_verified:
+                for relative in files:
+                    blob_hash = subprocess.run(
+                        ["git", "rev-parse", f"HEAD:{relative}"],
+                        cwd=str(self.repo_root),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+                    if blob_hash != expected_blobs[relative]:
+                        commit_is_verified = False
+                        break
+        except (OSError, subprocess.CalledProcessError):
+            commit_is_verified = False
+            head = ""
+
+        if not commit_is_verified:
+            reason = push_message if not committed else (
+                "Git commit was created but could not be verified against the approval "
+                "manifest; manual review is required."
+            )
+            reason = reason or "No verifiable goal-specific commit was created."
+            report = self._approval_report(goal, error=reason)
+            goal.notes = (
+                f"Approval did not produce a verified promotion. No version advance was "
+                f"recorded. {reason}"
+            )
+            self._update_goal(goal)
+            return report
+
+        commit_hash = head[:12]
+        if goal.category == GoalCategory.CAPABILITY_ADD:
+            version_after = self.version_tracker.bump_minor(
+                goal_id=goal.goal_id,
+                title=goal.title,
+                git_commit=commit_hash,
+                tag=False,
+            )
+        else:
+            version_after = self.version_tracker.bump_patch(
+                goal_id=goal.goal_id,
+                title=goal.title,
+                git_commit=commit_hash,
+                tag=False,
+            )
+        report = self._approval_report(goal, stage=EvolutionStage.PROMOTED)
+        report.git_committed = True
+        report.git_commit_hash = commit_hash
+        report.git_pushed = pushed
+        report.git_push_message = push_message
+        goal.status = GoalStatus.PROMOTED
+        goal.completed_at = _now()
+        goal.version_after = version_after
+        goal.evolution_report = report.to_markdown()
+        goal.notes = (
+            f"Operator approved verified commit {commit_hash}; version advanced to "
+            f"{version_after}. {push_message}"
+        ).strip()
+        self._update_goal(goal)
+        self._record_entry(JournalEntry(
+            entry_id=f"ent-{uuid.uuid4().hex[:8]}",
+            goal_id=goal.goal_id,
+            title=goal.title,
+            category=goal.category.value,
+            status="promoted",
+            version_before=goal.version_before,
+            version_after=version_after,
+            files_affected=report.files_affected,
+            lines_added=report.lines_added,
+            lines_removed=report.lines_removed,
+            test_summary=(
+                f"Tests: {report.test_result.passed_tests}/"
+                f"{report.test_result.total_tests} passed"
+            ),
+            notes="Operator-approved promotion after file and commit verification.",
+            commit_hash=commit_hash,
+        ))
+        return report
 
     # ------------------------------------------------------------------
     # 2. Intelligent Codebase Analysis
@@ -610,11 +947,29 @@ class EvolutionGoalDirector:
             ), report_only=report_only)
 
         elif report.stage == EvolutionStage.AWAITING_APPROVAL:
-            goal.status = GoalStatus.AWAITING_APPROVAL
-            goal.notes = (
-                "Verified edits remain in the working tree and are awaiting manual "
-                "operator approval; they have not been rolled back."
-            )
+            goal.evolution_report = report.to_markdown()
+            if report_only:
+                goal.status = GoalStatus.VERIFIED
+                goal.notes = (
+                    "Tests passed in report-only mode and the working tree was restored. "
+                    "There are no pending edits to promote; rerun without report-only "
+                    "to create an approval-ready working tree."
+                )
+            else:
+                goal.status = GoalStatus.AWAITING_APPROVAL
+                try:
+                    goal.approval_manifest = self._make_approval_manifest(report)
+                    goal.notes = (
+                        "Verified edits remain in the working tree and are awaiting "
+                        "manual operator approval; they have not been rolled back."
+                    )
+                except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+                    goal.approval_manifest = {}
+                    goal.notes = (
+                        "Verified edits remain in the working tree, but an approval "
+                        f"manifest could not be captured: {exc}. Promotion is blocked "
+                        "until the goal is reverified."
+                    )
             self._update_goal(goal)
 
         else:
