@@ -41,6 +41,10 @@ def test_ai_human_being_identity_and_vault_persistence(tmp_path, monkeypatch):
     """Being and BeingVault persist accounts and persona across restarts using RFC 2606 .test domains."""
     db_file = tmp_path / "being_vault_test.db"
     monkeypatch.setenv("SONIC_BEING_DB_PATH", str(db_file))
+    monkeypatch.setenv(
+        "SONIC_BEING_VAULT_KEY",
+        base64.urlsafe_b64encode(b"test-only-key-material-32-bytes!").decode("ascii"),
+    )
     reset_being_singleton()
 
     being = get_or_create_being(tenant_id="tenant-human-1", name="SONIC")

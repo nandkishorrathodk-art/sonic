@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from sonic.agents.judge import JudgeEvaluation, JudgeVerdict
 from sonic.computer_use.boss import BossAgent
 from sonic.computer_use.models import (
     ActionExecutionStatus,
@@ -13,11 +14,29 @@ from sonic.computer_use.models import (
 )
 from sonic.computer_use.models_boss import (
     BossReport,
-    BossThinking,
     Phase,
     SubMission,
     SubMissionResult,
 )
+
+
+@pytest.fixture(autouse=True)
+def _confirm_successful_worker_receipts(monkeypatch):
+    """Keep orchestration unit tests independent from the vision Judge implementation."""
+    async def evaluate(self, workspace_id, sub_mission, result, worker_agent_id="worker"):
+        if result.success:
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.CONFIRMED,
+                confidence=1.0,
+                notes="Test fixture independently confirms the worker receipt.",
+            )
+        return JudgeEvaluation(
+            verdict=JudgeVerdict.INCONCLUSIVE,
+            confidence=0.0,
+            notes="Test fixture received no successful worker outcome.",
+        )
+
+    monkeypatch.setattr("sonic.agents.judge.JudgeAgent.evaluate_sub_mission", evaluate)
 
 
 def _make_llm_mock(responses: list[str]):
@@ -97,11 +116,11 @@ async def test_boss_strategic_decomposition_creates_phase():
 
 @pytest.mark.asyncio
 async def test_boss_planning_only_result_is_not_reported_complete():
-    """A no-submission plan must not claim the user's objective was completed."""
+    """An empty objective must not create a worker or claim completion."""
     llm = _make_llm_mock(["{}"])
     boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=llm)
 
-    report = await boss.run(workspace_id="ws-1", objective="inspect the target")
+    report = await boss.run(workspace_id="ws-1", objective="")
 
     assert report.status == "INCOMPLETE"
     assert report.total_actions == 0
@@ -109,7 +128,7 @@ async def test_boss_planning_only_result_is_not_reported_complete():
 
 @pytest.mark.asyncio
 async def test_boss_delegates_when_llm_omits_workers_for_actionable_objective():
-    """A non-trivial objective must not be dropped as a planning no-op."""
+    """An actionable objective must not be dropped when planning omits workers."""
     llm = _make_llm_mock([json.dumps({
         "domain": "WEB",
         "thinking": "The objective requires live browser navigation and repository discovery.",
@@ -125,6 +144,18 @@ async def test_boss_delegates_when_llm_omits_workers_for_actionable_objective():
     assert phase is not None
     assert len(phase.sub_missions) == 1
     assert "open the browser" in phase.sub_missions[0].goal.lower()
+
+
+@pytest.mark.asyncio
+async def test_boss_delegates_concise_objective_when_planner_omits_workers():
+    llm = _make_llm_mock(["{}"])
+    boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=llm)
+
+    phase = await boss._strategic_decomposition("pwd")
+
+    assert phase is not None
+    assert len(phase.sub_missions) == 1
+    assert "pwd" in phase.sub_missions[0].goal
 
 
 @pytest.mark.asyncio

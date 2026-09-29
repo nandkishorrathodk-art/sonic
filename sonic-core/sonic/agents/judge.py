@@ -17,6 +17,7 @@ Strict Mandate & Prohibitions (AGENTS.md):
 
 from __future__ import annotations
 
+import json
 import re
 from enum import StrEnum
 from typing import Any
@@ -70,8 +71,10 @@ class JudgeAgent:
         independent_verifier: IndependentVerifier | None = None,
         adversarial_reviewer: AdversarialReviewer | None = None,
         judge_id: str = "judge-alpha",
+        llm_router: Any = None,
     ):
         self.computer = computer_provider
+        self.llm_router = llm_router
         self.reproduction_engine = reproduction_engine or (
             ReproductionEngine(compute_provider=computer_provider)
             if computer_provider and hasattr(computer_provider, "execute")
@@ -80,6 +83,151 @@ class JudgeAgent:
         self.independent_verifier = independent_verifier or IndependentVerifier()
         self.adversarial_reviewer = adversarial_reviewer or AdversarialReviewer()
         self.judge_id = judge_id
+
+    async def _evaluate_gui_result(
+        self,
+        workspace_id: str,
+        sub_mission: SubMission,
+        result: SubMissionResult,
+        traces: list[Any],
+    ) -> JudgeEvaluation:
+        """Independently compare the requested GUI outcome with a fresh desktop frame."""
+        if self.llm_router is None or self.computer is None:
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.INCONCLUSIVE,
+                confidence=0.0,
+                notes="GUI outcome cannot be independently checked: vision Judge or desktop provider is unavailable.",
+                self_attestation_rejected=True,
+            )
+
+        gui_actions = []
+        for trace in traces:
+            action = _t_val(trace, "action_type", "")
+            action = action.value if hasattr(action, "value") else str(action)
+            if action.startswith("GUI_") or action in ("APP_LAUNCH", "APP_FOCUS", "APP_CLOSE"):
+                gui_actions.append(
+                    {
+                        "action": action,
+                        "target": str(_t_val(trace, "target_resource", ""))[:240],
+                        "status": str(_t_val(trace, "status", ""))[:40],
+                        "observation": str(
+                            _t_val(trace, "actual_observation", "")
+                            or _t_val(trace, "observation", "")
+                        )[:500],
+                    }
+                )
+        if not gui_actions:
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.INCONCLUSIVE,
+                confidence=0.0,
+                notes="GUI outcome cannot be confirmed: worker supplied no GUI interaction receipts.",
+                self_attestation_rejected=True,
+            )
+
+        try:
+            from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
+
+            screen = await self.computer.screenshot(workspace_id)
+            image = (
+                getattr(screen, "screenshot_base64", "")
+                or getattr(screen, "image_base64", "")
+            )
+            if not image:
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.INCONCLUSIVE,
+                    confidence=0.0,
+                    notes="GUI outcome cannot be confirmed: fresh desktop screenshot is unavailable.",
+                    self_attestation_rejected=True,
+                )
+
+            screen_state = str(getattr(screen, "desktop_state", "") or "UNKNOWN")
+            if screen_state.upper() == "NO_DISPLAY":
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.INCONCLUSIVE,
+                    confidence=0.0,
+                    notes="GUI outcome cannot be confirmed: workstation reports no active display.",
+                    self_attestation_rejected=True,
+                )
+
+            request = LLMRequest(
+                messages=[
+                    Message(
+                        role=MessageRole.SYSTEM,
+                        content=(
+                            "You are an independent desktop-task Judge. Compare the user's requested "
+                            "outcome with the attached fresh screenshot and typed GUI receipts. Do not "
+                            "treat the worker's claim or a successful click as proof by itself. Return "
+                            "CONFIRMED only when the requested end state is directly visible or "
+                            "unambiguously established by the screenshot and receipts. If the evidence "
+                            "is ambiguous, incomplete, or not visible, return INCONCLUSIVE. If the "
+                            "screenshot contradicts the requested outcome, return FALSIFIED. Output "
+                            "only JSON: {\"verdict\":\"CONFIRMED|INCONCLUSIVE|FALSIFIED\","
+                            "\"visible_evidence\":\"brief evidence from the screenshot\"}."
+                        ),
+                    ),
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"Requested outcome: {sub_mission.goal}\n"
+                            f"Worker outcome summary (untrusted claim): {result.findings_summary[:1200]}\n"
+                            f"Typed GUI receipts: {json.dumps(gui_actions[-12:], ensure_ascii=True)}\n"
+                            f"Current desktop state: {screen_state}; "
+                            f"active window: {getattr(screen, 'active_window', '')!r}"
+                        ),
+                        images=[ImageContent(base64=image)],
+                    ),
+                ],
+                task_type="vision",
+                max_tokens=220,
+                temperature=0.0,
+            )
+            response = await self.llm_router.complete(request)
+            raw = (response.content or "").strip()
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            parsed = json.loads(match.group(0)) if match else {}
+            verdict_text = str(parsed.get("verdict", "")).upper()
+            visible_evidence = str(parsed.get("visible_evidence", "")).strip()
+
+            if verdict_text == JudgeVerdict.CONFIRMED.value and visible_evidence:
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.CONFIRMED,
+                    confidence=0.9,
+                    notes=f"Fresh desktop screenshot confirms the requested GUI outcome: {visible_evidence[:500]}",
+                    evidence_items=[visible_evidence[:500]],
+                )
+            if verdict_text == JudgeVerdict.FALSIFIED.value:
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.FALSIFIED,
+                    confidence=0.85,
+                    notes=(
+                        "Fresh desktop screenshot contradicts the requested GUI outcome: "
+                        f"{visible_evidence[:500] or raw[:300]}"
+                    ),
+                    self_attestation_rejected=True,
+                    evidence_items=[visible_evidence[:500]] if visible_evidence else [],
+                )
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.INCONCLUSIVE,
+                confidence=0.4,
+                notes=(
+                    "Fresh desktop screenshot did not provide decisive proof of the requested "
+                    f"GUI outcome: {visible_evidence[:500] or raw[:300]}"
+                ),
+                self_attestation_rejected=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "judge_gui_outcome_evaluation_failed",
+                workspace_id=workspace_id,
+                sub_mission_id=sub_mission.id,
+                error=str(exc),
+            )
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.INCONCLUSIVE,
+                confidence=0.0,
+                notes=f"GUI outcome verification failed; no completion claim is allowed ({exc}).",
+                self_attestation_rejected=True,
+            )
 
     async def evaluate_sub_mission(
         self,
@@ -255,7 +403,8 @@ class JudgeAgent:
             )
 
         # 3. Anti-Self-Attestation Gate
-        if worker_self_verified and not has_concrete_proof:
+        is_gui_mission = str(getattr(sub_mission, "plane", "")).lower() == "gui"
+        if worker_self_verified and not has_concrete_proof and not is_gui_mission:
             logger.warning(
                 "judge_self_attestation_rejected",
                 worker=worker_agent_id,
@@ -370,63 +519,18 @@ class JudgeAgent:
                         },
                     )
 
-        # 4.5 Workstation Application & Desktop Window Check (Rule 5 & Rule 7):
-        is_gui_mission = getattr(sub_mission, "plane", "") == "gui" and any(
-            w in goal_lower
-            for w in ("desktop", "browser", "window", "gui", "open application", "launch application")
-        )
+        gui_evaluation: JudgeEvaluation | None = None
         if is_gui_mission:
-            has_gui_action = any(
-                str(_t_val(t, "action_type", "")).startswith("GUI_")
-                or str(_t_val(t, "action_type", "")) in ("APP_LAUNCH", "APP_FOCUS")
-                for t in traces
+            gui_evaluation = await self._evaluate_gui_result(
+                workspace_id,
+                sub_mission,
+                result,
+                traces,
             )
-            gui_verified = has_gui_action
-            status_checked = False
-            if self.computer and callable(getattr(self.computer, "status", None)):
-                try:
-                    state = await self.computer.status(workspace_id)
-                    open_windows = getattr(state, "open_applications", None)
-                    if open_windows is None:
-                        open_windows = getattr(state, "windows", [])
-                    active_window = (
-                        getattr(state, "active_window", "")
-                        or getattr(state, "active_application", "")
-                    )
-                    generic_windows = {"", "desktop", "headless", "terminal", "headless_terminal"}
-                    gui_verified = any(
-                        str(window).strip().lower() not in generic_windows
-                        for window in (open_windows or [])
-                    ) or str(active_window).strip().lower() not in generic_windows
-                    status_checked = True
-                except Exception as exc:
-                    logger.warning(
-                        "judge_gui_status_verification_failed",
-                        workspace_id=workspace_id,
-                        error=str(exc),
-                    )
-                    status_checked = False
-            if not gui_verified and not status_checked and self.computer and hasattr(self.computer, "terminal"):
-                try:
-                    wm_res = await self.computer.terminal(
-                        workspace_id,
-                        "DISPLAY=:99 wmctrl -l 2>/dev/null | grep -v ' -1 '",
-                    )
-                    open_wins = [
-                        line for line in (getattr(wm_res, "stdout", "") or "").splitlines()
-                        if line.strip()
-                    ]
-                    if open_wins:
-                        gui_verified = True
-                except Exception:
-                    pass
-
-            if not gui_verified:
-                return JudgeEvaluation(
-                    verdict=JudgeVerdict.FALSIFIED,
-                    confidence=0.85,
-                    notes="GUI desktop interaction unverified: No application window or visual action was detected on Display :99.",
-                )
+            if gui_evaluation.verdict != JudgeVerdict.CONFIRMED:
+                return gui_evaluation
+            has_concrete_proof = True
+            evidence_items.extend(gui_evaluation.evidence_items)
 
         # A successful process is not evidence that it advanced the mission.
         # Require a meaningful objective token in the concrete receipt before
@@ -453,7 +557,7 @@ class JudgeAgent:
         has_overlap = bool(goal_terms.intersection(receipt_terms)) or any(
             gt in receipt_text for gt in goal_terms
         )
-        if has_concrete_proof and goal_terms and not has_overlap:
+        if gui_evaluation is None and has_concrete_proof and goal_terms and not has_overlap:
             return JudgeEvaluation(
                 verdict=JudgeVerdict.INCONCLUSIVE,
                 confidence=0.4,

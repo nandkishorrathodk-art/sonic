@@ -238,7 +238,11 @@ class BossAgent:
             max_total_tasks=100,
         )
         self.replan_engine = ReplanEngine()
-        self.judge = JudgeAgent(computer_provider=self.computer, judge_id=f"judge-{self.tenant_id}")
+        self.judge = JudgeAgent(
+            computer_provider=self.computer,
+            judge_id=f"judge-{self.tenant_id}",
+            llm_router=self.llm_router,
+        )
 
     def interrupt(self) -> None:
         """Signal the Boss to stop orchestration."""
@@ -386,22 +390,20 @@ class BossAgent:
         if not self.phases:
             first_phase = await self._strategic_decomposition(objective)
             if not first_phase or not first_phase.sub_missions:
-                if len(objective.split()) > 3:
+                if objective.strip():
                     # Planning must never prevent a real observation. If the
-                    # planner emits no workers for a substantive objective,
+                    # planner emits no workers for any actionable objective,
                     # delegate the original objective to one bounded,
                     # adaptive worker instead of returning a planning-only
                     # no-op.
                     first_phase = self._fallback_decomposition(objective)
                 else:
-                    # Truly trivial objectives may remain planning-only.
-                    logger.info("boss_agent_simple_objective", objective=objective[:100])
+                    logger.info("boss_agent_missing_objective")
                     return BossReport(
                         objective=objective,
                         status="INCOMPLETE",
                         findings_summary=(
-                            "No sub-missions were created; no execution or verification "
-                            "was performed. Route this objective to direct execution."
+                            "No objective was provided; no execution or verification was performed."
                         ),
                         duration_seconds=round(time.perf_counter() - t_start, 2),
                     )
@@ -802,7 +804,7 @@ Rules:
             # no-op: preserve the user's objective and delegate one bounded,
             # adaptive worker. Keep an explicitly empty/minimal response
             # honest for genuinely trivial objectives and legacy callers.
-            if len(objective.split()) > 3:
+            if objective.strip():
                 return self._fallback_decomposition(objective)
             return None
 
@@ -1433,11 +1435,16 @@ Rules:
                 waiting_for_human_reason=waiting_for_human_reason,
             )
 
-            # Independent Judge Agent evaluation (Anti-Self-Attestation)
-            if hasattr(self, "judge") and self.judge and not waiting_for_human:
+            # Independent Judge Agent evaluation (Anti-Self-Attestation). A
+            # missing, inconclusive, or failed Judge must never leave the
+            # worker's self-reported success intact.
+            if not waiting_for_human:
                 try:
                     from sonic.agents.judge import JudgeVerdict
-                    judge_eval = await self.judge.evaluate_sub_mission(
+                    judge = getattr(self, "judge", None)
+                    if judge is None:
+                        raise RuntimeError("independent Judge is not configured")
+                    judge_eval = await judge.evaluate_sub_mission(
                         workspace_id=workspace_id,
                         sub_mission=sub_mission,
                         result=sub_result,
@@ -1445,19 +1452,32 @@ Rules:
                     )
                     sub_result.judge_verdict = judge_eval.verdict.value
                     sub_result.judge_notes = judge_eval.notes
-                    if judge_eval.verdict == JudgeVerdict.CONFIRMED:
+                    if judge_eval.verdict == JudgeVerdict.CONFIRMED and sub_result.success:
                         sub_result.evidence_verified = True
-                    elif judge_eval.verdict == JudgeVerdict.FALSIFIED:
+                    else:
                         sub_result.evidence_verified = False
                         sub_result.success = False
                         sub_result.status = "FAILED"
-                        falsified_note = f"[FALSIFIED by Judge] {judge_eval.notes}"
+                        verdict_label = (
+                            "FALSIFIED"
+                            if judge_eval.verdict == JudgeVerdict.FALSIFIED
+                            else "UNVERIFIED"
+                        )
+                        judge_note = f"[{verdict_label} by Judge] {judge_eval.notes}"
                         if sub_result.findings_summary:
-                            sub_result.findings_summary = f"{falsified_note}\n{sub_result.findings_summary}"
+                            sub_result.findings_summary = f"{judge_note}\n{sub_result.findings_summary}"
                         else:
-                            sub_result.findings_summary = falsified_note
+                            sub_result.findings_summary = judge_note
                 except Exception as judge_err:
-                    logger.warning("boss_judge_evaluation_failed", error=str(judge_err))
+                    logger.error("boss_judge_evaluation_failed", error=str(judge_err))
+                    sub_result.evidence_verified = False
+                    sub_result.success = False
+                    sub_result.status = "FAILED"
+                    judge_note = f"[UNVERIFIED by Judge] Independent verification failed: {judge_err}"
+                    if sub_result.findings_summary:
+                        sub_result.findings_summary = f"{judge_note}\n{sub_result.findings_summary}"
+                    else:
+                        sub_result.findings_summary = judge_note
 
             return sub_result
 
@@ -1670,7 +1690,7 @@ Rules:
 
         verified_results = [
             result for result in (results or [])
-            if result.evidence_verified or self._result_has_verified_trace(result)
+            if result.evidence_verified
         ]
         if is_complete and not verified_results:
             is_complete = False
@@ -1687,34 +1707,6 @@ Rules:
         ))
 
         return is_complete, reason
-
-    @staticmethod
-    def _result_has_verified_trace(result: SubMissionResult) -> bool:
-        """Recognize independently observed, successful sandbox evidence."""
-        for trace in result.traces:
-            explicit_evidence = getattr(trace, "verification_evidence", None)
-            if explicit_evidence is None and isinstance(trace, dict):
-                explicit_evidence = trace.get("verification_evidence")
-            actual_obs = getattr(trace, "actual_observation", None)
-            if actual_obs is None and isinstance(trace, dict):
-                actual_obs = trace.get("actual_observation") or trace.get("observation")
-            exit_code = getattr(trace, "exit_code", None)
-            if exit_code is None and isinstance(trace, dict):
-                exit_code = trace.get("exit_code")
-            status = getattr(trace, "status", None)
-            if status is None and isinstance(trace, dict):
-                status = trace.get("status")
-            status_text = str(status or "").upper()
-            if status_text == "VERIFIED" and str(explicit_evidence or "").strip():
-                return True
-            if (
-                status_text in ("COMPLETED", "SUCCESS")
-                and exit_code in (0, None)
-                and str(actual_obs or "").strip()
-                and not str(actual_obs or "").strip().startswith(("Error:", "[ACTION LOOP DETECTED]"))
-            ):
-                return True
-        return False
 
     # ------------------------------------------------------------------
     # Next Phase Planning (Reaction)
@@ -1876,7 +1868,7 @@ If the objective is complete or no more work is needed, return:
             r.success for p in self.phases for r in p.results
         ) if self.phases and any(p.results for p in self.phases) else False
         all_verified = all(
-            r.evidence_verified or self._result_has_verified_trace(r)
+            r.evidence_verified
             for p in self.phases
             for r in p.results
         ) if self.phases and any(p.results for p in self.phases) else False

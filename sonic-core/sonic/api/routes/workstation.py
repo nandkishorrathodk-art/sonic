@@ -222,8 +222,13 @@ async def _run_prompt_reasoning_with_timeout(
     """Bound one-shot reasoning so a provider outage cannot strand a session."""
     state = _get_or_create_session(tenant_id, session_id)
     try:
-        # Dynamically scale timeout for complex/multi-phase missions (up to 900s)
-        timeout_sec = 900 if _is_complex_or_multi_part_objective(prompt) else 300
+        # Actionable computer tasks run through Boss planning, worker execution,
+        # and verification; reserve the longer mission budget for that path.
+        timeout_sec = (
+            900
+            if _is_action_prompt(prompt) and not _is_observation_only_prompt(prompt)
+            else 300
+        )
         await asyncio.wait_for(
             _run_prompt_reasoning(tenant_id, session_id, prompt),
             timeout=timeout_sec,
@@ -2454,36 +2459,6 @@ def _is_research_prompt(prompt: str) -> bool:
     return False
 
 
-def _is_complex_or_multi_part_objective(prompt: str) -> bool:
-    """Check if an objective requests multi-step or Boss Agent subagent orchestration."""
-    p_lower = prompt.lower().strip()
-    if any(k in p_lower for k in ("[boss]", "subagent", "sub-agent", "multi-phase", "orchestrat", "swarm")):
-        return True
-    if re.search(r"\bdeep\s+dive\b", p_lower):
-        return True
-    words = p_lower.split()
-    if len(words) >= 25:
-        return True
-    if len(words) >= 8 and len(re.findall(r"\band\b", p_lower)) >= 2:
-        return True
-    profile = _infer_program_profile(prompt)
-    target_hint = str(profile.get("target") or "")
-    network_target = bool(re.search(
-        r"(?:https?://|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|ai|app)\b)",
-        target_hint,
-    ))
-    if profile["objective_present"] and (
-        network_target
-        or (
-            profile["modalities"] != ["UNKNOWN"]
-            and any(modality != "DATA_FORENSICS" for modality in profile["modalities"])
-        )
-        or re.search(r"\b(?:phase|recon|attack\s+surface)\b", p_lower)
-    ):
-        return True
-    return False
-
-
 def _infer_program_profile(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a lightweight, evidence-labelled intake profile.
 
@@ -3230,6 +3205,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             llm=llm_router,
                             vector_memory=vec_mem,
                             toolsmith=toolsmith,
+                            tenant_id=tenant_id,
                         )
                         lessons_ledger = LessonsLedger(
                             tenant_id=tenant_id,
@@ -3237,7 +3213,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             semantic_memory=vec_mem,
                         )
 
-                        if _is_complex_or_multi_part_objective(prompt):
+                        # Every actionable workstation objective is planned and
+                        # delegated by Boss. Simple objectives naturally become
+                        # a single bounded worker instead of bypassing orchestration.
+                        if execution_prompt:
                             from sonic.computer_use.boss import BossAgent
 
                             boss = BossAgent(
