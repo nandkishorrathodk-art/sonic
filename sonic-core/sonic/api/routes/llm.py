@@ -287,9 +287,14 @@ async def laya_status(user: User = Depends(require_auth)):
     if "api_url" not in st:
         st["api_url"] = engine.api_url or None
     if "language_support" not in st:
-        st["language_support"] = ["en", "hi-Deva", "hi-Latn", "multilingual"]
+        st["language_support"] = ["en", "hi-Deva"]
     if "languages" not in st:
-        st["languages"] = ["en", "hi-Deva", "hi-Latn", "multilingual"]
+        st["languages"] = ["en", "hi-Deva"]
+    if "language_capabilities" not in st:
+        st["language_capabilities"] = {
+            "en": ["all typed fallback decisions"],
+            "hi-Deva": ["execution-plane routing"],
+        }
     if "ram_check" not in st:
         st["ram_check"] = {
             "sufficient": st.get("sufficient_ram", True),

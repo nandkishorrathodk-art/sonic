@@ -4,12 +4,13 @@ SONIC — Laya System-1 Non-Autoregressive Decision Engine Integration
 Integrates the Laya System-1 decision architecture (https://github.com/NandhaKishorM/laya)
 into SONIC's AI-Human Digital Being cognitive core.
 
-Provides sub-35ms single-pass typed judgments (`choice`, `score`, `noul`) across
-100+ languages (including English, Hindi, and Hinglish) for:
+Provides single-pass typed judgments (`choice`, `score`, `noul`) for:
   1. Dual-Plane Execution Routing (`gui` vs `headless` vs `dual`)
   2. Empirical Goal Verification (`noul` receipt proof probability)
   3. BeingMind Curiosity & Novelty Affect Evaluation (`score` & `noul`)
   4. Semantic Pre-Action Safety Triage (`safe`, `needs_approval`, `destructive`)
+The local lexical fallback supports English typed decisions and Devanagari
+Hindi execution-plane routing.
 
 Hardware & RAM Safety Guard:
   - Never preloads all 3 PyTorch checkpoints unless `LAYA_PRELOAD=1`.
@@ -26,6 +27,7 @@ import math
 import os
 import re
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,7 +37,6 @@ from sonic.logger import get_logger
 
 logger = get_logger(__name__)
 
-_TOKEN_RE = re.compile(r"\w+")
 _DANGEROUS_ACTION_MARKERS = (
     "rm -rf", "drop", "delete", "format", "truncate", "destroy", "wipe",
     "kill", "mkfs", "dd if=", "dd of=",
@@ -117,8 +118,27 @@ class LayaDecisionResult:
 
 
 def _detect_script_and_model(text: str) -> tuple[str, str]:
-    """Laya System-1 default routing — English model and 'en' language."""
+    """Return the detected script language and the default checkpoint."""
+    if any("\u0900" <= char <= "\u097f" for char in text):
+        return "hi-Deva", "english"
     return "en", "english"
+
+
+def _tokenize(text: str) -> list[str]:
+    """Split Unicode words while keeping combining marks attached to letters."""
+    tokens: list[str] = []
+    current: list[str] = []
+    for char in unicodedata.normalize("NFC", text):
+        category = unicodedata.category(char)[0]
+        if category in {"L", "N"} or (category == "M" and current):
+            current.append(char)
+        else:
+            if current:
+                tokens.append("".join(current))
+                current.clear()
+    if current:
+        tokens.append("".join(current))
+    return tokens
 
 
 def _has_sufficient_ram_gb(min_free_gb: float = 1.5) -> bool:
@@ -263,7 +283,7 @@ class LayaSystem1Engine:
             except Exception as exc:
                 logger.warning("laya_local_predict_failed", error=str(exc))
 
-        # 3. Zero-RAM Calibrated System-1 Scoring Engine (Multilingual EN / HI / Hinglish)
+        # 3. Zero-RAM calibrated scoring fallback.
         answers: dict[str, dict[str, Any]] = {}
         for q_key, q_spec in questions.items():
             q_type = str(q_spec.get("type", "choice")).lower()
@@ -376,30 +396,38 @@ class LayaSystem1Engine:
         criteria: dict[str, str],
     ) -> dict[str, float]:
         """Compute calibrated Softmax distribution over candidate choices."""
-        state_tokens = [t.lower() for t in _TOKEN_RE.findall(state_text)]
-        state_token_set = set(state_tokens)
+        state_tokens = [t.lower() for t in _tokenize(state_text)]
         state_lower = state_text.lower()
 
-        # English concept expansion
-        english_concepts: dict[str, set[str]] = {
+        plane_concepts: dict[str, set[str]] = {
             "gui": {
                 "gui", "visual", "visually", "screen", "screenshot", "desktop", "window",
                 "browser", "click", "button", "scroll", "drag", "ui", "page", "open",
                 "website", "login", "signup", "profile", "view", "display", "render",
+                "दृश्य", "स्क्रीन", "डेस्कटॉप", "विंडो", "खिड़की", "ब्राउज़र",
+                "अनुप्रयोग", "ऐप", "खोलें", "खोलना", "क्लिक", "दबाएं", "बटन",
+                "स्क्रॉल", "पृष्ठ", "वेबसाइट", "सेटिंग", "चित्र", "तस्वीर",
+                "डिजाइन", "डिज़ाइन", "संपादित", "फॉर्म", "लॉगिन", "मेनू",
+                "देखें", "देखना", "टाइप",
             },
             "headless": {
                 "headless", "terminal", "cli", "command", "bash", "shell", "script",
                 "directory", "mkdir", "file", "code", "source", "git", "commit", "push",
                 "pytest", "test", "server", "port", "ports", "curl", "netstat", "ss",
                 "endpoints", "background", "audit", "compile", "run", "python",
+                "टर्मिनल", "कमांड", "आदेश", "शेल", "स्क्रिप्ट", "फ़ाइल", "फाइल",
+                "कोड", "स्रोत", "जिट", "परीक्षण", "टेस्ट", "जाँच", "चलाएं",
+                "चलाना", "चलाने", "बनाएं", "बनाना", "लिखें", "लिखना", "सर्वर",
+                "पोर्ट", "पाइथन", "पायथन", "निर्देशिका", "फ़ोल्डर", "फोल्डर",
+                "प्रोग्राम", "बिल्ड", "कम्पाइल", "प्रोजेक्ट",
             },
         }
 
         logits: dict[str, float] = {}
         for key, desc in criteria.items():
             key_lower = key.lower()
-            desc_tokens = {t.lower() for t in _TOKEN_RE.findall(f"{key} {desc}")}
-            expanded = desc_tokens | english_concepts.get(key_lower, set())
+            desc_tokens = {t.lower() for t in _tokenize(f"{key} {desc}")}
+            expanded = desc_tokens | plane_concepts.get(key_lower, set())
 
             overlap = sum(1.0 for tok in state_tokens if tok in expanded)
             exact_phrase_bonus = sum(
@@ -524,8 +552,12 @@ class LayaSystem1Engine:
             "sufficient_ram": ram_ok,
             "has_ram_headroom": ram_ok,
             "ram_check": {"sufficient": ram_ok, "min_free_gb": 1.5},
-            "language_support": ["en"],
-            "languages": ["en"],
+            "language_support": ["en", "hi-Deva"],
+            "languages": ["en", "hi-Deva"],
+            "language_capabilities": {
+                "en": ["all typed fallback decisions"],
+                "hi-Deva": ["execution-plane routing"],
+            },
             "presets": ["triage", "guard", "verification", "curiosity"],
             "supported_presets": ["triage", "guard", "verification", "curiosity"],
         }
@@ -578,9 +610,9 @@ class LayaSystem1Engine:
 
         # 1. Anchor-based score if affirmative or negative anchor provided
         if affirmative_anchor or negative_anchor:
-            state_tokens = set(_TOKEN_RE.findall(s_lower))
-            aff_tokens = set(_TOKEN_RE.findall(affirmative_anchor.lower()))
-            neg_tokens = set(_TOKEN_RE.findall(negative_anchor.lower()))
+            state_tokens = set(_tokenize(s_lower))
+            aff_tokens = set(_tokenize(affirmative_anchor.lower()))
+            neg_tokens = set(_tokenize(negative_anchor.lower()))
 
             aff_hits = len(state_tokens & aff_tokens)
             neg_hits = len(state_tokens & neg_tokens)
