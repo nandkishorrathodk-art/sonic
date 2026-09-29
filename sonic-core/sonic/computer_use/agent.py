@@ -918,7 +918,7 @@ class ComputerUseAgent:
         goal: str,
         observation: ComputerWorldObservation,
         step_index: int = 1,
-    ) -> tuple[ComputerActionType, str, dict[str, Any], str]:
+    ) -> tuple[ComputerActionType | ActionExecutionStatus, str, dict[str, Any], str]:
         """Choose the next action dynamically based on observation and goal.
 
         Decide the next action from (goal, observation, history).
@@ -956,7 +956,23 @@ class ComputerUseAgent:
         if self.llm_router is not None:
             return await self._llm_choose_action(goal, observation, step_index, primary_file, test_file)
 
+        if getattr(self, "gui_only", False) or getattr(self, "execution_plane", "") == "gui":
+            return self._reasoning_unavailable_action(
+                "No reasoning model is configured for this GUI worker."
+            )
+
         return self._diagnostic_fallback(primary_file)
+
+    @staticmethod
+    def _reasoning_unavailable_action(
+        reason: str,
+    ) -> tuple[ActionExecutionStatus, str, dict[str, Any], str]:
+        return (
+            ActionExecutionStatus.BLOCKED,
+            "reasoning-unavailable",
+            {},
+            reason,
+        )
 
     @staticmethod
     def _refresh_observation_age(observation: ComputerWorldObservation) -> None:
@@ -1693,6 +1709,9 @@ class ComputerUseAgent:
             "Think: 'What is the fastest, most effective way to accomplish this objective on my workstation?\n"
             "Which GUI application window or terminal command should I use right now?'\n"
             f"{capability_directive}"
+            f"GUI ACTION COORDINATES: In GUI action TARGET/PAYLOAD fields, use actual screen pixels "
+            f"(x=0..{max(0, screen_w - 1)}, y=0..{max(0, screen_h - 1)}), not normalized values. "
+            "Only the separate multimodal grounding response uses normalized 0-1000 coordinates.\n"
             "================================================================================\n\n"
         )
         init_ctx = getattr(self, "initial_context", {}) or {}
@@ -1805,7 +1824,7 @@ class ComputerUseAgent:
         step_index: int,
         primary_file: str,
         test_file: str,
-    ) -> tuple[ComputerActionType, str, dict[str, Any], str]:
+    ) -> tuple[ComputerActionType | ActionExecutionStatus, str, dict[str, Any], str]:
         """Use the LLM to decide the next action from goal + observation + history."""
         from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
 
@@ -2026,12 +2045,14 @@ class ComputerUseAgent:
             return action_type, target, payload, expected
         except Exception as e:
             self._last_thought_duration = round(time.perf_counter() - t_thought_start, 2)
-            logger.warning("computer_llm_action_failed_diagnostic_fallback", error=str(e))
+            logger.warning("computer_llm_action_failed", error=str(e))
             self._last_thought = ""
-            if getattr(self, "gui_only", False):
-                return self._gui_only_recovery_action(
-                    goal,
-                    "Reasoning failed",
+            if (
+                getattr(self, "gui_only", False)
+                or getattr(self, "execution_plane", "") == "gui"
+            ):
+                return self._reasoning_unavailable_action(
+                    f"GUI reasoning failed: {e}"
                 )
             return self._diagnostic_fallback(primary_file)
         finally:
@@ -5823,14 +5844,11 @@ class ComputerUseAgent:
                 f"Visible GUI state: application={obs.active_application!r}; "
                 f"windows={obs.windows!r}; text={visible[:1500]!r}"
             )
-            goal_terms = [
-                term for term in re.findall(r"[a-zA-Z0-9]{3,}", goal.lower())
-                if term not in {"open", "look", "find", "the", "and", "use", "for"}
-            ]
-            visible_lower = visible.lower()
-            matched = sum(1 for term in goal_terms if term in visible_lower)
-            verified = bool(goal_terms) and matched >= max(1, len(goal_terms) // 3)
-            return verified, evidence
+            return False, (
+                f"{evidence}\n"
+                "Visible text alone is not an independent GUI postcondition; "
+                "completion requires the external Judge."
+            )
 
         do_llm = use_llm if use_llm is not None else getattr(self, "enable_llm_verification", False)
         g = goal.lower().strip()
@@ -6030,6 +6048,10 @@ class ComputerUseAgent:
         self._watchdog_aborted = False
         goal_reached = False
         self._last_tool_result = None
+        requires_external_gui_judge = (
+            getattr(self, "execution_plane", "") == "gui"
+            or getattr(self, "gui_only", False)
+        )
         if getattr(self, "_last_mission_goal", None) != goal:
             self._last_mission_goal = goal
             self._replan_count = 0
@@ -6079,6 +6101,17 @@ class ComputerUseAgent:
             # Goal-complete sentinel: the LLM JUDGED the goal achieved — but we
             # do not stop on self-declaration alone. We independently verify.
             if expected == _GOAL_COMPLETE_SENTINEL:
+                if requires_external_gui_judge:
+                    self.history.append({
+                        "action": "GOAL_COMPLETE (awaiting independent Judge)",
+                        "result": (
+                            "The GUI worker proposed completion. Its visible "
+                            "self-check is not treated as proof; route the live "
+                            "desktop and worker receipts to the independent Judge."
+                        ),
+                    })
+                    break
+
                 verified, evidence = await self.verify_goal(workspace_id, goal)
                 if verified:
                     receipt_ok, receipt_note = await self._verify_completion_receipt(goal, evidence)
@@ -6163,6 +6196,12 @@ class ComputerUseAgent:
                         await cb_res
                 except Exception as cb_err:
                     logger.warning("run_mission_step_callback_failed", error=str(cb_err))
+
+            if (
+                action_type == ActionExecutionStatus.BLOCKED
+                and target == "reasoning-unavailable"
+            ):
+                break
 
             if self._interrupted or (callable(interrupt_check) and interrupt_check()):
                 self._interrupted = True
@@ -6319,7 +6358,12 @@ class ComputerUseAgent:
         )
         self.metrics.recovery_events = self.recovery_events
 
-        if not goal_reached and self.metrics.actions_successful > 0 and self.metrics.actions_failed == 0:
+        if (
+            not goal_reached
+            and not requires_external_gui_judge
+            and self.metrics.actions_successful > 0
+            and self.metrics.actions_failed == 0
+        ):
             try:
                 verified, evidence = await self.verify_goal(workspace_id, goal)
                 if verified:

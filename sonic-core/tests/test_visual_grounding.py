@@ -2,9 +2,16 @@
 Tests for visual grounding engine (adapted from open-computer-use).
 """
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
-from sonic.computer_use.grounding import extract_bbox_midpoint, draw_action_marker
+from sonic.computer.models import GUIActionType, ScreenObservation
+from sonic.computer_use.agent import ComputerUseAgent
+from sonic.computer_use.grounding import draw_action_marker, extract_bbox_midpoint
+from sonic.computer_use.models import ComputerActionType
+from sonic.llm.prompts import grounding_user_prompt
 
 
 def test_extract_bbox_midpoint_box_tags():
@@ -22,6 +29,35 @@ def test_extract_bbox_midpoint_float_range():
     resp = "0.5, 0.5"
     pt = extract_bbox_midpoint(resp, width=1280, height=800)
     assert pt == (640, 400)
+
+
+def test_grounding_prompt_declares_normalized_coordinate_space():
+    prompt = grounding_user_prompt("visible button", 1280, 800)
+
+    assert "normalized 0-1000 screen space" in prompt
+    assert "[x, y] (both values normalized from 0 to 1000)" in prompt
+
+
+@pytest.mark.asyncio
+async def test_multimodal_grounding_json_point_uses_normalized_screen_space():
+    from sonic.computer_use.grounding import query_multimodal_grounding
+
+    router = SimpleNamespace(
+        complete=AsyncMock(return_value=SimpleNamespace(content='{"x": 500, "y": 500}'))
+    )
+    screenshot = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    coords = await query_multimodal_grounding(
+        router,
+        "visible button",
+        screenshot,
+        width=1280,
+        height=800,
+    )
+
+    assert coords == (640, 400)
 
 
 def test_draw_action_marker_fallback():
@@ -97,12 +133,6 @@ def test_draw_action_marker_styles():
     m_double = draw_action_marker(dummy_b64, (20, 20), label="DOUBLE_CLICK")
     assert m_click and m_right and m_double
     assert len(m_click) > 0
-
-
-from unittest.mock import AsyncMock, MagicMock
-from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ComputerActionType
-from sonic.computer.models import GUIActionType, ScreenObservation
 
 
 @pytest.mark.asyncio

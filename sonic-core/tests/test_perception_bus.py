@@ -53,3 +53,80 @@ def test_perception_bus_invalidates_targets_after_external_action():
     assert version == 2
     assert bus.resolve("menu") is None
     assert not bus.is_current(future)
+
+
+def test_perception_bus_normalizes_explicit_corner_bboxes_before_centering():
+    bus = PerceptionBus()
+    bus.publish(
+        screenshot_base64="frame",
+        width=1280,
+        height=800,
+        controls=[
+            {
+                "name": source,
+                "role": "button",
+                "bbox": (100, 200, 180, 230),
+                "bbox_format": "xyxy",
+                "source": source,
+            }
+            for source in ("ocr", "atspi", "x11")
+        ],
+    )
+
+    for source in ("ocr", "atspi", "x11"):
+        match = bus.resolve(source)
+        assert match is not None
+        assert match.bbox == (100, 200, 80, 30)
+        assert match.center == (140, 215)
+
+
+def test_perception_bus_rejects_invalid_bbox_format_and_empty_rectangles():
+    bus = PerceptionBus()
+    bus.publish(
+        screenshot_base64="frame",
+        controls=[
+            {
+                "name": "unknown-format",
+                "bbox": (10, 20, 30, 40),
+                "bbox_format": "guess",
+            },
+            {
+                "name": "inverted-rectangle",
+                "bbox": (30, 40, 10, 20),
+                "bbox_format": "xyxy",
+            },
+        ],
+    )
+
+    assert bus.resolve("unknown-format") is None
+    assert bus.resolve("inverted-rectangle") is None
+
+
+def test_perception_bus_fails_closed_for_duplicate_semantic_targets():
+    bus = PerceptionBus()
+    bus.publish(
+        screenshot_base64="frame",
+        width=1280,
+        height=800,
+        controls=[
+            {
+                "name": "Submit",
+                "role": "button",
+                "bbox": (100, 200, 80, 30),
+                "attributes": {"aria-label": "Submit login"},
+            },
+            {
+                "name": "Submit",
+                "role": "button",
+                "bbox": (900, 700, 80, 30),
+                "attributes": {"aria-label": "Submit payment"},
+            },
+        ],
+    )
+
+    assert bus.resolve("Submit") is None
+    assert bus.resolve("Submit button") is None
+    assert bus.resolve("Submit login") is not None
+    assert bus.resolve("Submit login").center == (140, 215)
+    assert bus.resolve("Submit payment") is not None
+    assert bus.resolve("Submit payment").center == (940, 715)

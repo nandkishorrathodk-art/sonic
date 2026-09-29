@@ -94,10 +94,21 @@ async def test_docker_computer_provider_files_and_apps():
 async def test_docker_screenshot_reports_source_frame_age_from_nsi_timestamp():
     provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
     encoded = base64.b64encode(b"pixel-data" * 20).decode()
+    controls = [
+        {
+            "name": source,
+            "role": "button",
+            "bbox": [100, 200, 180, 230],
+            "bbox_format": "xyxy",
+            "source": source,
+        }
+        for source in ("ocr", "atspi", "x11")
+    ]
     provider._nsi_request = AsyncMock(return_value={
         "ok": True,
         "b64": encoded,
         "capture_timestamp_ns": time.time_ns() - 250_000_000,
+        "detected_controls": controls,
     })
 
     observation = await provider.screenshot("ws-1")
@@ -105,6 +116,7 @@ async def test_docker_screenshot_reports_source_frame_age_from_nsi_timestamp():
     assert observation.capture_timestamp_ns is not None
     assert observation.capture_age_ms is not None
     assert observation.capture_age_ms >= 250
+    assert observation.detected_controls == controls
 
 
 @pytest.mark.no_live_infra
@@ -137,6 +149,7 @@ async def test_docker_screenshot_parses_capture_timestamp_from_fallback_capture(
             f"___CAPTURE_TIMESTAMP_NS___\n{capture_timestamp_ns}\n{encoded}"
             "\n___OCR_TSV___\n"
             "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            "5\t1\t1\t1\t1\t1\t100\t200\t80\t30\t90\tSubmit\n"
             "___ACTIVE_WINDOW___\nDesktop\n___OPEN_WINDOWS___\n"
         ),
         "",
@@ -148,6 +161,15 @@ async def test_docker_screenshot_parses_capture_timestamp_from_fallback_capture(
     assert observation.capture_timestamp_ns == capture_timestamp_ns
     assert observation.capture_age_ms is not None
     assert observation.capture_age_ms >= 100
+    assert observation.detected_controls == [
+        {
+            "name": "Submit",
+            "role": "text",
+            "bbox": (100, 200, 180, 230),
+            "bbox_format": "xyxy",
+            "source": "ocr",
+        }
+    ]
 
 
 @pytest.mark.no_live_infra

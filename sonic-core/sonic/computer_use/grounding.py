@@ -35,7 +35,12 @@ def _parse_grounding_coords(
     height: int = 1080,
 ) -> tuple[int, int] | None:
     """Parse grounding model coordinate text, scaling [0, 1000] tagged boxes to screen dimensions."""
-    return extract_bbox_midpoint(text, width=width, height=height)
+    return extract_bbox_midpoint(
+        text,
+        width=width,
+        height=height,
+        coordinate_space="normalized_1000",
+    )
 
 
 def extract_bbox_midpoint(
@@ -93,6 +98,11 @@ def _extract_bbox_midpoint_impl(
     if not bbox_response:
         return None
 
+    def _screen_point(x: int, y: int) -> tuple[int, int] | None:
+        if 0 <= x < width and 0 <= y < height:
+            return x, y
+        return None
+
     if isinstance(bbox_response, str) and "{" in bbox_response and "}" in bbox_response:
         try:
             import json
@@ -132,20 +142,22 @@ def _extract_bbox_midpoint_impl(
                 else:
                     mid_x = int((x1 + x2) / 2.0)
                     mid_y = int((y1 + y2) / 2.0)
-                mid_pt = (min(max(0, mid_x), max(0, width - 1)), min(max(0, mid_y), max(0, height - 1)))
-                return mid_pt
+                return _screen_point(mid_x, mid_y)
             elif len(bbox_response) >= 2:
                 x, y = float(bbox_response[0]), float(bbox_response[1])
                 if max(x, y) <= 1.0:
                     px = int(x * width)
                     py = int(y * height)
-                elif is_normalized_1000 is True or (is_normalized_1000 is None and (x > width or y > height)):
+                elif is_normalized_1000 is True or (
+                    is_normalized_1000 is None
+                    and max(x, y) <= 1000
+                    and (x > width or y > height)
+                ):
                     px = int((x / 1000.0) * width)
                     py = int((y / 1000.0) * height)
                 else:
                     px, py = int(x), int(y)
-                pt = (min(max(0, px), max(0, width - 1)), min(max(0, py), max(0, height - 1)))
-                return pt
+                return _screen_point(px, py)
         except (ValueError, TypeError):
             pass
 
@@ -156,7 +168,7 @@ def _extract_bbox_midpoint_impl(
     match = re.search(r"(?:<\|box_start\|>|<box>)(.*?)(?:<\|box_end\|>|</box>)", bbox_response, re.DOTALL)
     inner_text = match.group(1) if match else bbox_response
 
-    numbers = [float(num) for num in re.findall(r"\d+\.?\d*", inner_text)]
+    numbers = [float(num) for num in re.findall(r"-?\d+\.?\d*", inner_text)]
     if not numbers:
         return None
 
@@ -185,8 +197,7 @@ def _extract_bbox_midpoint_impl(
         else:
             mid_x = int(raw_x)
             mid_y = int(raw_y)
-        mid_pt = (max(0, min(width - 1, mid_x)), max(0, min(height - 1, mid_y)))
-        return mid_pt
+        return _screen_point(mid_x, mid_y)
 
     elif len(numbers) >= 2:
         raw_x, raw_y = numbers[0], numbers[1]
@@ -213,8 +224,7 @@ def _extract_bbox_midpoint_impl(
         else:
             px = int(raw_x)
             py = int(raw_y)
-        pt = (max(0, min(width - 1, px)), max(0, min(height - 1, py)))
-        return pt
+        return _screen_point(px, py)
 
     return None
 
@@ -471,7 +481,12 @@ async def query_multimodal_grounding(
     )
     try:
         res = await asyncio.wait_for(llm_router.complete(req), timeout=8.0)
-        return extract_bbox_midpoint(res.content, width=width, height=height)
+        return extract_bbox_midpoint(
+            res.content,
+            width=width,
+            height=height,
+            coordinate_space="normalized_1000",
+        )
     except Exception as exc:
         logger.warning("multimodal_grounding_model_query_failed", query=query, error=str(exc))
         return None
