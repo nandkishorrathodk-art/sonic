@@ -27,22 +27,12 @@ def test_laya_language_and_checkpoint_routing():
 
 
 @pytest.mark.no_live_infra
-def test_laya_devanagari_plane_routing_and_unicode_tokenization():
+def test_laya_english_only_language_and_capability_reporting():
     engine = LayaSystem1Engine(enable_local_model=False)
 
-    headless_goal = "कृपया टर्मिनल में परीक्षण चलाएं"
-    gui_goal = "दृश्य अनुप्रयोग में सेटिंग खोलें"
-
-    assert laya_engine._tokenize(headless_goal) == [
-        "कृपया", "टर्मिनल", "में", "परीक्षण", "चलाएं"
-    ]
-    assert _detect_script_and_model(headless_goal) == ("hi-Deva", "english")
-    assert engine.decide_execution_plane(headless_goal)[0] == "headless"
-    assert engine.decide_execution_plane(gui_goal)[0] == "gui"
-    assert engine.status()["language_capabilities"]["hi-Deva"] == [
-        "execution-plane routing"
-    ]
-
+    assert _detect_script_and_model("Run the tests in the terminal") == ("en", "english")
+    assert engine.status()["languages"] == ["en"]
+    assert engine.status()["language_support"] == ["en"]
 
 @pytest.mark.no_live_infra
 def test_laya_english_plane_decision():
@@ -67,15 +57,6 @@ def test_laya_submission_plane_inference_english():
     assert sub_headless.plane == "headless"
 
     sub_gui = SubMission(goal="Open browser window and view user interface")
-    assert sub_gui.plane == "gui"
-
-
-@pytest.mark.no_live_infra
-def test_laya_submission_plane_inference_for_devanagari_goal():
-    sub_headless = SubMission(goal="कृपया टर्मिनल में परीक्षण चलाएं")
-    sub_gui = SubMission(goal="दृश्य अनुप्रयोग में सेटिंग खोलें")
-
-    assert sub_headless.plane == "headless"
     assert sub_gui.plane == "gui"
 
 
