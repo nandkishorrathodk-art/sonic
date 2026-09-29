@@ -25,8 +25,12 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
+import json
+import math
 import re
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +62,31 @@ REFUSAL_PHRASES = (
 )
 
 
+class LLMBudgetExceededError(RuntimeError):
+    """Raised when a conservative request-cost estimate exceeds a configured cap."""
+
+    def __init__(
+        self,
+        budget: str,
+        estimate_usd: float,
+        limit_usd: float,
+        engagement_id: str | None = None,
+    ) -> None:
+        self.budget = budget
+        self.estimate_usd = estimate_usd
+        self.limit_usd = limit_usd
+        self.engagement_id = engagement_id
+        super().__init__(
+            f"LLM {budget} budget would be exceeded: estimated "
+            f"${estimate_usd:.6f}, limit ${limit_usd:.6f}"
+            + (f" (engagement {engagement_id})" if engagement_id else "")
+        )
+
+
+class LLMBudgetEstimateUnavailableError(RuntimeError):
+    """Raised when configured limits cannot be checked with known model prices."""
+
+
 def is_refusal_response(response: LLMResponse) -> bool:
     """Detect if an LLM returned a safety refusal rather than an actionable answer."""
     content = (response.content or "").lower()
@@ -87,8 +116,19 @@ class ModelRouter:
         self.cost_records: list[CostRecord] = []
 
         # Cost limits
-        self.max_per_request_usd: float = 1.0
-        self.max_per_engagement_usd: float = 50.0
+        # No budget block means legacy behavior: limits are disabled until an
+        # operator explicitly configures them in models.yaml.
+        self.max_per_request_usd: float | None = None
+        self.max_per_engagement_usd: float | None = None
+        self.warn_at_percent: float | None = None
+        self._budget_lock = asyncio.Lock()
+        self._engagement_reservations: dict[str, Decimal] = {}
+        self._engagement_uncertain_costs: dict[str, Decimal] = {}
+        self._warned_engagements: set[str] = set()
+        self.budget_warnings: list[dict[str, Any]] = []
+        self.budget_overruns: list[dict[str, Any]] = []
+        self.incomplete_image_budget_requests: list[dict[str, Any]] = []
+        self.unaccounted_response_costs: list[dict[str, Any]] = []
 
     # ============================================
     # Setup
@@ -177,9 +217,18 @@ class ModelRouter:
         router.fallback_chain = config.get("global_fallback_chain", [])
 
         # Load cost limits
-        cost_limits = config.get("cost_limits", {})
-        router.max_per_request_usd = cost_limits.get("max_per_request_usd", 1.0)
-        router.max_per_engagement_usd = cost_limits.get("max_per_engagement_usd", 50.0)
+        cost_limits = config.get("cost_limits") or {}
+        router.max_per_request_usd = cost_limits.get("max_per_request_usd")
+        router.max_per_engagement_usd = cost_limits.get("max_per_engagement_usd")
+        router.warn_at_percent = cost_limits.get("warn_at_percent")
+        for name in ("max_per_request_usd", "max_per_engagement_usd"):
+            amount = getattr(router, name)
+            if amount is not None and (not math.isfinite(float(amount)) or float(amount) < 0):
+                raise ValueError(f"cost_limits.{name} must be a finite non-negative amount")
+        if router.warn_at_percent is not None:
+            percent = float(router.warn_at_percent)
+            if not math.isfinite(percent) or not 0 <= percent <= 100:
+                raise ValueError("cost_limits.warn_at_percent must be between 0 and 100")
 
         # Register providers from config
         providers_config = config.get("providers", {})
@@ -214,6 +263,14 @@ class ModelRouter:
             model_id = env_override_model or config_default_for_provider or first_model["id"]
 
             kwargs = {}
+            kwargs["model_pricing"] = {
+                model["id"]: {
+                    "cost_per_1k_input": model["cost_per_1k_input"],
+                    "cost_per_1k_output": model["cost_per_1k_output"],
+                }
+                for model in models
+                if "cost_per_1k_input" in model and "cost_per_1k_output" in model
+            }
             # Groq on-demand accounts enforce a hard output-tokens-per-minute
             # limit (OTPM=1000). Any request declaring more is rejected with 429
             # before generation starts, regardless of actual output length.
@@ -373,6 +430,305 @@ class ModelRouter:
 
         raise RuntimeError("No LLM providers configured. Add at least one provider.")
 
+    def _budget_is_enabled(self) -> bool:
+        return self.max_per_request_usd is not None or self.max_per_engagement_usd is not None
+
+    def _estimate_request_cost(self, provider: CustomLLMProvider, request: LLMRequest) -> Decimal:
+        """Conservatively estimate the request from text bytes and output-token ceiling.
+
+        Tokenization is provider-specific, so UTF-8 bytes provide a conservative
+        upper bound for textual input tokens. Image payload costs cannot be
+        estimated here and are accounted from provider response usage instead.
+        """
+        request_data = request.model_dump(mode="json")
+        for message in request_data["messages"]:
+            message["images"] = []
+        input_bytes = len(
+            json.dumps(
+                request_data,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        max_tokens = provider._effective_max_tokens(request.max_tokens)
+        models = dict.fromkeys([request.model or provider.default_model, *provider.fallback_models])
+        estimates = []
+        for model in models:
+            prices = provider.pricing_for_model(model)
+            if prices is None or any(not math.isfinite(rate) or rate <= 0 for rate in prices):
+                raise LLMBudgetEstimateUnavailableError(
+                    f"Cannot enforce LLM budget: no complete, non-zero token pricing "
+                    f"is configured for possible model {model!r} at provider {provider.name!r}"
+                )
+            input_rate, output_rate = prices
+            estimates.append(
+                Decimal(input_bytes) * Decimal(str(input_rate)) / Decimal(1000)
+                + Decimal(max_tokens) * Decimal(str(output_rate)) / Decimal(1000)
+            )
+        return max(estimates)
+
+    def _engagement_spend(self, engagement_id: str) -> Decimal:
+        recorded = sum(
+            (Decimal(str(record.cost_usd)) for record in self.cost_records if record.engagement_id == engagement_id),
+            Decimal(0),
+        )
+        return recorded + self._engagement_uncertain_costs.get(engagement_id, Decimal(0))
+
+    async def _reserve_budget(
+        self,
+        provider: CustomLLMProvider,
+        request: LLMRequest,
+        request_spent: list[Decimal],
+    ) -> Decimal | None:
+        if not self._budget_is_enabled():
+            return None
+
+        estimate = self._estimate_request_cost(provider, request)
+        if any(getattr(message, "images", None) for message in request.messages):
+            warning = {
+                "kind": "image_budget_estimate_incomplete",
+                "engagement_id": request.engagement_id,
+                "estimated_text_and_output_usd": float(estimate),
+                "preflight_estimate_includes_images": False,
+                "hard_cap_guaranteed": False,
+                "reason": (
+                    "Image-token usage is not included in the preflight estimate; "
+                    "reported response cost or aggregate token usage is accounted after completion."
+                ),
+            }
+            self.incomplete_image_budget_requests.append(warning)
+            logger.warning("llm_image_budget_estimate_incomplete", **warning)
+        request_limit = (
+            Decimal(str(self.max_per_request_usd))
+            if self.max_per_request_usd is not None
+            else None
+        )
+        if request_limit is not None and request_spent[0] + estimate > request_limit:
+            raise LLMBudgetExceededError(
+                "per-request",
+                float(request_spent[0] + estimate),
+                float(request_limit),
+                request.engagement_id,
+            )
+
+        if request.engagement_id and self.max_per_engagement_usd is not None:
+            engagement_id = request.engagement_id
+            engagement_limit = Decimal(str(self.max_per_engagement_usd))
+            async with self._budget_lock:
+                committed = self._engagement_spend(engagement_id)
+                reserved = self._engagement_reservations.get(engagement_id, Decimal(0))
+                projected = committed + reserved + estimate
+                if projected > engagement_limit:
+                    raise LLMBudgetExceededError(
+                        "per-engagement",
+                        float(projected),
+                        float(engagement_limit),
+                        engagement_id,
+                    )
+                self._engagement_reservations[engagement_id] = reserved + estimate
+                self._maybe_warn_budget(engagement_id, projected, engagement_limit)
+        return estimate
+
+    def _maybe_warn_budget(
+        self,
+        engagement_id: str,
+        projected: Decimal,
+        limit: Decimal,
+    ) -> None:
+        if self.warn_at_percent is None or engagement_id in self._warned_engagements or limit <= 0:
+            return
+        threshold = limit * Decimal(str(self.warn_at_percent)) / Decimal(100)
+        if projected < threshold:
+            return
+        warning = {
+            "engagement_id": engagement_id,
+            "spent_or_reserved_usd": float(projected),
+            "limit_usd": float(limit),
+            "percent": float(projected / limit * 100),
+            "warn_at_percent": float(self.warn_at_percent),
+        }
+        self._warned_engagements.add(engagement_id)
+        self.budget_warnings.append(warning)
+        logger.warning("llm_engagement_budget_warning", **warning)
+
+    async def _settle_budget(
+        self,
+        provider: CustomLLMProvider,
+        request: LLMRequest,
+        estimate: Decimal | None,
+        response: LLMResponse | None = None,
+    ) -> Decimal:
+        if estimate is None:
+            if response is not None:
+                # Budget controls are disabled: preserve the historical
+                # provider-reported cost behavior rather than enforcing usage.
+                self._record_response_cost(request, response, response.cost_usd)
+                return Decimal(str(response.cost_usd))
+            return Decimal(0)
+
+        engagement_id = request.engagement_id
+        try:
+            actual = (
+                self._account_response_cost(provider, request, response)
+                if response is not None
+                else estimate
+            )
+        except LLMBudgetEstimateUnavailableError:
+            if engagement_id and self.max_per_engagement_usd is not None:
+                async with self._budget_lock:
+                    current = self._engagement_reservations.get(engagement_id, Decimal(0))
+                    remaining = max(Decimal(0), current - estimate)
+                    if remaining:
+                        self._engagement_reservations[engagement_id] = remaining
+                    else:
+                        self._engagement_reservations.pop(engagement_id, None)
+                    self._engagement_uncertain_costs[engagement_id] = (
+                        self._engagement_uncertain_costs.get(engagement_id, Decimal(0)) + estimate
+                    )
+            unaccounted = {
+                "request_id": response.request_id,
+                "engagement_id": engagement_id,
+                "model": response.model,
+                "reserved_estimate_usd": float(estimate),
+                "image_request": any(message.images for message in request.messages),
+                "reason": "Response contained no usable cost or priced token usage",
+            }
+            self.unaccounted_response_costs.append(unaccounted)
+            logger.warning("llm_response_cost_unaccounted", **unaccounted)
+            raise
+
+        async with self._budget_lock:
+            if engagement_id and self.max_per_engagement_usd is not None:
+                current = self._engagement_reservations.get(engagement_id, Decimal(0))
+                remaining = max(Decimal(0), current - estimate)
+                if remaining:
+                    self._engagement_reservations[engagement_id] = remaining
+                else:
+                    self._engagement_reservations.pop(engagement_id, None)
+                if response is None:
+                    # A failed transport may have reached the provider and been
+                    # billed. Keep its full estimate in the engagement ledger.
+                    self._engagement_uncertain_costs[engagement_id] = (
+                        self._engagement_uncertain_costs.get(engagement_id, Decimal(0)) + estimate
+                    )
+                    logger.warning(
+                        "llm_budget_uncertain_attempt",
+                        engagement_id=engagement_id,
+                        estimated_cost_usd=float(estimate),
+                        message="Provider error; estimate is conservatively retained because billing is unknown",
+                    )
+                else:
+                    self._record_response_cost(request, response, float(actual))
+                current_spend = self._engagement_spend(engagement_id)
+                limit = Decimal(str(self.max_per_engagement_usd))
+                self._maybe_warn_budget(engagement_id, current_spend, limit)
+                if response is not None and current_spend > limit:
+                    self._record_budget_overrun(
+                        "per-engagement",
+                        request,
+                        current_spend,
+                        limit,
+                        response.request_id,
+                        image_request=any(message.images for message in request.messages),
+                    )
+            elif response is not None:
+                self._record_response_cost(request, response, float(actual))
+        return actual
+
+    def _account_response_cost(
+        self,
+        provider: CustomLLMProvider,
+        request: LLMRequest,
+        response: LLMResponse,
+    ) -> Decimal:
+        response_cost = Decimal(str(response.cost_usd))
+        if response_cost.is_finite() and response_cost > 0:
+            return response_cost
+
+        usage = response.usage
+        if usage.prompt_tokens > 0 or usage.completion_tokens > 0 or usage.total_tokens > 0:
+            model = response.model or request.model or provider.default_model
+            prices = provider.pricing_for_model(model)
+            if prices is None:
+                model = request.model or provider.default_model
+                prices = provider.pricing_for_model(model)
+            if prices is not None and all(math.isfinite(rate) and rate >= 0 for rate in prices):
+                return Decimal(str(provider._calculate_cost(usage, model)))
+
+        raise LLMBudgetEstimateUnavailableError(
+            "LLM response completed but could not be accounted: it included neither a "
+            "positive response cost nor usable token usage with configured model pricing"
+        )
+
+    def _record_response_cost(
+        self,
+        request: LLMRequest,
+        response: LLMResponse,
+        cost_usd: float,
+    ) -> None:
+        self.cost_records.append(CostRecord(
+            request_id=response.request_id,
+            provider=response.provider,
+            model=response.model,
+            input_tokens=response.usage.prompt_tokens,
+            output_tokens=response.usage.completion_tokens,
+            cost_usd=cost_usd,
+            agent_id=request.agent_id,
+            engagement_id=request.engagement_id,
+        ))
+
+    def _record_budget_overrun(
+        self,
+        budget: str,
+        request: LLMRequest,
+        amount: Decimal,
+        limit: Decimal,
+        request_id: str,
+        *,
+        image_request: bool,
+    ) -> None:
+        overrun = {
+            "kind": "budget_exceeded_after_response",
+            "budget": budget,
+            "engagement_id": request.engagement_id,
+            "request_id": request_id,
+            "amount_usd": float(amount),
+            "limit_usd": float(limit),
+            "image_request": image_request,
+            "hard_cap_guaranteed": not image_request,
+        }
+        self.budget_overruns.append(overrun)
+        logger.warning("llm_budget_exceeded_after_response", **overrun)
+
+    async def _budgeted_complete(
+        self,
+        provider: CustomLLMProvider,
+        request: LLMRequest,
+        request_spent: list[Decimal],
+    ) -> LLMResponse:
+        estimate = await self._reserve_budget(provider, request, request_spent)
+        try:
+            response = await provider.complete_with_timing(request)
+        except Exception:
+            if estimate is not None:
+                request_spent[0] += await self._settle_budget(provider, request, estimate)
+            raise
+        actual = await self._settle_budget(provider, request, estimate, response)
+        request_spent[0] += actual
+        if (
+            self.max_per_request_usd is not None
+            and request_spent[0] > Decimal(str(self.max_per_request_usd))
+        ):
+            self._record_budget_overrun(
+                "per-request",
+                request,
+                request_spent[0],
+                Decimal(str(self.max_per_request_usd)),
+                response.request_id,
+                image_request=any(message.images for message in request.messages),
+            )
+        return response
+
     # ============================================
     # Complete & Stream
     # ============================================
@@ -421,9 +777,10 @@ class ModelRouter:
 
         # Set task metadata
         request.task_type = effective_task
+        request_spent = [Decimal(0)]
 
         try:
-            response = await provider.complete_with_timing(request)
+            response = await self._budgeted_complete(provider, request, request_spent)
 
             # Check for safety refusal; trigger model fallback if detected
             if is_refusal_response(response):
@@ -433,22 +790,17 @@ class ModelRouter:
                     model=response.model,
                     task_type=effective_task,
                 )
-                return await self._try_fallbacks(request, provider.name, effective_task)
-
-            # Track cost
-            self.cost_records.append(CostRecord(
-                request_id=response.request_id,
-                provider=response.provider,
-                model=response.model,
-                input_tokens=response.usage.prompt_tokens,
-                output_tokens=response.usage.completion_tokens,
-                cost_usd=response.cost_usd,
-                agent_id=request.agent_id,
-                engagement_id=request.engagement_id,
-            ))
+                return await self._try_fallbacks(
+                    request,
+                    provider.name,
+                    effective_task,
+                    request_spent=request_spent,
+                )
 
             return response
 
+        except (LLMBudgetExceededError, LLMBudgetEstimateUnavailableError):
+            raise
         except Exception as e:
             logger.error(
                 "complete_failed",
@@ -457,15 +809,23 @@ class ModelRouter:
                 task_type=effective_task,
             )
             # Try fallback chain
-            return await self._try_fallbacks(request, provider.name, effective_task)
+            return await self._try_fallbacks(
+                request,
+                provider.name,
+                effective_task,
+                request_spent=request_spent,
+            )
 
     async def _try_fallbacks(
         self,
         request: LLMRequest,
         failed_provider: str,
         task_type: str | None,
+        request_spent: list[Decimal] | None = None,
     ) -> LLMResponse:
         """Try fallback providers when the primary fails."""
+        if request_spent is None:
+            request_spent = [Decimal(0)]
         candidates: list[tuple[str, str | None]] = []
 
         if task_type and task_type in self.routing_rules:
@@ -493,7 +853,9 @@ class ModelRouter:
             try:
                 fb_provider = self.providers[fb_name]
                 request.model = fb_model  # Assign model appropriate for fallback provider (or None to use default)
-                return await fb_provider.complete_with_timing(request)
+                return await self._budgeted_complete(fb_provider, request, request_spent)
+            except (LLMBudgetExceededError, LLMBudgetEstimateUnavailableError):
+                raise
             except Exception as e:
                 logger.warning("fallback_failed", provider=fb_name, model=fb_model, error=str(e))
                 continue
@@ -521,8 +883,28 @@ class ModelRouter:
         if model_override and not request.model:
             request.model = model_override
 
-        async for chunk in provider.stream(request):
-            yield chunk
+        if not self._budget_is_enabled():
+            async for chunk in provider.stream(request):
+                yield chunk
+            return
+
+        estimate = await self._reserve_budget(provider, request, [Decimal(0)])
+        usage_response: LLMResponse | None = None
+        try:
+            async for chunk in provider.stream(request):
+                if chunk.is_final and chunk.usage is not None:
+                    model = request.model or provider.default_model
+                    usage_response = LLMResponse(
+                        request_id=provider.generate_request_id(),
+                        model=model,
+                        provider=provider.provider_name,
+                        usage=chunk.usage,
+                        cost_usd=provider._calculate_cost(chunk.usage, model),
+                    )
+                yield chunk
+        finally:
+            if estimate is not None:
+                await self._settle_budget(provider, request, estimate, usage_response)
 
     # ============================================
     # Info & Stats
@@ -571,4 +953,22 @@ class ModelRouter:
             "total_cost_usd": round(self.get_total_cost(), 6),
             "total_requests": len(self.cost_records),
             "routing_rules": list(self.routing_rules.keys()),
+            "budget": {
+                "max_per_request_usd": self.max_per_request_usd,
+                "max_per_engagement_usd": self.max_per_engagement_usd,
+                "warn_at_percent": self.warn_at_percent,
+                "reserved_by_engagement_usd": {
+                    engagement_id: float(amount)
+                    for engagement_id, amount in self._engagement_reservations.items()
+                },
+                "uncertain_by_engagement_usd": {
+                    engagement_id: float(amount)
+                    for engagement_id, amount in self._engagement_uncertain_costs.items()
+                },
+                "warnings": list(self.budget_warnings),
+                "incomplete_image_estimates": list(self.incomplete_image_budget_requests),
+                "image_preflight_limit_guaranteed": False,
+                "overruns": list(self.budget_overruns),
+                "unaccounted_responses": list(self.unaccounted_response_costs),
+            },
         }

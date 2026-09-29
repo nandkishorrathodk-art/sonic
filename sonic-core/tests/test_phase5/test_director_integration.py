@@ -6,9 +6,7 @@ import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from sonic.agents.director import Director, AgentInput, AgentOutput
-from sonic.agents.cognitive_state import CognitiveState, EngagementBudget
-from sonic.agents.task_graph import TaskGraph, TaskStatus
+from sonic.agents.director import Director, AgentOutput
 from sonic.agents.state_store import StateStore
 from sonic.memory.inmemory import InMemoryGraph
 from sonic.safety.scope import ScopeChecker
@@ -220,6 +218,116 @@ def test_director_concurrency_limit():
         assert len(dispatchable_2) == 0
 
     asyncio.run(_run())
+
+
+@pytest.mark.asyncio
+async def test_director_rejected_empty_plan_is_not_complete_or_successful():
+    """Unsupported worker labels are rejected; an empty graph is not success."""
+    router = MagicMock(spec=ModelRouter)
+    router.complete = AsyncMock(return_value=LLMResponse(
+        content="""{
+            "assumptions": [],
+            "unknowns": [],
+            "tasks": [
+                {"name": "Author custom probe", "agent_type": "toolsmith"},
+                {"name": "Invent method", "agent_type": "method"}
+            ]
+        }""",
+        model="test-model",
+    ))
+    director = Director(
+        model_router=router,
+        graph_memory=InMemoryGraph(),
+        scope_checker=ScopeChecker(),
+        state_store=StateStore(),
+    )
+    engagement_id = await director.start_engagement(
+        target="target.test",
+        scope={},
+        tenant_id="tenant-empty-plan",
+    )
+    graph = director._graphs[engagement_id]
+    assert graph.size == 0
+    assert graph.is_complete() is False
+
+    result = await director.run_engagement_loop(
+        engagement_id,
+        worker_fn=AsyncMock(),
+    )
+    assert result["completed"] == 0
+    assert result["graph_complete"] is False
+    assert result["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_director_runs_dispatched_tasks_concurrently_within_limit():
+    """A dispatched batch runs concurrently and retains each task's findings."""
+    router = MagicMock(spec=ModelRouter)
+    router.complete = AsyncMock(return_value=LLMResponse(
+        content="""{
+            "assumptions": [],
+            "unknowns": [],
+            "tasks": [
+                {"name": "Task one", "agent_type": "recon", "payload": {}},
+                {"name": "Task two", "agent_type": "static", "payload": {}},
+                {"name": "Task three", "agent_type": "dynamic", "payload": {}}
+            ]
+        }""",
+        model="test-model",
+    ))
+    director = Director(
+        model_router=router,
+        graph_memory=InMemoryGraph(),
+        scope_checker=ScopeChecker(),
+        state_store=StateStore(),
+        max_parallel=2,
+    )
+    director._evaluate_stop_condition = MagicMock(return_value=MagicMock(
+        should_stop=False,
+        model_dump=lambda: {},
+    ))
+    director.replan_engine.evaluate = AsyncMock(
+        return_value=MagicMock(should_replan=False)
+    )
+    engagement_id = await director.start_engagement(
+        target="target.test",
+        scope={},
+        tenant_id="tenant-concurrent-loop",
+    )
+
+    active = 0
+    max_active = 0
+
+    async def worker(_payload):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.02)
+            if _payload["agent_type"] == "static":
+                raise RuntimeError("static worker failed")
+            return {
+                "status": "success",
+                "findings": [{"title": f"finding-{max_active}"}],
+            }
+        finally:
+            active -= 1
+
+    result = await director.run_engagement_loop(engagement_id, worker)
+
+    assert max_active == 2
+    assert result["completed"] == 2
+    assert result["failed"] == 1
+    assert len(result["findings"]) == 2
+    assert result["graph_complete"] is True
+    assert result["status"] == "partial"
+    failed_task = next(
+        task for task in director._graphs[engagement_id].tasks.values()
+        if task.agent_type == "static"
+    )
+    assert failed_task.status.value == "failed"
+    assert failed_task.error == "static worker failed"
+    assert not director._graphs[engagement_id].get_running_tasks()
 
 
 def test_director_pause_and_resume():

@@ -35,6 +35,8 @@ it when "left to its own devices".
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import sqlite3
 import threading
@@ -44,9 +46,71 @@ from datetime import UTC, datetime
 
 from typing import Any
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from sonic.logger import get_logger
 
 logger = get_logger(__name__)
+
+_VAULT_CIPHERTEXT_PREFIX = "enc:v1:"
+_VAULT_KEY_ENV = "SONIC_BEING_VAULT_KEY"
+
+
+class VaultKeyUnavailableError(RuntimeError):
+    """The vault key is missing or invalid; vault reads and writes fail closed."""
+
+
+class VaultLegacyDataError(RuntimeError):
+    """A record is still in the legacy plaintext format and needs explicit migration."""
+
+
+class VaultDataError(RuntimeError):
+    """An encrypted vault record cannot be authenticated or decoded."""
+
+
+def _vault_cipher() -> AESGCM:
+    key_text = os.environ.get(_VAULT_KEY_ENV, "").strip()
+    if not key_text:
+        raise VaultKeyUnavailableError(
+            f"{_VAULT_KEY_ENV} must contain a URL-safe base64-encoded 32-byte key"
+        )
+    try:
+        key = base64.b64decode(key_text, altchars=b"-_", validate=True)
+    except Exception as exc:
+        raise VaultKeyUnavailableError(f"{_VAULT_KEY_ENV} is not valid URL-safe base64") from exc
+    if len(key) != 32 or base64.urlsafe_b64encode(key).decode("ascii") != key_text:
+        raise VaultKeyUnavailableError(
+            f"{_VAULT_KEY_ENV} must encode exactly 32 random bytes in URL-safe base64"
+        )
+    return AESGCM(key)
+
+
+def _vault_aad(*parts: str) -> bytes:
+    return "\0".join(parts).encode("utf-8")
+
+
+def _encrypt_vault_value(value: str, aad: bytes) -> str:
+    nonce = os.urandom(12)
+    encrypted = _vault_cipher().encrypt(nonce, value.encode("utf-8"), aad)
+    return _VAULT_CIPHERTEXT_PREFIX + base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
+
+
+def _decrypt_vault_value(value: str, aad: bytes) -> str:
+    if not value.startswith(_VAULT_CIPHERTEXT_PREFIX):
+        raise VaultLegacyDataError(
+            "Vault record is legacy plaintext; call BeingVault.migrate_legacy_data() explicitly "
+            "before retrieving it"
+        )
+    try:
+        encrypted = base64.b64decode(
+            value[len(_VAULT_CIPHERTEXT_PREFIX):], altchars=b"-_", validate=True
+        )
+        plaintext = _vault_cipher().decrypt(encrypted[:12], encrypted[12:], aad)
+        return plaintext.decode("utf-8")
+    except VaultKeyUnavailableError:
+        raise
+    except Exception as exc:
+        raise VaultDataError("Vault ciphertext authentication or decoding failed") from exc
 
 
 def _default_db_path() -> str:
@@ -179,10 +243,7 @@ class BeingMind:
             self.focus = min(1.0, self.focus + 0.04)
             self.curiosity_drive = max(0.1, self.curiosity_drive - 0.05)
         if _being_store is not None:
-            try:
-                _being_store.save_mind(self)
-            except Exception:
-                pass
+            _being_store.save_mind(self)
         return self
 
     def record_mission_outcome(
@@ -221,10 +282,7 @@ class BeingMind:
             self.curiosity_drive = max(0.1, self.curiosity_drive - 0.03)
             self.satiety = max(0.0, self.satiety - 0.02)
 
-        try:
-            get_being_store().save_mind(self)
-        except Exception:
-            pass
+        get_being_store().save_mind(self)
         return self
 
 
@@ -247,7 +305,7 @@ class BeingStore:
         self._being_cache: dict[str, Being] = {}
         self._mind_cache: dict[str, BeingMind] = {}
         self._vault_cache: dict[tuple[str, str], dict[str, str]] = {}
-        self._browser_state_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._browser_state_cache: dict[tuple[str, str], str] = {}
         self._lock = threading.Lock()
         if persist:
             self._open_db()
@@ -307,28 +365,8 @@ class BeingStore:
                     goals_completed=data.get("goals_completed", 0),
                     last_idle_at=data.get("last_idle_at", ""),
                 )
-            for row in self._db.execute(
-                "SELECT being_id, service, username, secret, token, profile_url, updated_at FROM being_vault"
-            ).fetchall():
-                self._vault_cache[(row[0], row[1].lower())] = {
-                    "being_id": row[0],
-                    "service": row[1],
-                    "username": row[2],
-                    "secret": row[3],
-                    "token": row[4],
-                    "profile_url": row[5],
-                    "updated_at": row[6],
-                }
-            for b_id, p_key, state_json, _ in self._db.execute(
-                "SELECT being_id, profile_key, storage_state_json, updated_at FROM being_browser_state"
-            ).fetchall():
-                try:
-                    import json
-                    parsed_state = json.loads(state_json)
-                    if isinstance(parsed_state, dict):
-                        self._browser_state_cache[(b_id, p_key.lower())] = parsed_state
-                except Exception:
-                    pass
+            # Vault data is intentionally not hydrated into plaintext caches. Legacy rows
+            # are read only by explicit migration or rejected by the retrieval methods.
 
     # -- Being CRUD -------------------------------------------------------
     def get_being(self, being_id: str) -> Being | None:
@@ -388,6 +426,74 @@ class BeingStore:
                 (being.being_id, being.name, being.tenant_id, being.born_at, being.last_attached_at),
             )
             self._db.commit()
+
+    def get_or_create_being(self, tenant_id: str, name: str = "SONIC") -> tuple[Being, bool]:
+        """Atomically provision one identity per tenant across SQLite connections/processes."""
+        with self._lock:
+            if self.persist and self._db is not None:
+                now = _now()
+                self._db.execute("BEGIN IMMEDIATE")
+                try:
+                    candidate = Being(
+                        being_id=f"being-{uuid.uuid4().hex[:12]}",
+                        name=name,
+                        tenant_id=tenant_id,
+                        born_at=now,
+                        last_attached_at=now,
+                    )
+                    self._db.execute(
+                        "INSERT INTO beings (being_id, name, tenant_id, born_at, last_attached_at) "
+                        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(tenant_id) DO NOTHING",
+                        (candidate.being_id, candidate.name, tenant_id, now, now),
+                    )
+                    row = self._db.execute(
+                        "SELECT being_id, name, tenant_id, born_at, last_attached_at "
+                        "FROM beings WHERE tenant_id = ?",
+                        (tenant_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise RuntimeError("Atomic being provisioning produced no tenant row")
+                    if row[0] == candidate.being_id:
+                        being = candidate
+                        created = True
+                    else:
+                        attached_at = _now()
+                        self._db.execute(
+                            "UPDATE beings SET last_attached_at = ? WHERE being_id = ?",
+                            (attached_at, row[0]),
+                        )
+                        being = Being(
+                            being_id=row[0],
+                            name=row[1],
+                            tenant_id=row[2],
+                            born_at=row[3],
+                            last_attached_at=attached_at,
+                        )
+                        created = False
+                    self._db.commit()
+                except Exception:
+                    self._db.rollback()
+                    raise
+            else:
+                existing = next(
+                    (item for item in self._being_cache.values() if item.tenant_id == tenant_id),
+                    None,
+                )
+                if existing is not None:
+                    existing.last_attached_at = _now()
+                    being, created = existing, False
+                else:
+                    now = _now()
+                    being = Being(
+                        being_id=f"being-{uuid.uuid4().hex[:12]}",
+                        name=name,
+                        tenant_id=tenant_id,
+                        born_at=now,
+                        last_attached_at=now,
+                    )
+                    created = True
+            self._being_cache[being.being_id] = being
+            return being, created
 
     def touch_attached(self, being_id: str) -> None:
         b = self.get_being(being_id)
@@ -471,6 +577,15 @@ class BeingStore:
     ) -> dict[str, str]:
         svc_key = service.strip().lower()
         now_ts = _now()
+        encrypted_secret = _encrypt_vault_value(
+            secret, _vault_aad(being_id, svc_key, "secret")
+        )
+        encrypted_token = _encrypt_vault_value(
+            token, _vault_aad(being_id, svc_key, "token")
+        )
+        encrypted_profile_url = _encrypt_vault_value(
+            profile_url.strip(), _vault_aad(being_id, svc_key, "profile_url")
+        )
         entry = {
             "being_id": being_id,
             "service": service.strip(),
@@ -481,7 +596,13 @@ class BeingStore:
             "updated_at": now_ts,
         }
         with self._lock:
-            self._vault_cache[(being_id, svc_key)] = entry
+            stored_entry = {
+                **entry,
+                "secret": encrypted_secret,
+                "token": encrypted_token,
+                "profile_url": encrypted_profile_url,
+            }
+            self._vault_cache[(being_id, svc_key)] = stored_entry
             if self.persist and self._db is not None:
                 self._db.execute(
                     "INSERT INTO being_vault (being_id, service, username, secret, token, profile_url, updated_at) "
@@ -489,7 +610,8 @@ class BeingStore:
                     "ON CONFLICT(being_id, service) DO UPDATE SET "
                     "username=excluded.username, secret=excluded.secret, token=excluded.token, "
                     "profile_url=excluded.profile_url, updated_at=excluded.updated_at",
-                    (being_id, svc_key, entry["username"], secret, token, entry["profile_url"], now_ts),
+                    (being_id, svc_key, entry["username"], encrypted_secret, encrypted_token,
+                     encrypted_profile_url, now_ts),
                 )
                 self._db.commit()
         return entry
@@ -497,36 +619,59 @@ class BeingStore:
     def get_credential(self, being_id: str, service: str) -> dict[str, str] | None:
         svc_key = service.strip().lower()
         with self._lock:
-            cached = self._vault_cache.get((being_id, svc_key))
-            if cached is not None:
-                return dict(cached)
             if self.persist and self._db is not None:
                 row = self._db.execute(
                     "SELECT being_id, service, username, secret, token, profile_url, updated_at "
                     "FROM being_vault WHERE being_id = ? AND service = ?",
                     (being_id, svc_key),
                 ).fetchone()
-                if row:
-                    entry = {
-                        "being_id": row[0],
-                        "service": row[1],
-                        "username": row[2],
-                        "secret": row[3],
-                        "token": row[4],
-                        "profile_url": row[5],
-                        "updated_at": row[6],
-                    }
-                    self._vault_cache[(being_id, svc_key)] = entry
-                    return dict(entry)
-            return None
+            else:
+                cached = self._vault_cache.get((being_id, svc_key))
+                row = (
+                    being_id, svc_key, cached["username"], cached["secret"], cached["token"],
+                    cached["profile_url"], cached["updated_at"],
+                ) if cached is not None else None
+            if row is None:
+                return None
+            return {
+                "being_id": row[0],
+                "service": row[1],
+                "username": row[2],
+                "secret": _decrypt_vault_value(row[3], _vault_aad(being_id, svc_key, "secret")),
+                "token": _decrypt_vault_value(row[4], _vault_aad(being_id, svc_key, "token")),
+                "profile_url": _decrypt_vault_value(
+                    row[5], _vault_aad(being_id, svc_key, "profile_url")
+                ),
+                "updated_at": row[6],
+            }
 
     def list_accounts(self, being_id: str) -> list[dict[str, str]]:
         with self._lock:
+            if self.persist and self._db is not None:
+                rows = self._db.execute(
+                    "SELECT service, username, profile_url, updated_at FROM being_vault "
+                    "WHERE being_id = ?",
+                    (being_id,),
+                ).fetchall()
+                return [
+                    {
+                        "service": row[0],
+                        "username": row[1],
+                        "profile_url": _decrypt_vault_value(
+                            row[2], _vault_aad(being_id, row[0].lower(), "profile_url")
+                        ),
+                        "updated_at": row[3],
+                    }
+                    for row in rows
+                ]
             results = [
                 {
                     "service": v["service"],
                     "username": v["username"],
-                    "profile_url": v.get("profile_url", ""),
+                    "profile_url": _decrypt_vault_value(
+                        v.get("profile_url", ""),
+                        _vault_aad(being_id, v["service"].lower(), "profile_url"),
+                    ),
                     "updated_at": v.get("updated_at", ""),
                 }
                 for (b_id, _), v in self._vault_cache.items()
@@ -551,9 +696,12 @@ class BeingStore:
         else:
             state_dict = dict(storage_state or {})
         now_ts = _now()
-        payload = json.dumps(state_dict)
+        payload = _encrypt_vault_value(
+            json.dumps(state_dict),
+            _vault_aad(being_id, pkey, "browser_state"),
+        )
         with self._lock:
-            self._browser_state_cache[(being_id, pkey)] = state_dict
+            self._browser_state_cache[(being_id, pkey)] = payload
             if self.persist and self._db is not None:
                 self._db.execute(
                     "INSERT INTO being_browser_state (being_id, profile_key, storage_state_json, updated_at) "
@@ -570,26 +718,96 @@ class BeingStore:
         being_id: str,
         profile_key: str = "default",
     ) -> dict[str, Any] | None:
-        import json
         pkey = (profile_key or "default").strip().lower()
         with self._lock:
-            cached = self._browser_state_cache.get((being_id, pkey))
-            if cached is not None:
-                return dict(cached)
             if self.persist and self._db is not None:
                 row = self._db.execute(
                     "SELECT storage_state_json FROM being_browser_state WHERE being_id = ? AND profile_key = ?",
                     (being_id, pkey),
                 ).fetchone()
-                if row:
-                    try:
-                        state_dict = json.loads(row[0])
-                        if isinstance(state_dict, dict):
-                            self._browser_state_cache[(being_id, pkey)] = state_dict
-                            return dict(state_dict)
-                    except Exception:
-                        pass
-            return None
+                payload = row[0] if row else None
+            else:
+                payload = self._browser_state_cache.get((being_id, pkey))
+            if payload is None:
+                return None
+            decoded = _decrypt_vault_value(payload, _vault_aad(being_id, pkey, "browser_state"))
+            try:
+                state_dict = json.loads(decoded)
+            except Exception as exc:
+                raise VaultDataError("Browser-state vault payload is not valid JSON") from exc
+            if not isinstance(state_dict, dict):
+                raise VaultDataError("Browser-state vault payload must be a JSON object")
+            return state_dict
+
+    def migrate_legacy_vault_data(self) -> dict[str, int]:
+        """Explicitly encrypt unmarked legacy plaintext vault rows in-place.
+
+        This is never run automatically: operators should back up the database,
+        configure SONIC_BEING_VAULT_KEY, then invoke this migration deliberately.
+        """
+        _vault_cipher()  # Fail before opening a transaction if key management is incomplete.
+        if not self.persist or self._db is None:
+            raise RuntimeError("Legacy vault migration requires a persistent BeingStore")
+        credentials = 0
+        browser_states = 0
+        with self._lock:
+            self._db.execute("PRAGMA secure_delete=ON")
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                for being_id, service, secret, token, profile_url in self._db.execute(
+                    "SELECT being_id, service, secret, token, profile_url FROM being_vault"
+                ).fetchall():
+                    svc_key = service.strip().lower()
+                    encrypted_secret = secret if secret.startswith(_VAULT_CIPHERTEXT_PREFIX) else (
+                        _encrypt_vault_value(secret, _vault_aad(being_id, svc_key, "secret"))
+                    )
+                    encrypted_token = token if token.startswith(_VAULT_CIPHERTEXT_PREFIX) else (
+                        _encrypt_vault_value(token, _vault_aad(being_id, svc_key, "token"))
+                    )
+                    encrypted_profile_url = (
+                        profile_url if profile_url.startswith(_VAULT_CIPHERTEXT_PREFIX) else
+                        _encrypt_vault_value(
+                            profile_url, _vault_aad(being_id, svc_key, "profile_url")
+                        )
+                    )
+                    if (
+                        encrypted_secret != secret
+                        or encrypted_token != token
+                        or encrypted_profile_url != profile_url
+                    ):
+                        self._db.execute(
+                            "UPDATE being_vault SET secret = ?, token = ?, profile_url = ? "
+                            "WHERE being_id = ? AND service = ?",
+                            (encrypted_secret, encrypted_token, encrypted_profile_url,
+                             being_id, service),
+                        )
+                        credentials += 1
+                for being_id, profile_key, state in self._db.execute(
+                    "SELECT being_id, profile_key, storage_state_json FROM being_browser_state"
+                ).fetchall():
+                    if not state.startswith(_VAULT_CIPHERTEXT_PREFIX):
+                        encrypted_state = _encrypt_vault_value(
+                            state,
+                            _vault_aad(being_id, profile_key.strip().lower(), "browser_state"),
+                        )
+                        self._db.execute(
+                            "UPDATE being_browser_state SET storage_state_json = ? "
+                            "WHERE being_id = ? AND profile_key = ?",
+                            (encrypted_state, being_id, profile_key),
+                        )
+                        browser_states += 1
+                self._db.commit()
+                checkpoint = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint and (checkpoint[0] != 0 or checkpoint[1] != checkpoint[2]):
+                    raise VaultDataError(
+                        "Legacy values were encrypted, but SQLite could not truncate the "
+                        "plaintext WAL; stop other database users and retry checkpointing"
+                    )
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+        return {"credentials": credentials, "browser_states": browser_states}
 
     def close(self) -> None:
         with self._lock:
@@ -628,20 +846,11 @@ def get_or_create_being(tenant_id: str, name: str = "SONIC") -> Being:
     being_id, same born_at), not reminted. First contact provisions one.
     """
     store = get_being_store()
-    being = store.get_being_for_tenant(tenant_id)
-    if being is None:
-        being = Being(
-            being_id=f"being-{uuid.uuid4().hex[:12]}",
-            name=name,
-            tenant_id=tenant_id,
-            born_at=_now(),
-            last_attached_at=_now(),
-        )
-        store.save_being(being)
+    being, created = store.get_or_create_being(tenant_id, name=name)
+    if created:
         store.get_mind(being.being_id)  # initialize mind row
         logger.info("being_provisioned", being_id=being.being_id, tenant_id=tenant_id)
     else:
-        store.touch_attached(being.being_id)
         logger.info("being_reattached", being_id=being.being_id,
                     born_at=being.born_at, tenant_id=tenant_id)
     return being

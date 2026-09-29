@@ -4,7 +4,12 @@ SONIC — Persistent BeingVault (Credentials, Accounts & Browser Session State)
 
 Provides a clean `BeingVault` facade wrapping `BeingStore` so the AI-Human
 Digital Being can persist and reload platform accounts, credentials, tokens,
-and browser `storage_state` profiles across restarts.
+and browser `storage_state` profiles across restarts. Sensitive fields are
+AES-GCM encrypted with `SONIC_BEING_VAULT_KEY`; no key is generated or
+defaulted by the application. Existing unmarked plaintext requires explicit
+`migrate_legacy_data()` after an operator has backed up the database, configured
+the key, and stopped other database users. The backup must be protected and
+retired separately because it necessarily contains the pre-migration plaintext.
 """
 
 from __future__ import annotations
@@ -125,6 +130,10 @@ class BeingVault:
             if alt is not None:
                 return alt
         return res
+
+    def migrate_legacy_data(self) -> dict[str, int]:
+        """Explicitly encrypt legacy plaintext records after configuring the vault key."""
+        return self.store.migrate_legacy_vault_data()
 
 
 __all__ = ["BeingVault"]

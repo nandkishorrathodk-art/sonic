@@ -13,8 +13,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from sonic.swarm import SwarmRunner
 
 
@@ -117,4 +115,31 @@ def test_pivot_loop_stops_when_no_findings():
 
         result = await runner._run_dispatch_loop("eng-2", "tenant-1", max_iterations=10)
         assert result["pivot_rounds"] == 0
+    asyncio.run(_run())
+
+
+def test_empty_task_graph_is_not_reported_as_completed():
+    """A rejected/empty plan must not produce a successful swarm summary."""
+    async def _run():
+        runner = _make_runner()
+        director = MagicMock()
+        director.get_dispatchable_tasks = MagicMock(return_value=[])
+        director.get_engagement_state = MagicMock(return_value={"target": "app.test"})
+        director.get_task_graph = MagicMock(return_value={})
+        empty_graph = MagicMock()
+        empty_graph.size = 0
+        empty_graph.is_complete = MagicMock(return_value=False)
+        director._graphs = {"eng-empty": empty_graph}
+        runner.director = director
+        runner.metrics = MagicMock()
+
+        result = await runner._run_dispatch_loop(
+            "eng-empty",
+            "tenant-1",
+            max_iterations=10,
+        )
+
+        assert result["tasks_completed"] == 0
+        assert result["summary"]["status"] == "failed"
+
     asyncio.run(_run())
