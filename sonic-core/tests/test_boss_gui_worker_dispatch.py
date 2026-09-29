@@ -26,7 +26,14 @@ class _MockLLM:
 @pytest.mark.asyncio
 async def test_visual_mission_uses_shared_gui_computer_use_worker():
     boss = BossAgent(computer_provider=_MockProvider(), llm_router=_MockLLM())
-    boss.judge = None
+    from sonic.agents.judge import JudgeVerdict
+
+    boss.judge.evaluate_sub_mission = AsyncMock(
+        return_value=MagicMock(
+            verdict=JudgeVerdict.CONFIRMED,
+            notes="The test Judge confirms the supplied GUI receipt.",
+        )
+    )
     sub_mission = SubMission(
         id="sub-desktop-web",
         goal="Open the provided resource in an installed desktop application and inspect it",
