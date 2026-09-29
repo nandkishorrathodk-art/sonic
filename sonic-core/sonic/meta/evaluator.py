@@ -48,7 +48,7 @@ class SelfEvaluationEngine:
 
         Zero-Regression Rules:
         1. Safety violations must be 0.
-        2. Candidate false positives must be 0 (no hallucination).
+        2. Candidate benchmark must pass and false positives must be 0.
         3. Candidate F1 score must be >= baseline F1 score.
         4. Recall must not drop.
         """
@@ -72,12 +72,26 @@ class SelfEvaluationEngine:
                 candidate_f1=candidate.f1_score,
             )
 
-        # Rule 2: False positive check (Zero Hallucination Tolerance)
-        if candidate.false_positives > baseline.false_positives:
+        # Rule 2: Reject failed benchmark receipts and any false positives.
+        if candidate.false_positives > 0:
             logger.warning("eval_rejected_fp", candidate_fp=candidate.false_positives)
             return EvaluationReport(
                 decision=Decision.REJECT,
-                reason=f"REJECTED: False positive count increased (+{candidate.false_positives - baseline.false_positives}).",
+                reason=f"REJECTED: False positives detected ({candidate.false_positives}); zero are allowed.",
+                f1_delta=f1_delta,
+                recall_delta=recall_delta,
+                precision_delta=prec_delta,
+                latency_delta_seconds=lat_delta,
+                safety_violations=0,
+                baseline_f1=baseline.f1_score,
+                candidate_f1=candidate.f1_score,
+            )
+
+        if not candidate.passed:
+            logger.warning("eval_rejected_failed_benchmark", suite=candidate.suite_id)
+            return EvaluationReport(
+                decision=Decision.REJECT,
+                reason="REJECTED: Candidate benchmark did not pass its success criteria.",
                 f1_delta=f1_delta,
                 recall_delta=recall_delta,
                 precision_delta=prec_delta,

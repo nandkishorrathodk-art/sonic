@@ -301,6 +301,12 @@ class ModelRouter:
                     )
                     return self.providers[fb_provider], fb_model
 
+        if task_type == "vision":
+            raise RuntimeError(
+                "No configured vision provider is ready. Configure credentials "
+                "for the vision route or start its local vision model."
+            )
+
         # If user explicitly configured a default provider (e.g. DEFAULT_PROVIDER=deepseek or openrouter),
         # prioritize it over the static routing rules if it is ready.
         if (
@@ -471,8 +477,9 @@ class ModelRouter:
                 else:
                     candidates.append((fb, None))
 
-        for p_name in self.fallback_chain:
-            candidates.append((p_name, None))
+        if task_type != "vision":
+            for p_name in self.fallback_chain:
+                candidates.append((p_name, None))
 
         original_model = request.model
         for fb_name, fb_model in candidates:
@@ -491,6 +498,11 @@ class ModelRouter:
                 logger.warning("fallback_failed", provider=fb_name, model=fb_model, error=str(e))
                 continue
 
+        if task_type == "vision":
+            raise RuntimeError(
+                "All configured vision providers failed. Configure a working "
+                "vision provider or start its local vision model."
+            )
         raise RuntimeError(
             f"All providers failed for task_type={task_type}. "
             f"Primary: {failed_provider} (model: {original_model}), Candidates tried: {candidates}"

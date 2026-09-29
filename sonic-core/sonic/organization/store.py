@@ -270,9 +270,22 @@ class OrganizationStore:
             )
         )
         receipts = result.scalars().all()
-        if not any(r.approved for r in receipts):
+        matching_ref = item.development_branch
+        if not matching_ref:
+            raise ValueError("Release requires a development branch ref")
+        if not any(
+            r.approved
+            and r.event_type == "pull_request_review"
+            and r.ref == matching_ref
+            for r in receipts
+        ):
             raise ValueError("Release blocked: no approved GitHub review receipt")
-        if not any(r.ci_success for r in receipts):
+        if not any(
+            r.ci_success
+            and r.event_type in {"check_suite", "check_run"}
+            and r.ref == matching_ref
+            for r in receipts
+        ):
             raise ValueError("Release blocked: no successful GitHub CI receipt")
 
     async def snapshot(self, tenant_id: str) -> dict[str, Any]:

@@ -62,7 +62,26 @@ async def test_release_requires_review_and_ci_receipts(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="approved GitHub review"):
         await store.update_work_item_status("tenant-a", item["id"], "released")
 
-    await store.record_github_receipt("tenant-a", "pull_request_review", "acme/sonic", "feat/api", "11", approved=True)
+    await store.record_github_receipt(
+        "tenant-a", "check_suite", "acme/sonic", "old-head-sha", "11", ci_success=True
+    )
+    await store.record_github_receipt(
+        "tenant-a", "pull_request_review", "acme/sonic", "old-head-sha", "11",
+        approved=True,
+    )
+    with pytest.raises(ValueError, match="approved GitHub review"):
+        await store.update_work_item_status("tenant-a", item["id"], "released")
+
+    await store.record_github_receipt(
+        "tenant-a", "pull_request_review", "acme/sonic", "feat/api", "11",
+        approved=True,
+    )
+    with pytest.raises(ValueError, match="successful GitHub CI"):
+        await store.update_work_item_status("tenant-a", item["id"], "released")
+
+    await store.record_github_receipt(
+        "tenant-a", "check_suite", "acme/sonic", "old-head-sha", "11", ci_success=True
+    )
     with pytest.raises(ValueError, match="successful GitHub CI"):
         await store.update_work_item_status("tenant-a", item["id"], "released")
 

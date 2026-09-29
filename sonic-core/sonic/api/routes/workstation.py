@@ -56,6 +56,7 @@ router = APIRouter()
 
 _primary_computer_instance: Any | None = None
 _daytona_provider_instance: Any | None = None
+_foreground_operator_lock = asyncio.Lock()
 
 
 def _assert_runtime_execution_enabled(tenant_id: str) -> None:
@@ -204,14 +205,26 @@ def _strip_model_thinking(text: str) -> str:
 
 
 async def _run_foreground_operator_task(coro: Any) -> Any:
-    """Give an operator mission exclusive use of the shared desktop."""
-    from sonic.being.life_loop import pause_for_operator, resume_after_operator
+    """Serialize operator missions that share the physical workstation."""
+    from sonic.being.life_loop import (
+        pause_for_operator,
+        resume_after_operator,
+        wait_for_operator_quiescence,
+    )
 
-    pause_for_operator()
+    entered_lock = False
     try:
-        return await coro
+        async with _foreground_operator_lock:
+            entered_lock = True
+            pause_for_operator()
+            try:
+                await wait_for_operator_quiescence()
+                return await coro
+            finally:
+                resume_after_operator()
     finally:
-        resume_after_operator()
+        if not entered_lock and asyncio.iscoroutine(coro):
+            coro.close()
 
 
 async def _run_prompt_reasoning_with_timeout(
@@ -2432,6 +2445,13 @@ def _is_observation_only_prompt(prompt: str) -> bool:
     lower = re.sub(r"\s+", " ", prompt.strip().lower())
     if not _requires_desktop_observation(lower):
         return False
+    # Prohibitions describe actions to avoid, not actions to perform. Keep
+    # positive intents before/after those clauses available to the classifier.
+    positive_intent = re.sub(
+        r"\b(?:do not|don't|never)\b[^.!?]*(?:[.!?]|$)",
+        " ",
+        lower,
+    )
     observation_terms = (
         "analyze", "analyse", "analysis", "describe", "tell me", "what do you see",
         "what you see", "what is on", "what's on", "visible", "inspect", "observe",
@@ -2444,8 +2464,8 @@ def _is_observation_only_prompt(prompt: str) -> bool:
         "drag", "download", "close", "focus", "install", "run", "execute", "create", "write",
         "delete", "rm", "kill", "compile", "build", "exploit", "attack", "scan target",
     )
-    return any(term in lower for term in observation_terms) and not any(
-        term in lower for term in mutating_terms
+    return any(term in positive_intent for term in observation_terms) and not any(
+        term in positive_intent for term in mutating_terms
     )
 
 
@@ -2907,50 +2927,53 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
         if not desktop_id:
             desktop_id = str(state.get("desktop", {}).get("workspace_id") or state.get("desktop", {}).get("sandbox_id") or "")
 
-        # Always observe the live workstation desktop if desktop_id is available.
-        # A computer-use assistant must always see its current screen and active window.
+        # Capture pixels only when the prompt needs visual/application context.
+        # Ordinary chat should not depend on a vision-capable provider.
+        computer = None
         if desktop_id:
-            try:
-                computer = get_daytona_computer()
-                screen = await computer.screenshot(desktop_id)
-                desktop_screenshot_b64 = (
-                    getattr(screen, "screenshot_base64", "")
-                    or getattr(screen, "image_base64", "")
-                    or ""
-                )
-
-                ctx_parts = [
-                    f"CURRENT LIVE DESKTOP OBSERVATION (captured {screen.timestamp}): "
-                    f"state={screen.desktop_state}; resolution={screen.width}x{screen.height}; "
-                    f"active_window={screen.active_window!r}"
-                ]
-                if screen.visible_text:
-                    ctx_parts.append(f"window_info={screen.visible_text!r}")
-                if screen.detected_controls:
-                    ctx_parts.append(f"controls={screen.detected_controls!r}")
-                desktop_context = "; ".join(ctx_parts) + "."
-                state["last_desktop_observation"] = desktop_context
-                state["last_desktop_observation_at"] = screen.timestamp
-                _persist_workstation_state()
-                if execution_prompt or observation_only:
-                    _append_worklog(
-                        state,
-                        "action",
-                        "Agent Desktop Observation",
-                        "Agent inspected the live workstation via screenshot. " + desktop_context,
+            if desktop_prompt:
+                try:
+                    computer = get_daytona_computer()
+                    screen = await computer.screenshot(desktop_id)
+                    desktop_screenshot_b64 = (
+                        getattr(screen, "screenshot_base64", "")
+                        or getattr(screen, "image_base64", "")
                     )
-            except Exception as observation_err:
-                logger.warning("workstation_desktop_observation_failed", error=str(observation_err))
-                if state.get("last_desktop_observation"):
-                    desktop_context = str(state["last_desktop_observation"])
-                else:
-                    desktop_context = f"Workstation active ('{desktop_id}'), but screen capture returned: {observation_err}"
+
+                    ctx_parts = [
+                        f"CURRENT LIVE DESKTOP OBSERVATION (captured {screen.timestamp}): "
+                        f"state={screen.desktop_state}; resolution={screen.width}x{screen.height}; "
+                        f"active_window={screen.active_window!r}"
+                    ]
+                    if screen.visible_text:
+                        ctx_parts.append(f"window_info={screen.visible_text!r}")
+                    if screen.detected_controls:
+                        ctx_parts.append(f"controls={screen.detected_controls!r}")
+                    desktop_context = "; ".join(ctx_parts) + "."
+                    state["last_desktop_observation"] = desktop_context
+                    state["last_desktop_observation_at"] = screen.timestamp
+                    _persist_workstation_state()
+                    if execution_prompt or observation_only:
+                        _append_worklog(
+                            state,
+                            "action",
+                            "Agent Desktop Observation",
+                            "Agent inspected the live workstation via screenshot. " + desktop_context,
+                        )
+                except Exception as observation_err:
+                    logger.warning("workstation_desktop_observation_failed", error=str(observation_err))
+                    if state.get("last_desktop_observation"):
+                        desktop_context = str(state["last_desktop_observation"])
+                    else:
+                        desktop_context = f"Workstation active ('{desktop_id}'), but screen capture returned: {observation_err}"
 
             # Execute autonomous action loop if applicable
             if execution_prompt:
                 # --- Phase 8: Use ComputerUseAgent for visual computer use ---
                 if desktop_id:
                     try:
+                        if computer is None:
+                            computer = get_daytona_computer()
                         from sonic.computer_use.agent import ComputerUseAgent
                         from sonic.computer_use.models import (
                             ComputerAutonomyLevel,
@@ -2999,10 +3022,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             logger.info("workstation_preserving_desktop_provider", desktop_id=desktop_id)
                         else:
                             computer = resolved_comp
-                        # The visible X11 desktop is the only Computer surface.
-                        # Do not create a hidden Playwright browser with an
-                        # independent page state.
-                        browser_agent = None
                         from sonic.safety.sealed import seal_default
                         state["interrupted"] = False
 
@@ -3224,7 +3243,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 llm_router=llm_router,
                                 safety=safety_policy,
                                 security_tools=security_tools,
-                                browser=browser_agent,
                                 tenant_id=tenant_id,
                                 being=being,
                                 being_mind=mind,
@@ -3312,17 +3330,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     )
                                 _persist_workstation_state()
 
-                            try:
-                                boss_report = await boss.run(
-                                    workspace_id=desktop_id,
-                                    objective=effective_goal,
-                                    phase_callback=_on_boss_event,
-                                    interrupt_check=lambda: bool(state.get("interrupted")),
-                                )
-                                report = boss_report
-                            finally:
-                                if browser_agent is not None:
-                                    await browser_agent.close()
+                            boss_report = await boss.run(
+                                workspace_id=desktop_id,
+                                objective=effective_goal,
+                                phase_callback=_on_boss_event,
+                                interrupt_check=lambda: bool(state.get("interrupted")),
+                            )
+                            report = boss_report
                             summary_msg = report.findings_summary
 
                             boss_waiting_human = (
@@ -3418,7 +3432,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 lessons_ledger=lessons_ledger,
                                 safety=safety_policy,
                                 self_host=True,
-                                browser=browser_agent,
                                 security_tools=security_tools,
                                 gui_only=False,
                                 compact_prompt=True,
@@ -3454,17 +3467,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 _persist_workstation_state()
 
                             agent._heartbeat_callback = _on_heartbeat
-                            try:
-                                traces = await agent.run_mission(
-                                    workspace_id=desktop_id,
-                                    goal=effective_goal,
-                                    steps=agent.max_actions,
-                                    step_callback=_on_step,
-                                    interrupt_check=lambda: bool(state.get("interrupted")),
-                                )
-                            finally:
-                                if browser_agent is not None:
-                                    await browser_agent.close()
+                            traces = await agent.run_mission(
+                                workspace_id=desktop_id,
+                                goal=effective_goal,
+                                steps=agent.max_actions,
+                                step_callback=_on_step,
+                                interrupt_check=lambda: bool(state.get("interrupted")),
+                            )
 
                             # Final summary
                             succeeded = sum(1 for t in traces if t.status in ("SUCCESS", "RECOVERED"))
@@ -3684,7 +3693,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             base64=desktop_screenshot_b64.split(",", 1)[-1],
                             media_type="image/png",
                         )]
-                        if desktop_screenshot_b64
+                        if desktop_prompt and desktop_screenshot_b64
                         else []
                     ),
                 ),
@@ -3696,7 +3705,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             messages=messages,
                             max_tokens=900,
                             temperature=0.2,
-                            task_type="vision" if desktop_screenshot_b64 else "reasoning",
+                            task_type="vision" if desktop_prompt and desktop_screenshot_b64 else "reasoning",
                         )
                     ),
                     timeout=25,

@@ -190,7 +190,7 @@ async def test_browser_fallback_does_not_type_when_desktop_target_is_unresolved(
         "type into the visible search field",
     )
 
-    assert trace.status == "FAILED"
+    assert trace.status == "BLOCKED"
     computer.gui_action.assert_not_awaited()
 
 

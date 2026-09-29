@@ -702,7 +702,6 @@ class SubagentTeamworkManager:
                 being=getattr(self.parent, "being", None),
                 being_mind=getattr(self.parent, "being_mind", None),
                 enable_llm_decomposition=False,
-                browser=getattr(self.parent, "browser", None),
                 toolsmith=getattr(self.parent, "toolsmith", None),
                 method_lab=getattr(self.parent, "method_lab", None),
                 lessons_ledger=getattr(self.parent, "lessons_ledger", None),

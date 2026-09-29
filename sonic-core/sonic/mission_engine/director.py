@@ -368,7 +368,6 @@ class MissionDirector:
             security_tools=sec_tools,
             autonomy_level=self.autonomy_level,
             mode=EngineeringMissionMode.ENGINEERING_MODE,
-            browser=None,
             gui_only=False,
             observe_desktop=True,
             tenant_id=state.tenant_id,
@@ -505,7 +504,7 @@ class MissionDirector:
             # The agent is granted full creative autonomy to explore and approach
             # the target asset without forced tool chains or scripted recipes.
             # It has access to:
-            #   - Unified browser automation (BrowserAgent)
+            #   - Visible desktop GUI interaction through ComputerUseAgent
             #   - Security tool adapters (in-sandbox, fail-closed)
             #   - Dynamic tool authoring (ToolsmithLoop)
             #   - Autonomous attack/recon method synthesis (MethodLab)
@@ -610,7 +609,6 @@ class MissionDirector:
                     security_tools=sec_tools,
                     autonomy_level=self.autonomy_level,
                     mode=EngineeringMissionMode.ENGINEERING_MODE,
-                    browser=None,
                     gui_only=False,
                     observe_desktop=True,
                     tenant_id=mission.tenant_id,

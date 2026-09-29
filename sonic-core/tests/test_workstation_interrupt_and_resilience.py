@@ -12,6 +12,7 @@ Verifies:
     5. EngagementManager._run_computer_dynamic tenant isolation propagation.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +20,46 @@ from fastapi.testclient import TestClient
 from sonic.api.main import app
 from sonic.auth.google_auth import create_jwt_token
 from sonic.auth.models import User, UserRole
+
+
+@pytest.mark.asyncio
+async def test_foreground_operator_tasks_are_serialized(monkeypatch):
+    from sonic.api.routes import workstation
+
+    events = []
+    release_first = asyncio.Event()
+
+    async def no_idle_tick():
+        return None
+
+    monkeypatch.setattr(
+        "sonic.being.life_loop.pause_for_operator", lambda: None
+    )
+    monkeypatch.setattr(
+        "sonic.being.life_loop.resume_after_operator", lambda: None
+    )
+    monkeypatch.setattr(
+        "sonic.being.life_loop.wait_for_operator_quiescence", no_idle_tick
+    )
+
+    async def run_task(name, block=False):
+        async def work():
+            events.append(f"{name}:start")
+            if block:
+                await release_first.wait()
+            events.append(f"{name}:end")
+
+        await workstation._run_foreground_operator_task(work())
+
+    first = asyncio.create_task(run_task("first", block=True))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(run_task("second"))
+    await asyncio.sleep(0)
+    assert events == ["first:start"]
+
+    release_first.set()
+    await asyncio.gather(first, second)
+    assert events == ["first:start", "first:end", "second:start", "second:end"]
 
 
 # ===========================================================================
@@ -259,11 +300,8 @@ async def test_mission_director_coordinate_end_to_end():
     assert mission_id in director.missions
 
     # Coordinate mission
-    with patch("sonic.agents.browser_agent.BrowserAgent") as MockBrowser, \
-         patch("sonic.mission_engine.director.ComputerUseAgent") as MockAgentClass, \
+    with patch("sonic.mission_engine.director.ComputerUseAgent") as MockAgentClass, \
          patch("sonic.tools.registry.get_default_registry") as MockRegistry:
-        mock_browser = AsyncMock()
-        MockBrowser.return_value = mock_browser
         mock_agent = MagicMock()
         mock_agent.run_mission = AsyncMock(return_value=[])
         MockAgentClass.return_value = mock_agent

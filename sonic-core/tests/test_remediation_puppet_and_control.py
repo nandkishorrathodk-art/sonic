@@ -129,16 +129,14 @@ async def test_daytona_burpsuite_unblocked():
 
 @pytest.mark.asyncio
 async def test_boss_subagent_feature_forwarding_and_context():
-    """BossAgent forwards browser, toolsmith, and accumulated discoveries."""
+    """BossAgent forwards shared-computer capabilities and accumulated discoveries."""
     computer = AsyncMock()
     llm = AsyncMock()
-    mock_browser = MagicMock()
     mock_toolsmith = MagicMock()
 
     boss = BossAgent(
         computer_provider=computer,
         llm_router=llm,
-        browser=mock_browser,
         toolsmith=mock_toolsmith,
     )
     boss._accumulated_context.append("Found port 8080 open on 10.0.0.5")
@@ -159,7 +157,6 @@ async def test_boss_subagent_feature_forwarding_and_context():
         result = await boss._dispatch_sub_agent("ws-1", sub)
 
         _, kwargs = MockAgentClass.call_args
-        assert kwargs["browser"] == mock_browser
         assert kwargs["toolsmith"] == mock_toolsmith
 
         run_kwargs = mock_instance.run_mission.call_args[1]

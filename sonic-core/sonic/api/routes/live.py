@@ -259,7 +259,7 @@ async def get_live_graph(user: User = Depends(require_auth)):
     """Retrieve authentic Cognitive Memory and System Architecture graph."""
     from sonic.memory.router import get_smart_memory
     from sonic.being.identity import get_or_create_being, get_being_store
-    from sonic.being.craft import get_or_create_craft
+    from sonic.being.craft import BeingCraft
 
     t_id = getattr(user, "tenant_id", None) or "default"
     memory = await get_smart_memory()
@@ -330,7 +330,7 @@ async def get_live_graph(user: User = Depends(require_auth)):
                     "focus": round(mind.focus, 3),
                     "satiety": round(mind.satiety, 3),
                     "goals_completed": mind.goals_completed,
-                    "idle_cycles": mind.idle_cycles,
+                    "idle_cycles": mind.idle_cycles_run,
                     "learned_facts_count": len(mind.learned_facts),
                 },
             })
@@ -352,7 +352,7 @@ async def get_live_graph(user: User = Depends(require_auth)):
                 edges.append({"source": mind_id, "target": fact_id, "type": "INTERNALIZED_KNOWLEDGE"})
 
         # 2. BeingCraft (Authored Scripts & Toolsmithing)
-        craft = get_or_create_craft(being.being_id)
+        craft = BeingCraft(being_id=being.being_id)
         for entry in craft.list_notes():
             craft_id = f"craft_{entry.note_id}"
             if craft_id not in existing_node_ids:

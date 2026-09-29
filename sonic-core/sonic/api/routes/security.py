@@ -65,6 +65,7 @@ class SecurityFinding:
 @dataclass
 class AuditStore:
     findings: list[SecurityFinding] = field(default_factory=list)
+    latest_findings: list[SecurityFinding] = field(default_factory=list)
     last_audit: str = ""
 
     def verdict_for(self, test_id: str) -> str:
@@ -74,15 +75,33 @@ class AuditStore:
         return "NOT_RUN"
 
     def release_gate(self) -> tuple[str, list[SecurityFinding]]:
-        active = [f for f in self.findings if f.verdict == "FAIL"]
-        if not self.findings:
+        if not self.latest_findings:
             return "NO_AUDIT_RUN", []
-        if not active:
-            return "RELEASE_CANDIDATE_CERTIFIED", []
-        crit = [f for f in active if _by_id(f.test_id).severity == "CRITICAL"]
-        if crit:
-            return "FAIL_CRITICAL", active
-        return "FAIL_NON_CRITICAL", active
+        latest_by_id = {finding.test_id: finding for finding in self.latest_findings}
+        active = [finding for finding in latest_by_id.values() if finding.verdict == "FAIL"]
+        if active:
+            crit = [f for f in active if _by_id(f.test_id).severity == "CRITICAL"]
+            if crit:
+                return "FAIL_CRITICAL", active
+            return "FAIL_NON_CRITICAL", active
+        required_ids = {test.test_id for test in CATALOG}
+        if (
+            set(latest_by_id) != required_ids
+            or any(finding.verdict != "PASS" for finding in latest_by_id.values())
+        ):
+            return "INCOMPLETE", [
+                finding for finding in latest_by_id.values()
+                if finding.verdict == "SKIP"
+            ]
+        return "RELEASE_CANDIDATE_CERTIFIED", []
+
+    def incomplete_test_ids(self) -> list[str]:
+        latest_by_id = {finding.test_id: finding for finding in self.latest_findings}
+        return sorted(
+            test.test_id
+            for test in CATALOG
+            if test.test_id not in latest_by_id or latest_by_id[test.test_id].verdict != "PASS"
+        )
 
 
 _store = AuditStore()
@@ -157,6 +176,7 @@ async def security_audit(
 ):
     """Execute the adversarial self-security test suite and record findings."""
     new_findings = [_run_in_process_check(t) for t in CATALOG]
+    _store.latest_findings = new_findings
     _store.findings.extend(new_findings)
     _store.last_audit = _now()
 
@@ -239,7 +259,7 @@ async def list_findings(
     user: User = Depends(require_operator),
 ):
     """List any discovered self-security vulnerabilities or weaknesses."""
-    active = [f for f in _store.findings if f.verdict == "FAIL"]
+    active = [f for f in _store.latest_findings if f.verdict == "FAIL"]
     return {
         "last_audit": _store.last_audit,
         "total_recorded": len(_store.findings),
@@ -260,6 +280,7 @@ async def release_gate(
     return {
         "status": gate,
         "last_audit": _store.last_audit,
+        "incomplete_tests": _store.incomplete_test_ids() if gate == "INCOMPLETE" else [],
         "active_failures": [
             {"test_id": f.test_id, "detail": f.detail, "timestamp": f.timestamp}
             for f in active
@@ -275,6 +296,7 @@ async def reproduce_test(
     """Reproduce a specific self-security test deterministically."""
     test = _by_id(test_id)
     finding = _run_in_process_check(test)
+    _store.latest_findings = [finding]
     _store.findings.append(finding)
     _store.last_audit = _now()
     return {

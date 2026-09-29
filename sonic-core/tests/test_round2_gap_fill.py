@@ -41,8 +41,8 @@ def _auth(token: str) -> dict:
 # /experiments lifecycle: approve / reject / promote / weaknesses / history
 # ==========================================================
 
-def test_approve_reject_promote_lifecycle(client):
-    """An experiment flows PROPOSED -> approve -> CANARY -> promote -> PROMOTED."""
+def test_approval_alone_cannot_promote_experiment(client):
+    """Human approval advances to canary, but benchmark evidence is required to promote."""
     token = _login(client)
     h = _auth(token)
 
@@ -71,17 +71,33 @@ def test_approve_reject_promote_lifecycle(client):
     res = client.post(f"/experiments/{exp_id}/approve", headers=h)
     assert res.status_code == 409
 
-    # Promote -> promoted
+    # Approval alone is not benchmark evidence.
+    res = client.post(f"/experiments/{exp_id}/promote", headers=h)
+    assert res.status_code == 409
+    assert "completed, passing" in res.json()["detail"]
+
+    # The experiment is not added to promotion history.
+    res = client.get("/experiments/history/timeline", headers=h)
+    assert res.status_code == 200
+    hist = res.json()
+    assert not any(v["experiment_id"] == exp_id for v in hist["version_history"])
+
+    # A completed passing receipt from the canary evaluator permits promotion.
+    from sonic.api.routes.experiments import _experiment_manager
+
+    proposal = _experiment_manager.get_experiment(exp_id, tenant_id="default")
+    assert proposal is not None
+    proposal.benchmark_completed = True
+    proposal.benchmark_passed = True
+    proposal.benchmark_eligible = True
+    proposal.benchmark_suite_id = "canary-regression-suite"
+
     res = client.post(f"/experiments/{exp_id}/promote", headers=h)
     assert res.status_code == 200, res.text
     assert res.json()["status"] == "promoted"
 
-    # History now records the promotion
     res = client.get("/experiments/history/timeline", headers=h)
-    assert res.status_code == 200
-    hist = res.json()
-    assert hist["total_generations"] >= 1
-    assert any(v["experiment_id"] == exp_id for v in hist["version_history"])
+    assert any(v["experiment_id"] == exp_id for v in res.json()["version_history"])
 
 
 def test_reject_archives_experiment(client):
@@ -196,6 +212,7 @@ def test_security_release_gate(client):
     assert res.json()["status"] in (
         "NO_AUDIT_RUN",
         "RELEASE_CANDIDATE_CERTIFIED",
+        "INCOMPLETE",
         "FAIL_CRITICAL",
         "FAIL_NON_CRITICAL",
     )
@@ -205,9 +222,37 @@ def test_security_release_gate(client):
     assert res.status_code == 200
     assert res.json()["status"] in (
         "RELEASE_CANDIDATE_CERTIFIED",
+        "INCOMPLETE",
         "FAIL_CRITICAL",
         "FAIL_NON_CRITICAL",
     )
+
+
+def test_security_audit_gate_skips_and_replaces_old_failures():
+    from sonic.api.routes.security import AuditStore, CATALOG, SecurityFinding
+
+    now = "2026-09-28T00:00:00+00:00"
+    store = AuditStore(
+        findings=[SecurityFinding(CATALOG[0].test_id, "FAIL", "old failure", now)],
+        latest_findings=[
+            *[
+                SecurityFinding(test.test_id, "PASS", "passed", now)
+                for test in CATALOG[:-1]
+            ],
+            SecurityFinding(CATALOG[-1].test_id, "SKIP", "not run", now),
+        ],
+    )
+
+    gate, blockers = store.release_gate()
+    assert gate == "INCOMPLETE"
+    assert [finding.test_id for finding in blockers] == [CATALOG[-1].test_id]
+
+    store.latest_findings = [
+        SecurityFinding(test.test_id, "PASS", "passed", now) for test in CATALOG
+    ]
+    gate, blockers = store.release_gate()
+    assert gate == "RELEASE_CANDIDATE_CERTIFIED"
+    assert blockers == []
 
 
 def test_security_reproduce_single_test(client):

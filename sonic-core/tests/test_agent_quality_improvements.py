@@ -432,7 +432,7 @@ async def test_prevent_shell_command_injection_in_ui_execute():
     assert gui_trace.status == ActionExecutionStatus.BLOCKED
     assert provider.gui_actions_taken == []
 
-    # 2. BROWSER_TYPE without BrowserAgent via GUI keyboard also does not inject command
+    # 2. BROWSER_TYPE without an adapter uses grounded GUI typing, not command execution.
     browser_trace = await agent.execute_action(
         "ws-1",
         ComputerActionType.BROWSER_TYPE,
@@ -501,33 +501,23 @@ async def test_non_destructive_gui_recovery():
 
 
 # ---------------------------------------------------------------------------
-# 13. Fix Headless Browser Screenshot Without Navigate
+# 13. Capture the shared desktop without invoking a hidden application
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_headless_browser_screenshot_without_navigate():
+async def test_gui_screenshot_uses_the_shared_desktop():
     provider = DummyComputerProvider()
-    mock_browser = MagicMock()
-    mock_browser.screenshot = AsyncMock()
-    mock_browser.navigate = AsyncMock()
-    mock_snapshot = MagicMock()
-    mock_snapshot.url = "https://current.page.com/profile"
-    mock_snapshot.screenshot_b64 = "base64data=="
-    mock_browser.screenshot.return_value = mock_snapshot
-
-    agent = ComputerUseAgent(computer_provider=provider, browser=mock_browser)
+    agent = ComputerUseAgent(computer_provider=provider)
     trace = await agent.execute_action(
         "ws-1",
-        ComputerActionType.BROWSER_SCREENSHOT,
+        ComputerActionType.GUI_SCREENSHOT,
         "screenshot",
         {},
         "capture view",
     )
 
     assert trace.status == ActionExecutionStatus.COMPLETED
-    assert "https://current.page.com/profile" in trace.actual_observation
-    assert mock_browser.screenshot.called
-    assert not mock_browser.navigate.called
+    assert "Screenshot captured" in trace.actual_observation
 
 
 # ---------------------------------------------------------------------------

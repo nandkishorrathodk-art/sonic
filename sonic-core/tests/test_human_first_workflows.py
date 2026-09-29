@@ -2,7 +2,7 @@
 
 These tests deliberately exercise ordinary desktop work rather than security
 scenarios.  They keep the provider and agent in the loop while remaining
-independent of Docker, a display server, and Playwright.
+independent of Docker and a live display server.
 """
 
 from __future__ import annotations
@@ -10,21 +10,20 @@ from __future__ import annotations
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ComputerActionType
 from sonic.sandbox.provider import ExecResult
-from tests.test_phase4_unified_browser_in_loop import (
-    _StubBrowser,
-    _StubComputer,
-    _StubPage,
-)
+from tests.test_phase4_visible_desktop_actions import _VisibleDesktop
 
 
-class _WorkflowComputer(_StubComputer):
+class _WorkflowComputer(_VisibleDesktop):
     """Small stateful extension of the shared provider helper."""
 
     def __init__(self, *, terminal_results=None):
         super().__init__()
+        self.workspace_id = "ws-desktop"
         self.files: dict[str, str] = {}
         self.terminal_results = list(terminal_results or [])
         self.gui_states: list[str] = []
+        self.commands: list[str] = []
+        self.commands: list[str] = []
 
     async def write_file(self, workspace_id, path, content, actor="operator"):
         self.files[path] = content
@@ -73,38 +72,22 @@ def test_document_workflow_writes_then_reads_real_provider_state():
     assert "Read" in read.actual_observation
 
 
-def test_browser_ui_workflow_uses_live_page_controls_without_named_apps():
-    browser = _StubBrowser({
-        "about:blank": _StubPage(
-            url="about:blank",
-            title="Document preview",
-            elements=[{"tag": "input", "selector": "#title", "text": ""},
-                      {"tag": "button", "selector": "#save", "text": "Save"}],
-        )
-    })
-    browser.current = browser.pages["about:blank"]
+def test_gui_workflow_uses_grounded_controls_in_the_shared_desktop():
     computer = _WorkflowComputer()
-    agent = ComputerUseAgent(computer_provider=computer, browser=browser)
+    agent = ComputerUseAgent(computer_provider=computer)
 
     typed = _run(agent.execute_action(
         computer.workspace_id,
-        ComputerActionType.BROWSER_TYPE,
-        "#title",
-        {"selector": "#title", "text": "Quarterly notes"},
-        "Fill the visible title field",
-    ))
-    clicked = _run(agent.execute_action(
-        computer.workspace_id,
-        ComputerActionType.BROWSER_CLICK,
-        "#save",
-        {"selector": "#save"},
-        "Activate the visible save control",
+        ComputerActionType.GUI_TYPE,
+        "title field",
+        {"x": 100, "y": 120, "text": "Quarterly notes"},
+        "Enter the requested document title",
     ))
 
     assert typed.status == "SUCCESS"
-    assert clicked.status == "SUCCESS"
-    assert ("type", {"selector": "#title", "text": "Quarterly notes"}) in browser.actions
-    assert ("click", {"selector": "#save"}) in browser.actions
+    assert [action.action.value for action in computer.actions] == ["CLICK", "TYPE"]
+    assert computer.actions[0].x == 100
+    assert computer.actions[1].text == "Quarterly notes"
 
 
 def test_gui_and_terminal_coordination_keeps_planes_distinct():

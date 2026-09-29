@@ -6,8 +6,8 @@ Verifies:
      into GUI_TYPE typing payloads.
   2. Command and type payloads sanitize trailing thoughts, multiline commentary,
      and 'BeingCraft note:' blocks.
-  3. MotorReflexes and ComputerUseAgent implement field clearing before GUI_TYPE
-     (xdotool key --clearmodifiers ctrl+a BackSpace) and active window focus settling.
+  3. GUI_TYPE focuses the grounded target before typing and only clears field
+     contents when the action explicitly requests replacement.
   4. Standard keyboard accelerators (Alt+F, Ctrl+O, Ctrl+S, Ctrl+N) are present
      in prompts and action guidance.
 """
@@ -196,8 +196,8 @@ async def test_motor_human_type_with_clear_field():
 
 
 @pytest.mark.asyncio
-async def test_agent_gui_type_clears_field_and_settles_focus():
-    """ComputerUseAgent clears field and settles focus before executing GUI_TYPE."""
+async def test_agent_gui_type_preserves_existing_field_contents_by_default():
+    """Typing into a grounded control must not clear unrelated active content."""
     comp = _MockMotorComputer()
     agent = ComputerUseAgent(computer_provider=comp)
 
@@ -205,13 +205,50 @@ async def test_agent_gui_type_clears_field_and_settles_focus():
         "ws-1",
         ComputerActionType.GUI_TYPE,
         "input",
-        {"text": "replacement text", "x": 100, "y": 200},
-        "Type replacement text",
+        {"text": "additional text", "x": 100, "y": 200},
+        "Type additional text",
     )
     assert trace.status == "SUCCESS"
-    executed = comp.commands_executed
-    # Field clearing command dispatched
-    assert any("ctrl+a BackSpace" in cmd for cmd in executed)
+    assert not any("ctrl+a BackSpace" in cmd for cmd in comp.commands_executed)
+    assert comp.gui_actions[0].action == GUIActionType.CLICK
+    assert (comp.gui_actions[0].x, comp.gui_actions[0].y) == (100, 200)
+
+
+@pytest.mark.asyncio
+async def test_agent_gui_type_clears_only_after_grounded_target_is_focused():
+    """Explicit replacement clears the selected field after the visible focus click."""
+    comp = _MockMotorComputer()
+    events: list[tuple[str, object]] = []
+    comp._docker_exec.side_effect = lambda cmd, timeout=60: (
+        events.append(("exec", cmd)) or (0, "", "")
+    )
+    comp.gui_action.side_effect = lambda workspace_id, action, actor="operator": (
+        events.append(("gui", action))
+        or ScreenObservation(width=1280, height=800)
+    )
+    agent = ComputerUseAgent(computer_provider=comp)
+
+    trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_TYPE,
+        "input",
+        {"text": "replacement text", "x": 100, "y": 200, "clear_field": True},
+        "Replace the current input text",
+    )
+    assert trace.status == "SUCCESS"
+    click_index = next(
+        i for i, (kind, value) in enumerate(events)
+        if kind == "gui" and value.action == GUIActionType.CLICK
+    )
+    clear_index = next(
+        i for i, (kind, value) in enumerate(events)
+        if kind == "exec" and "ctrl+a BackSpace" in value
+    )
+    type_index = next(
+        i for i, (kind, value) in enumerate(events)
+        if kind == "exec" and "xdotool type --delay" in value
+    )
+    assert click_index < clear_index < type_index
 
 
 # ---------------------------------------------------------------------------
