@@ -264,8 +264,7 @@ def test_director_coordinate_boss_agent_integration():
         findings_summary="Vulnerability patched and committed across 2 phases.",
     )
 
-    with patch("sonic.computer_use.boss.BossAgent.run", new=AsyncMock(return_value=fake_report)) as mock_boss_run, \
-         patch("sonic.agents.browser_agent.BrowserAgent.launch", new=AsyncMock()):
+    with patch("sonic.computer_use.boss.BossAgent.run", new=AsyncMock(return_value=fake_report)) as mock_boss_run:
         final_state = asyncio.run(director.coordinate(state.mission_id))
         assert mock_boss_run.called
         # Check that traces were stashed and reflect all SubAgent actions
@@ -304,8 +303,7 @@ def test_director_coordinate_boss_agent_fallback_on_empty():
     ]
 
     with patch("sonic.computer_use.boss.BossAgent.run", new=AsyncMock(return_value=empty_report)) as mock_boss_run, \
-         patch("sonic.computer_use.agent.ComputerUseAgent.run_mission", new=AsyncMock(return_value=fallback_traces)) as mock_cua_run, \
-         patch("sonic.agents.browser_agent.BrowserAgent.launch", new=AsyncMock()):
+         patch("sonic.computer_use.agent.ComputerUseAgent.run_mission", new=AsyncMock(return_value=fallback_traces)) as mock_cua_run:
         final_state = asyncio.run(director.coordinate(state.mission_id))
         assert mock_boss_run.called
         assert mock_cua_run.called
@@ -331,4 +329,3 @@ def test_director_stash_traces_direct():
     ]
     director.stash_traces(state.mission_id, traces)
     assert getattr(state, "_last_traces") == traces
-

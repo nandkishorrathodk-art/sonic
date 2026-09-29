@@ -278,12 +278,14 @@ class ComputerWorldObservation(BaseModel):
     processes: list[str] = Field(default_factory=list)
     terminal_output: str = ""
     working_directory: str = "/home/sonic/workspace"
-    browser_state: dict[str, Any] = Field(default_factory=lambda: {"url": "about:blank", "title": "New Tab"})
+    browser_state: dict[str, Any] = Field(default_factory=dict)
     ide_state: dict[str, Any] = Field(default_factory=lambda: {"active_file": "None", "cursor_line": 1})
     git_branch: str = "main"
     git_clean: bool = True
     perception_version: int = 0
     perception_latency_ns: int = 0
+    observation_age_ms: float | None = Field(default=None, ge=0)
+    observation_received_monotonic_ns: int | None = Field(default=None, exclude=True, ge=0)
     timestamp: str = Field(default_factory=_now)
 
     @property

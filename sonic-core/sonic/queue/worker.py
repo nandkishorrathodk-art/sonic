@@ -245,13 +245,6 @@ class SonicWorker:
 
         agent_cls = agent_classes.get(agent_type)
         if not agent_cls:
-            # "browser" agent_type is handled by a dedicated BrowserAgent job
-            # path, not the generic BaseAgent dispatcher.
-            if agent_type == "browser":
-                raise ValueError(
-                    "'browser' agent_type must be dispatched via a BROWSER job, "
-                    "not an AGENT_STEP job"
-                )
             raise ValueError(f"Unknown agent_type '{agent_type}' for AGENT_STEP")
 
         # Create agent with shared resources

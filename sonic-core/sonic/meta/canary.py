@@ -43,6 +43,10 @@ class CanaryPipeline:
             raise ValueError(f"Experiment {experiment_id} not found")
 
         logger.info("canary_run_started", exp_id=experiment_id, title=proposal.title)
+        proposal.benchmark_completed = False
+        proposal.benchmark_passed = False
+        proposal.benchmark_eligible = False
+        proposal.benchmark_suite_id = ""
         self.exp_mgr.update_status(experiment_id, ExperimentStatus.CANARY_TESTING, "Running inside isolated sandbox")
 
         try:
@@ -58,6 +62,10 @@ class CanaryPipeline:
 
             # 3. Evaluate Decision Gate
             report = self.evaluator.evaluate(baseline_result, candidate_result)
+            proposal.benchmark_completed = True
+            proposal.benchmark_passed = candidate_result.passed
+            proposal.benchmark_eligible = report.decision == Decision.PROMOTE
+            proposal.benchmark_suite_id = candidate_result.suite_id
 
             # 4. Enforce Decision
             if report.decision == Decision.PROMOTE:

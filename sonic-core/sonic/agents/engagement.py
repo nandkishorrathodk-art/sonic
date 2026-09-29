@@ -610,7 +610,6 @@ class EngagementManager:
             agent = ComputerUseAgent(
                 computer_provider=provider,
                 safety=safety,
-                browser=None,
                 gui_only=False,
                 observe_desktop=True,
                 tenant_id=tenant_id,

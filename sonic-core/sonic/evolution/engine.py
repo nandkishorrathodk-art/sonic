@@ -44,12 +44,12 @@ from sonic.logger import get_logger
 logger = get_logger(__name__)
 
 CORE_NORTH_STAR_GOAL = """
-The North Star goal of SONIC is general-purpose AI-Human Digital Being workstation mastery: operating its personal computer workstation across both the Graphical Desktop Application Plane (X11/Wayland GUI, browsers, editors, design/media tools, and multi-window workflows) and the Dedicated Headless Terminal/Sandbox Plane (software engineering, git workflows, script execution, and service orchestration) with human-grade intuition and empirical rigor.
+The North Star goal of SONIC is general-purpose AI-Human Digital Being workstation mastery: operating its personal computer workstation across both the Graphical Desktop Application Plane (X11/Wayland GUI, arbitrary desktop applications, and multi-window workflows) and the Dedicated Headless Terminal/Sandbox Plane (software engineering, git workflows, script execution, and service orchestration) with human-grade intuition and empirical rigor.
 The system prioritizes the following core principles:
 1. AI-Human Workstation Fluency: Seamlessly launch, switch between, and coordinate multiple arbitrary desktop GUI applications and terminal workflows concurrently without hardcoded vendor binaries or scripted puppet heuristics.
 2. Sealed Safety & Confinement: Execute all actions strictly within the authorized sandbox and sealed safety envelope (`ActionPolicy` / `SafetyKernel`), preserving zero host escape guarantees.
 3. Autonomous Adaptation & Self-Evolution: Continuously adapt strategies from live environment feedback, synthesize novel workflows and methods via `MethodLab`, and author reusable utilities via `ToolsmithLoop`.
-4. Persistent Identity, Vault & Craft: Maintain continuity of identity (`Being`), cognitive affect (`BeingMind`), accounts/browser profiles (`BeingVault`), and authored toolkit (`BeingCraft`) across sessions and restarts.
+4. Persistent Identity, Vault & Craft: Maintain continuity of identity (`Being`), cognitive affect (`BeingMind`), operator-requested accounts and application profiles (`BeingVault`), and authored toolkit (`BeingCraft`) across sessions and restarts.
 5. Deterministic State-First Convergence (HDCE): Drive multi-step tasks via typed `StateDelta` transitions and `ActionContract` pre/postcondition verification rather than rigid checklists.
 6. Empirical Falsification (Zero Success-by-Decree): Require verifiable execution receipts and ground-truth exit codes/observations before claiming task or milestone completion.
 7. Continuous Codebase & Capability Improvement: Evolve internal modules, tools, and strategies through automated testing, canary verification, and version-controlled promotion.

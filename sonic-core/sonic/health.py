@@ -92,30 +92,38 @@ class HealthChecker:
 
     @classmethod
     async def check_database(cls) -> ComponentHealth:
-        db_url = os.environ.get("DATABASE_URL")
-        if not db_url:
-            return ComponentHealth(
-                name="postgresql",
-                status=HealthStatus.DEGRADED,
-                message="DATABASE_URL not configured. In-memory sqlite/mock mode.",
-                is_critical=False,
-            )
         start = time.perf_counter()
+        from sqlalchemy import text
+
+        from sonic.db.session import get_database_url, get_engine
+
+        db_url = get_database_url()
+        backend = db_url.split(":", 1)[0].split("+", 1)[0]
+
         try:
-            # Test connection
+            async def probe_database() -> None:
+                async with get_engine().connect() as connection:
+                    result = await connection.execute(text("SELECT 1"))
+                    if result.scalar_one() != 1:
+                        raise RuntimeError("Database health query returned an unexpected result")
+
+            await asyncio.wait_for(probe_database(), timeout=3.0)
             latency = round((time.perf_counter() - start) * 1000, 2)
             return ComponentHealth(
-                name="postgresql",
+                name="database",
                 status=HealthStatus.HEALTHY,
                 latency_ms=latency,
-                message="PostgreSQL database operational",
+                message=f"{backend} database connection and health query succeeded",
                 is_critical=True,
             )
         except Exception as e:
+            latency = round((time.perf_counter() - start) * 1000, 2)
+            logger.error("database_health_check_failed", backend=backend, error=str(e))
             return ComponentHealth(
-                name="postgresql",
+                name="database",
                 status=HealthStatus.UNAVAILABLE,
-                message=f"PostgreSQL connection failed: {str(e)}",
+                latency_ms=latency,
+                message=f"{backend} database health check failed: {e}",
                 is_critical=True,
             )
 

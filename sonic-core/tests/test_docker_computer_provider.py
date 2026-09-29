@@ -2,10 +2,10 @@
 Unit tests for DockerComputerProvider (Native Workstation Engine).
 """
 
-import os
 import base64
 import shutil
 import subprocess
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
@@ -87,6 +87,67 @@ async def test_docker_computer_provider_files_and_apps():
         # Test list applications
         apps = await provider.application_list(ws_id)
         assert len(apps) > 0
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_reports_source_frame_age_from_nsi_timestamp():
+    provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
+    encoded = base64.b64encode(b"pixel-data" * 20).decode()
+    provider._nsi_request = AsyncMock(return_value={
+        "ok": True,
+        "b64": encoded,
+        "capture_timestamp_ns": time.time_ns() - 250_000_000,
+    })
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.capture_timestamp_ns is not None
+    assert observation.capture_age_ms is not None
+    assert observation.capture_age_ms >= 250
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_keeps_capture_age_unknown_for_invalid_clock_data():
+    provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
+    encoded = base64.b64encode(b"pixel-data" * 20).decode()
+    provider._nsi_request = AsyncMock(return_value={
+        "ok": True,
+        "b64": encoded,
+        "capture_timestamp_ns": time.time_ns() + 1_000_000_000,
+    })
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.capture_timestamp_ns is not None
+    assert observation.capture_age_ms is None
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_parses_capture_timestamp_from_fallback_capture():
+    provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
+    encoded = base64.b64encode(b"pixel-data" * 20).decode()
+    capture_timestamp_ns = time.time_ns() - 100_000_000
+    provider._nsi_request = AsyncMock(return_value=None)
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        (
+            f"___CAPTURE_TIMESTAMP_NS___\n{capture_timestamp_ns}\n{encoded}"
+            "\n___OCR_TSV___\n"
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            "___ACTIVE_WINDOW___\nDesktop\n___OPEN_WINDOWS___\n"
+        ),
+        "",
+    ))
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.screenshot_base64 == encoded
+    assert observation.capture_timestamp_ns == capture_timestamp_ns
+    assert observation.capture_age_ms is not None
+    assert observation.capture_age_ms >= 100
 
 
 @pytest.mark.no_live_infra

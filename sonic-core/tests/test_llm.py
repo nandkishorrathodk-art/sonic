@@ -202,3 +202,69 @@ async def test_anthropic_stream_sends_tools_and_stop_sequences():
     assert kwargs["stop_sequences"] == ["END"]
     assert result[0].content == "answer"
     assert result[-1].tool_calls[0].arguments == {"key": "value"}
+
+
+def test_vision_route_fails_closed_instead_of_using_local_text_model(monkeypatch):
+    monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:11434")
+    router = ModelRouter()
+    router.default_provider = "local"
+    router.fallback_chain = ["local"]
+    router.add_provider(
+        CustomLLMProvider(
+            name="nvidia",
+            base_url="https://example.invalid/v1",
+            api_key="",
+            default_model="vision-model",
+        )
+    )
+    router.add_provider(
+        CustomLLMProvider(
+            name="local",
+            base_url="http://localhost:11434/v1",
+            api_key="",
+            default_model="text-only-model",
+        )
+    )
+    router.routing_rules["vision"] = {
+        "provider": "nvidia",
+        "model": "vision-model",
+        "fallback": [],
+    }
+
+    with pytest.raises(RuntimeError, match="No configured vision provider is ready"):
+        router._resolve_provider(task_type="vision")
+
+
+@pytest.mark.asyncio
+async def test_vision_request_does_not_fall_back_to_global_text_provider(monkeypatch):
+    monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:11434")
+    router = ModelRouter()
+    primary = CustomLLMProvider(
+        name="nvidia",
+        base_url="https://example.invalid/v1",
+        api_key="vision-key",
+        default_model="vision-model",
+    )
+    text_fallback = CustomLLMProvider(
+        name="local",
+        base_url="http://localhost:11434/v1",
+        api_key="",
+        default_model="text-only-model",
+    )
+    text_fallback.complete_with_timing = AsyncMock()
+    router.add_provider(primary)
+    router.add_provider(text_fallback)
+    router.routing_rules["vision"] = {
+        "provider": "nvidia",
+        "model": "vision-model",
+        "fallback": [],
+    }
+    router.fallback_chain = ["local"]
+
+    with pytest.raises(RuntimeError, match="All configured vision providers failed"):
+        await router._try_fallbacks(
+            LLMRequest(messages=[Message(role=MessageRole.USER, content="describe image")]),
+            failed_provider="nvidia",
+            task_type="vision",
+        )
+    text_fallback.complete_with_timing.assert_not_awaited()
