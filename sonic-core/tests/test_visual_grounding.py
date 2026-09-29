@@ -172,7 +172,7 @@ async def test_agent_gui_right_click_dispatch():
 
 
 @pytest.mark.asyncio
-async def test_unresolved_desktop_target_is_blocked_without_typing(monkeypatch):
+async def test_browser_fallback_does_not_type_when_desktop_target_is_unresolved(monkeypatch):
     from unittest.mock import AsyncMock, MagicMock
     import sonic.computer_use.agent as agent_module
 
@@ -190,7 +190,7 @@ async def test_unresolved_desktop_target_is_blocked_without_typing(monkeypatch):
         "type into the visible search field",
     )
 
-    assert trace.status == "BLOCKED"
+    assert trace.status == "FAILED"
     computer.gui_action.assert_not_awaited()
 
 

@@ -113,11 +113,13 @@ class MethodLab:
         vector_memory: Any | None,
         toolsmith: Any | None = None,
         ledger_namespace: str = _TECHNIQUE_DOC_PREFIX,
+        tenant_id: str = "default",
     ):
         self.llm = llm
         self.vector_memory = vector_memory
         self.toolsmith = toolsmith
         self.ledger_namespace = ledger_namespace
+        self.tenant_id = tenant_id or "default"
         self.invented: list[InventedTechnique] = []
 
     # ------------------------------------------------------------------
@@ -130,6 +132,7 @@ class MethodLab:
                 "workflow method synthesis technique diagnostic automation",
                 top_k=10,
                 score_threshold=0.0,
+                tenant_id=self.tenant_id,
             )
             facts = []
             for r in results:
@@ -406,6 +409,7 @@ class MethodLab:
                 f"[{technique.family}] {technique.name}: {technique.hypothesis}",
                 metadata={"kind": "technique", "name": technique.name,
                           "family": technique.family, "confirmed": True},
+                tenant_id=self.tenant_id,
             )
         except Exception as e:
             logger.warning("method_lab_ledger_persist_failed", error=str(e))
