@@ -1,7 +1,7 @@
 """End-to-end tests for SONIC's Laya System-1 Non-Autoregressive Decision Engine integration.
 
 Validates the full cognitive lifecycle across:
-1. Single-pass typed decisions (choice, score, noul) across English, Hindi, and Hinglish.
+1. Single-pass English typed decisions (choice, score, noul).
 2. SubMission automatic dual-plane resolution (gui vs headless) across languages.
 3. ComputerUseAgent.verify_goal fail-closed dummy marker rejection & real receipt verification.
 4. CuriosityLoop + LayaSystem1Engine.evaluate_curiosity_affect scoring novel vs duplicate observations.
@@ -35,7 +35,7 @@ from sonic.llm.laya_engine import (
 from sonic.sandbox.provider import ExecResult
 
 # ============================================================================
-# 1. Single-Pass Decisions across English, Hindi, and Hinglish
+# 1. Single-Pass English Decisions
 # ============================================================================
 
 @pytest.mark.no_live_infra
@@ -89,8 +89,8 @@ def test_laya_single_pass_decisions_english():
 
 
 @pytest.mark.no_live_infra
-def test_laya_single_pass_decisions_multilingual_unicode():
-    """Verify Unicode script detection and custom criteria evaluation without hardcoded vocab lists."""
+def test_laya_single_pass_decisions_with_unicode_text():
+    """Verify English decisions remain valid with non-ASCII text in the input."""
     engine = LayaSystem1Engine(enable_local_model=False)
 
     questions = {
@@ -510,12 +510,13 @@ def test_laya_api_status_endpoint_on_app():
     assert "backend" in data
     assert "sufficient_ram" in data or "ram_check" in data
     assert "presets" in data or "supported_presets" in data
-    assert "languages" in data or "language_support" in data
+    assert data["languages"] == ["en"]
+    assert data["language_support"] == ["en"]
 
 
 @pytest.mark.no_live_infra
 def test_laya_api_predict_endpoint_on_app():
-    """Verify POST /llm/laya/predict on sonic.api.main:app across English, Hindi, and Hinglish."""
+    """Verify POST /llm/laya/predict on sonic.api.main:app for English inputs."""
     client = TestClient(app)
     token_response = client.post("/auth/dev-token")
     assert token_response.status_code == 200

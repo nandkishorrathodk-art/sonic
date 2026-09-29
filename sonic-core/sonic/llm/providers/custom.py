@@ -244,6 +244,47 @@ def parse_tool_arguments(raw: str | None) -> dict:
     return {"value": raw.strip()}
 
 
+def _accumulate_stream_tool_calls(
+    accumulated: dict[int, dict[str, str]],
+    deltas: Any,
+) -> None:
+    """Accumulate provider-native OpenAI tool-call deltas by index."""
+    for delta in deltas or []:
+        index = getattr(delta, "index", None)
+        if index is None and isinstance(delta, dict):
+            index = delta.get("index")
+        if index is None:
+            continue
+        item = accumulated.setdefault(index, {"id": "", "name": "", "arguments": ""})
+        get_value = (
+            (lambda key: getattr(delta, key, None))
+            if not isinstance(delta, dict)
+            else delta.get
+        )
+        item["id"] += get_value("id") or ""
+        function = get_value("function") or {}
+        function_value = (
+            (lambda key: getattr(function, key, None))
+            if not isinstance(function, dict)
+            else function.get
+        )
+        item["name"] += function_value("name") or ""
+        item["arguments"] += function_value("arguments") or ""
+
+
+def _finish_stream_tool_calls(accumulated: dict[int, dict[str, str]]) -> list[ToolCall]:
+    """Convert accumulated native tool deltas into complete provider-neutral calls."""
+    return [
+        ToolCall(
+            id=item["id"],
+            name=item["name"],
+            arguments=parse_tool_arguments(item["arguments"]),
+        )
+        for _, item in sorted(accumulated.items())
+        if item["name"]
+    ]
+
+
 class CustomLLMProvider(LLMProvider):
     """
     Universal LLM Provider — works with ANY OpenAI-compatible API.
@@ -272,6 +313,7 @@ class CustomLLMProvider(LLMProvider):
         speed_tier: SpeedTier = SpeedTier.MEDIUM,
         timeout_seconds: int = 120,
         fallback_models: list[str] | None = None,
+        model_pricing: dict[str, dict[str, float]] | None = None,
         max_retries: int = 3,
         retry_base_delay: float = 0.5,
         retry_max_delay: float = 20.0,
@@ -295,6 +337,14 @@ class CustomLLMProvider(LLMProvider):
         self.fallback_models: list[str] = fallback_models or []
         self.cost_per_1k_input = cost_per_1k_input
         self.cost_per_1k_output = cost_per_1k_output
+        self.model_pricing = dict(model_pricing or {})
+        self.model_pricing.setdefault(
+            default_model,
+            {
+                "cost_per_1k_input": cost_per_1k_input,
+                "cost_per_1k_output": cost_per_1k_output,
+            },
+        )
         self.max_context_tokens = max_context_tokens
         self.capabilities = capabilities or ["general"]
         self.speed_tier = speed_tier
@@ -467,11 +517,25 @@ class CustomLLMProvider(LLMProvider):
             for tool in tools
         ]
 
-    def _calculate_cost(self, usage: TokenUsage) -> float:
-        """Calculate cost in USD based on configured rates."""
+    def pricing_for_model(self, model: str) -> tuple[float, float] | None:
+        """Return configured input/output USD per 1K-token rates for a model."""
+        prices = self.model_pricing.get(model)
+        if prices is None:
+            return None
+        input_rate = prices.get("cost_per_1k_input")
+        output_rate = prices.get("cost_per_1k_output")
+        if input_rate is None or output_rate is None:
+            return None
+        return float(input_rate), float(output_rate)
+
+    def _calculate_cost(self, usage: TokenUsage, model: str | None = None) -> float:
+        """Estimate USD cost using the rates configured for the selected model."""
+        prices = self.pricing_for_model(model or self.default_model)
+        if prices is None:
+            prices = (self.cost_per_1k_input, self.cost_per_1k_output)
         return (
-            (usage.prompt_tokens / 1000) * self.cost_per_1k_input
-            + (usage.completion_tokens / 1000) * self.cost_per_1k_output
+            (usage.prompt_tokens / 1000) * prices[0]
+            + (usage.completion_tokens / 1000) * prices[1]
         )
 
     # ============================================
@@ -644,7 +708,7 @@ class CustomLLMProvider(LLMProvider):
                 tool_calls=tool_calls,
                 usage=usage,
                 finish_reason=choice.finish_reason or "stop",
-                cost_usd=self._calculate_cost(usage),
+                cost_usd=self._calculate_cost(usage, model),
             )
         else:
             # Fallback to raw httpx
@@ -726,7 +790,7 @@ class CustomLLMProvider(LLMProvider):
             provider=self.provider_name,
             usage=usage,
             finish_reason=choice.get("finish_reason", "stop"),
-            cost_usd=self._calculate_cost(usage),
+            cost_usd=self._calculate_cost(usage, model),
         )
 
     async def _complete_anthropic(self, request: LLMRequest) -> LLMResponse:
@@ -746,6 +810,8 @@ class CustomLLMProvider(LLMProvider):
                 kwargs["system"] = system_prompt
             if tools:
                 kwargs["tools"] = tools
+            if request.stop_sequences:
+                kwargs["stop_sequences"] = request.stop_sequences
 
             response = await self._anthropic_client.messages.create(**kwargs)
 
@@ -774,7 +840,7 @@ class CustomLLMProvider(LLMProvider):
                 tool_calls=tool_calls,
                 usage=usage,
                 finish_reason=response.stop_reason or "stop",
-                cost_usd=self._calculate_cost(usage),
+                cost_usd=self._calculate_cost(usage, model),
             )
         else:
             # Fallback to raw httpx for Anthropic
@@ -801,6 +867,8 @@ class CustomLLMProvider(LLMProvider):
             payload["system"] = system_prompt
         if tools:
             payload["tools"] = tools
+        if request.stop_sequences:
+            payload["stop_sequences"] = request.stop_sequences
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             resp = await client.post(
@@ -845,7 +913,7 @@ class CustomLLMProvider(LLMProvider):
             provider=self.provider_name,
             usage=usage,
             finish_reason=data.get("stop_reason", "stop"),
-            cost_usd=self._calculate_cost(usage),
+            cost_usd=self._calculate_cost(usage, model),
         )
 
     # ============================================
@@ -864,28 +932,45 @@ class CustomLLMProvider(LLMProvider):
     async def _stream_openai(self, request: LLMRequest) -> AsyncIterator[LLMChunk]:
         """Stream via OpenAI-compatible API."""
         model = request.model or self.default_model
+        tools = self._to_openai_tools(request.tools)
 
         if self._openai_client:
             messages = self._to_openai_messages(request)
-            stream = await self._openai_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=self._effective_max_tokens(request.max_tokens),
-                temperature=request.temperature,
-                stream=True,
-            )
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": self._effective_max_tokens(request.max_tokens),
+                "temperature": request.temperature,
+                "stream": True,
+            }
+            if tools:
+                kwargs["tools"] = tools
+            if request.stop_sequences:
+                kwargs["stop"] = request.stop_sequences
+            stream = await self._openai_client.chat.completions.create(**kwargs)
 
+            accumulated_tools: dict[int, dict[str, str]] = {}
             async for chunk in stream:
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     c_text = delta.content or ""
                     r_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None) or ""
+                    _accumulate_stream_tool_calls(
+                        accumulated_tools, getattr(delta, "tool_calls", None)
+                    )
                     if c_text or r_text:
                         yield LLMChunk(content=c_text, reasoning_content=r_text)
                     if chunk.choices[0].finish_reason:
+                        usage = getattr(chunk, "usage", None)
                         yield LLMChunk(
                             is_final=True,
                             finish_reason=chunk.choices[0].finish_reason,
+                            tool_calls=_finish_stream_tool_calls(accumulated_tools),
+                            usage=TokenUsage(
+                                prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                                completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                                total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                            ) if usage else None,
                         )
         else:
             # httpx streaming fallback
@@ -897,6 +982,10 @@ class CustomLLMProvider(LLMProvider):
                 "temperature": request.temperature,
                 "stream": True,
             }
+            if tools:
+                payload["tools"] = tools
+            if request.stop_sequences:
+                payload["stop"] = request.stop_sequences
             reasoning_models = ("gpt-oss", "deepseek-r1", "deepseek-reasoner", "reasoning", "o1", "o3")
             if request.reasoning_effort:
                 payload["reasoning_effort"] = request.reasoning_effort
@@ -905,6 +994,7 @@ class CustomLLMProvider(LLMProvider):
             if request.extra_body:
                 payload.update(request.extra_body)
 
+            accumulated_tools: dict[int, dict[str, str]] = {}
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 async with client.stream(
                     "POST",
@@ -922,12 +1012,22 @@ class CustomLLMProvider(LLMProvider):
                                 delta = data["choices"][0].get("delta", {})
                                 c_text = delta.get("content") or ""
                                 r_text = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                                _accumulate_stream_tool_calls(
+                                    accumulated_tools, delta.get("tool_calls")
+                                )
                                 if c_text or r_text:
                                     yield LLMChunk(content=c_text, reasoning_content=r_text)
                                 if data["choices"][0].get("finish_reason"):
+                                    usage = data.get("usage") or {}
                                     yield LLMChunk(
                                         is_final=True,
                                         finish_reason=data["choices"][0]["finish_reason"],
+                                        tool_calls=_finish_stream_tool_calls(accumulated_tools),
+                                        usage=TokenUsage(
+                                            prompt_tokens=usage.get("prompt_tokens", 0),
+                                            completion_tokens=usage.get("completion_tokens", 0),
+                                            total_tokens=usage.get("total_tokens", 0),
+                                        ) if usage else None,
                                     )
 
     async def _stream_anthropic(self, request: LLMRequest) -> AsyncIterator[LLMChunk]:
@@ -944,6 +1044,11 @@ class CustomLLMProvider(LLMProvider):
             }
             if system_prompt:
                 kwargs["system"] = system_prompt
+            tools = self._to_anthropic_tools(request.tools)
+            if tools:
+                kwargs["tools"] = tools
+            if request.stop_sequences:
+                kwargs["stop_sequences"] = request.stop_sequences
 
             async with self._anthropic_client.messages.stream(**kwargs) as stream:
                 async for text in stream.text_stream:
@@ -958,12 +1063,23 @@ class CustomLLMProvider(LLMProvider):
                         completion_tokens=final.usage.output_tokens,
                         total_tokens=final.usage.input_tokens + final.usage.output_tokens,
                     ),
+                    tool_calls=[
+                        ToolCall(id=block.id, name=block.name, arguments=block.input or {})
+                        for block in final.content
+                        if getattr(block, "type", None) == "tool_use"
+                    ],
                 )
         else:
             # Anthropic httpx streaming would go here
             # For now, fall back to non-streaming
             response = await self._complete_anthropic(request)
-            yield LLMChunk(content=response.content, is_final=True)
+            yield LLMChunk(
+                content=response.content,
+                is_final=True,
+                finish_reason=response.finish_reason,
+                usage=response.usage,
+                tool_calls=response.tool_calls,
+            )
 
     # ============================================
     # Model Info & Health

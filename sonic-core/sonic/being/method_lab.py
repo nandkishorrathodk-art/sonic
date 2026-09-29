@@ -103,6 +103,7 @@ class MethodLab:
         llm:          an LLM router (ModelRouter) used to synthesize methods/techniques.
         vector_memory: VectorMemory holding the known-technique ledger.
         toolsmith:    the ToolsmithLoop used to author + run the probe (Phase A).
+        tenant_id:    tenant scope for ledger search and persistence.
         ledger_namespace: doc_id prefix for technique records (default
                       ``technique-``); set distinctly only for test isolation.
     """
@@ -119,6 +120,8 @@ class MethodLab:
         self.vector_memory = vector_memory
         self.toolsmith = toolsmith
         self.ledger_namespace = ledger_namespace
+        # Keep the default for legacy single-tenant callers; production
+        # construction sites pass the active tenant explicitly.
         self.tenant_id = tenant_id or "default"
         self.invented: list[InventedTechnique] = []
 
