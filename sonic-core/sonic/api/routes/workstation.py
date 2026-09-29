@@ -3335,6 +3335,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 objective=effective_goal,
                                 phase_callback=_on_boss_event,
                                 interrupt_check=lambda: bool(state.get("interrupted")),
+                                requested_plane="gui" if desktop_prompt else None,
                             )
                             report = boss_report
                             summary_msg = report.findings_summary

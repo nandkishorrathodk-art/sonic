@@ -124,7 +124,13 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
     with patch("sonic.computer_use.boss.BossAgent") as mock_boss_cls:
         mock_boss = MagicMock()
 
-        async def fake_run(workspace_id, objective, phase_callback=None, interrupt_check=None):
+        async def fake_run(
+            workspace_id,
+            objective,
+            phase_callback=None,
+            interrupt_check=None,
+            requested_plane=None,
+        ):
             if phase_callback:
                 await phase_callback("boss_thinking", {"content": "Planning attack phases", "thinking_type": "strategic_decomposition"})
                 await phase_callback("sub_dispatch", {"sub_agent_number": 1, "goal": "Discover endpoints", "max_steps": 5})
@@ -185,10 +191,11 @@ async def test_workstation_routes_concise_computer_task_to_boss_agent(monkeypatc
     mock_boss_cls = MagicMock(return_value=mock_boss_inst)
     monkeypatch.setattr("sonic.computer_use.boss.BossAgent", mock_boss_cls)
 
-    await _run_prompt_reasoning(tenant_id, session_id, "hostname")
+    await _run_prompt_reasoning(tenant_id, session_id, "Open the desktop File Manager")
 
     mock_boss_cls.assert_called_once()
     mock_boss_inst.run.assert_awaited_once()
+    assert mock_boss_inst.run.await_args.kwargs["requested_plane"] == "gui"
     assert state["status"] == "IDLE"
 
 

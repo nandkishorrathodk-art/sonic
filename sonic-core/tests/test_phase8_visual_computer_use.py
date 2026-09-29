@@ -117,6 +117,39 @@ class TestGUIActionDispatch:
         provider.gui_action.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_gui_execution_plane_blocks_terminal_but_keeps_gui_actions_available(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(
+            computer_provider=provider,
+            execution_plane="gui",
+        )
+
+        terminal_trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.TERMINAL_EXEC,
+            "gedit",
+            {"command": "gedit"},
+            "Launch a GUI application through the terminal",
+        )
+
+        assert agent.gui_only is False
+        assert terminal_trace.status == ActionExecutionStatus.BLOCKED
+        assert terminal_trace.exit_code == 126
+        assert "GUI execution contract blocked TERMINAL_EXEC" in terminal_trace.actual_observation
+        provider.terminal.assert_not_awaited()
+
+        gui_trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_KEYPRESS,
+            "Applications menu",
+            {"key": "Super"},
+            "Open the visible applications menu",
+        )
+
+        assert gui_trace.status == ActionExecutionStatus.SUCCESS
+        provider.gui_action.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_gui_only_rejected_close_tabs_proposal_reobserves_visible_desktop(self):
         action_type, target, payload, expected = ComputerUseAgent._gui_only_recovery_action(
             "hi sonic, close browser and close all tabs",

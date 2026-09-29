@@ -35,7 +35,7 @@ class SubMission(BaseModel):
     max_steps: int = 5
     priority: int = 1  # Higher = execute first within a phase
     depends_on: list[str] = Field(default_factory=list)
-    plane: str = "gui"  # "gui" (shared desktop + terminal) | "headless" (CLI-only)
+    plane: str = "gui"  # "gui" (visible desktop actions) | "headless" (terminal/file actions)
     process_mode: str = "deep"
     evidence_context: dict[str, Any] = Field(default_factory=dict)
     status: str = "PENDING"  # PENDING -> RUNNING -> COMPLETED -> FAILED
