@@ -107,6 +107,58 @@ async def test_destination_navigation_uses_visible_desktop_without_terminal_disc
 
 
 @pytest.mark.asyncio
+async def test_app_focus_requires_matching_active_window_evidence():
+    comp = _MockComputerProvider()
+    agent = ComputerUseAgent(computer_provider=comp)
+
+    trace = await agent.execute_action(
+        comp.workspace_id,
+        ComputerActionType.APP_FOCUS,
+        "Another Application",
+        {"app_name": "Another Application"},
+        "Focus the requested application",
+    )
+
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert "was not verified as the active window" in trace.actual_observation
+
+
+@pytest.mark.asyncio
+async def test_app_focus_succeeds_when_requested_window_is_visible():
+    comp = _MockComputerProvider()
+    agent = ComputerUseAgent(computer_provider=comp)
+
+    trace = await agent.execute_action(
+        comp.workspace_id,
+        ComputerActionType.APP_FOCUS,
+        "Document Application",
+        {"app_name": "Document Application"},
+        "Focus the document application",
+    )
+
+    assert trace.status == ActionExecutionStatus.COMPLETED
+    assert "active window: Document Application" in trace.actual_observation
+
+
+@pytest.mark.asyncio
+async def test_app_focus_fails_without_live_display_evidence():
+    comp = _MockComputerProvider()
+    comp.display_available = False
+    agent = ComputerUseAgent(computer_provider=comp)
+
+    trace = await agent.execute_action(
+        comp.workspace_id,
+        ComputerActionType.APP_FOCUS,
+        "Document Application",
+        {"app_name": "Document Application"},
+        "Focus the document application",
+    )
+
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert "observed: unknown" in trace.actual_observation
+
+
+@pytest.mark.asyncio
 async def test_destination_navigation_fails_without_live_desktop_evidence():
     comp = _MockComputerProvider()
     comp.display_available = False

@@ -2079,6 +2079,31 @@ class ComputerUseAgent:
             >= max(1, math.ceil(len(requested_words) * 0.6))
         )
 
+    async def _verify_active_application(self, workspace_id: str, app_name: str) -> tuple[bool, str]:
+        """Require a live screenshot and a matching active-window title."""
+        screen = await self.computer.screenshot(workspace_id)
+        screenshot_b64 = str(getattr(screen, "screenshot_base64", "") or "")
+        if screenshot_b64:
+            self._last_screenshot_b64 = screenshot_b64
+            self._prev_screenshot_hash = hashlib.md5(screenshot_b64.encode()).hexdigest()
+            self._update_screen_dims(screen)
+
+        screen_state = str(getattr(screen, "desktop_state", "") or "").upper()
+        if not screenshot_b64 or screen_state == "NO_DISPLAY":
+            return False, "unknown"
+
+        status = await self.computer.status(workspace_id)
+        active_windows = (
+            getattr(screen, "active_window", ""),
+            getattr(status, "active_window", ""),
+            getattr(status, "active_application", ""),
+        )
+        for window in active_windows:
+            title = str(window or "").strip()
+            if title and self._window_matches_application(app_name, title):
+                return True, title
+        return False, next((str(window).strip() for window in active_windows if window), "unknown")
+
     @classmethod
     def _resolve_app_binary(cls, target: str) -> str:
         """Dynamically sanitize application name to an OS-safe launch binary without any hardcoded app names."""
@@ -4292,17 +4317,21 @@ class ComputerUseAgent:
                     if "\n" in app_name:
                         app_name = app_name.split("\n")[0].strip(" *_\n\r\t`\"'")
                     try:
-                        obs_focus = await self.computer.gui_action(
+                        await self.computer.gui_action(
                             workspace_id,
                             GUIAction(action=GUIActionType.SELECT_WINDOW, app_name=app_name),
                         )
-                        focus_b64 = getattr(obs_focus, "screenshot_base64", "") if obs_focus else ""
-                        if focus_b64:
-                            self._last_screenshot_b64 = focus_b64
-                            self._prev_screenshot_hash = hashlib.md5(focus_b64.encode()).hexdigest()
-                            self._update_screen_dims(obs_focus)
-                        active_w = getattr(obs_focus, "active_window", "") or app_name
-                        actual_obs_str = f"Focused window: {app_name} (active window: {active_w})"
+                        focused, active_w = await self._verify_active_application(
+                            workspace_id, app_name
+                        )
+                        if focused:
+                            actual_obs_str = f"Focused window: {app_name} (active window: {active_w})"
+                        else:
+                            status = ActionExecutionStatus.FAILED
+                            actual_obs_str = (
+                                f"APP_FOCUS failed: '{app_name}' was not verified as the active "
+                                f"window (observed: {active_w})"
+                            )
                     except Exception as focus_exc:
                         # Auto-assist: If focusing an unopened app, attempt to launch it so the user's objective progresses
                         launched = False
@@ -4310,15 +4339,26 @@ class ComputerUseAgent:
                             launched = await self.computer.launch_application(workspace_id, app_name)
                         if launched:
                             await asyncio.sleep(1.0)
-                            obs_focus = await self.computer.screenshot(workspace_id)
-                            focus_b64 = getattr(obs_focus, "screenshot_base64", "") if obs_focus else ""
-                            if focus_b64:
-                                self._last_screenshot_b64 = focus_b64
-                                self._update_screen_dims(obs_focus)
-                            active_w = getattr(obs_focus, "active_window", "") or app_name
-                            actual_obs_str = f"Window '{app_name}' was not running; automatically launched '{app_name}' on desktop (active window: {active_w})."
+                            focused, active_w = await self._verify_active_application(
+                                workspace_id, app_name
+                            )
+                            if focused:
+                                actual_obs_str = (
+                                    f"Window '{app_name}' was not running; automatically "
+                                    f"launched '{app_name}' on desktop (active window: {active_w})."
+                                )
+                            else:
+                                status = ActionExecutionStatus.FAILED
+                                actual_obs_str = (
+                                    f"APP_FOCUS failed: launched '{app_name}', but could not "
+                                    f"verify it became the active window (observed: {active_w}; "
+                                    f"focus error: {focus_exc})"
+                                )
                         else:
-                            actual_obs_str = f"APP_FOCUS notice: window '{app_name}' is not currently open. Use APP_LAUNCH to start '{app_name}'."
+                            actual_obs_str = (
+                                f"APP_FOCUS failed: window '{app_name}' could not be focused "
+                                f"({focus_exc}). Use APP_LAUNCH if it is not open."
+                            )
                             status = ActionExecutionStatus.FAILED
 
             elif action_type in (
