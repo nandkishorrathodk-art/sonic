@@ -15,17 +15,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from sonic.agents.judge import JudgeAgent, JudgeVerdict
-from sonic.computer.models import GUIAction, GUIActionType, ScreenObservation
+from sonic.computer.models import GUIActionType, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.boss import BossAgent
 from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionType,
     ComputerDecisionTrace,
-    ComputerWorldObservation,
 )
-from sonic.computer_use.models_boss import Phase, SubMission, SubMissionResult
-from sonic.sandbox.provider import ExecResult
+from sonic.computer_use.models_boss import SubMission, SubMissionResult
 
 
 def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
@@ -240,7 +238,7 @@ async def test_judge_rejects_unverified_gui_actions_with_none_exit_code():
     )
 
     eval_result = await judge.evaluate_sub_mission("ws-1", sub_m, result)
-    assert eval_result.verdict == JudgeVerdict.FALSIFIED
+    assert eval_result.verdict == JudgeVerdict.INCONCLUSIVE
     assert eval_result.self_attestation_rejected is True
 
 

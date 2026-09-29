@@ -5139,6 +5139,7 @@ class ComputerUseAgent:
                             llm=self.llm_router,
                             vector_memory=get_vector_memory(),
                             toolsmith=self.toolsmith,
+                            tenant_id=self.tenant_id,
                         )
                     except Exception as e:
                         logger.warning("lazy_method_lab_init_failed", error=str(e))

@@ -8,7 +8,6 @@ from sonic.api.routes.workstation import (
     _get_or_create_session,
     _infer_program_profile,
     _is_action_prompt,
-    _is_complex_or_multi_part_objective,
     _is_observation_only_prompt,
     _requires_desktop_observation,
     _run_prompt_reasoning,
@@ -25,28 +24,6 @@ from sonic.computer_use.models_boss import (
     SubMission,
 )
 from sonic.mission_engine.director import MissionDirector
-
-
-def test_is_complex_or_multi_part_objective_distinguishes_goals():
-    """Verify classification logic accurately routes complex vs simple prompts."""
-    # Complex / Security objectives -> True
-    assert _is_complex_or_multi_part_objective("find SQL injection in target.com") is True
-    assert _is_complex_or_multi_part_objective("audit web application for vulnerabilities") is True
-    assert _is_complex_or_multi_part_objective("check system hostname and disk space and list running services") is True
-    assert _is_complex_or_multi_part_objective("launch subagent to investigate") is True
-    assert _is_complex_or_multi_part_objective("run phase 1 recon") is True
-    assert _is_complex_or_multi_part_objective("deep dive into attack surface") is True
-    assert _is_complex_or_multi_part_objective("investigate sql injection") is True
-    assert _is_complex_or_multi_part_objective("find a file named report.txt") is False
-    assert _is_complex_or_multi_part_objective("analyze this log file") is False
-    assert _is_complex_or_multi_part_objective("open the supplied application") is False
-
-    # Simple queries -> False
-    assert _is_complex_or_multi_part_objective("hostname") is False
-    assert _is_complex_or_multi_part_objective("pwd") is False
-    assert _is_complex_or_multi_part_objective("whoami") is False
-    assert _is_complex_or_multi_part_objective("date") is False
-    assert _is_complex_or_multi_part_objective("ls -la") is False
 
 
 def test_conversational_prompts_do_not_start_desktop_observation():
@@ -111,8 +88,8 @@ def test_positive_desktop_action_stays_actionable_with_a_negative_constraint():
 
 
 @pytest.mark.asyncio
-async def test_workstation_routes_complex_prompt_to_boss_agent(monkeypatch):
-    """Verify that a complex prompt in Workstation triggers BossAgent and streams all events."""
+async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
+    """Every actionable task, regardless of length, enters Boss orchestration."""
     tenant_id = "test-tenant-boss-int"
     session_id = "boss-int-sess-1"
     state = _get_or_create_session(tenant_id, session_id)
@@ -186,8 +163,8 @@ async def test_workstation_routes_complex_prompt_to_boss_agent(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_workstation_routes_simple_prompt_to_single_agent(monkeypatch):
-    """Verify that a simple prompt bypasses BossAgent and uses ComputerUseAgent."""
+async def test_workstation_routes_concise_computer_task_to_boss_agent(monkeypatch):
+    """Concise actionable prompts do not bypass Boss for the direct single-agent path."""
     tenant_id = "test-tenant-simple-int"
     session_id = "simple-int-sess-1"
     state = _get_or_create_session(tenant_id, session_id)
@@ -199,19 +176,19 @@ async def test_workstation_routes_simple_prompt_to_single_agent(monkeypatch):
     mock_computer.terminal = AsyncMock(side_effect=[MagicMock(stdout="/root"), MagicMock(stdout="file.txt")])
     monkeypatch.setattr("sonic.api.routes.workstation.get_daytona_computer", lambda: mock_computer)
 
-    mock_agent_inst = MagicMock()
-    mock_agent_inst.max_actions = 8
-    mock_agent_inst.run_mission = AsyncMock(return_value=[])
-    mock_agent_cls = MagicMock(return_value=mock_agent_inst)
-    monkeypatch.setattr("sonic.computer_use.agent.ComputerUseAgent", mock_agent_cls)
-
-    mock_boss_cls = MagicMock()
+    mock_boss_inst = MagicMock()
+    mock_boss_inst.run = AsyncMock(return_value=BossReport(
+        objective="hostname",
+        status="INCOMPLETE",
+        findings_summary="Task not verified.",
+    ))
+    mock_boss_cls = MagicMock(return_value=mock_boss_inst)
     monkeypatch.setattr("sonic.computer_use.boss.BossAgent", mock_boss_cls)
 
     await _run_prompt_reasoning(tenant_id, session_id, "hostname")
 
-    mock_boss_cls.assert_not_called()
-    mock_agent_cls.assert_called_once()
+    mock_boss_cls.assert_called_once()
+    mock_boss_inst.run.assert_awaited_once()
     assert state["status"] == "IDLE"
 
 
