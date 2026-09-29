@@ -355,10 +355,6 @@ Create an initial plan with:
 2. Initial unknowns to investigate
 3. Ordered tasks appropriate to the target modality and objective. Do not assume the target is a web application or force a recon/testing order.
 
-Where a gap exists that no registered scanner covers, prefer a toolsmith or
-method-invention task (agent_type "toolsmith" or "method") over forcing a
-known-scanner that does not apply.
-
 Respond with JSON:
 {{
     "assumptions": ["assumption 1", "assumption 2"],
@@ -366,7 +362,7 @@ Respond with JSON:
     "tasks": [
         {{
             "name": "descriptive name",
-            "agent_type": "recon|static|dynamic|hypothesis|verifier",
+            "agent_type": "{'|'.join(sorted(VALID_AGENT_TYPES))}",
             "priority": "critical|high|medium|low",
             "depends_on": [],
             "payload": {{"target": "{target}", "task": "specific_task"}}
@@ -374,7 +370,8 @@ Respond with JSON:
     ]
 }}
 
-Valid agent types: {json.dumps(sorted(VALID_AGENT_TYPES))}
+Valid worker agent types: {json.dumps(sorted(VALID_AGENT_TYPES))}. Do not
+return task types without a registered worker.
 Create 1-6 initial tasks. The first task should establish the most useful target-specific observation, not a fixed reconnaissance phase."""
 
         try:
@@ -913,6 +910,7 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         failed = 0
         all_findings: list[dict[str, Any]] = []
         stop_evaluation = None
+        stop_requested = False
 
         for _iteration in range(max_iterations):
             dispatchable = self.get_dispatchable_tasks(engagement_id)
@@ -928,12 +926,26 @@ Create 1-6 initial tasks. The first task should establish the most useful target
                 await asyncio.sleep(0.02)
                 continue
 
-            for task_payload in dispatchable:
+            async def run_worker(task_payload: dict[str, Any]) -> Any:
+                try:
+                    if inspect.iscoroutinefunction(worker_fn):
+                        result = await worker_fn(task_payload)
+                    else:
+                        result = await asyncio.to_thread(worker_fn, task_payload)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return result
+                except Exception as exc:
+                    return exc
+
+            results = await asyncio.gather(
+                *(run_worker(task_payload) for task_payload in dispatchable)
+            )
+            for task_payload, res in zip(dispatchable, results, strict=True):
                 tid = task_payload.get("task_id", "")
                 try:
-                    res = worker_fn(task_payload)
-                    if inspect.isawaitable(res):
-                        res = await res
+                    if isinstance(res, Exception):
+                        raise res
                     result = res if isinstance(res, dict) else {}
                     result_status = str(result.get("status", "")).lower()
                     if result_status in {"failed", "error", "timed_out", "timeout"}:
@@ -957,20 +969,29 @@ Create 1-6 initial tasks. The first task should establish the most useful target
                     stop_evaluation = self._evaluate_stop_condition(state, graph)
                     if stop_evaluation.should_stop:
                         logger.info("director_stop_condition_reached", engagement_id=engagement_id, condition=stop_evaluation.condition.value)
-                        break
+                        stop_requested = True
                 except Exception as exc:
                     logger.warning("director_worker_task_failed", task_id=tid, error=str(exc))
                     await self.on_task_failed(engagement_id, tid, error=str(exc))
                     failed += 1
-            if stop_evaluation is not None and stop_evaluation.should_stop:
+                    stop_evaluation = self._evaluate_stop_condition(state, graph)
+                    if stop_evaluation.should_stop:
+                        stop_requested = True
+            if stop_requested:
                 break
 
+        graph_complete = graph.is_complete()
         return {
             "engagement_id": engagement_id,
             "completed": completed,
             "failed": failed,
             "findings": all_findings,
-            "graph_complete": graph.is_complete(),
+            "graph_complete": graph_complete,
+            "status": (
+                "completed" if graph_complete and completed > 0 and failed == 0
+                else "partial" if completed > 0
+                else "failed"
+            ),
             "state_summary": state.summary(),
             "stop_condition": stop_evaluation.model_dump() if stop_evaluation else None,
         }

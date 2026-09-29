@@ -269,6 +269,36 @@ def test_goal_director_successful_execution_and_version_bump(temp_evolution_env)
     assert "0.1.0 ➔ 0.1.1" in md_text
 
 
+def test_awaiting_approval_keeps_applied_edits_and_reports_pending_status(temp_evolution_env):
+    director: EvolutionGoalDirector = temp_evolution_env["director"]
+    repo_root: Path = temp_evolution_env["repo_root"]
+    target_rel = "sonic-core/sonic/tools/approval_probe.py"
+    target_path = repo_root / target_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    goal = director.submit_goal(
+        title="Require approval for worker update",
+        description="Update the probe and wait for an operator decision",
+        category=GoalCategory.BUG_FIX,
+        target_files=[target_rel],
+    )
+    report = asyncio.run(
+        director.execute_goal(
+            goal.goal_id,
+            custom_patch="VALUE = 2\n",
+            auto_promote=False,
+            test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+        )
+    )
+
+    assert report.stage == EvolutionStage.AWAITING_APPROVAL
+    assert target_path.read_text(encoding="utf-8") == "VALUE = 2\n"
+    updated_goal = director.get_goal(goal.goal_id)
+    assert updated_goal.status == GoalStatus.AWAITING_APPROVAL
+    assert "remain in the working tree" in updated_goal.notes
+
+
 def test_goal_director_capability_add_bumps_minor_version(temp_evolution_env):
     """Verifies that CAPABILITY_ADD bumps the minor version (e.g. 0.1.0 -> 0.2.0)."""
     director: EvolutionGoalDirector = temp_evolution_env["director"]

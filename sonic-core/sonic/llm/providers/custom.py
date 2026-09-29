@@ -272,6 +272,7 @@ class CustomLLMProvider(LLMProvider):
         speed_tier: SpeedTier = SpeedTier.MEDIUM,
         timeout_seconds: int = 120,
         fallback_models: list[str] | None = None,
+        model_pricing: dict[str, dict[str, float]] | None = None,
         max_retries: int = 3,
         retry_base_delay: float = 0.5,
         retry_max_delay: float = 20.0,
@@ -295,6 +296,14 @@ class CustomLLMProvider(LLMProvider):
         self.fallback_models: list[str] = fallback_models or []
         self.cost_per_1k_input = cost_per_1k_input
         self.cost_per_1k_output = cost_per_1k_output
+        self.model_pricing = dict(model_pricing or {})
+        self.model_pricing.setdefault(
+            default_model,
+            {
+                "cost_per_1k_input": cost_per_1k_input,
+                "cost_per_1k_output": cost_per_1k_output,
+            },
+        )
         self.max_context_tokens = max_context_tokens
         self.capabilities = capabilities or ["general"]
         self.speed_tier = speed_tier
@@ -467,11 +476,25 @@ class CustomLLMProvider(LLMProvider):
             for tool in tools
         ]
 
-    def _calculate_cost(self, usage: TokenUsage) -> float:
-        """Calculate cost in USD based on configured rates."""
+    def pricing_for_model(self, model: str) -> tuple[float, float] | None:
+        """Return configured input/output USD per 1K-token rates for a model."""
+        prices = self.model_pricing.get(model)
+        if prices is None:
+            return None
+        input_rate = prices.get("cost_per_1k_input")
+        output_rate = prices.get("cost_per_1k_output")
+        if input_rate is None or output_rate is None:
+            return None
+        return float(input_rate), float(output_rate)
+
+    def _calculate_cost(self, usage: TokenUsage, model: str | None = None) -> float:
+        """Estimate USD cost using the rates configured for the selected model."""
+        prices = self.pricing_for_model(model or self.default_model)
+        if prices is None:
+            prices = (self.cost_per_1k_input, self.cost_per_1k_output)
         return (
-            (usage.prompt_tokens / 1000) * self.cost_per_1k_input
-            + (usage.completion_tokens / 1000) * self.cost_per_1k_output
+            (usage.prompt_tokens / 1000) * prices[0]
+            + (usage.completion_tokens / 1000) * prices[1]
         )
 
     # ============================================
@@ -644,7 +667,7 @@ class CustomLLMProvider(LLMProvider):
                 tool_calls=tool_calls,
                 usage=usage,
                 finish_reason=choice.finish_reason or "stop",
-                cost_usd=self._calculate_cost(usage),
+                cost_usd=self._calculate_cost(usage, model),
             )
         else:
             # Fallback to raw httpx
@@ -726,7 +749,7 @@ class CustomLLMProvider(LLMProvider):
             provider=self.provider_name,
             usage=usage,
             finish_reason=choice.get("finish_reason", "stop"),
-            cost_usd=self._calculate_cost(usage),
+            cost_usd=self._calculate_cost(usage, model),
         )
 
     async def _complete_anthropic(self, request: LLMRequest) -> LLMResponse:
@@ -774,7 +797,7 @@ class CustomLLMProvider(LLMProvider):
                 tool_calls=tool_calls,
                 usage=usage,
                 finish_reason=response.stop_reason or "stop",
-                cost_usd=self._calculate_cost(usage),
+                cost_usd=self._calculate_cost(usage, model),
             )
         else:
             # Fallback to raw httpx for Anthropic
@@ -845,7 +868,7 @@ class CustomLLMProvider(LLMProvider):
             provider=self.provider_name,
             usage=usage,
             finish_reason=data.get("stop_reason", "stop"),
-            cost_usd=self._calculate_cost(usage),
+            cost_usd=self._calculate_cost(usage, model),
         )
 
     # ============================================

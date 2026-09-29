@@ -138,6 +138,7 @@ async def _maybe_start_being_life_loop(settings):
             llm=router,
             vector_memory=get_vector_memory(),
             toolsmith=toolsmith,
+            tenant_id=tenant_id,
         )
         # Lessons Ledger (Phase C, AIOSR): the being learns from experience
         # and adapts testing strategies across missions.

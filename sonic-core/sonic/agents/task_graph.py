@@ -30,12 +30,11 @@ from pydantic import BaseModel, Field
 # Constants
 # ============================================
 
+# Autonomous worker types plus explicitly modelled workflow-stage nodes.
+# Workflow-stage labels are graph state, not SwarmRunner dispatch targets.
 VALID_AGENT_TYPES = frozenset({
     "recon", "static", "dynamic", "hypothesis", "verifier",
-    "exploit_validator", "codefix", "browser", "orchestrator",
-    # A neutral hand-off for operator-driven workflows.  It deliberately has
-    # no application or security semantics; the payload is caller-defined.
-    "human", "human_workflow",
+    "exploit_validator", "codefix", "human_workflow", "human",
 })
 
 
@@ -671,7 +670,9 @@ class TaskGraph:
         return [t for t in self._tasks.values() if t.status == TaskStatus.PENDING]
 
     def is_complete(self) -> bool:
-        """True when no tasks are PENDING, READY, or RUNNING."""
+        """True when a non-empty graph has no PENDING, READY, or RUNNING tasks."""
+        if not self._tasks:
+            return False
         active_statuses = {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RUNNING}
         return not any(t.status in active_statuses for t in self._tasks.values())
 

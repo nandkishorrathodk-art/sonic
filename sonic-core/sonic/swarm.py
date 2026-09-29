@@ -336,6 +336,12 @@ class SwarmRunner:
                         failed=failed,
                     )
                     break
+                if graph is not None and graph.size == 0:
+                    logger.warning(
+                        "dispatch_loop_no_executable_tasks",
+                        engagement_id=engagement_id,
+                    )
+                    break
                 # No dispatchable tasks but not complete — could be running tasks
                 # or blocked. Brief yield then continue.
                 await asyncio.sleep(0.01)
@@ -344,9 +350,9 @@ class SwarmRunner:
             # Dispatch tasks concurrently (up to max_parallel handled by Director)
             tasks_to_run = []
             for task_payload in dispatchable:
-                agent_type = task_payload.get("agent_type", "recon")
-                agent_name = agent_map.get(agent_type, "recon")
-                agent = self._agents.get(agent_name)
+                agent_type = task_payload.get("agent_type")
+                agent_name = agent_map.get(agent_type)
+                agent = self._agents.get(agent_name) if agent_name else None
                 if agent is None:
                     # No agent available — mark as failed
                     await self.director.on_task_failed(
@@ -374,6 +380,7 @@ class SwarmRunner:
 
         state = self.director.get_engagement_state(engagement_id)
         graph = self.director.get_task_graph(engagement_id)
+        dispatch_graph = self.director._graphs.get(engagement_id)
 
         # Sustained pivot loop: when the first pass produced findings, feed them
         # back as new hypotheses so the dynamic agent keeps probing/chaining
@@ -425,7 +432,15 @@ class SwarmRunner:
                 "critical": sum(1 for f in all_findings if f.get("severity") == "critical"),
                 "high": sum(1 for f in all_findings if f.get("severity") == "high"),
                 "medium": sum(1 for f in all_findings if f.get("severity") == "medium"),
-                "status": "completed",
+                "status": (
+                    "completed"
+                    if completed > 0
+                    and failed == 0
+                    and dispatch_graph is not None
+                    and dispatch_graph.is_complete()
+                    else "partial" if completed > 0
+                    else "failed"
+                ),
             },
         }
 

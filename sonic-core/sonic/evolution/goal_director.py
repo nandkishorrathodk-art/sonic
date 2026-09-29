@@ -65,6 +65,7 @@ class GoalStatus(StrEnum):
     SYNTHESIZING = "synthesizing"
     TESTING = "testing"
     PROMOTED = "promoted"
+    AWAITING_APPROVAL = "awaiting_approval"
     ROLLED_BACK = "rolled_back"
     REJECTED = "rejected"
     FAILED = "failed"
@@ -609,8 +610,11 @@ class EvolutionGoalDirector:
             ), report_only=report_only)
 
         elif report.stage == EvolutionStage.AWAITING_APPROVAL:
-            goal.status = GoalStatus.ROLLED_BACK
-            goal.notes = "Evolution cycle awaiting manual operator approval."
+            goal.status = GoalStatus.AWAITING_APPROVAL
+            goal.notes = (
+                "Verified edits remain in the working tree and are awaiting manual "
+                "operator approval; they have not been rolled back."
+            )
             self._update_goal(goal)
 
         else:
