@@ -27,6 +27,14 @@ def test_laya_language_and_checkpoint_routing():
 
 
 @pytest.mark.no_live_infra
+def test_laya_english_only_language_and_capability_reporting():
+    engine = LayaSystem1Engine(enable_local_model=False)
+
+    assert _detect_script_and_model("Run the tests in the terminal") == ("en", "english")
+    assert engine.status()["languages"] == ["en"]
+    assert engine.status()["language_support"] == ["en"]
+
+@pytest.mark.no_live_infra
 def test_laya_english_plane_decision():
     """Verify System-1 `choice` decisions for GUI vs Headless on English goals."""
     engine = LayaSystem1Engine(enable_local_model=False)

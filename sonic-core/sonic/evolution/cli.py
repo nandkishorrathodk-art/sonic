@@ -99,7 +99,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Command: goals
     goals_parser = subparsers.add_parser("goals", help="List all evolution goals in the queue")
-    goals_parser.add_argument("--status", choices=["queued", "analyzing", "synthesizing", "testing", "promoted", "rolled_back", "rejected", "failed"], help="Filter by goal status")
+    goals_parser.add_argument("--status", choices=["queued", "analyzing", "synthesizing", "testing", "verified", "awaiting_approval", "promoted", "rolled_back", "rejected", "failed"], help="Filter by goal status")
+
+    resolve_parser = subparsers.add_parser(
+        "resolve",
+        help="Approve or reject a verified goal awaiting operator resolution",
+    )
+    resolve_parser.add_argument("goal_id", help="Goal ID in awaiting_approval state")
+    resolve_parser.add_argument(
+        "--decision",
+        required=True,
+        choices=["approve", "reject"],
+        help="Approve the verified working-tree patch or reject it without discarding edits",
+    )
+    resolve_parser.add_argument(
+        "--push",
+        action="store_true",
+        default=False,
+        help="Push the newly verified local promotion to origin (approval only)",
+    )
 
     # Command: run
     run_parser = subparsers.add_parser("run", help="Run continuous evolution loop on queued goals")
@@ -292,6 +310,30 @@ def main() -> int:
                 print(f"   Result: v{g.version_before} -> v{g.version_after}")
         print()
         return 0
+
+    if args.command == "resolve":
+        if args.push and args.decision != "approve":
+            print("Error: --push is valid only with --decision approve", file=sys.stderr)
+            return 1
+        try:
+            if args.decision == "reject":
+                goal = director.reject_goal(args.goal_id)
+                print(f"Goal {goal.goal_id} rejected.")
+                print(goal.notes)
+                return 0
+            report = director.approve_goal(args.goal_id, push=args.push)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(f"Outcome: {report.stage.value}")
+        if report.git_commit_hash:
+            print(f"Commit: {report.git_commit_hash}")
+        if report.error_reason:
+            print(report.error_reason)
+        goal = director.get_goal(args.goal_id)
+        if goal is not None and goal.notes:
+            print(goal.notes)
+        return 0 if report.stage == EvolutionStage.PROMOTED else 2
 
     if args.command == "run":
         if args.max_goals is not None and args.max_goals <= 0:

@@ -333,6 +333,7 @@ class MissionDirector:
             llm=self.model_router,
             vector_memory=get_vector_memory(),
             toolsmith=toolsmith,
+            tenant_id=state.tenant_id,
         )
         lessons_ledger = LessonsLedger(tenant_id=state.tenant_id, agent_id=being.being_id)
         evolution_engine = EvolutionEngine(
@@ -548,6 +549,7 @@ class MissionDirector:
                 llm=self.model_router,
                 vector_memory=get_vector_memory(),
                 toolsmith=toolsmith,
+                tenant_id=mission.tenant_id,
             )
             from sonic.being.lessons import LessonsLedger
             obj_tenant = getattr(state.objective, "tenant_id", "default") if hasattr(state, "objective") else "default"

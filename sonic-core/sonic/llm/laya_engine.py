@@ -4,19 +4,19 @@ SONIC — Laya System-1 Non-Autoregressive Decision Engine Integration
 Integrates the Laya System-1 decision architecture (https://github.com/NandhaKishorM/laya)
 into SONIC's AI-Human Digital Being cognitive core.
 
-Provides sub-35ms single-pass typed judgments (`choice`, `score`, `noul`) across
-100+ languages (including English, Hindi, and Hinglish) for:
+Provides English single-pass typed judgments (`choice`, `score`, `noul`) for:
   1. Dual-Plane Execution Routing (`gui` vs `headless` vs `dual`)
   2. Empirical Goal Verification (`noul` receipt proof probability)
   3. BeingMind Curiosity & Novelty Affect Evaluation (`score` & `noul`)
   4. Semantic Pre-Action Safety Triage (`safe`, `needs_approval`, `destructive`)
+The local lexical fallback and script routing support English only.
 
 Hardware & RAM Safety Guard:
   - Never preloads all 3 PyTorch checkpoints unless `LAYA_PRELOAD=1`.
   - Supports remote `laya-serve` HTTP API (`LAYA_API_URL`) with 0 MB host RAM overhead.
   - Supports local `laya.Router(preload=False)` when `SONIC_ENABLE_LOCAL_LAYA=1` and
     free system RAM >= 1.5 GB.
-  - Includes a zero-RAM calibrated multilingual scoring engine fallback so typed
+  - Includes a zero-RAM calibrated English scoring engine fallback so typed
     decisions always return valid `choice` / `score` / `noul` probability distributions.
 """
 
@@ -117,7 +117,7 @@ class LayaDecisionResult:
 
 
 def _detect_script_and_model(text: str) -> tuple[str, str]:
-    """Laya System-1 default routing — English model and 'en' language."""
+    """Route English input to the English checkpoint."""
     return "en", "english"
 
 
@@ -263,7 +263,7 @@ class LayaSystem1Engine:
             except Exception as exc:
                 logger.warning("laya_local_predict_failed", error=str(exc))
 
-        # 3. Zero-RAM Calibrated System-1 Scoring Engine (Multilingual EN / HI / Hinglish)
+        # 3. Zero-RAM calibrated English scoring fallback.
         answers: dict[str, dict[str, Any]] = {}
         for q_key, q_spec in questions.items():
             q_type = str(q_spec.get("type", "choice")).lower()
@@ -377,10 +377,8 @@ class LayaSystem1Engine:
     ) -> dict[str, float]:
         """Compute calibrated Softmax distribution over candidate choices."""
         state_tokens = [t.lower() for t in _TOKEN_RE.findall(state_text)]
-        state_token_set = set(state_tokens)
         state_lower = state_text.lower()
 
-        # English concept expansion
         english_concepts: dict[str, set[str]] = {
             "gui": {
                 "gui", "visual", "visually", "screen", "screenshot", "desktop", "window",
@@ -637,7 +635,7 @@ class LayaSystem1Engine:
     def decide_execution_plane(self, goal: str) -> tuple[str, float]:
         """
         Use System-1 `choice` judgment to decide between `"gui"` and `"headless"`
-        planes across English, Hindi, and Hinglish goals.
+        planes for English goals.
         """
         res = self.predict(
             state=goal,

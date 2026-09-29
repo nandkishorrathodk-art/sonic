@@ -14,6 +14,7 @@ Verifies with real execution receipts (zero fake success):
 """
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any
 import pytest
@@ -62,6 +63,10 @@ async def test_pillar_1_and_8_live_api_login_workstation_being_vault_and_human_r
     """Verifies Auth Login, Workstation State, Being/Vault inspection, and WAITING_FOR_HUMAN -> Resume."""
     monkeypatch.setenv("SONIC_MEMORY_DB_PATH", str(tmp_path / "mem.db"))
     monkeypatch.setenv("SONIC_BEING_DB_PATH", str(tmp_path / "being.db"))
+    monkeypatch.setenv(
+        "SONIC_BEING_VAULT_KEY",
+        base64.urlsafe_b64encode(b"test-only-key-material-32-bytes!").decode("ascii"),
+    )
     reset_being_singleton()
 
     client = TestClient(app)
@@ -278,6 +283,10 @@ async def test_pillar_2_to_7_senior_engineer_full_workflow_observation_subagents
 def test_pillar_9_persistent_being_mind_vault_and_craft_across_restart(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Verifies Being identity, BeingMind learned facts, BeingVault credentials, and BeingCraft survive restart."""
     monkeypatch.setenv("SONIC_BEING_DB_PATH", str(tmp_path / "being_persist.db"))
+    monkeypatch.setenv(
+        "SONIC_BEING_VAULT_KEY",
+        base64.urlsafe_b64encode(b"test-only-key-material-32-bytes!").decode("ascii"),
+    )
     monkeypatch.setenv("SONIC_CRAFT_DIR", str(tmp_path / "craft"))
     reset_being_singleton()
 
@@ -331,5 +340,3 @@ def test_pillar_7_and_10_git_injection_pkill_scope_and_subagent_action_types(tmp
     for act_name in ("DEFINE_SUBAGENT", "INVOKE_SUBAGENT", "SEND_MESSAGE", "MANAGE_SUBAGENTS"):
         assert hasattr(ComputerActionType, act_name)
         assert policy.evaluate(act_name, "self", {}).allowed
-
-

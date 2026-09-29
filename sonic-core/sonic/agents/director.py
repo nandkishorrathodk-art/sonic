@@ -49,7 +49,8 @@ from sonic.agents.replan import (
 )
 from sonic.agents.state_store import StateStore, get_state_store
 from sonic.agents.task_graph import (
-    VALID_AGENT_TYPES,
+    DISPATCHABLE_AGENT_TYPES,
+    GRAPH_ONLY_AGENT_TYPES,
     TaskGraph,
     TaskGraphError,
     TaskNode,
@@ -99,6 +100,7 @@ class AgentInput:
         engagement_id: str,
         task_id: str,
         agent_type: str,
+        execution_id: str = "",
         workspace_id: str = "",
         target: str = "",
         task_payload: dict[str, Any] | None = None,
@@ -109,6 +111,7 @@ class AgentInput:
         self.engagement_id = engagement_id
         self.task_id = task_id
         self.agent_type = agent_type
+        self.execution_id = execution_id
         self.workspace_id = workspace_id
         self.target = target
         self.task_payload = task_payload or {}
@@ -121,6 +124,7 @@ class AgentInput:
             "engagement_id": self.engagement_id,
             "task_id": self.task_id,
             "agent_type": self.agent_type,
+            "execution_id": self.execution_id,
             "workspace_id": self.workspace_id,
             "target": self.target,
             "task_payload": self.task_payload,
@@ -237,6 +241,7 @@ class Director:
         state_store: StateStore | None = None,
         max_parallel: int = 4,
         budget: EngagementBudget | None = None,
+        available_agent_types: set[str] | frozenset[str] | None = None,
     ):
         self.router = model_router
         self.memory = graph_memory
@@ -244,6 +249,11 @@ class Director:
         self.state_store = state_store or get_state_store()
         self.max_parallel = max_parallel
         self.default_budget = budget or EngagementBudget(max_parallel=max_parallel)
+        self.available_agent_types = frozenset(
+            available_agent_types
+            if available_agent_types is not None
+            else DISPATCHABLE_AGENT_TYPES
+        )
 
         # Active engagements (in-memory, backed by Redis)
         self._states: dict[str, CognitiveState] = {}
@@ -251,7 +261,10 @@ class Director:
         self._events: dict[str, list[LifecycleEvent]] = {}
 
         # Replan engine & Action selector (Phase 6)
-        self.replan_engine = ReplanEngine(scope_checker=scope_checker)
+        self.replan_engine = ReplanEngine(
+            scope_checker=scope_checker,
+            allowed_agent_types=self.available_agent_types,
+        )
         self.action_selector = ActionSelector()
 
     # ============================================
@@ -355,10 +368,6 @@ Create an initial plan with:
 2. Initial unknowns to investigate
 3. Ordered tasks appropriate to the target modality and objective. Do not assume the target is a web application or force a recon/testing order.
 
-Where a gap exists that no registered scanner covers, prefer a toolsmith or
-method-invention task (agent_type "toolsmith" or "method") over forcing a
-known-scanner that does not apply.
-
 Respond with JSON:
 {{
     "assumptions": ["assumption 1", "assumption 2"],
@@ -366,7 +375,7 @@ Respond with JSON:
     "tasks": [
         {{
             "name": "descriptive name",
-            "agent_type": "recon|static|dynamic|hypothesis|verifier",
+            "agent_type": "{'|'.join(sorted(self.available_agent_types))}",
             "priority": "critical|high|medium|low",
             "depends_on": [],
             "payload": {{"target": "{target}", "task": "specific_task"}}
@@ -374,7 +383,8 @@ Respond with JSON:
     ]
 }}
 
-Valid agent types: {json.dumps(sorted(VALID_AGENT_TYPES))}
+Valid worker agent types: {json.dumps(sorted(self.available_agent_types))}. Do not
+return graph-only human workflow types or task types without a registered worker.
 Create 1-6 initial tasks. The first task should establish the most useful target-specific observation, not a fixed reconnaissance phase."""
 
         try:
@@ -401,15 +411,36 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         # Build task graph
         task_id_map: dict[str, str] = {}  # name → task_id
         for task_def in plan.get("tasks", []):
+            dependencies = task_def.get("depends_on", [])
+            unresolved_dependencies = [
+                dependency
+                for dependency in dependencies
+                if dependency not in task_id_map
+            ]
+            if unresolved_dependencies:
+                logger.warning(
+                    "initial_task_rejected",
+                    task=task_def.get("name"),
+                    error=f"dependencies are missing or were rejected: {unresolved_dependencies}",
+                )
+                continue
+
+            agent_type = task_def.get("agent_type", "recon")
+            if agent_type not in self.available_agent_types:
+                logger.warning(
+                    "initial_task_rejected",
+                    task=task_def.get("name"),
+                    error=f"no registered worker for agent_type '{agent_type}'",
+                )
+                continue
             deps = [
-                task_id_map[d]
-                for d in task_def.get("depends_on", [])
-                if d in task_id_map
+                task_id_map[dependency]
+                for dependency in dependencies
             ]
             try:
                 task = TaskNode(
                     name=task_def["name"],
-                    agent_type=task_def.get("agent_type", "recon"),
+                    agent_type=agent_type,
                     task_payload=task_def.get("payload", {"target": target}),
                     depends_on=deps,
                     priority=TaskPriority(task_def.get("priority", "medium")),
@@ -488,6 +519,7 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         engagement_id: str,
         task_id: str,
         result: dict[str, Any],
+        execution_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Handle task completion event.
@@ -515,7 +547,7 @@ Create 1-6 initial tasks. The first task should establish the most useful target
 
         # 1. Mark completed in graph
         try:
-            graph.mark_completed(task_id, result)
+            graph.mark_completed(task_id, result, execution_id=execution_id)
         except TaskGraphError as e:
             return {"error": f"Cannot complete task: {str(e)}"}
 
@@ -589,7 +621,10 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         await self._persist(engagement_id)
 
         # 7. Get ready tasks for dispatch
-        ready = graph.get_ready_tasks()
+        ready = [
+            task for task in graph.get_ready_tasks()
+            if task.agent_type in self.available_agent_types
+        ]
 
         summary = {
             "task_id": task_id,
@@ -613,6 +648,7 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         engagement_id: str,
         task_id: str,
         error: str,
+        execution_id: str | None = None,
     ) -> dict[str, Any]:
         """Handle task failure event."""
         state = self._states.get(engagement_id)
@@ -625,7 +661,11 @@ Create 1-6 initial tasks. The first task should establish the most useful target
             return {"error": f"Task {task_id} not found"}
 
         # Mark failed and cascade blocked
-        blocked_ids = graph.mark_failed(task_id, error)
+        blocked_ids = graph.mark_failed(
+            task_id,
+            error,
+            execution_id=execution_id,
+        )
         state.tasks_failed += 1
 
         # Record as failed attempt
@@ -860,11 +900,18 @@ Create 1-6 initial tasks. The first task should establish the most useful target
             )
             state.add_decision_trace(trace, agent_id="director")
 
+            try:
+                execution_id = graph.mark_running(task.id)
+            except TaskGraphError as e:
+                logger.warning("task_dispatch_failed", task_id=task.id, error=str(e))
+                continue
+
             agent_input = AgentInput(
                 tenant_id=state.tenant_id,
                 engagement_id=engagement_id,
                 task_id=task.id,
                 agent_type=task.agent_type,
+                execution_id=execution_id,
                 workspace_id=task.workspace_id or f"ws-{engagement_id}",
                 target=task.task_payload.get("target", ""),
                 task_payload=task.task_payload,
@@ -873,17 +920,12 @@ Create 1-6 initial tasks. The first task should establish the most useful target
             )
             dispatchable.append(agent_input.to_dict())
 
-            # Mark as running in graph
-            try:
-                graph.mark_running(task.id)
-                self._emit_event(LifecycleEvent(
-                    event_type="TaskStarted",
-                    tenant_id=state.tenant_id,
-                    engagement_id=engagement_id,
-                    task_id=task.id,
-                ))
-            except TaskGraphError as e:
-                logger.warning("task_dispatch_failed", task_id=task.id, error=str(e))
+            self._emit_event(LifecycleEvent(
+                event_type="TaskStarted",
+                tenant_id=state.tenant_id,
+                engagement_id=engagement_id,
+                task_id=task.id,
+            ))
 
         return dispatchable
 
@@ -913,6 +955,8 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         failed = 0
         all_findings: list[dict[str, Any]] = []
         stop_evaluation = None
+        stop_requested = False
+        waiting_for_human = False
 
         for _iteration in range(max_iterations):
             dispatchable = self.get_dispatchable_tasks(engagement_id)
@@ -922,28 +966,64 @@ Create 1-6 initial tasks. The first task should establish the most useful target
                     break
                 if graph.is_complete():
                     break
+                if any(
+                    task.agent_type in GRAPH_ONLY_AGENT_TYPES
+                    and task.status
+                    in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RUNNING}
+                    for task in graph.tasks.values()
+                ):
+                    waiting_for_human = True
+                    break
                 if not graph.get_running_tasks():
                     # No running tasks and no dispatchable tasks, graph is either blocked or finished
                     break
                 await asyncio.sleep(0.02)
                 continue
 
-            for task_payload in dispatchable:
+            async def run_worker(task_payload: dict[str, Any]) -> Any:
+                try:
+                    if inspect.iscoroutinefunction(worker_fn):
+                        result = await worker_fn(task_payload)
+                    else:
+                        result = await asyncio.to_thread(worker_fn, task_payload)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return result
+                except Exception as exc:
+                    return exc
+
+            results = await asyncio.gather(
+                *(run_worker(task_payload) for task_payload in dispatchable)
+            )
+            for task_payload, res in zip(dispatchable, results, strict=True):
                 tid = task_payload.get("task_id", "")
                 try:
-                    res = worker_fn(task_payload)
-                    if inspect.isawaitable(res):
-                        res = await res
+                    if isinstance(res, Exception):
+                        raise res
                     result = res if isinstance(res, dict) else {}
                     result_status = str(result.get("status", "")).lower()
                     if result_status in {"failed", "error", "timed_out", "timeout"}:
-                        await self.on_task_failed(engagement_id, tid, error=str(result.get("error") or result.get("reason") or result_status))
+                        await self.on_task_failed(
+                            engagement_id,
+                            tid,
+                            error=str(result.get("error") or result.get("reason") or result_status),
+                            execution_id=task_payload.get("execution_id"),
+                        )
                         failed += 1
                     elif result_status in {"blocked", "not_executed", "skipped"}:
-                        graph.mark_blocked(tid, str(result.get("reason") or result_status))
+                        graph.mark_blocked(
+                            tid,
+                            str(result.get("reason") or result_status),
+                            execution_id=task_payload.get("execution_id"),
+                        )
                         failed += 1
                     elif result_status in {"success", "succeeded", "completed", "verified", "recovered"}:
-                        await self.on_task_completed(engagement_id, tid, result)
+                        await self.on_task_completed(
+                            engagement_id,
+                            tid,
+                            result,
+                            execution_id=task_payload.get("execution_id"),
+                        )
                         completed += 1
                         if result.get("findings") and isinstance(result["findings"], list):
                             all_findings.extend(result["findings"])
@@ -952,25 +1032,45 @@ Create 1-6 initial tasks. The first task should establish the most useful target
                             engagement_id,
                             tid,
                             error="worker returned no explicit successful status",
+                            execution_id=task_payload.get("execution_id"),
                         )
                         failed += 1
                     stop_evaluation = self._evaluate_stop_condition(state, graph)
                     if stop_evaluation.should_stop:
                         logger.info("director_stop_condition_reached", engagement_id=engagement_id, condition=stop_evaluation.condition.value)
-                        break
+                        stop_requested = True
                 except Exception as exc:
                     logger.warning("director_worker_task_failed", task_id=tid, error=str(exc))
-                    await self.on_task_failed(engagement_id, tid, error=str(exc))
+                    await self.on_task_failed(
+                        engagement_id,
+                        tid,
+                        error=str(exc),
+                        execution_id=task_payload.get("execution_id"),
+                    )
                     failed += 1
-            if stop_evaluation is not None and stop_evaluation.should_stop:
+                    stop_evaluation = self._evaluate_stop_condition(state, graph)
+                    if stop_evaluation.should_stop:
+                        stop_requested = True
+            if stop_requested:
                 break
 
+        graph_complete = graph.is_complete()
+        graph_succeeded = graph_complete and all(
+            task.status == TaskStatus.SUCCEEDED for task in graph.tasks.values()
+        )
         return {
             "engagement_id": engagement_id,
             "completed": completed,
             "failed": failed,
             "findings": all_findings,
-            "graph_complete": graph.is_complete(),
+            "graph_complete": graph_complete,
+            "status": (
+                "awaiting_human"
+                if waiting_for_human
+                else "completed" if graph_succeeded and completed > 0
+                else "partial" if completed > 0
+                else "failed"
+            ),
             "state_summary": state.summary(),
             "stop_condition": stop_evaluation.model_dump() if stop_evaluation else None,
         }

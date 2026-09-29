@@ -10,6 +10,7 @@ Configuration is managed via `sonic-core/sonic/config.py` (`Settings`) and envir
 | `JWT_SECRET` | *(required)* | Secret key for signing bearer tokens |
 | `SONIC_MEMORY_DB_PATH` | `./sonic_data.db` | Persistent SQLite store for Graph, Vector, and Evolution memory |
 | `SONIC_BEING_DB_PATH` | `./sonic_data.db` | Persistent SQLite store for `Being`, `BeingMind`, and `BeingVault` |
+| `SONIC_BEING_VAULT_KEY` | *(required to use the vault)* | URL-safe base64 encoding of 32 random bytes; encrypts credentials, tokens, profile URLs, and saved session state |
 | `SONIC_WORKSTATION_STATE_PATH` | `sonic_data/workstations.json` | Persistent workspace attachment index |
 | `SONIC_ENABLE_BEING_LIFE_LOOP` | `0` | Enable always-on autonomous `BeingLifeLoop` (`1` to enable) |
 | `SONIC_SELF_CODER_ENABLED` | `true` | Enable the independent periodic self-coder loop; disabling it stops automatic code improvement |
@@ -18,6 +19,42 @@ Configuration is managed via `sonic-core/sonic/config.py` (`Settings`) and envir
 | `SONIC_SELF_CODER_EVERY_TICKS` | `20` | Cadence for optional direct `BeingLifeLoop` self-coder integrations (`1`–`10000`); production background self-coding uses the interval above |
 | `SONIC_SELF_CODER_CANDIDATE_DIR` | `sonic_data/self_coder_candidates` | Directory for tenant-scoped candidate records and temporary Git worktrees |
 | `NEXT_PUBLIC_API_URL` | `http://127.0.0.1:12000` | Backend URL used by `sonic-dashboard` |
+
+### BeingVault key setup and legacy data
+
+Provision `SONIC_BEING_VAULT_KEY` from a secret manager and keep it stable across
+restarts and all backend workers that access the same Being database. Generate
+a new key with:
+
+```powershell
+python -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+Do not commit the key or store it alongside the database. Vault reads and writes
+fail closed when the key is missing, malformed, or different from the key used
+to encrypt the records.
+
+Databases created before vault encryption may contain plaintext credentials or
+session state. Back up the database to protected storage, configure the key,
+stop other database users, and explicitly run
+`BeingVault.migrate_legacy_data()` before retrieving those records. Protect and
+retire the pre-migration backup separately because it still contains plaintext.
+Do not delete or discard it until the encrypted records have been verified.
+
+## LLM Cost Controls
+
+The limits in `configs/models.yaml` are checked by the model router using
+configured model token pricing. Text-only requests are estimated before
+dispatch, engagement estimates are reserved against concurrent requests, and
+response usage/cost is recorded afterward. Engagement totals are maintained
+per router process, not in shared persistent storage.
+
+For multimodal requests, image-token cost is not included in the preflight
+estimate because no provider-specific image pricing is configured. Vision
+requests are still allowed; their reported response cost or token usage is
+accounted after completion, and the router logs/reports that a hard cap was not
+guaranteed for the image portion. Providers must return usable cost or token
+usage for the completed call to be accounted.
 
 ## Self-Coder Autonomous Workflow
 

@@ -588,6 +588,7 @@ class EngagementManager:
                     llm=self.router,
                     vector_memory=get_vector_memory(),
                     toolsmith=toolsmith,
+                    tenant_id=tenant_id,
                 )
                 extra_agent_kwargs["toolsmith"] = toolsmith
                 extra_agent_kwargs["method_lab"] = method_lab
