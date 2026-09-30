@@ -749,9 +749,10 @@ def grounding_user_prompt(query: str, width: int, height: int) -> str:
     return (
         f"Analyze this desktop screenshot ({width}x{height} resolution). "
         f"Locate the UI element: '{query}'. "
+        "Coordinates MUST use normalized 0-1000 screen space, not pixel coordinates. "
         "Return ONLY one of these formats, nothing else:\n"
         "<|box_start|>(x1, y1, x2, y2)<|box_end|>\n"
-        "or [x, y]\n"
+        "or [x, y] (both values normalized from 0 to 1000)\n"
         "If the element is not visible or not found on screen, return NOT_FOUND."
     )
 

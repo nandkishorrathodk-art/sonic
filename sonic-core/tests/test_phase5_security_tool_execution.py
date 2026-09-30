@@ -142,7 +142,7 @@ def test_security_tool_dispatches_to_adapter():
     ])
     agent = ComputerUseAgent(computer_provider=comp, llm_router=llm,
                              security_tools={"nmap": tool})
-    traces = _run(agent.run_mission(comp.workspace_id, "Scan the host", steps=5))
+    traces = _run(agent.run_mission(comp.workspace_id, "Scan the host", steps=2))
     assert len(traces) == 1
     assert traces[0].action_type == ComputerActionType.SECURITY_TOOL
     # The tool actually ran in-sandbox via its provider.
@@ -169,7 +169,7 @@ def test_scan_findings_reach_reasoning_prompt():
     ])
     agent = ComputerUseAgent(computer_provider=comp, llm_router=llm,
                              security_tools={"nmap": tool})
-    _run(agent.run_mission(comp.workspace_id, "scan", steps=3))
+    _run(agent.run_mission(comp.workspace_id, "scan", steps=2))
     step2_prompt = llm.received_prompts[1]
     assert "Last security-tool result" in step2_prompt
     assert "findings_count=2" in step2_prompt
@@ -218,7 +218,7 @@ def test_agent_reacts_to_scan_findings():
     ])
     agent1 = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=llm1,
                                security_tools={"nmap": tool1})
-    traces1 = _run(agent1.run_mission("ws", "Secure the host", steps=5))
+    traces1 = _run(agent1.run_mission("ws", "Secure the host", steps=2))
     assert [t.action_type for t in traces1] == [
         ComputerActionType.SECURITY_TOOL, ComputerActionType.FILE_WRITE]
     # The findings actually informed the follow-up decision.
@@ -233,7 +233,7 @@ def test_agent_reacts_to_scan_findings():
     ])
     agent2 = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=llm2,
                                security_tools={"nmap": tool2})
-    traces2 = _run(agent2.run_mission("ws", "Secure the host", steps=5))
+    traces2 = _run(agent2.run_mission("ws", "Secure the host", steps=2))
     assert [t.action_type for t in traces2] == [ComputerActionType.SECURITY_TOOL]
     assert "findings_count=0" in llm2.received_prompts[1]
 

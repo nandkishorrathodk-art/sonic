@@ -14,18 +14,19 @@ from sonic.computer.docker_computer import DockerComputerProvider, _get_display
 from sonic.computer.models import GUIAction, GUIActionType
 
 
-def _docker_daemon_up() -> bool:
+def _workstation_container_up(container_name: str = "sonic-desktop-workstation") -> bool:
     if not shutil.which("docker"):
         return False
     try:
+        probe = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
         return (
-            subprocess.run(
-                ["docker", "info", "--format", "{{.ServerVersion}}"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=10,
-            ).returncode
-            == 0
+            probe.returncode == 0
+            and probe.stdout.decode("utf-8", errors="ignore").strip() == "true"
         )
     except Exception:
         return False
@@ -42,11 +43,12 @@ async def test_docker_computer_provider_lifecycle():
     url = await provider.get_vnc_url(ws.id)
     # A real noVNC listener only exists when the daemon + workstation container
     # are actually up. Fail-closed returns None otherwise — assert accordingly.
-    if _docker_daemon_up():
+    workstation_up = _workstation_container_up(ws.id)
+    if workstation_up:
         assert url is not None
         assert "6080" in url
 
-    if _docker_daemon_up():
+    if workstation_up:
         status = await provider.status(ws.id)
         assert status.workspace_id == "sonic-desktop-workstation"
         assert len(status.running_processes) >= 0
@@ -73,7 +75,7 @@ async def test_docker_computer_provider_files_and_apps():
     provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
     ws_id = "sonic-desktop-workstation"
 
-    if _docker_daemon_up():
+    if _workstation_container_up(ws_id):
         # Test write file
         test_content = "sonic_security_audit_test_file"
         test_path = "/tmp/sonic_test.txt"
@@ -94,10 +96,21 @@ async def test_docker_computer_provider_files_and_apps():
 async def test_docker_screenshot_reports_source_frame_age_from_nsi_timestamp():
     provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
     encoded = base64.b64encode(b"pixel-data" * 20).decode()
+    controls = [
+        {
+            "name": source,
+            "role": "button",
+            "bbox": [100, 200, 180, 230],
+            "bbox_format": "xyxy",
+            "source": source,
+        }
+        for source in ("ocr", "atspi", "x11")
+    ]
     provider._nsi_request = AsyncMock(return_value={
         "ok": True,
         "b64": encoded,
         "capture_timestamp_ns": time.time_ns() - 250_000_000,
+        "detected_controls": controls,
     })
 
     observation = await provider.screenshot("ws-1")
@@ -105,6 +118,7 @@ async def test_docker_screenshot_reports_source_frame_age_from_nsi_timestamp():
     assert observation.capture_timestamp_ns is not None
     assert observation.capture_age_ms is not None
     assert observation.capture_age_ms >= 250
+    assert observation.detected_controls == controls
 
 
 @pytest.mark.no_live_infra
@@ -137,6 +151,7 @@ async def test_docker_screenshot_parses_capture_timestamp_from_fallback_capture(
             f"___CAPTURE_TIMESTAMP_NS___\n{capture_timestamp_ns}\n{encoded}"
             "\n___OCR_TSV___\n"
             "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            "5\t1\t1\t1\t1\t1\t100\t200\t80\t30\t90\tSubmit\n"
             "___ACTIVE_WINDOW___\nDesktop\n___OPEN_WINDOWS___\n"
         ),
         "",
@@ -148,6 +163,15 @@ async def test_docker_screenshot_parses_capture_timestamp_from_fallback_capture(
     assert observation.capture_timestamp_ns == capture_timestamp_ns
     assert observation.capture_age_ms is not None
     assert observation.capture_age_ms >= 100
+    assert observation.detected_controls == [
+        {
+            "name": "Submit",
+            "role": "text",
+            "bbox": (100, 200, 180, 230),
+            "bbox_format": "xyxy",
+            "source": "ocr",
+        }
+    ]
 
 
 @pytest.mark.no_live_infra

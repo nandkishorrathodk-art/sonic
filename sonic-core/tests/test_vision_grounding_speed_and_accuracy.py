@@ -1,5 +1,4 @@
 import pytest
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 from sonic.computer_use.grounding import (
@@ -35,6 +34,9 @@ async def test_multimodal_image_auto_routes_to_vision():
     mock_provider = MagicMock()
     mock_provider.name = "nvidia"
     mock_provider.default_model = "moonshotai/kimi-k3"
+    mock_provider.fallback_models = []
+    mock_provider._effective_max_tokens = lambda requested: requested
+    mock_provider.pricing_for_model = lambda model: (0.001, 0.001)
     mock_provider.complete_with_timing = AsyncMock()
     
     mock_response = MagicMock()
@@ -60,7 +62,8 @@ async def test_multimodal_image_auto_routes_to_vision():
         task_type="reasoning",
     )
     res = await router.complete(req)
-    assert req.task_type == "vision"
+    routed_request = mock_provider.complete_with_timing.await_args.args[0]
+    assert routed_request.task_type == "vision"
     assert res.content == "<|box_start|>(350, 160, 450, 200)<|box_end|>"
 
 

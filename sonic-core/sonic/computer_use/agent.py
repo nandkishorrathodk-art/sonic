@@ -587,6 +587,13 @@ class ComputerUseAgent:
         """Signal the agent to stop its active mission loop immediately."""
         self._interrupted = True
 
+    def _gui_action_contract_active(self) -> bool:
+        """Return whether this worker must stay within visible GUI actions."""
+        return bool(
+            getattr(self, "gui_only", False)
+            or str(getattr(self, "execution_plane", "") or "").lower().strip() == "gui"
+        )
+
     async def _llm_decompose_goal(self, goal: str) -> SubGoalChecklist | None:
         """Use LLM to decompose the mission goal into concrete, actionable sub-goals."""
         from sonic.llm.schemas import LLMRequest, Message, MessageRole
@@ -600,7 +607,7 @@ class ComputerUseAgent:
         action_examples = (
             "Use only visible GUI actions such as launching/focusing an application, "
             "clicking, typing, keypresses, scrolling, dragging, waiting, and observing."
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else
             "Each sub-goal must be a specific concrete action (for example, inspect a response, "
             "author a probe, or launch an application and verify its window)."
@@ -764,7 +771,7 @@ class ComputerUseAgent:
                         )
                 except Exception as exc:
                     logger.debug("application_inventory_unavailable", error=str(exc))
-            if getattr(self, "gui_only", False):
+            if self._gui_action_contract_active():
                 files = []
                 git_st = None
             else:
@@ -781,8 +788,8 @@ class ComputerUseAgent:
         if not hasattr(self, "_last_gui_action_result"):
             self._last_gui_action_result: dict[str, Any] = {}
         try:
-            if getattr(self, "gui_only", False):
-                raise RuntimeError("GUI-only computer: terminal observation disabled")
+            if self._gui_action_contract_active():
+                raise RuntimeError("GUI execution contract: terminal observation is outside this worker's action plane")
             last_out = self._last_action_output
             terminal_output = ""
             if last_out and last_out.get("stdout", "").strip():
@@ -828,8 +835,8 @@ class ComputerUseAgent:
                     terminal_output = term_out or f"Exit {getattr(term_res, 'exit_code', 0)}"
         except Exception:
             terminal_output = (
-                "GUI-only computer: terminal observation disabled"
-                if getattr(self, "gui_only", False)
+                "GUI execution contract: terminal observation disabled"
+                if self._gui_action_contract_active()
                 else f"Terminal Ready ({len(status.running_processes)} procs)"
             )
 
@@ -918,7 +925,7 @@ class ComputerUseAgent:
         goal: str,
         observation: ComputerWorldObservation,
         step_index: int = 1,
-    ) -> tuple[ComputerActionType, str, dict[str, Any], str]:
+    ) -> tuple[ComputerActionType | ActionExecutionStatus, str, dict[str, Any], str]:
         """Choose the next action dynamically based on observation and goal.
 
         Decide the next action from (goal, observation, history).
@@ -956,7 +963,23 @@ class ComputerUseAgent:
         if self.llm_router is not None:
             return await self._llm_choose_action(goal, observation, step_index, primary_file, test_file)
 
+        if getattr(self, "gui_only", False) or getattr(self, "execution_plane", "") == "gui":
+            return self._reasoning_unavailable_action(
+                "No reasoning model is configured for this GUI worker."
+            )
+
         return self._diagnostic_fallback(primary_file)
+
+    @staticmethod
+    def _reasoning_unavailable_action(
+        reason: str,
+    ) -> tuple[ActionExecutionStatus, str, dict[str, Any], str]:
+        return (
+            ActionExecutionStatus.BLOCKED,
+            "reasoning-unavailable",
+            {},
+            reason,
+        )
 
     @staticmethod
     def _refresh_observation_age(observation: ComputerWorldObservation) -> None:
@@ -1503,9 +1526,9 @@ class ComputerUseAgent:
         )
         tool_content = tool_lines.strip() if tool_lines else "None"
         gui_policy_text = (
-            "GUI-ONLY MODE: use visible GUI applications and GUI actions only. "
+            "GUI EXECUTION CONTRACT: use visible GUI applications and GUI actions only. "
             "Do not use terminal, shell, file, script, package, security-tool, or backend actions."
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else
             "Operator toolkit is separate from the graphical desktop and may be used only when appropriate."
         )
@@ -1680,7 +1703,7 @@ class ComputerUseAgent:
         capability_directive = (
             "Use only visible GUI applications and graphical controls; do not use terminal, "
             "shell, scripts, files, packages, or backend tools.\n"
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else
             "You have full freedom to operate 1, 2, or N desktop GUI applications (`APP_LAUNCH`, `APP_FOCUS`, `GUI_*`),\n"
             "complete operator-requested online workflows through the visible desktop, write files (`FILE_WRITE`), manage Git (`GIT_*`), and run terminal commands (`TERMINAL_EXEC`).\n"
@@ -1693,10 +1716,21 @@ class ComputerUseAgent:
             "Think: 'What is the fastest, most effective way to accomplish this objective on my workstation?\n"
             "Which GUI application window or terminal command should I use right now?'\n"
             f"{capability_directive}"
+            f"GUI ACTION COORDINATES: In GUI action TARGET/PAYLOAD fields, use actual screen pixels "
+            f"(x=0..{max(0, screen_w - 1)}, y=0..{max(0, screen_h - 1)}), not normalized values. "
+            "Only the separate multimodal grounding response uses normalized 0-1000 coordinates.\n"
             "================================================================================\n\n"
         )
         init_ctx = getattr(self, "initial_context", {}) or {}
-        if init_ctx.get("delegated_plane") != "headless":
+        if init_ctx.get("delegated_plane") == "gui":
+            target_header += (
+                "=== VISIBLE WORKSTATION APPLICATION PLANE ===\n"
+                "This worker is assigned a visible desktop objective. Use observed GUI applications and controls only; "
+                "if an application is unavailable, report the limitation or choose another observed GUI path. "
+                "Do not switch to terminal, shell, or filesystem actions.\n"
+                "=============================================\n\n"
+            )
+        elif init_ctx.get("delegated_plane") != "headless":
             target_header += (
                 "=== FULL DUAL-PLANE AGENCY (DESKTOP GUI :99 + TERMINAL/FILE SANDBOX) ===\n"
                 "You are an AI-Human Being & Engineer operating BOTH your graphical desktop (:99) and your terminal/file sandbox:\n"
@@ -1805,7 +1839,7 @@ class ComputerUseAgent:
         step_index: int,
         primary_file: str,
         test_file: str,
-    ) -> tuple[ComputerActionType, str, dict[str, Any], str]:
+    ) -> tuple[ComputerActionType | ActionExecutionStatus, str, dict[str, Any], str]:
         """Use the LLM to decide the next action from goal + observation + history."""
         from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
 
@@ -1867,7 +1901,7 @@ class ComputerUseAgent:
 
         available_actions = (
             self._GUI_ONLY_ACTIONS
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else frozenset(ComputerActionType) - {ComputerActionType.VERIFY_PROBE}
         )
         action_schema = "|".join(
@@ -1875,7 +1909,7 @@ class ComputerUseAgent:
         )
         efficiency_directive = (
             "2. DIRECT & EFFICIENT: solve the objective with the fewest necessary visible GUI actions.\n"
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else
             "2. DIRECT & EFFICIENT: solve the objective in minimal actions. Combine commands with && if appropriate (e.g. `hostname && df -h`).\n"
         )
@@ -1967,7 +2001,7 @@ class ComputerUseAgent:
                 self._last_thought = (
                     "LLM safety refusal detected; recording refusal for replanning."
                 )
-                if getattr(self, "gui_only", False):
+                if self._gui_action_contract_active():
                     return self._gui_only_recovery_action(
                         goal,
                         "LLM safety refusal detected",
@@ -1995,7 +2029,7 @@ class ComputerUseAgent:
                 parse_target_str, primary_file
             )
             if (
-                getattr(self, "gui_only", False)
+                self._gui_action_contract_active()
                 and expected != _GOAL_COMPLETE_SENTINEL
                 and action_type not in self._GUI_ONLY_ACTIONS
             ):
@@ -2011,7 +2045,7 @@ class ComputerUseAgent:
             if target == "diagnostic-verification" and "LLM safety refusal detected" in expected:
                 self._refusal_recovery_active = True
                 self._last_thought = "Model refusal received; continue from the live visible desktop."
-                if getattr(self, "gui_only", False):
+                if self._gui_action_contract_active():
                     return self._gui_only_recovery_action(
                         goal,
                         "Model refusal received",
@@ -2026,12 +2060,14 @@ class ComputerUseAgent:
             return action_type, target, payload, expected
         except Exception as e:
             self._last_thought_duration = round(time.perf_counter() - t_thought_start, 2)
-            logger.warning("computer_llm_action_failed_diagnostic_fallback", error=str(e))
+            logger.warning("computer_llm_action_failed", error=str(e))
             self._last_thought = ""
-            if getattr(self, "gui_only", False):
-                return self._gui_only_recovery_action(
-                    goal,
-                    "Reasoning failed",
+            if (
+                getattr(self, "gui_only", False)
+                or getattr(self, "execution_plane", "") == "gui"
+            ):
+                return self._reasoning_unavailable_action(
+                    f"GUI reasoning failed: {e}"
                 )
             return self._diagnostic_fallback(primary_file)
         finally:
@@ -3230,9 +3266,9 @@ class ComputerUseAgent:
             self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
             return trace
 
-        if getattr(self, "gui_only", False) and action_type not in self._GUI_ONLY_ACTIONS:
+        if self._gui_action_contract_active() and action_type not in self._GUI_ONLY_ACTIONS:
             actual_obs_str = (
-                f"GUI-only computer blocked {action_type.value}. "
+                f"GUI execution contract blocked {action_type.value}. "
                 "Use visible desktop applications and GUI controls; terminal, "
                 "shell, file, security-tool, and backend execution are unavailable."
             )
@@ -3306,7 +3342,20 @@ class ComputerUseAgent:
                     or getattr(prev_trace, "target_resource", "")
                     or ""
                 ).strip()
-                if curr_path and curr_path == prev_path:
+                content_keys = ("content", "code", "file_content", "text", "data")
+                curr_content = next(
+                    (str(payload[key]) for key in content_keys if payload.get(key) is not None),
+                    "",
+                )
+                prev_content = next(
+                    (
+                        str(prev_payload[key])
+                        for key in content_keys
+                        if isinstance(prev_payload, dict) and prev_payload.get(key) is not None
+                    ),
+                    "",
+                )
+                if curr_path and curr_path == prev_path and curr_content == prev_content:
                     actual_obs_str = "Duplicate consecutive FILE_WRITE to the same file blocked. Run TERMINAL_EXEC to verify the file or call GOAL_COMPLETE if finished."
                     trace = ComputerDecisionTrace(
                         step_index=self.action_counter,
@@ -4035,7 +4084,7 @@ class ComputerUseAgent:
                 if use_motor:
                     if status == ActionExecutionStatus.BLOCKED:
                         pass
-                    elif getattr(self, "gui_only", False):
+                    elif self._gui_action_contract_active():
                         obs_after = await self.computer.gui_action(
                             workspace_id,
                             GUIAction(
@@ -5343,7 +5392,7 @@ class ComputerUseAgent:
             self.scratchpad.extract_from_text(actual_obs_str, source=action_type.value.lower())
 
         # Reflexive backtracking on blocking modal overlays
-        if not getattr(self, "gui_only", False) and hasattr(self, "motor") and self.motor:
+        if not self._gui_action_contract_active() and hasattr(self, "motor") and self.motor:
             lower_obs = actual_obs_str.lower()
             if any(term in lower_obs for term in ("modal_blocked", "blocked by modal", "overlay detected", "dismiss modal")):
                 await self.motor.backtrack(workspace_id, reason="modal_blocked")
@@ -5571,7 +5620,7 @@ class ComputerUseAgent:
         self.recovery_events += 1
         logger.warning("computer_recovery_triggered", action=failed_action_type, error=error_context)
 
-        if getattr(self, "gui_only", False):
+        if self._gui_action_contract_active():
             try:
                 await self.computer.gui_action(
                     workspace_id,
@@ -5823,14 +5872,11 @@ class ComputerUseAgent:
                 f"Visible GUI state: application={obs.active_application!r}; "
                 f"windows={obs.windows!r}; text={visible[:1500]!r}"
             )
-            goal_terms = [
-                term for term in re.findall(r"[a-zA-Z0-9]{3,}", goal.lower())
-                if term not in {"open", "look", "find", "the", "and", "use", "for"}
-            ]
-            visible_lower = visible.lower()
-            matched = sum(1 for term in goal_terms if term in visible_lower)
-            verified = bool(goal_terms) and matched >= max(1, len(goal_terms) // 3)
-            return verified, evidence
+            return False, (
+                f"{evidence}\n"
+                "Visible text alone is not an independent GUI postcondition; "
+                "completion requires the external Judge."
+            )
 
         do_llm = use_llm if use_llm is not None else getattr(self, "enable_llm_verification", False)
         g = goal.lower().strip()
@@ -6030,6 +6076,10 @@ class ComputerUseAgent:
         self._watchdog_aborted = False
         goal_reached = False
         self._last_tool_result = None
+        requires_external_gui_judge = (
+            getattr(self, "execution_plane", "") == "gui"
+            or getattr(self, "gui_only", False)
+        )
         if getattr(self, "_last_mission_goal", None) != goal:
             self._last_mission_goal = goal
             self._replan_count = 0
@@ -6046,7 +6096,7 @@ class ComputerUseAgent:
 
         # Backend bootstrap may inspect/install packages through a shell. It is
         # intentionally unavailable on the GUI-only Computer plane.
-        if not getattr(self, "gui_only", False) and not getattr(self, "_bootstrap_performed", False):
+        if not self._gui_action_contract_active() and not getattr(self, "_bootstrap_performed", False):
             try:
                 from sonic.computer.bootstrap import WorkstationBootstrapEngine
                 bootstrap = WorkstationBootstrapEngine(self.computer)
@@ -6079,6 +6129,17 @@ class ComputerUseAgent:
             # Goal-complete sentinel: the LLM JUDGED the goal achieved — but we
             # do not stop on self-declaration alone. We independently verify.
             if expected == _GOAL_COMPLETE_SENTINEL:
+                if requires_external_gui_judge:
+                    self.history.append({
+                        "action": "GOAL_COMPLETE (awaiting independent Judge)",
+                        "result": (
+                            "The GUI worker proposed completion. Its visible "
+                            "self-check is not treated as proof; route the live "
+                            "desktop and worker receipts to the independent Judge."
+                        ),
+                    })
+                    break
+
                 verified, evidence = await self.verify_goal(workspace_id, goal)
                 if verified:
                     receipt_ok, receipt_note = await self._verify_completion_receipt(goal, evidence)
@@ -6163,6 +6224,12 @@ class ComputerUseAgent:
                         await cb_res
                 except Exception as cb_err:
                     logger.warning("run_mission_step_callback_failed", error=str(cb_err))
+
+            if (
+                action_type == ActionExecutionStatus.BLOCKED
+                and target == "reasoning-unavailable"
+            ):
+                break
 
             if self._interrupted or (callable(interrupt_check) and interrupt_check()):
                 self._interrupted = True
@@ -6319,7 +6386,12 @@ class ComputerUseAgent:
         )
         self.metrics.recovery_events = self.recovery_events
 
-        if not goal_reached and self.metrics.actions_successful > 0 and self.metrics.actions_failed == 0:
+        if (
+            not goal_reached
+            and not requires_external_gui_judge
+            and self.metrics.actions_successful > 0
+            and self.metrics.actions_failed == 0
+        ):
             try:
                 verified, evidence = await self.verify_goal(workspace_id, goal)
                 if verified:

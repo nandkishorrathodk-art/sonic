@@ -565,7 +565,7 @@ def _delta_ocr(img, png_bytes, bbox):
                 try:
                     conf, wx, wy, ww, wh = float(cols[10]), int(cols[6]), int(cols[7]), int(cols[8]), int(cols[9])
                     if conf >= 25.0 and ww > 2 and wh > 2:
-                        added.append({"name": cols[11].strip(), "role": "text", "bbox": [x1 + wx, y1 + wy, x1 + wx + ww, y1 + wy + wh], "source": "ocr"})
+                        added.append({"name": cols[11].strip(), "role": "text", "bbox": [x1 + wx, y1 + wy, x1 + wx + ww, y1 + wy + wh], "bbox_format": "xyxy", "source": "ocr"})
                 except Exception:
                     pass
     merged = kept + added
@@ -611,7 +611,7 @@ def _atspi_and_cdp():
                             if cp:
                                 rc = cp.get_extents(Atspi.CoordType.SCREEN)
                                 if rc and rc.width > 4 and rc.height > 4 and rc.x >= 0 and rc.y >= 0:
-                                    ctrls.append({"name": nm, "role": rn, "bbox": [int(rc.x), int(rc.y), int(rc.x + rc.width), int(rc.y + rc.height)], "source": "atspi"})
+                                    ctrls.append({"name": nm, "role": rn, "bbox": [int(rc.x), int(rc.y), int(rc.x + rc.width), int(rc.y + rc.height)], "bbox_format": "xyxy", "source": "atspi"})
                         for ci in range(min(n.get_child_count(), 16)):
                             ch = n.get_child_at_index(ci)
                             if ch: st.append((ch, dp + 1))
@@ -638,7 +638,8 @@ def _fast_retina_worker():
                         ows.append(lp[7])
                         try:
                             wx, wy, ww, wh = int(lp[2]), int(lp[3]), int(lp[4]), int(lp[5])
-                            wctrls.append({"name": lp[7], "role": "window", "bbox": [max(0, wx), max(0, wy), max(0, wx + ww), max(0, wy + wh)], "source": "x11"})
+                            x0, y0 = max(0, wx), max(0, wy)
+                            wctrls.append({"name": lp[7], "role": "window", "bbox": [x0, y0, max(0, wx + ww), max(0, wy + wh)], "bbox_format": "xyxy", "source": "x11"})
                         except Exception:
                             pass
             b64 = base64.b64encode(png_b).decode("ascii") if png_b else ""
@@ -888,6 +889,7 @@ while True:
                             "name": word,
                             "role": "text",
                             "bbox": (x, y, x + w, y + h),
+                            "bbox_format": "xyxy",
                             "source": "ocr",
                         })
 

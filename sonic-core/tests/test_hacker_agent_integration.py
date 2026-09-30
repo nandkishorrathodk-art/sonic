@@ -167,15 +167,9 @@ class TestHackerAgentIntegration:
         assert "Reflexive backtrack: dismissed blocking modal" in trace.actual_observation
 
     @pytest.mark.asyncio
-    async def test_browser_navigate_enforces_tab_budget(self):
-        """When desktop browser is active, BROWSER_NAVIGATE enforces tab budget via motor reflexes."""
+    async def test_legacy_browser_navigation_requires_live_desktop_evidence(self):
+        """Legacy navigation aliases must use the visible desktop and fail closed without a frame."""
         provider = _mock_provider()
-        # Mock pgrep returning running chromium and subsequent nav command
-        provider.terminal.side_effect = [
-            MagicMock(exit_code=0, stdout="1234\n", stderr=""),  # pgrep -i chromium
-            MagicMock(exit_code=0, stdout="", stderr=""),         # nav_cmd
-        ]
-
         agent = ComputerUseAgent(computer_provider=provider)
         agent.motor.enforce_tab_budget = AsyncMock(return_value=1)
 
@@ -188,4 +182,9 @@ class TestHackerAgentIntegration:
         )
 
         agent.motor.enforce_tab_budget.assert_not_awaited()
-        assert trace.status == ActionExecutionStatus.COMPLETED
+        provider.terminal.assert_not_awaited()
+        assert trace.status in {
+            ActionExecutionStatus.FAILED,
+            ActionExecutionStatus.RECOVERED,
+        }
+        assert "could not be verified from a live screen" in trace.actual_observation

@@ -700,7 +700,7 @@ class BossAgent:
         t_start = time.perf_counter()
 
         prompt = f"""You are SONIC's Boss Agent, coordinating a general-purpose AI-Human Digital Being operating a personal computer workstation.
-Your job is to analyze the user's objective from first principles and decompose it into focused, independent sub-missions for worker agents operating a full personal computer workstation (graphical desktop on DISPLAY=:99 + concurrent headless terminal/developer sandbox).
+Your job is to analyze the user's objective from first principles and decompose it into focused, independent sub-missions for worker agents operating a full personal computer workstation (graphical desktop on DISPLAY=:99 plus a separate headless terminal/developer sandbox).
 
 USER OBJECTIVE: {objective}
 
@@ -713,7 +713,7 @@ Apply target-agnostic first-principles reasoning:
 1. METHODOLOGY:
    - Do not force an application, scanner, protocol, or interaction modality before observing the environment.
    - Boss owns planning, worker selection, task coordination, evidence review, and replanning.
-   - Delegate to general computer-use workers; workers operate the shared workstation through live perception and generic GUI controls, using the terminal only when useful.
+   - Delegate to general computer-use workers. The selected execution plane is a binding per-worker contract: GUI workers use live perception and visible GUI controls; headless workers use terminal and file tools.
    - Each worker receives a clear operational outcome and relevant context, not a scripted action sequence.
 
 Respond with EXACTLY this JSON format (no extra text):
@@ -735,8 +735,9 @@ Respond with EXACTLY this JSON format (no extra text):
 
 Rules:
 - Each sub_mission goal must be FOCUSED and SPECIFIC
-- plane: "gui" for tasks requiring visible desktop interaction or mixed GUI/terminal workflows; "headless" ONLY for strictly non-visual CLI-only tasks
-- Keep multi-application desktop GUI tasks (launching, focusing, and switching between 1, 2, or more desktop GUI windows alongside terminal commands) inside a SINGLE unified sub_mission with plane="gui" and max_steps=30 so window state and visual grounding remain continuous
+- plane: "gui" for tasks requiring visible desktop interaction; "headless" ONLY for strictly non-visual CLI-only tasks
+- GUI workers must stay within visible desktop applications and controls. Do not substitute shell, file, or backend actions when a GUI operation fails; report the limitation or replan through another observed GUI path.
+- Keep multi-application desktop GUI tasks (launching, focusing, and switching between 1, 2, or more desktop GUI windows) inside a SINGLE unified sub_mission with plane="gui" and max_steps=30 so window state and visual grounding remain continuous
 - depends_on: list of sub_mission IDs that must complete before this worker starts
 - max_steps should be 10-30 depending on task complexity
 - priority: higher number = execute first

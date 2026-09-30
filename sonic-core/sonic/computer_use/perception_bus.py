@@ -82,6 +82,7 @@ def _extract_control_data(control: Any) -> dict[str, Any] | None:
         name = str(control.get("name") or control.get("text") or "").strip()
         role = str(control.get("role") or control.get("tag") or "").strip()
         bbox = control.get("bbox")
+        bbox_format = str(control.get("bbox_format") or "xywh").strip().lower()
         raw_attrs = control.get("attributes")
         attrs: dict[str, Any] = dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
         for k in ("placeholder", "aria-label", "aria_label", "id", "name", "type", "value", "title", "selector"):
@@ -95,6 +96,7 @@ def _extract_control_data(control: Any) -> dict[str, Any] | None:
         name = str(getattr(control, "name", "") or getattr(control, "text", "") or "").strip()
         role = str(getattr(control, "role", "") or getattr(control, "tag", "") or "").strip()
         bbox = getattr(control, "bbox", None)
+        bbox_format = str(getattr(control, "bbox_format", "xywh") or "xywh").strip().lower()
         raw_attrs = getattr(control, "attributes", None)
         attrs = dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
         for k in ("placeholder", "aria-label", "aria_label", "id", "name", "type", "value", "title", "selector"):
@@ -108,6 +110,13 @@ def _extract_control_data(control: Any) -> dict[str, Any] | None:
     try:
         clean_bbox = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
     except (ValueError, TypeError):
+        return None
+    if bbox_format == "xyxy":
+        x1, y1, x2, y2 = clean_bbox
+        clean_bbox = (x1, y1, x2 - x1, y2 - y1)
+    elif bbox_format != "xywh":
+        return None
+    if clean_bbox[2] <= 0 or clean_bbox[3] <= 0:
         return None
 
     # Must have at least some identifiable content
@@ -244,6 +253,7 @@ class SemanticTargetIndex:
         self._index: dict[str, TargetMatch] = {}
         self._confidences: dict[str, float] = {}
         self._matches: list[TargetMatch] = []
+        self._ambiguous_keys: set[str] = set()
 
     @property
     def version(self) -> int:
@@ -256,6 +266,7 @@ class SemanticTargetIndex:
             self._index.clear()
             self._confidences.clear()
             self._matches.clear()
+            self._ambiguous_keys.clear()
             if state_version is not None:
                 self._version = state_version
 
@@ -422,6 +433,12 @@ class SemanticTargetIndex:
                     key_clean = key_str.strip().lower()
                     if not key_clean:
                         continue
+                    existing_match = self._index.get(key_clean)
+                    if (
+                        existing_match is not None
+                        and existing_match.bbox != match.bbox
+                    ):
+                        self._ambiguous_keys.add(key_clean)
                     existing_conf = self._confidences.get(key_clean, -1.0)
                     if key_clean not in self._index or k_conf > existing_conf:
                         self._index[key_clean] = match
@@ -541,37 +558,57 @@ class SemanticTargetIndex:
                 return None
 
             # 1. Exact query match
-            match = self._index.get(q)
+            match = None if q in self._ambiguous_keys else self._index.get(q)
             if match is not None:
                 return match
 
             # 2. Whitespace-normalized
             q_norm = re.sub(r"\s+", " ", q)
-            match = self._index.get(q_norm)
+            match = (
+                None
+                if q_norm in self._ambiguous_keys
+                else self._index.get(q_norm)
+            )
             if match is not None:
                 return match
 
             # 3. Slugs (kebab, snake, compact)
             q_kebab = re.sub(r"[\s_]+", "-", q_norm)
-            match = self._index.get(q_kebab)
+            match = (
+                None
+                if q_kebab in self._ambiguous_keys
+                else self._index.get(q_kebab)
+            )
             if match is not None:
                 return match
 
             q_snake = re.sub(r"[\s\-]+", "_", q_norm)
-            match = self._index.get(q_snake)
+            match = (
+                None
+                if q_snake in self._ambiguous_keys
+                else self._index.get(q_snake)
+            )
             if match is not None:
                 return match
 
             q_compact = re.sub(r"[^a-z0-9]", "", q_norm)
             if len(q_compact) >= 2:
-                match = self._index.get(q_compact)
+                match = (
+                    None
+                    if q_compact in self._ambiguous_keys
+                    else self._index.get(q_compact)
+                )
                 if match is not None:
                     return match
 
             # 4. Punctuation-stripped query (e.g. "Search...", "Submit!")
             q_clean_punct = re.sub(r"^[^\w]+|[^\w]+$", "", q_norm)
             if q_clean_punct and q_clean_punct != q_norm:
-                match = self._index.get(q_clean_punct)
+                match = (
+                    None
+                    if q_clean_punct in self._ambiguous_keys
+                    else self._index.get(q_clean_punct)
+                )
                 if match is not None:
                     return match
 
