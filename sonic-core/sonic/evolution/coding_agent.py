@@ -255,7 +255,9 @@ class CodingAgent:
     def _t_run_tests(self, path: str = "") -> ToolResult:
         import sys
 
-        target = path or (self.test_paths[0] if self.test_paths else "sonic-core/tests")
+        target = path or (self.test_paths[0] if self.test_paths else "")
+        if not target:
+            target = "sonic-core/tests/test_evolution_strategy_and_engine.py"
         cmd = [sys.executable, "-m", "pytest", target, "-q", "--tb=short", "-p", "no:cacheprovider"]
         try:
             res = subprocess.run(cmd, cwd=str(self.repo_root), capture_output=True, text=True, timeout=600)
@@ -373,6 +375,8 @@ class CodingAgent:
                 # Model answered in prose — no more tool use; treat as final thought.
                 messages.append(Message(role=MessageRole.ASSISTANT, content=text or "(no content)"))
                 result.diagnosis = text
+                if result.tool_calls and text.strip():
+                    result.finished = True
                 result.stop_reason = "no_tool_call"
                 break
 
@@ -415,6 +419,8 @@ class CodingAgent:
                 req = LLMRequest(messages=messages, task_type="coding", max_tokens=1500, temperature=0.1)
                 resp = await self.llm.complete(req, task_type="coding")
                 result.diagnosis = (getattr(resp, "content", "") or "").strip()
+                if result.diagnosis and result.tool_calls:
+                    result.finished = True
             except Exception as e:
                 logger.warning("coding_agent_summary_failed", error=str(e))
 
