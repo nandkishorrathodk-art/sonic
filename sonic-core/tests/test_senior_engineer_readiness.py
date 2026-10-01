@@ -14,6 +14,7 @@ Verifies with real execution receipts (zero fake success):
 """
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any
 import pytest
@@ -57,11 +58,25 @@ class _SequencedLLM:
 
 
 @pytest.mark.no_live_infra
+class _ConfirmingVisionLLM:
+    async def complete(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        return LLMResponse(
+            content='{"verdict":"CONFIRMED","visible_evidence":"The requested application is visible."}',
+            model="test-vision-judge",
+            provider="local",
+            usage={"total_tokens": 8},
+        )
+
+
 @pytest.mark.asyncio
 async def test_pillar_1_and_8_live_api_login_workstation_being_vault_and_human_resume(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Verifies Auth Login, Workstation State, Being/Vault inspection, and WAITING_FOR_HUMAN -> Resume."""
     monkeypatch.setenv("SONIC_MEMORY_DB_PATH", str(tmp_path / "mem.db"))
     monkeypatch.setenv("SONIC_BEING_DB_PATH", str(tmp_path / "being.db"))
+    monkeypatch.setenv(
+        "SONIC_BEING_VAULT_KEY",
+        base64.urlsafe_b64encode(b"test-only-key-material-32-bytes!").decode("ascii"),
+    )
     reset_being_singleton()
 
     client = TestClient(app)
@@ -234,10 +249,11 @@ async def test_pillar_2_to_7_senior_engineer_full_workflow_observation_subagents
     mgr = SubagentTeamworkManager(
         parent_agent=parent_agent,
         computer_provider=provider,
-        llm_router=None,  # Force deterministic JudgeAgent + verification_command check
+        llm_router=_ConfirmingVisionLLM(),
         safety=policy,
         tenant_id="t-senior",
     )
+    # Keep the worker's action sequence independent from the vision Judge.
     mgr.llm_router = sub_llm
 
     convs = await mgr.invoke_subagents(
@@ -265,7 +281,10 @@ async def test_pillar_2_to_7_senior_engineer_full_workflow_observation_subagents
     assert conv.agent_instance.execution_plane == "gui"
     assert conv.agent_instance.gui_only is False
     # Self-correction & Empirical Judge verified
-    assert conv.correction_rounds_used == 1
+    assert conv.correction_rounds_used == 1, (
+        f"expected one correction round; verdict={conv.judge_verdict}, "
+        f"notes={conv.judge_notes!r}, state={conv.state_detail!r}"
+    )
     assert conv.verified is True
     assert conv.judge_verdict == "CONFIRMED"
     # Merged into parent workspace while preserving user's existing uncommitted file!
@@ -278,6 +297,10 @@ async def test_pillar_2_to_7_senior_engineer_full_workflow_observation_subagents
 def test_pillar_9_persistent_being_mind_vault_and_craft_across_restart(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Verifies Being identity, BeingMind learned facts, BeingVault credentials, and BeingCraft survive restart."""
     monkeypatch.setenv("SONIC_BEING_DB_PATH", str(tmp_path / "being_persist.db"))
+    monkeypatch.setenv(
+        "SONIC_BEING_VAULT_KEY",
+        base64.urlsafe_b64encode(b"test-only-key-material-32-bytes!").decode("ascii"),
+    )
     monkeypatch.setenv("SONIC_CRAFT_DIR", str(tmp_path / "craft"))
     reset_being_singleton()
 
@@ -331,5 +354,3 @@ def test_pillar_7_and_10_git_injection_pkill_scope_and_subagent_action_types(tmp
     for act_name in ("DEFINE_SUBAGENT", "INVOKE_SUBAGENT", "SEND_MESSAGE", "MANAGE_SUBAGENTS"):
         assert hasattr(ComputerActionType, act_name)
         assert policy.evaluate(act_name, "self", {}).allowed
-
-

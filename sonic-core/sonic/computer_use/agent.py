@@ -1,21 +1,9 @@
-"""
-SONIC-REDA — Autonomous Computer-Use Agent Engine (Phase 3: real reasoning)
-==========================================================================
-Closed-loop autonomous engineer that operates the SONIC Computer to
-investigate, inspect, edit, build, test, debug, verify, and remediate code.
-
-Phase 3 replaced the step-indexed hardcoded script with genuine
-observe → reason (LLM) → act → observe-result reasoning. The agent carries
-its action history and the live screen/terminal observation into each LLM
-call, so its next action is a function of (goal, observation, history) — not
-of a step counter. No vulnerability-specific fix is hardcoded anywhere.
-"""
+"""General-purpose computer-use worker for SONIC's shared workstation."""
 
 from __future__ import annotations
 
 import ast
 import asyncio
-import base64
 import contextlib
 import hashlib
 import inspect
@@ -271,7 +259,6 @@ class ComputerUseAgent:
         max_actions: int = 50,
         max_recovery_attempts: int = 5,
         llm_router: Any | None = None,
-        browser: Any | None = None,
         security_tools: dict[str, Any] | None = None,
         safety: Any | None = None,
         self_host: bool = False,
@@ -333,9 +320,8 @@ class ComputerUseAgent:
             except Exception:
                 llm_router = None
         self.llm_router = llm_router  # ModelRouter for LLM-driven reasoning
-        # Optional BrowserAgent so the same observe->reason->act loop can drive a
-        # real web browser (navigate/click/type/screenshot) — unified computer-use.
-        self.browser = browser
+        if "browser" in kwargs:
+            raise TypeError("Browser adapters were removed; use the visible desktop GUI worker")
         self.vault = kwargs.get("vault")
         if self.vault is None:
             try:
@@ -345,11 +331,6 @@ class ComputerUseAgent:
                 self.vault = BeingVault(_b)
             except Exception:
                 self.vault = None
-        if self.browser is not None and getattr(self.browser, "vault", None) is None and self.vault is not None:
-            try:
-                self.browser.vault = self.vault
-            except Exception:
-                pass
         # Optional registry of SecurityTool adapters (name -> tool) the agent can
         # invoke as a first-class reasoning action. Tools execute in-sandbox and
         # fail closed; their structured findings feed back into the observation.
@@ -444,9 +425,6 @@ class ComputerUseAgent:
         # what makes the agent adaptive: step N's action depends on step N-1's
         # observed outcome, not on a pre-written script.
         self.history: list[dict[str, str]] = []
-        # Last captured browser page state, carried into the next observation so
-        # the LLM sees the current page even between browser actions.
-        self._last_browser_snapshot: Any | None = None
         # Last structured security-tool result, surfaced to the next reasoning
         # step so the LLM acts on real scan findings rather than a claim.
         self._last_tool_result: Any | None = None
@@ -465,7 +443,7 @@ class ComputerUseAgent:
         self._consecutive_unchanged_screens: int = 0
         self._goal_complete_declared: bool = False
         self._replan_count: int = 0
-        self._last_navigated_url: str = ""
+        self._last_gui_navigation_target: str = ""
         self._recent_action_signatures: list[tuple[str, str, str]] = []
         self._last_action_output: dict[str, Any] = {}
         self._last_gui_action_result: dict[str, Any] = {}
@@ -525,8 +503,6 @@ class ComputerUseAgent:
         checks = {
             "active_window": getattr(snapshot, "active_window", ""),
             "visible_text": getattr(snapshot, "visible_text", ""),
-            "browser_url": (getattr(snapshot, "browser_state", {}) or {}).get("url", ""),
-            "url": (getattr(snapshot, "browser_state", {}) or {}).get("url", ""),
         }
         for key, expected in postcondition.items():
             if key in {"require_state_change", "screen_changed"}:
@@ -578,7 +554,6 @@ class ComputerUseAgent:
                 or current.windows != before.windows
                 or current.visible_text != before.visible_text
                 or current.controls != before.controls
-                or current.browser_state != before.browser_state
             )
             if current.version <= before.version:
                 return {"ok": False}
@@ -612,6 +587,13 @@ class ComputerUseAgent:
         """Signal the agent to stop its active mission loop immediately."""
         self._interrupted = True
 
+    def _gui_action_contract_active(self) -> bool:
+        """Return whether this worker must stay within visible GUI actions."""
+        return bool(
+            getattr(self, "gui_only", False)
+            or str(getattr(self, "execution_plane", "") or "").lower().strip() == "gui"
+        )
+
     async def _llm_decompose_goal(self, goal: str) -> SubGoalChecklist | None:
         """Use LLM to decompose the mission goal into concrete, actionable sub-goals."""
         from sonic.llm.schemas import LLMRequest, Message, MessageRole
@@ -625,7 +607,7 @@ class ComputerUseAgent:
         action_examples = (
             "Use only visible GUI actions such as launching/focusing an application, "
             "clicking, typing, keypresses, scrolling, dragging, waiting, and observing."
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else
             "Each sub-goal must be a specific concrete action (for example, inspect a response, "
             "author a probe, or launch an application and verify its window)."
@@ -711,9 +693,8 @@ class ComputerUseAgent:
 
         The terminal output is read from a real (cheap) probe so the agent
         reacts to what is actually on the screen/terminal, not a placeholder.
-        When a browser is attached, the current page state (url, title,
-        interactive elements) is folded into the observation so the same
-        reasoning loop can drive web interaction.
+        The current application state is grounded in the visible desktop
+        observation so the same reasoning loop can operate any GUI workflow.
         """
         if getattr(self, "execution_plane", "") == "headless":
             screen_obs = ScreenObservation(
@@ -737,6 +718,7 @@ class ComputerUseAgent:
                 detected_controls=[],
                 desktop_state="NOT_REQUESTED",
             )
+        screen_received_at_ns = time.perf_counter_ns()
         # Store screenshot for vision-in-the-loop (VLM image input)
         self._last_screenshot_b64 = getattr(screen_obs, "screenshot_base64", "")
         # Track real screen dimensions so coordinate actions can be validated
@@ -789,7 +771,7 @@ class ComputerUseAgent:
                         )
                 except Exception as exc:
                     logger.debug("application_inventory_unavailable", error=str(exc))
-            if getattr(self, "gui_only", False):
+            if self._gui_action_contract_active():
                 files = []
                 git_st = None
             else:
@@ -806,8 +788,8 @@ class ComputerUseAgent:
         if not hasattr(self, "_last_gui_action_result"):
             self._last_gui_action_result: dict[str, Any] = {}
         try:
-            if getattr(self, "gui_only", False):
-                raise RuntimeError("GUI-only computer: terminal observation disabled")
+            if self._gui_action_contract_active():
+                raise RuntimeError("GUI execution contract: terminal observation is outside this worker's action plane")
             last_out = self._last_action_output
             terminal_output = ""
             if last_out and last_out.get("stdout", "").strip():
@@ -853,26 +835,15 @@ class ComputerUseAgent:
                     terminal_output = term_out or f"Exit {getattr(term_res, 'exit_code', 0)}"
         except Exception:
             terminal_output = (
-                "GUI-only computer: terminal observation disabled"
-                if getattr(self, "gui_only", False)
+                "GUI execution contract: terminal observation disabled"
+                if self._gui_action_contract_active()
                 else f"Terminal Ready ({len(status.running_processes)} procs)"
             )
 
-        if not hasattr(self, "_last_navigated_url"):
-            self._last_navigated_url = ""
+        if not hasattr(self, "_last_gui_navigation_target"):
+            self._last_gui_navigation_target = ""
         if not hasattr(self, "_recent_action_signatures"):
             self._recent_action_signatures = []
-
-        browser_state = {
-            "url": self._last_navigated_url or "about:blank",
-            "title": "Desktop Browser" if self._last_navigated_url else "New Tab",
-            "interactive_elements": [],
-        }
-        if self.browser is not None:
-            try:
-                browser_state = await self._observe_browser()
-            except Exception as e:
-                logger.warning("browser_observe_failed", error=str(e))
 
         perception_snapshot = self.perception_bus.publish(
             screenshot_base64=self._last_screenshot_b64,
@@ -883,32 +854,9 @@ class ComputerUseAgent:
             processes=status.running_processes,
             visible_text=getattr(screen_obs, "visible_text", ""),
             controls=getattr(screen_obs, "detected_controls", []),
-            browser_state=browser_state,
         )
         if getattr(self, "skill_ledger", None) is not None:
             self.skill_ledger.observe_applications(list(status.open_applications))
-        win_offset_x, win_offset_y = browser_state.get("window_offset") or (0, 0)
-        for element in browser_state.get("interactive_elements", []):
-            if not isinstance(element, dict) or not element.get("bbox"):
-                continue
-            bbox = element["bbox"]
-            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-                continue
-            query = str(element.get("text") or element.get("selector") or "").strip()
-            if query and element.get("visible", True):
-                adjusted_bbox = (
-                    int(bbox[0] + win_offset_x),
-                    int(bbox[1] + win_offset_y),
-                    int(bbox[2]),
-                    int(bbox[3]),
-                )
-                self.perception_bus.register_target(
-                    query,
-                    adjusted_bbox,
-                    source="browser_dom",
-                    confidence=0.98,
-                    state_version=perception_snapshot.version,
-                )
         pending_skill = getattr(self, "_pending_skill_context", None)
         if pending_skill is not None and getattr(self, "skill_ledger", None) is not None:
             pending_trace, before_graph = pending_skill
@@ -955,65 +903,19 @@ class ComputerUseAgent:
             processes=running_procs,
             terminal_output=_safe_str(terminal_output),
             working_directory=working_directory or "/home/daytona",
-            browser_state=browser_state,
             ide_state={"active_file": file_names[0] if file_names else "", "cursor_line": 1},
             git_branch=branch_val,
             git_clean=git_st.is_clean if hasattr(git_st, "is_clean") else True,
             perception_version=perception_snapshot.version,
             perception_latency_ns=self.perception_bus.last_update_latency_ns,
+            observation_age_ms=(
+                screen_obs.capture_age_ms
+                + (time.perf_counter_ns() - screen_received_at_ns) / 1_000_000
+                if screen_obs.capture_age_ms is not None
+                else None
+            ),
+            observation_received_monotonic_ns=screen_received_at_ns,
         )
-
-    async def _observe_browser(self) -> dict[str, Any]:
-        """Capture the current browser page state for reasoning.
-
-        Prefers the browser's LIVE page state (which reflects post-click/type
-        navigation), falling back to the last navigated snapshot. Refreshes the
-        interactive-element list so the LLM sees what it can click/type.
-        """
-        url, title = "about:blank", "New Tab"
-        if hasattr(self.browser, "current_page_state"):
-            try:
-                import inspect
-                res = self.browser.current_page_state()
-                if inspect.isawaitable(res):
-                    url, title = await res
-                else:
-                    url, title = res
-            except Exception:
-                pass
-        elif self._last_browser_snapshot:
-            url = getattr(self._last_browser_snapshot, "url", url)
-            title = getattr(self._last_browser_snapshot, "title", title)
-
-        elements: list[dict[str, Any]] = []
-        elem_fn = getattr(self.browser, "find_interactive_elements", None) or getattr(self.browser, "get_interactive_elements", None)
-        if elem_fn is not None:
-            try:
-                import inspect
-                res = elem_fn()
-                if inspect.isawaitable(res):
-                    raw_el = await res
-                else:
-                    raw_el = res
-                elements = [
-                    {
-                        "tag": getattr(e, "tag", ""),
-                        "text": getattr(e, "text", ""),
-                        "selector": getattr(e, "selector", ""),
-                        "visible": getattr(e, "is_visible", True),
-                        "bbox": getattr(e, "bbox", None),
-                    }
-                    if not isinstance(e, dict) else e
-                    for e in (raw_el or [])
-                ]
-            except Exception as el_err:
-                logger.debug("browser_interactive_elements_failed", error=str(el_err))
-
-        return {
-            "url": url,
-            "title": title,
-            "interactive_elements": elements,
-        }
 
     # =============================================================
     # 2. Closed-Loop Reasoning & Action Selection
@@ -1023,7 +925,7 @@ class ComputerUseAgent:
         goal: str,
         observation: ComputerWorldObservation,
         step_index: int = 1,
-    ) -> tuple[ComputerActionType, str, dict[str, Any], str]:
+    ) -> tuple[ComputerActionType | ActionExecutionStatus, str, dict[str, Any], str]:
         """Choose the next action dynamically based on observation and goal.
 
         Decide the next action from (goal, observation, history).
@@ -1036,6 +938,7 @@ class ComputerUseAgent:
 
         Returns: (action_type, target_resource, payload_dict, predicted_outcome)
         """
+        self._refresh_observation_age(observation)
         target_files = observation.filesystem_files or []
         code_files = [f for f in target_files if f.endswith((".py", ".js", ".ts", ".go", ".rs", ".sh")) and not f.startswith("test_")]
         test_files = [f for f in target_files if f.startswith("test_") or f.endswith(("_test.py", ".test.js", ".test.ts"))]
@@ -1060,7 +963,33 @@ class ComputerUseAgent:
         if self.llm_router is not None:
             return await self._llm_choose_action(goal, observation, step_index, primary_file, test_file)
 
+        if getattr(self, "gui_only", False) or getattr(self, "execution_plane", "") == "gui":
+            return self._reasoning_unavailable_action(
+                "No reasoning model is configured for this GUI worker."
+            )
+
         return self._diagnostic_fallback(primary_file)
+
+    @staticmethod
+    def _reasoning_unavailable_action(
+        reason: str,
+    ) -> tuple[ActionExecutionStatus, str, dict[str, Any], str]:
+        return (
+            ActionExecutionStatus.BLOCKED,
+            "reasoning-unavailable",
+            {},
+            reason,
+        )
+
+    @staticmethod
+    def _refresh_observation_age(observation: ComputerWorldObservation) -> None:
+        received_at_ns = observation.observation_received_monotonic_ns
+        capture_age_ms = observation.screen.capture_age_ms
+        if received_at_ns is None or capture_age_ms is None:
+            observation.observation_age_ms = None
+            return
+        elapsed_ns = max(0, time.perf_counter_ns() - received_at_ns)
+        observation.observation_age_ms = capture_age_ms + elapsed_ns / 1_000_000
 
     @staticmethod
     def _gui_only_recovery_action(
@@ -1311,7 +1240,7 @@ class ComputerUseAgent:
         """Build the (system_prompt, user_prompt) the LLM reasons over.
 
         The user prompt embeds the LIVE observation — screen visible text,
-        terminal output, files, git state, browser page — and the full
+        terminal output, files, git state, and the full
         action/result history, so the model's decision is a function of the
         current world state and what it has already done, not a step counter.
         """
@@ -1357,39 +1286,7 @@ class ComputerUseAgent:
         test_file_str = test_file or "UNKNOWN"
         available_tools = ", ".join(sorted(self.security_tools.keys())) if self.security_tools else "UNKNOWN"
 
-        bs = observation.browser_state or {}
-        browser_lines = ""
-        active_url = (
-            bs.get("url")
-            if (bs.get("url") and bs.get("url") != "about:blank")
-            else getattr(self, "_last_navigated_url", "")
-        )
-        if self.browser is not None:
-            elements = bs.get("interactive_elements", [])
-            if has_live_pixels:
-                elements = elements[:5]
-            el_summary = ", ".join(
-                f"{e.get('tag', '?')}[{e.get('selector', '')}]:'{e.get('text', '')}'"
-                for e in elements[:10]
-            ) or "(no interactive elements)"
-            browser_lines = (
-                (f"Browser active URL: {active_url}\n" if active_url else "")
-                + f"Browser page: url={bs.get('url', 'about:blank')}, "
-                f"title={bs.get('title', '')}\n"
-                f"Interactive elements: {el_summary}\n"
-            )
-        elif active_url:
-            browser_lines = f"Desktop browser page: url={active_url}\nBrowser active URL: {active_url}\n"
-
         anti_loop_banner = ""
-        if active_url:
-            anti_loop_banner = (
-                f"ACTIVE BROWSER PAGE: '{active_url}' is ALREADY loaded in the active desktop browser tab.\n"
-                f"ANTI-LOOP PROGRESSION RULE: Do NOT emit BROWSER_NAVIGATE to '{active_url}' again! "
-                "The page is already open on screen. You MUST interact directly with the visible page: "
-                "use GUI_CLICK on buttons, input fields, links, or search bars (using coordinates or element names like 'search bar', 'explore', 'connect wallet'), "
-                "or use GUI_TYPE, GUI_SCROLL, or another visible GUI action to make forward progress.\n"
-            )
 
         recent_sigs = getattr(self, "_recent_action_signatures", [])
         if len(recent_sigs) >= 2:
@@ -1480,8 +1377,6 @@ class ComputerUseAgent:
         # Present structured observations and let the LLM synthesize its own
         # epistemic state — no pre-packaged "what I know" templates.
         raw_facts: list[str] = []
-        if active_url:
-            raw_facts.append(f"Browser URL: {active_url}")
         if files_str != "UNKNOWN":
             raw_facts.append(f"Workspace files: {files_str}")
         if active_app != "UNKNOWN":
@@ -1624,12 +1519,16 @@ class ComputerUseAgent:
         max_act = getattr(self, "max_actions", 50)
         compact = bool(getattr(self, "_compact_mode", False))
 
-        browser_content = browser_lines.strip() if browser_lines else "None"
+        application_content = (
+            f"Active application: {active_app}\n"
+            f"Open windows: {windows_str}\n"
+            f"Visible content: {screen_text}"
+        )
         tool_content = tool_lines.strip() if tool_lines else "None"
         gui_policy_text = (
-            "GUI-ONLY MODE: use visible GUI applications and GUI actions only. "
+            "GUI EXECUTION CONTRACT: use visible GUI applications and GUI actions only. "
             "Do not use terminal, shell, file, script, package, security-tool, or backend actions."
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else
             "Operator toolkit is separate from the graphical desktop and may be used only when appropriate."
         )
@@ -1674,7 +1573,7 @@ class ComputerUseAgent:
             f"Open Windows (Currently Running X11 Windows): {windows_str}\n"
             f"Available Installed Desktop Applications: {installed_str}\n"
             f"Screen Visible Content: {screen_text}\n"
-            f"Browser State: {browser_content}\n\n"
+            f"Desktop Application State:\n{application_content}\n\n"
             f"=== EXECUTION & TOOLKIT CAPABILITIES ===\n"
             f"{gui_policy_text}\n"
             f"Last Command Output: {terminal_text}\n"
@@ -1804,10 +1703,10 @@ class ComputerUseAgent:
         capability_directive = (
             "Use only visible GUI applications and graphical controls; do not use terminal, "
             "shell, scripts, files, packages, or backend tools.\n"
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else
             "You have full freedom to operate 1, 2, or N desktop GUI applications (`APP_LAUNCH`, `APP_FOCUS`, `GUI_*`),\n"
-            "browse web applications (`BROWSER_*`), write files (`FILE_WRITE`), manage Git (`GIT_*`), and run terminal commands (`TERMINAL_EXEC`).\n"
+            "complete operator-requested online workflows through the visible desktop, write files (`FILE_WRITE`), manage Git (`GIT_*`), and run terminal commands (`TERMINAL_EXEC`).\n"
         )
         target_header += (
             "================================================================================\n"
@@ -1817,14 +1716,25 @@ class ComputerUseAgent:
             "Think: 'What is the fastest, most effective way to accomplish this objective on my workstation?\n"
             "Which GUI application window or terminal command should I use right now?'\n"
             f"{capability_directive}"
+            f"GUI ACTION COORDINATES: In GUI action TARGET/PAYLOAD fields, use actual screen pixels "
+            f"(x=0..{max(0, screen_w - 1)}, y=0..{max(0, screen_h - 1)}), not normalized values. "
+            "Only the separate multimodal grounding response uses normalized 0-1000 coordinates.\n"
             "================================================================================\n\n"
         )
         init_ctx = getattr(self, "initial_context", {}) or {}
-        if init_ctx.get("delegated_plane") != "headless":
+        if init_ctx.get("delegated_plane") == "gui":
+            target_header += (
+                "=== VISIBLE WORKSTATION APPLICATION PLANE ===\n"
+                "This worker is assigned a visible desktop objective. Use observed GUI applications and controls only; "
+                "if an application is unavailable, report the limitation or choose another observed GUI path. "
+                "Do not switch to terminal, shell, or filesystem actions.\n"
+                "=============================================\n\n"
+            )
+        elif init_ctx.get("delegated_plane") != "headless":
             target_header += (
                 "=== FULL DUAL-PLANE AGENCY (DESKTOP GUI :99 + TERMINAL/FILE SANDBOX) ===\n"
                 "You are an AI-Human Being & Engineer operating BOTH your graphical desktop (:99) and your terminal/file sandbox:\n"
-                "- When the mission asks to operate desktop GUI applications, browse websites, or interact with visual tools, actively use your graphical desktop plane (`APP_LAUNCH`, `APP_FOCUS`, `GUI_CLICK`, `GUI_TYPE`, `GUI_MOVE`, `GUI_KEYPRESS`, `BROWSER_*`).\n"
+                "- When the mission asks to operate desktop GUI applications or interact with visual tools, actively use your graphical desktop plane (`APP_LAUNCH`, `APP_FOCUS`, `GUI_CLICK`, `GUI_TYPE`, `GUI_MOVE`, `GUI_KEYPRESS`).\n"
                 "- When the mission asks for source code, build scripts, tests, or CLI commands (`pwd`, `ls`, `git`, `pytest`), use `TERMINAL_EXEC` and `FILE_WRITE`.\n"
                 "- Both planes work together: you can launch apps on screen and verify them with commands or inspect files while interacting with GUI windows.\n"
                 "- To delegate parallel modules into isolated branch workspaces, use `DEFINE_SUBAGENT` and `INVOKE_SUBAGENT`.\n"
@@ -1864,22 +1774,6 @@ class ComputerUseAgent:
                 + obs_summary
             )
         obs_summary = target_header + obs_summary
-        if active_url and active_url != "about:blank":
-            norm_active = active_url.rstrip("/").lower()
-            goal_urls = [u.rstrip("/").lower() for u in (targets.get("urls") or [])]
-            if (
-                norm_active in goal_urls
-                or (primary_dest and norm_active == primary_dest.rstrip("/").lower())
-                or norm_active in goal.lower()
-            ):
-                obs_summary = (
-                    f"=== ANTI-LOOP NAVIGATION RULE ===\n"
-                    f"The target URL '{active_url}' is ALREADY loaded in the browser. "
-                    f"Do NOT call BROWSER_NAVIGATE to '{active_url}' again. Interact with the loaded page (e.g. BROWSER_CLICK, BROWSER_TYPE, GUI_CLICK, GUI_TYPE) or call GOAL_COMPLETE if finished.\n"
-                    f"=================================\n\n"
-                    + obs_summary
-                )
-
         # Select system prompt based on model capability
         if compact:
             try:
@@ -1945,7 +1839,7 @@ class ComputerUseAgent:
         step_index: int,
         primary_file: str,
         test_file: str,
-    ) -> tuple[ComputerActionType, str, dict[str, Any], str]:
+    ) -> tuple[ComputerActionType | ActionExecutionStatus, str, dict[str, Any], str]:
         """Use the LLM to decide the next action from goal + observation + history."""
         from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
 
@@ -1953,7 +1847,7 @@ class ComputerUseAgent:
             goal, observation, step_index, primary_file, test_file
         )
         # Only attach image content when gui_only is True, when the immediately
-        # preceding action was GUI_SCREENSHOT / BROWSER_SCREENSHOT, or when a
+        # preceding action was GUI_SCREENSHOT, or when a
         # unit test explicitly injected _last_screenshot_b64 without observe().
         prev_action_list = getattr(self, "action_history", None) or getattr(self, "traces", None) or []
         prev_act_type = getattr(prev_action_list[-1], "action_type", None) if prev_action_list else None
@@ -1963,7 +1857,6 @@ class ComputerUseAgent:
             or getattr(self, "gui_only", False)
             or prev_act_type in (
                 ComputerActionType.GUI_SCREENSHOT,
-                ComputerActionType.BROWSER_SCREENSHOT,
                 ComputerActionType.APP_LAUNCH,
                 ComputerActionType.APP_FOCUS,
                 ComputerActionType.APP_MAXIMIZE,
@@ -2008,7 +1901,7 @@ class ComputerUseAgent:
 
         available_actions = (
             self._GUI_ONLY_ACTIONS
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else frozenset(ComputerActionType) - {ComputerActionType.VERIFY_PROBE}
         )
         action_schema = "|".join(
@@ -2016,7 +1909,7 @@ class ComputerUseAgent:
         )
         efficiency_directive = (
             "2. DIRECT & EFFICIENT: solve the objective with the fewest necessary visible GUI actions.\n"
-            if getattr(self, "gui_only", False)
+            if self._gui_action_contract_active()
             else
             "2. DIRECT & EFFICIENT: solve the objective in minimal actions. Combine commands with && if appropriate (e.g. `hostname && df -h`).\n"
         )
@@ -2108,7 +2001,7 @@ class ComputerUseAgent:
                 self._last_thought = (
                     "LLM safety refusal detected; recording refusal for replanning."
                 )
-                if getattr(self, "gui_only", False):
+                if self._gui_action_contract_active():
                     return self._gui_only_recovery_action(
                         goal,
                         "LLM safety refusal detected",
@@ -2136,7 +2029,7 @@ class ComputerUseAgent:
                 parse_target_str, primary_file
             )
             if (
-                getattr(self, "gui_only", False)
+                self._gui_action_contract_active()
                 and expected != _GOAL_COMPLETE_SENTINEL
                 and action_type not in self._GUI_ONLY_ACTIONS
             ):
@@ -2152,7 +2045,7 @@ class ComputerUseAgent:
             if target == "diagnostic-verification" and "LLM safety refusal detected" in expected:
                 self._refusal_recovery_active = True
                 self._last_thought = "Model refusal received; continue from the live visible desktop."
-                if getattr(self, "gui_only", False):
+                if self._gui_action_contract_active():
                     return self._gui_only_recovery_action(
                         goal,
                         "Model refusal received",
@@ -2167,12 +2060,14 @@ class ComputerUseAgent:
             return action_type, target, payload, expected
         except Exception as e:
             self._last_thought_duration = round(time.perf_counter() - t_thought_start, 2)
-            logger.warning("computer_llm_action_failed_diagnostic_fallback", error=str(e))
+            logger.warning("computer_llm_action_failed", error=str(e))
             self._last_thought = ""
-            if getattr(self, "gui_only", False):
-                return self._gui_only_recovery_action(
-                    goal,
-                    "Reasoning failed",
+            if (
+                getattr(self, "gui_only", False)
+                or getattr(self, "execution_plane", "") == "gui"
+            ):
+                return self._reasoning_unavailable_action(
+                    f"GUI reasoning failed: {e}"
                 )
             return self._diagnostic_fallback(primary_file)
         finally:
@@ -2196,6 +2091,29 @@ class ComputerUseAgent:
         # Strip trailing punctuation/quotes
         s = s.strip(" *_\n\r\t`\"'.,:;")
         return s.lower()
+
+    @staticmethod
+    def _window_matches_application(app_name: str, window_title: str) -> bool:
+        """Match an arbitrary app request to a live desktop window title."""
+        try:
+            requested = shlex.split(app_name.strip())[0]
+        except (ValueError, IndexError):
+            requested = app_name.strip().split(maxsplit=1)[0] if app_name.strip() else ""
+        requested = os.path.splitext(os.path.basename(requested))[0].lower()
+        title = window_title.lower()
+        requested_key = re.sub(r"[^a-z0-9]+", "", requested)
+        title_key = re.sub(r"[^a-z0-9]+", "", title)
+        if not requested_key or not title_key:
+            return False
+        if requested_key in title_key:
+            return True
+        requested_words = set(re.findall(r"[a-z0-9]{3,}", requested))
+        title_words = set(re.findall(r"[a-z0-9]{3,}", title))
+        return (
+            bool(requested_words)
+            and len(requested_words & title_words)
+            >= max(1, math.ceil(len(requested_words) * 0.6))
+        )
 
     @classmethod
     def _resolve_app_binary(cls, target: str) -> str:
@@ -2661,7 +2579,7 @@ class ComputerUseAgent:
                 payload["path"] = target
 
         if action_type in (ComputerActionType.GUI_TYPE, ComputerActionType.BROWSER_TYPE):
-            # GUI and browser typing is strictly for text inputs, not shell commands.
+            # GUI text entry is strictly for visible input controls, not shell commands.
             if not payload.get("text"):
                 fallback_txt = fields.get("TEXT") or fields.get("CONTENT") or ""
                 if fallback_txt:
@@ -3111,14 +3029,32 @@ class ComputerUseAgent:
             self.safety = None
         self.action_counter += 1
         t_start = time.perf_counter()
+        legacy_gui_actions = {
+            ComputerActionType.BROWSER_CLICK: ComputerActionType.GUI_CLICK,
+            ComputerActionType.BROWSER_TYPE: ComputerActionType.GUI_TYPE,
+            ComputerActionType.BROWSER_KEYPRESS: ComputerActionType.GUI_KEYPRESS,
+            ComputerActionType.BROWSER_SCROLL: ComputerActionType.GUI_SCROLL,
+            ComputerActionType.BROWSER_SCREENSHOT: ComputerActionType.GUI_SCREENSHOT,
+            ComputerActionType.BROWSER_WAIT: ComputerActionType.GUI_WAIT,
+        }
+        if action_type == ComputerActionType.BROWSER_SCROLL:
+            delta_y = payload.get("delta_y", payload.get("delta"))
+            if delta_y is not None:
+                payload = {**payload, "delta": -3 if int(delta_y) > 0 else 3}
+        if action_type in (ComputerActionType.BROWSER_CLICK, ComputerActionType.BROWSER_TYPE):
+            target_resource = str(
+                payload.get("selector") or payload.get("target") or target_resource
+            )
+        if action_type == ComputerActionType.BROWSER_KEYPRESS:
+            target_resource = str(payload.get("key") or target_resource)
+        if action_type in legacy_gui_actions:
+            action_type = legacy_gui_actions[action_type]
         actual_obs_str = ""
         status = ActionExecutionStatus.COMPLETED
         recovery_needed = False
         visual_stall_detected = False
         action_exit_code: int | None = None
         action_stderr: str = ""
-        browser_status_code: int | None = None
-        browser_response_body = ""
         typing_validation_error = ""
         if action_type == ComputerActionType.GUI_TYPE:
             raw_text = str(payload.get("text") or payload.get("value") or payload.get("input") or "")
@@ -3330,9 +3266,9 @@ class ComputerUseAgent:
             self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
             return trace
 
-        if getattr(self, "gui_only", False) and action_type not in self._GUI_ONLY_ACTIONS:
+        if self._gui_action_contract_active() and action_type not in self._GUI_ONLY_ACTIONS:
             actual_obs_str = (
-                f"GUI-only computer blocked {action_type.value}. "
+                f"GUI execution contract blocked {action_type.value}. "
                 "Use visible desktop applications and GUI controls; terminal, "
                 "shell, file, security-tool, and backend execution are unavailable."
             )
@@ -3406,7 +3342,20 @@ class ComputerUseAgent:
                     or getattr(prev_trace, "target_resource", "")
                     or ""
                 ).strip()
-                if curr_path and curr_path == prev_path:
+                content_keys = ("content", "code", "file_content", "text", "data")
+                curr_content = next(
+                    (str(payload[key]) for key in content_keys if payload.get(key) is not None),
+                    "",
+                )
+                prev_content = next(
+                    (
+                        str(prev_payload[key])
+                        for key in content_keys
+                        if isinstance(prev_payload, dict) and prev_payload.get(key) is not None
+                    ),
+                    "",
+                )
+                if curr_path and curr_path == prev_path and curr_content == prev_content:
                     actual_obs_str = "Duplicate consecutive FILE_WRITE to the same file blocked. Run TERMINAL_EXEC to verify the file or call GOAL_COMPLETE if finished."
                     trace = ComputerDecisionTrace(
                         step_index=self.action_counter,
@@ -4092,15 +4041,15 @@ class ComputerUseAgent:
                     status = ActionExecutionStatus.BLOCKED
                     action_exit_code = 126
                 else:
-                    # Settle focus and clear field if motor reflexes available
+                    # Only treat an explicit window name as a window target;
+                    # target_resource is usually a field label such as "search".
                     if hasattr(self, "motor") and self.motor:
-                        try:
-                            if hasattr(self.motor, "settle_focus"):
-                                await self.motor.settle_focus(workspace_id, target_window=target_resource)
-                            if hasattr(self.motor, "clear_field"):
-                                await self.motor.clear_field(workspace_id)
-                        except Exception:
-                            pass
+                        target_window = payload.get("window") or payload.get("window_title")
+                        if target_window and hasattr(self.motor, "settle_focus"):
+                            await self.motor.settle_focus(
+                                workspace_id,
+                                target_window=str(target_window),
+                            )
                 if focus_x is not None and focus_y is not None:
                     focus_err = self._validate_coordinates(
                         ComputerActionType.GUI_CLICK,
@@ -4119,6 +4068,14 @@ class ComputerUseAgent:
                                 y=int(focus_y),
                             ),
                         )
+                if (
+                    status != ActionExecutionStatus.BLOCKED
+                    and payload.get("clear_field") is True
+                    and hasattr(self, "motor")
+                    and self.motor
+                    and hasattr(self.motor, "clear_field")
+                ):
+                    await self.motor.clear_field(workspace_id)
                 use_motor = bool(
                     hasattr(self, "motor")
                     and self.motor
@@ -4127,7 +4084,7 @@ class ComputerUseAgent:
                 if use_motor:
                     if status == ActionExecutionStatus.BLOCKED:
                         pass
-                    elif getattr(self, "gui_only", False):
+                    elif self._gui_action_contract_active():
                         obs_after = await self.computer.gui_action(
                             workspace_id,
                             GUIAction(
@@ -4305,6 +4262,12 @@ class ComputerUseAgent:
                     app_request = app_name
                     if extra_arg:
                         app_request = f"{app_request} {str(extra_arg).strip()}"
+                    before_status = await self.computer.status(workspace_id)
+                    windows_before = {
+                        str(window).strip()
+                        for window in (getattr(before_status, "open_applications", None) or [])
+                        if str(window).strip()
+                    }
                     if hasattr(self.computer, "launch_application"):
                         launched = await self.computer.launch_application(workspace_id, app_request)
                         if not launched:
@@ -4319,7 +4282,31 @@ class ComputerUseAgent:
                     screen = await self.computer.screenshot(workspace_id)
                     self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
                     self._update_screen_dims(screen)
-                    active_w = getattr(screen, "active_window", "") or app_name
+                    screen_state = str(getattr(screen, "desktop_state", "") or "").upper()
+                    active_w = str(getattr(screen, "active_window", "") or "").strip()
+                    after_status = await self.computer.status(workspace_id)
+                    if not active_w:
+                        active_w = str(getattr(after_status, "active_window", "") or "").strip()
+                    windows_after = {
+                        str(window).strip()
+                        for window in (getattr(after_status, "open_applications", None) or [])
+                        if str(window).strip()
+                    }
+                    newly_focused_window = active_w in windows_after and active_w not in windows_before
+                    if (
+                        screen_state == "NO_DISPLAY"
+                        or not self._last_screenshot_b64
+                        or active_w.lower() in {"", "desktop"}
+                        or not (
+                            self._window_matches_application(app_name, active_w)
+                            or newly_focused_window
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"application '{app_name}' did not produce a verified, focused GUI window "
+                            f"(active window: {active_w or 'unknown'}; "
+                            f"open windows: {sorted(windows_after)})"
+                        )
                     actual_obs_str = f"Launched and focused {app_name} (active window: {active_w})"
 
             elif action_type == ComputerActionType.APP_CLOSE:
@@ -4730,280 +4717,80 @@ class ComputerUseAgent:
                     elif "." in url and " " not in url:
                         url = f"https://{url}"
 
-                if self.browser is not None:
-                    snap = await self.browser.navigate(url)
-                    self._last_browser_snapshot = snap
-                    final_url = str(getattr(snap, "url", "") or "").strip()
-                    raw_status = getattr(snap, "status_code", None)
-                    browser_status_code = int(raw_status) if raw_status is not None else 200
-                    browser_response_body = str(getattr(snap, "html_content", "") or "")[:300]
-                    if not final_url or browser_status_code <= 0:
-                        raise RuntimeError("browser navigation produced no verified page response")
-                    self._last_navigated_url = final_url
-                    actual_obs_str = (
-                        f"Navigated to {final_url} "
-                        f"(HTTP {browser_status_code}, title: {getattr(snap, 'title', '')})"
+                await self.computer.gui_action(
+                    workspace_id,
+                    GUIAction(action=GUIActionType.KEYPRESS, key="ctrl+l"),
+                )
+                await self.computer.gui_action(
+                    workspace_id,
+                    GUIAction(action=GUIActionType.TYPE, text=url, delay_ms=25),
+                )
+                await self.computer.gui_action(
+                    workspace_id,
+                    GUIAction(action=GUIActionType.KEYPRESS, key="Return"),
+                )
+                await asyncio.sleep(0.5)
+                screen = await self.computer.screenshot(workspace_id)
+                self._update_screen_dims(screen)
+                if (
+                    getattr(screen, "desktop_state", "") == "NO_DISPLAY"
+                    or not getattr(screen, "screenshot_base64", "")
+                ):
+                    raise RuntimeError(
+                        "visible application navigation could not be verified from a live screen"
                     )
-                elif getattr(self, "gui_only", False):
-                    await self.computer.gui_action(
-                        workspace_id,
-                        GUIAction(action=GUIActionType.KEYPRESS, key="ctrl+l"),
-                    )
-                    await self.computer.gui_action(
-                        workspace_id,
-                        GUIAction(action=GUIActionType.TYPE, text=url, delay_ms=25),
-                    )
-                    await self.computer.gui_action(
-                        workspace_id,
-                        GUIAction(action=GUIActionType.KEYPRESS, key="Return"),
-                    )
-                    await asyncio.sleep(0.5)
-                    screen = await self.computer.screenshot(workspace_id)
-                    if (
-                        getattr(screen, "desktop_state", "") == "NO_DISPLAY"
-                        or (
-                            not getattr(screen, "screenshot_base64", "")
-                            and getattr(screen, "active_window", "Desktop") == "Desktop"
-                        )
-                    ):
-                        raise RuntimeError("visible browser navigation could not be verified from a live screen")
-                    self._last_navigated_url = url
-                    actual_obs_str = f"Navigated visible browser application to {url}"
-                else:
-                    is_same_url = getattr(self, "_last_navigated_url", "") == url
-                    disp = os.environ.get("DISPLAY", ":99" if hasattr(self.computer, "_docker_exec") or getattr(self.computer, "name", "") == "DockerComputerProvider" else ":0")
-                    # Dynamically discover any active browser window via wmctrl -lx without hardcoding
-                    win_probe = await self.computer.terminal(workspace_id, f"DISPLAY={disp} wmctrl -lx 2>/dev/null")
-                    browser_win_id = ""
-                    if win_probe and win_probe.stdout:
-                        for line in win_probe.stdout.splitlines():
-                            line_l = line.lower()
-                            if "http" in line_l or "www" in line_l or "://" in line_l or "browser" in line_l or "web" in line_l:
-                                parts = line.split()
-                                if parts and parts[0].startswith("0x"):
-                                    browser_win_id = parts[0]
-                                    break
-
-                    if is_same_url and browser_win_id:
-                        # Re-focus existing browser without spawning duplicate tabs
-                        focus_cmd = f"export DISPLAY={disp}; (wmctrl -i -a {browser_win_id} || xdotool windowactivate {browser_win_id})"
-                        focus_result = await self.computer.terminal(workspace_id, focus_cmd)
-                        if getattr(focus_result, "exit_code", 1) != 0:
-                            raise RuntimeError("existing browser window could not be focused")
-                        self._last_navigated_url = url
-                        actual_obs_str = (
-                            f"Browser is already active on {url}. Existing tab focused (duplicate tab prevented). "
-                            "Proceed to interact with the webpage via GUI_CLICK on buttons, search bar, or scroll."
-                        )
-                    elif browser_win_id:
-                        # Reuse existing browser window: focus, focus address bar via ctrl+l, type URL and press Return
-                        nav_cmd = (
-                            f"export DISPLAY={disp}; (xdotool windowactivate --sync {browser_win_id} || wmctrl -i -a {browser_win_id}) && "
-                            f"DISPLAY={disp} xdotool key --clearmodifiers ctrl+l sleep 0.1 type --delay 15 -- {shlex.quote(url)} key Return 2>/dev/null"
-                        )
-                        nav_result = await self.computer.terminal(workspace_id, nav_cmd)
-                        if getattr(nav_result, "exit_code", 1) != 0:
-                            raise RuntimeError("active browser navigation command failed")
-                        self._last_navigated_url = url
-                        if hasattr(self, "motor") and self.motor:
-                            await self.motor.enforce_tab_budget(workspace_id, max_tabs=3)
-                        actual_obs_str = f"Navigated active browser tab to {url} (tab reused via address bar)"
-                    else:
-                        # Resolve the system's configured browser through POSIX
-                        # alternatives and desktop-entry metadata, without
-                        # naming a vendor-specific application.
-                        b_probe = await self.computer.terminal(
-                            workspace_id,
-                            "for alt in x-www-browser sensible-browser xdg-open; do "
-                            "command -v \"$alt\" 2>/dev/null && break; "
-                            "done; "
-                            "if ! command -v \"$alt\" >/dev/null 2>&1; then "
-                            "desktop=$(xdg-settings get default-web-browser 2>/dev/null); "
-                            "for d in /usr/share/applications/$desktop "
-                            "$HOME/.local/share/applications/$desktop; do "
-                            "[ -f \"$d\" ] || continue; "
-                            "exec_line=$(grep -m1 '^Exec=' \"$d\" 2>/dev/null | cut -d= -f2-); "
-                            "bin=$(printf '%s\\n' \"$exec_line\" | awk '{print $1}'); "
-                            "command -v \"$bin\" 2>/dev/null && break; "
-                            "done; "
-                            "fi",
-                        )
-                        browser_bin = b_probe.stdout.strip() if (b_probe and b_probe.stdout.strip()) else ""
-                        if not browser_bin:
-                            self._last_navigated_url = url
-                            actual_obs_str = (
-                                "No application was selected or launched; "
-                                "no compatible application was discovered in the live workstation state."
-                            )
-                            browser_bin = ""
-                        if browser_bin:
-                            cmd = (
-                                f"DISPLAY={disp} nohup {shlex.quote(browser_bin)} "
-                                f"{shlex.quote(url)} >/tmp/sonic_app_launch.log 2>&1 &"
-                            )
-                            launch_result = await self.computer.terminal(workspace_id, cmd)
-                            if getattr(launch_result, "exit_code", 1) != 0:
-                                raise RuntimeError("application launch command failed")
-                            await asyncio.sleep(0.5)
-                            screen = await self.computer.screenshot(workspace_id)
-                            if (
-                                getattr(screen, "desktop_state", "") == "NO_DISPLAY"
-                                or (
-                                    not getattr(screen, "screenshot_base64", "")
-                                    and getattr(screen, "active_window", "Desktop") == "Desktop"
-                                )
-                            ):
-                                raise RuntimeError("application launch could not be verified from a live screen")
-                            self._last_navigated_url = url
-                            actual_obs_str = f"Launched discovered application and navigated to {url}"
+                self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "") or ""
+                self._last_gui_navigation_target = url
+                actual_obs_str = "Entered the requested destination through the visible desktop and captured its screen"
 
                 if hasattr(self, "scratchpad") and self.scratchpad:
                     self.scratchpad.extract_from_text(url, source="url")
-                if (
-                    browser_status_code is not None
-                    and hasattr(self, "wire_telemetry")
-                    and self.wire_telemetry
-                    and url.startswith("http")
-                ):
-                    self.wire_telemetry.record_wire_event(
-                        method="GET",
-                        url=url,
-                        status_code=browser_status_code,
-                        response_body=browser_response_body,
-                    )
-                if url.startswith("http"):
-                    await self.check_and_resolve_intercept_deadlock(workspace_id)
-
-            elif action_type == ComputerActionType.BROWSER_CLICK:
-                selector = payload.get("selector") or target_resource
-                if self.browser is not None:
-                    ok = await self.browser.click(selector)
-                    actual_obs_str = f"Clicked {selector}" if ok else f"Click failed: {selector}"
-                    if not ok:
-                        recovery_needed = True
-                    await self.check_and_resolve_intercept_deadlock(workspace_id)
-                else:
-                    screen_w = getattr(self, "_screen_width", 1280)
-                    screen_h = getattr(self, "_screen_height", 800)
-                    res_coords: tuple[int, int] | None = None
-                    if getattr(self, "perception_bus", None) is not None and selector:
-                        semantic_match = self.perception_bus.resolve(str(selector))
-                        if semantic_match is not None:
-                            bx, by, bw, bh = semantic_match.bbox
-                            res_coords = (bx + max(0, bw // 2), by + max(0, bh // 2))
-
-                    if res_coords is None:
-                        async def _ground_browser_click(
-                            q: str, b64: str, w: int = screen_w, h: int = screen_h
-                        ) -> tuple[int, int] | None:
-                            return await query_multimodal_grounding(
-                                llm_router=self.llm_router,
-                                query=q,
-                                screenshot_b64=b64,
-                                width=w,
-                                height=h,
-                            )
-
-                        res_coords = await resolve_ui_target_async(
-                            str(selector),
-                            screenshot_b64=self._last_screenshot_b64,
-                            width=screen_w,
-                            height=screen_h,
-                            screen_width=screen_w,
-                            screen_height=screen_h,
-                            grounding_fn=_ground_browser_click if getattr(self, "llm_router", None) else None,
-                            allow_landmarks=False,
-                        )
-                    if res_coords is not None:
-                        cx, cy = res_coords
-                        obs_after = await self.computer.gui_action(
-                            workspace_id,
-                            GUIAction(action=GUIActionType.CLICK, x=cx, y=cy),
-                        )
-                        post_b64 = getattr(obs_after, "screenshot_base64", "") if obs_after else ""
-                        if post_b64:
-                            self._last_screenshot_b64 = post_b64
-                            self._prev_screenshot_hash = hashlib.md5(post_b64.encode()).hexdigest()
-                        actual_obs_str = f"Clicked browser element '{selector}' via visual grounding at ({cx}, {cy})"
-                    else:
-                        actual_obs_str = f"Browser element '{selector}' could not be resolved from screen; re-observing."
-                        status = ActionExecutionStatus.FAILED
-
             elif action_type == ComputerActionType.BROWSER_SELECT:
                 selector = str(payload.get("selector") or target_resource or "").strip()
                 val = str(payload.get("value") or payload.get("option") or payload.get("label") or "").strip()
-                if self.browser is not None and hasattr(self.browser, "select_option"):
-                    ok = await self.browser.select_option(selector, val)
-                    actual_obs_str = f"Selected '{val}' in {selector}" if ok else f"Select option failed for {selector}"
-                    if not ok:
-                        status = ActionExecutionStatus.FAILED
+                selector_coords = await resolve_visible_desktop_target(selector)
+                if selector_coords is None or not val:
+                    actual_obs_str = (
+                        f"Could not visually resolve the selection control and option "
+                        f"'{val}' on the shared desktop"
+                    )
+                    status = ActionExecutionStatus.FAILED
                 else:
-                    selector_coords = await resolve_visible_desktop_target(selector)
-                    if selector_coords is None or not val:
+                    select_obs = await self.computer.gui_action(
+                        workspace_id,
+                        GUIAction(
+                            action=GUIActionType.CLICK,
+                            x=selector_coords[0],
+                            y=selector_coords[1],
+                        ),
+                    )
+                    self._update_screen_dims(select_obs)
+                    select_image = getattr(select_obs, "screenshot_base64", "")
+                    if not select_image:
                         actual_obs_str = (
-                            f"Could not visually resolve the selection control and option "
-                            f"'{val}' on the shared desktop"
+                            f"Opened selection control '{selector}', but the updated desktop "
+                            "image is unavailable; option selection was not attempted"
                         )
                         status = ActionExecutionStatus.FAILED
                     else:
-                        select_obs = await self.computer.gui_action(
-                            workspace_id,
-                            GUIAction(
-                                action=GUIActionType.CLICK,
-                                x=selector_coords[0],
-                                y=selector_coords[1],
-                            ),
-                        )
-                        self._update_screen_dims(select_obs)
-                        select_image = getattr(select_obs, "screenshot_base64", "")
-                        if not select_image:
+                        self._last_screenshot_b64 = select_image
+                        option_coords = await resolve_visible_desktop_target(val)
+                        if option_coords is None:
                             actual_obs_str = (
-                                f"Opened selection control '{selector}', but the updated desktop "
-                                "image is unavailable; option selection was not attempted"
+                                f"Opened selection control '{selector}', but option '{val}' "
+                                "could not be grounded on the updated desktop"
                             )
                             status = ActionExecutionStatus.FAILED
                         else:
-                            self._last_screenshot_b64 = select_image
-                            option_coords = await resolve_visible_desktop_target(val)
-                            if option_coords is None:
-                                actual_obs_str = (
-                                    f"Opened selection control '{selector}', but option '{val}' "
-                                    "could not be grounded on the updated desktop"
-                                )
-                                status = ActionExecutionStatus.FAILED
-                            else:
-                                await self.computer.gui_action(
-                                    workspace_id,
-                                    GUIAction(
-                                        action=GUIActionType.CLICK,
-                                        x=option_coords[0],
-                                        y=option_coords[1],
-                                    ),
-                                )
-                                actual_obs_str = f"Selected visible option '{val}' via desktop grounding"
-
-            elif action_type == ComputerActionType.BROWSER_KEYPRESS:
-                key = str(payload.get("key") or target_resource or "Return").strip()
-                if self.browser is not None and hasattr(self.browser, "press_key"):
-                    ok = await self.browser.press_key(key)
-                    actual_obs_str = f"Pressed key '{key}' in browser" if ok else f"Browser keypress failed: {key}"
-                else:
-                    await self.computer.gui_action(workspace_id, GUIAction(action=GUIActionType.KEYPRESS, key=key))
-                    actual_obs_str = f"Pressed key '{key}' via GUI keyboard"
-
-            elif action_type == ComputerActionType.BROWSER_SCROLL:
-                delta_y = int(payload.get("delta_y") or payload.get("delta") or 500)
-                if self.browser is not None and hasattr(self.browser, "scroll"):
-                    ok = await self.browser.scroll(delta_y=delta_y)
-                    actual_obs_str = f"Scrolled browser page by {delta_y}px" if ok else "Browser scroll failed"
-                else:
-                    def_x = getattr(self, "_screen_width", 1280) // 2
-                    def_y = getattr(self, "_screen_height", 800) // 2
-                    await self.computer.gui_action(
-                        workspace_id,
-                        GUIAction(action=GUIActionType.SCROLL, x=def_x, y=def_y, scroll_delta=-3 if delta_y > 0 else 3),
-                    )
-                    actual_obs_str = f"Scrolled browser window via GUI scroll (delta={delta_y})"
+                            await self.computer.gui_action(
+                                workspace_id,
+                                GUIAction(
+                                    action=GUIActionType.CLICK,
+                                    x=option_coords[0],
+                                    y=option_coords[1],
+                                ),
+                            )
+                            actual_obs_str = f"Selected visible option '{val}' via desktop grounding"
 
             elif action_type == ComputerActionType.WAIT_FOR_HUMAN:
                 reason = str(payload.get("reason") or payload.get("prompt") or target_resource or "Human assistance requested (CAPTCHA/OTP/2FA)").strip()
@@ -5012,133 +4799,14 @@ class ComputerUseAgent:
                 status = ActionExecutionStatus.WAITING_FOR_HUMAN
                 actual_obs_str = f"WAITING_FOR_HUMAN: {reason}"
 
-            elif action_type == ComputerActionType.BROWSER_TYPE:
-                selector = str(payload.get("selector") or target_resource or "").strip(" *_\n\r\t`\"'")
-                text = str(
-                    payload.get("text")
-                    or payload.get("value")
-                    or payload.get("query")
-                    or payload.get("input")
-                    or ""
-                )
-
-                if not text.strip():
-                    actual_obs_str = f"BROWSER_TYPE blocked: no text supplied for {selector or 'target'}"
-                    status = ActionExecutionStatus.BLOCKED
-                    action_exit_code = 126
-                elif self.browser is not None:
-                    ok = await self.browser.type_text(selector, text)
-                    actual_obs_str = f"Typed {len(text)} chars into {selector}" if ok else f"Type failed: {selector}"
-                    if not ok:
-                        recovery_needed = True
-                else:
-                    res_coords = await resolve_visible_desktop_target(selector)
-                    if not text.strip():
-                        actual_obs_str = f"BROWSER_TYPE blocked: no text supplied for {selector or 'target'}"
-                        status = ActionExecutionStatus.BLOCKED
-                        action_exit_code = 126
-                    elif res_coords is None:
-                        actual_obs_str = (
-                            f"BROWSER_TYPE failed: visible desktop control '{selector or 'target'}' "
-                            "could not be grounded; no text was typed"
-                        )
-                        status = ActionExecutionStatus.FAILED
-                    else:
-                        cx, cy = res_coords
-                        await self.computer.gui_action(
-                            workspace_id,
-                            GUIAction(action=GUIActionType.TYPE, x=cx, y=cy, text=text),
-                        )
-                        if payload.get("submit") is True or payload.get("press_enter") is True:
-                            await self.computer.gui_action(
-                                workspace_id,
-                                GUIAction(action=GUIActionType.KEYPRESS, key="Return"),
-                            )
-                        actual_obs_str = f"Typed {len(text)} chars into visually grounded desktop control '{selector}'"
-
-            elif action_type == ComputerActionType.BROWSER_SCREENSHOT:
-                if self.browser is not None:
-                    snap = None
-                    if hasattr(self.browser, "screenshot") and callable(self.browser.screenshot):
-                        snap = await self.browser.screenshot()
-                    elif hasattr(self.browser, "_page") and self.browser._page:
-                        try:
-                            screenshot_bytes = await self.browser._page.screenshot(full_page=True, type="png")
-                            screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-                            url = self.browser._page.url or ""
-                            title = await self.browser._page.title()
-                            from sonic.agents.browser_agent import PageSnapshot
-                            snap = PageSnapshot(
-                                url=url,
-                                title=title,
-                                status_code=getattr(self._last_browser_snapshot, "status_code", 200),
-                                html_content=await self.browser._page.content() if hasattr(self.browser._page, "content") else "",
-                                screenshot_b64=screenshot_b64,
-                            )
-                        except Exception as e:
-                            logger.debug("browser_page_screenshot_error", error=str(e))
-                    elif hasattr(self.browser, "current_page_state"):
-                        try:
-                            url, title = await self.browser.current_page_state()
-                            if self._last_browser_snapshot:
-                                snap = self._last_browser_snapshot
-                            else:
-                                from sonic.agents.browser_agent import PageSnapshot
-                                snap = PageSnapshot(url=url, title=title, status_code=200, html_content="", screenshot_b64="")
-                        except Exception:
-                            snap = self._last_browser_snapshot
-                    else:
-                        snap = self._last_browser_snapshot
-
-                    if snap is not None:
-                        self._last_browser_snapshot = snap
-                        b64 = getattr(snap, "screenshot_b64", "")
-                        if b64:
-                            self._last_screenshot_b64 = b64
-                        url_str = getattr(snap, "url", "") or (getattr(self._last_browser_snapshot, "url", "") if self._last_browser_snapshot else "")
-                        actual_obs_str = f"Screenshot captured: {url_str}"
-                    else:
-                        url_str = getattr(self._last_browser_snapshot, "url", "") if self._last_browser_snapshot else ""
-                        actual_obs_str = f"Screenshot captured: {url_str}"
-                else:
-                    screen = await self.computer.screenshot(workspace_id)
-                    self._update_screen_dims(screen)
-                    actual_obs_str = f"Desktop screenshot captured ({screen.width}x{screen.height})"
-
-            elif action_type == ComputerActionType.BROWSER_WAIT:
-                # Wait for a page element to render before clicking it — a human
-                # waits for a download button or "Next" to appear.
-                selector = payload.get("selector") or target_resource
-                if self.browser is not None and selector:
-                    ok = await self.browser.wait_for_element(selector)
-                    actual_obs_str = f"Element {selector} ready" if ok else f"Element {selector} not found within timeout"
-                    if not ok:
-                        status = ActionExecutionStatus.FAILED
-                        recovery_needed = False
-                else:
-                    actual_obs_str = "Browser wait unsupported: no browser page is available to verify the selector"
-                    status = ActionExecutionStatus.FAILED
-                    recovery_needed = False
-
             elif action_type == ComputerActionType.BROWSER_DOWNLOAD:
-                # Human step: click a download link on the website and save the
-                # file to the sandbox workspace. save_path is confined to the
-                # workspace root by the safety gate (FILE_WRITE-style).
                 selector = payload.get("selector") or target_resource
-                save_path = payload.get("save_path") or payload.get("path")
-                if self.browser is None:
-                    actual_obs_str = "Download requires BrowserAgent (Playwright)"
-                    recovery_needed = True
-                elif not selector or not save_path:
-                    actual_obs_str = "BROWSER_DOWNLOAD requires selector and save_path"
-                    recovery_needed = True
-                else:
-                    ok = await self.browser.download(selector, save_path)
-                    if ok:
-                        actual_obs_str = f"Downloaded {selector} to {save_path}"
-                    else:
-                        actual_obs_str = f"Download failed: {selector}"
-                        recovery_needed = True
+                actual_obs_str = (
+                    f"Dedicated download is unavailable; use visible GUI actions to activate "
+                    f"'{selector}' and handle the application's save dialog"
+                )
+                status = ActionExecutionStatus.FAILED
+                recovery_needed = False
 
             elif action_type == ComputerActionType.SECURITY_TOOL:
                 tool_name = payload.get("tool", target_resource)
@@ -5520,6 +5188,7 @@ class ComputerUseAgent:
                             llm=self.llm_router,
                             vector_memory=get_vector_memory(),
                             toolsmith=self.toolsmith,
+                            tenant_id=self.tenant_id,
                         )
                     except Exception as e:
                         logger.warning("lazy_method_lab_init_failed", error=str(e))
@@ -5697,14 +5366,14 @@ class ComputerUseAgent:
 
         # Closed-loop Target Feedback to Self-Evolution Engine
         # Only security-tool scans evolve offensive strategies / MethodLab.
-        # Workstation GUI, terminal, file, git, or browser operations must never trigger exploit synthesis.
+        # Workstation GUI, terminal, file, or git operations must never trigger exploit synthesis.
         if (
             action_type == ComputerActionType.SECURITY_TOOL
             and status in (ActionExecutionStatus.FAILED, ActionExecutionStatus.RECOVERED)
             and getattr(self, "evolution_engine", None) is not None
         ):
             try:
-                target_str = target_resource or str(self._last_action_output.get("target", "")) or self._last_navigated_url or "target"
+                target_str = target_resource or str(self._last_action_output.get("target", "")) or self._last_gui_navigation_target or "target"
                 evo_result = await self.evolution_engine.handle_target_failure(
                     raw_output=actual_obs_str,
                     exit_code=action_exit_code if action_exit_code is not None else 1,
@@ -5723,7 +5392,7 @@ class ComputerUseAgent:
             self.scratchpad.extract_from_text(actual_obs_str, source=action_type.value.lower())
 
         # Reflexive backtracking on blocking modal overlays
-        if not getattr(self, "gui_only", False) and hasattr(self, "motor") and self.motor:
+        if not self._gui_action_contract_active() and hasattr(self, "motor") and self.motor:
             lower_obs = actual_obs_str.lower()
             if any(term in lower_obs for term in ("modal_blocked", "blocked by modal", "overlay detected", "dismiss modal")):
                 await self.motor.backtrack(workspace_id, reason="modal_blocked")
@@ -5801,7 +5470,7 @@ class ComputerUseAgent:
         self.traces.append(trace)
         # Store the real action output so observe() reads real terminal data
         # instead of a dummy probe. Strictly for sandbox command executions (TERMINAL_EXEC, SECURITY_TOOL).
-        # GUI and Browser actions must NOT write into _last_action_output!
+        # GUI actions must NOT write into _last_action_output!
         if action_type in (
             ComputerActionType.TERMINAL_EXEC,
             ComputerActionType.SECURITY_TOOL,
@@ -5951,7 +5620,7 @@ class ComputerUseAgent:
         self.recovery_events += 1
         logger.warning("computer_recovery_triggered", action=failed_action_type, error=error_context)
 
-        if getattr(self, "gui_only", False):
+        if self._gui_action_contract_active():
             try:
                 await self.computer.gui_action(
                     workspace_id,
@@ -6135,16 +5804,6 @@ class ComputerUseAgent:
 
         return None
 
-    async def check_and_resolve_intercept_deadlock(
-        self,
-        workspace_id: str,
-        screen_observation: Any | None = None,
-    ) -> bool:
-        """
-        Generic application window resolution to ensure browser and desktop workflows do not deadlock.
-        """
-        return False
-
     def _verification_probe_for_goal(self, goal: str) -> VerificationProbe | None:
         """Infer only fixed-shape probes; never accept a shell command as input."""
         normalized = goal.lower().strip()
@@ -6213,43 +5872,14 @@ class ComputerUseAgent:
                 f"Visible GUI state: application={obs.active_application!r}; "
                 f"windows={obs.windows!r}; text={visible[:1500]!r}"
             )
-            goal_terms = [
-                term for term in re.findall(r"[a-zA-Z0-9]{3,}", goal.lower())
-                if term not in {"open", "look", "find", "the", "and", "use", "for"}
-            ]
-            visible_lower = visible.lower()
-            matched = sum(1 for term in goal_terms if term in visible_lower)
-            verified = bool(goal_terms) and matched >= max(1, len(goal_terms) // 3)
-            return verified, evidence
+            return False, (
+                f"{evidence}\n"
+                "Visible text alone is not an independent GUI postcondition; "
+                "completion requires the external Judge."
+            )
 
         do_llm = use_llm if use_llm is not None else getattr(self, "enable_llm_verification", False)
         g = goal.lower().strip()
-        browser = getattr(self, "browser", None)
-        if browser is not None and hasattr(browser, "current_page_state"):
-            try:
-                page_state = browser.current_page_state()
-                if inspect.isawaitable(page_state):
-                    page_state = await page_state
-                if isinstance(page_state, tuple) and len(page_state) >= 2:
-                    page_url, page_title = str(page_state[0] or ""), str(page_state[1] or "")
-                    page_state_text = f"{page_url} {page_title}".lower()
-                    evidence = f"Observed browser state: url={page_url!r}; title={page_title!r}"
-                    auth_goal = any(term in g for term in ("log in", "login", "sign in", "authenticate"))
-                    auth_landing = any(
-                        term in page_state_text
-                        for term in ("dashboard", "account", "profile", "logout", "sign out", "welcome")
-                    )
-                    health_goal = any(term in g for term in ("health", "healthy", "service status"))
-                    healthy_state = any(term in page_state_text for term in ("healthy", "health: ok", "status: ok", "ready"))
-                    if auth_goal and auth_landing and page_url and page_url != self._last_navigated_url:
-                        return True, evidence + "; authenticated landing state observed"
-                    if health_goal and healthy_state and any(
-                        term in page_state_text for term in ("health", "status", "ready")
-                    ):
-                        return True, evidence + "; positive service state observed"
-            except Exception as exc:
-                logger.warning("browser_goal_verification_failed", error=str(exc))
-
         tool_result = getattr(self, "_last_tool_result", None)
         if tool_result is not None:
             tool_status = getattr(tool_result, "status", "")
@@ -6446,6 +6076,10 @@ class ComputerUseAgent:
         self._watchdog_aborted = False
         goal_reached = False
         self._last_tool_result = None
+        requires_external_gui_judge = (
+            getattr(self, "execution_plane", "") == "gui"
+            or getattr(self, "gui_only", False)
+        )
         if getattr(self, "_last_mission_goal", None) != goal:
             self._last_mission_goal = goal
             self._replan_count = 0
@@ -6462,7 +6096,7 @@ class ComputerUseAgent:
 
         # Backend bootstrap may inspect/install packages through a shell. It is
         # intentionally unavailable on the GUI-only Computer plane.
-        if not getattr(self, "gui_only", False) and not getattr(self, "_bootstrap_performed", False):
+        if not self._gui_action_contract_active() and not getattr(self, "_bootstrap_performed", False):
             try:
                 from sonic.computer.bootstrap import WorkstationBootstrapEngine
                 bootstrap = WorkstationBootstrapEngine(self.computer)
@@ -6495,6 +6129,17 @@ class ComputerUseAgent:
             # Goal-complete sentinel: the LLM JUDGED the goal achieved — but we
             # do not stop on self-declaration alone. We independently verify.
             if expected == _GOAL_COMPLETE_SENTINEL:
+                if requires_external_gui_judge:
+                    self.history.append({
+                        "action": "GOAL_COMPLETE (awaiting independent Judge)",
+                        "result": (
+                            "The GUI worker proposed completion. Its visible "
+                            "self-check is not treated as proof; route the live "
+                            "desktop and worker receipts to the independent Judge."
+                        ),
+                    })
+                    break
+
                 verified, evidence = await self.verify_goal(workspace_id, goal)
                 if verified:
                     receipt_ok, receipt_note = await self._verify_completion_receipt(goal, evidence)
@@ -6579,6 +6224,12 @@ class ComputerUseAgent:
                         await cb_res
                 except Exception as cb_err:
                     logger.warning("run_mission_step_callback_failed", error=str(cb_err))
+
+            if (
+                action_type == ActionExecutionStatus.BLOCKED
+                and target == "reasoning-unavailable"
+            ):
+                break
 
             if self._interrupted or (callable(interrupt_check) and interrupt_check()):
                 self._interrupted = True
@@ -6735,7 +6386,12 @@ class ComputerUseAgent:
         )
         self.metrics.recovery_events = self.recovery_events
 
-        if not goal_reached and self.metrics.actions_successful > 0 and self.metrics.actions_failed == 0:
+        if (
+            not goal_reached
+            and not requires_external_gui_judge
+            and self.metrics.actions_successful > 0
+            and self.metrics.actions_failed == 0
+        ):
             try:
                 verified, evidence = await self.verify_goal(workspace_id, goal)
                 if verified:

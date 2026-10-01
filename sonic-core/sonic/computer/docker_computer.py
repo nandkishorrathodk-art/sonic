@@ -19,6 +19,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 import uuid
@@ -477,6 +478,7 @@ class _State:
         self.running_processes = []
         self.installed_applications = []
         self.working_directory = "/home/sonic/workspace"
+        self.capture_timestamp_ns = 0
         self.version = 0
         self.tile_hashes = {}
         self.cached_ocr_controls = []
@@ -563,7 +565,7 @@ def _delta_ocr(img, png_bytes, bbox):
                 try:
                     conf, wx, wy, ww, wh = float(cols[10]), int(cols[6]), int(cols[7]), int(cols[8]), int(cols[9])
                     if conf >= 25.0 and ww > 2 and wh > 2:
-                        added.append({"name": cols[11].strip(), "role": "text", "bbox": [x1 + wx, y1 + wy, x1 + wx + ww, y1 + wy + wh], "source": "ocr"})
+                        added.append({"name": cols[11].strip(), "role": "text", "bbox": [x1 + wx, y1 + wy, x1 + wx + ww, y1 + wy + wh], "bbox_format": "xyxy", "source": "ocr"})
                 except Exception:
                     pass
     merged = kept + added
@@ -609,7 +611,7 @@ def _atspi_and_cdp():
                             if cp:
                                 rc = cp.get_extents(Atspi.CoordType.SCREEN)
                                 if rc and rc.width > 4 and rc.height > 4 and rc.x >= 0 and rc.y >= 0:
-                                    ctrls.append({"name": nm, "role": rn, "bbox": [int(rc.x), int(rc.y), int(rc.x + rc.width), int(rc.y + rc.height)], "source": "atspi"})
+                                    ctrls.append({"name": nm, "role": rn, "bbox": [int(rc.x), int(rc.y), int(rc.x + rc.width), int(rc.y + rc.height)], "bbox_format": "xyxy", "source": "atspi"})
                         for ci in range(min(n.get_child_count(), 16)):
                             ch = n.get_child_at_index(ci)
                             if ch: st.append((ch, dp + 1))
@@ -623,6 +625,8 @@ def _fast_retina_worker():
     while True:
         try:
             img, png_b = _grab()
+            if png_b:
+                S.capture_timestamp_ns = time.time_ns()
             _, wout, _ = _run(f"(DISPLAY={_DISP} xdotool getactivewindow getwindowname 2>/dev/null || echo Desktop); echo '___W___'; DISPLAY={_DISP} wmctrl -lG 2>/dev/null", timeout=0.8)
             aw, ows, wctrls = "Desktop", [], []
             if "___W___" in wout:
@@ -634,7 +638,8 @@ def _fast_retina_worker():
                         ows.append(lp[7])
                         try:
                             wx, wy, ww, wh = int(lp[2]), int(lp[3]), int(lp[4]), int(lp[5])
-                            wctrls.append({"name": lp[7], "role": "window", "bbox": [max(0, wx), max(0, wy), max(0, wx + ww), max(0, wy + wh)], "source": "x11"})
+                            x0, y0 = max(0, wx), max(0, wy)
+                            wctrls.append({"name": lp[7], "role": "window", "bbox": [x0, y0, max(0, wx + ww), max(0, wy + wh)], "bbox_format": "xyxy", "source": "x11"})
                         except Exception:
                             pass
             b64 = base64.b64encode(png_b).decode("ascii") if png_b else ""
@@ -662,6 +667,7 @@ def _fast_retina_worker():
                     "ok": True,
                     "version": S.version,
                     "ts": time.time(),
+                    "capture_timestamp_ns": S.capture_timestamp_ns or None,
                     "b64": S.b64,
                     "active_window": S.active_window,
                     "open_windows": S.open_windows,
@@ -792,8 +798,16 @@ while True:
         now = asyncio.get_event_loop().time()
         nsi_data = await self._nsi_request({"cmd": "frame"}, timeout=2.5)
         if nsi_data and nsi_data.get("ok") and nsi_data.get("b64"):
+            capture_timestamp_ns = nsi_data.get("capture_timestamp_ns")
+            capture_age_ms = None
+            if isinstance(capture_timestamp_ns, int) and not isinstance(capture_timestamp_ns, bool):
+                age_ns = time.time_ns() - capture_timestamp_ns
+                if age_ns >= 0:
+                    capture_age_ms = age_ns / 1_000_000
             obs = ScreenObservation(
                 screenshot_base64=nsi_data["b64"],
+                capture_timestamp_ns=capture_timestamp_ns,
+                capture_age_ms=capture_age_ms,
                 width=1280,
                 height=800,
                 active_window=nsi_data.get("active_window") or "Desktop",
@@ -811,6 +825,7 @@ while True:
         scr_cmd = (
             f"DISPLAY={disp} scrot -p -o {tmp_path} 2>/dev/null || "
             f"DISPLAY={disp} import -window root {tmp_path} 2>/dev/null; "
+            "echo '___CAPTURE_TIMESTAMP_NS___'; date +%s%N; "
             f"base64 -w0 {tmp_path} 2>/dev/null && "
             f"echo '___OCR_TSV___' && "
             f"(tesseract {tmp_path} stdout --psm 11 tsv 2>/dev/null || true) && "
@@ -823,11 +838,20 @@ while True:
         code, out, _ = await self._docker_exec(scr_cmd, timeout=15)
         b64 = ""
         ocr_tsv = ""
+        capture_timestamp_ns = None
         active_win = "Desktop"
         open_wins: list[str] = []
         if code == 0 and out:
             parts = out.split("___ACTIVE_WINDOW___", 1)
             first_chunk = parts[0]
+            if "___CAPTURE_TIMESTAMP_NS___" in first_chunk:
+                _, timestamp_tail = first_chunk.split("___CAPTURE_TIMESTAMP_NS___", 1)
+                timestamp_text, _, image_text = timestamp_tail.lstrip("\r\n").partition("\n")
+                try:
+                    capture_timestamp_ns = int(timestamp_text.strip())
+                except ValueError:
+                    capture_timestamp_ns = None
+                first_chunk = image_text
             if "___OCR_TSV___" in first_chunk:
                 b64_part, ocr_tsv = first_chunk.split("___OCR_TSV___", 1)
                 b64 = b64_part.strip()
@@ -865,6 +889,7 @@ while True:
                             "name": word,
                             "role": "text",
                             "bbox": (x, y, x + w, y + h),
+                            "bbox_format": "xyxy",
                             "source": "ocr",
                         })
 
@@ -880,6 +905,13 @@ while True:
 
         obs = ScreenObservation(
             screenshot_base64=b64,
+            capture_timestamp_ns=capture_timestamp_ns,
+            capture_age_ms=(
+                max(0, time.time_ns() - capture_timestamp_ns) / 1_000_000
+                if capture_timestamp_ns is not None
+                and time.time_ns() >= capture_timestamp_ns
+                else None
+            ),
             width=1280,
             height=800,
             active_window=active_win,

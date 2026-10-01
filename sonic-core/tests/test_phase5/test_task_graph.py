@@ -8,11 +8,9 @@ from sonic.agents.task_graph import (
     TaskNode,
     TaskStatus,
     TaskPriority,
-    CycleDetectedError,
     InvalidDependencyError,
     InvalidAgentTypeError,
     TenantMismatchError,
-    DuplicateTaskError,
     MaxTasksExceededError,
 )
 
@@ -67,7 +65,7 @@ def test_task_graph_blocked_propagation():
 
     # t1 -> t2 -> t3
     #    -> t4
-    t1_id = graph.add_task(TaskNode(name="T1", agent_type="recon"))
+    t1_id = graph.add_task(TaskNode(name="T1", agent_type="recon", max_retries=0))
     t2_id = graph.add_task(TaskNode(name="T2", agent_type="static", depends_on=[t1_id]))
     t3_id = graph.add_task(TaskNode(name="T3", agent_type="dynamic", depends_on=[t2_id]))
     t4_id = graph.add_task(TaskNode(name="T4", agent_type="hypothesis", depends_on=[t1_id]))

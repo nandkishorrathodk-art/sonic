@@ -6,12 +6,15 @@ move, scroll, screenshot) to the computer provider, that the LLM prompt
 includes GUI actions in its schema, that the action parser handles coordinate
 formats, and that the safety policy allows GUI actions.
 """
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-from sonic.computer.models import GUIAction, GUIActionType, ScreenObservation
-from sonic.computer_use.models import ComputerActionType, ComputerWorldObservation
+from sonic.computer.models import GUIActionType, ScreenObservation
+from sonic.computer_use.models import (
+    ActionExecutionStatus,
+    ComputerActionType,
+    ComputerWorldObservation,
+)
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.safety.action_policy import ActionPolicy
 
@@ -114,6 +117,39 @@ class TestGUIActionDispatch:
         provider.gui_action.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_gui_execution_plane_blocks_terminal_but_keeps_gui_actions_available(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(
+            computer_provider=provider,
+            execution_plane="gui",
+        )
+
+        terminal_trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.TERMINAL_EXEC,
+            "gedit",
+            {"command": "gedit"},
+            "Launch a GUI application through the terminal",
+        )
+
+        assert agent.gui_only is False
+        assert terminal_trace.status == ActionExecutionStatus.BLOCKED
+        assert terminal_trace.exit_code == 126
+        assert "GUI execution contract blocked TERMINAL_EXEC" in terminal_trace.actual_observation
+        provider.terminal.assert_not_awaited()
+
+        gui_trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_KEYPRESS,
+            "Applications menu",
+            {"key": "Super"},
+            "Open the visible applications menu",
+        )
+
+        assert gui_trace.status == ActionExecutionStatus.SUCCESS
+        provider.gui_action.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_gui_only_rejected_close_tabs_proposal_reobserves_visible_desktop(self):
         action_type, target, payload, expected = ComputerUseAgent._gui_only_recovery_action(
             "hi sonic, close browser and close all tabs",
@@ -126,7 +162,7 @@ class TestGUIActionDispatch:
         assert "visible desktop" in expected
 
     @pytest.mark.asyncio
-    async def test_gui_only_close_tabs_intent_reobserves_when_reasoning_fails(self):
+    async def test_gui_only_close_tabs_intent_fails_closed_when_reasoning_fails(self):
         provider = _mock_provider()
         router = MagicMock()
         agent = ComputerUseAgent(
@@ -135,14 +171,74 @@ class TestGUIActionDispatch:
             gui_only=True,
         )
 
-        action_type, target, payload, _ = await agent.choose_action(
+        action_type, target, payload, expected = await agent.choose_action(
             "hi sonic, close browser and close all tabs",
             ComputerWorldObservation(),
         )
 
-        assert action_type == ComputerActionType.GUI_SCREENSHOT
-        assert target == "visible-desktop"
+        assert action_type == ActionExecutionStatus.BLOCKED
+        assert target == "reasoning-unavailable"
         assert payload == {}
+        assert "reasoning failed" in expected.lower()
+
+    @pytest.mark.asyncio
+    async def test_gui_plane_without_router_does_not_fall_back_to_file_probe(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(
+            computer_provider=provider,
+            execution_plane="gui",
+        )
+        agent.llm_router = None
+
+        action_type, target, payload, expected = await agent.choose_action(
+            "Open the document in the active application",
+            ComputerWorldObservation(),
+        )
+
+        assert action_type == ActionExecutionStatus.BLOCKED
+        assert target == "reasoning-unavailable"
+        assert payload == {}
+        assert "no reasoning model" in expected.lower()
+
+    @pytest.mark.asyncio
+    async def test_gui_reasoning_failure_records_one_block_and_stops_mission(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(
+            computer_provider=provider,
+            execution_plane="gui",
+        )
+        agent.llm_router = None
+        agent._bootstrap_performed = True
+        agent.observe = AsyncMock(return_value=ComputerWorldObservation())
+
+        traces = await agent.run_mission("ws-1", "Open the requested application", steps=8)
+
+        assert len(traces) == 1
+        assert traces[0].status == ActionExecutionStatus.BLOCKED
+        assert "No reasoning model" in traces[0].actual_observation
+        provider.gui_action.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_gui_verification_does_not_accept_keyword_overlap_as_proof(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(
+            computer_provider=provider,
+            execution_plane="gui",
+        )
+        agent.observe = AsyncMock(return_value=MagicMock(
+            active_application="Calculator",
+            visible_text="Calculator report saved",
+            windows=["Calculator"],
+            screen=MagicMock(visible_text="Calculator report saved"),
+        ))
+
+        verified, evidence = await agent.verify_goal(
+            "ws-1",
+            "Save Calculator report",
+        )
+
+        assert verified is False
+        assert "No typed independent verification probe" in evidence
 
     @pytest.mark.asyncio
     async def test_gui_only_observation_does_not_probe_files_git_or_terminal(self):
@@ -277,6 +373,8 @@ class TestReasoningPrompt:
         assert "EXECUTION GROUND-TRUTH" in system_prompt
         assert "visible cursor" in system_prompt
         assert "APP_FOCUS" in system_prompt
+        assert "actual screen pixels" in user_prompt
+        assert "Only the separate multimodal grounding response uses normalized 0-1000" in user_prompt
 
 
 class TestSafetyPolicy:

@@ -194,7 +194,11 @@ class SubagentTeamworkManager:
             ),
         }
         self.conversations: dict[str, SubagentConversation] = {}
-        self.judge = JudgeAgent(computer_provider=self.computer, judge_id=f"teamwork-judge-{tenant_id}")
+        self.judge = JudgeAgent(
+            computer_provider=self.computer,
+            judge_id=f"teamwork-judge-{tenant_id}",
+            llm_router=self.llm_router,
+        )
         self._baseline_snapshots: dict[str, dict[str, tuple[int, str]]] = {}
 
     # ------------------------------------------------------------------
@@ -698,7 +702,6 @@ class SubagentTeamworkManager:
                 being=getattr(self.parent, "being", None),
                 being_mind=getattr(self.parent, "being_mind", None),
                 enable_llm_decomposition=False,
-                browser=getattr(self.parent, "browser", None),
                 toolsmith=getattr(self.parent, "toolsmith", None),
                 method_lab=getattr(self.parent, "method_lab", None),
                 lessons_ledger=getattr(self.parent, "lessons_ledger", None),

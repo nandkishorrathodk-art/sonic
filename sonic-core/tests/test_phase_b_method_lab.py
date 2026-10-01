@@ -220,6 +220,55 @@ def test_successful_reproduction_confirmed_and_persisted(vm, registry):
     assert ledger[0].metadata.get("confirmed") is True
 
 
+def test_method_ledger_writes_and_search_are_tenant_isolated(vm):
+    """MethodLab persists and recalls confirmed techniques only in its tenant."""
+    tenant_a = MethodLab(
+        llm=_StubLLM(""),
+        vector_memory=vm,
+        tenant_id="tenant-a",
+    )
+    tenant_b = MethodLab(
+        llm=_StubLLM(""),
+        vector_memory=vm,
+        tenant_id="tenant-b",
+    )
+
+    def confirm(lab, name, hypothesis):
+        technique = InventedTechnique(
+            technique_id="shared-technique-id",
+            name=name,
+            family="diagnostic",
+            hypothesis=hypothesis,
+            probe_source="print('finding')",
+        )
+        return _run(lab.confirm(technique, _StubProvider(), "ws"))
+
+    assert confirm(tenant_a, "tenant_a_method", "A method known only to tenant A").confirmed
+    assert any("tenant_a_method" in fact for fact in tenant_a._ledger_facts())
+    assert not any("tenant_a_method" in fact for fact in tenant_b._ledger_facts())
+
+    assert confirm(tenant_b, "tenant_b_method", "A method known only to tenant B").confirmed
+    assert any("tenant_b_method" in fact for fact in tenant_b._ledger_facts())
+    assert not any("tenant_b_method" in fact for fact in tenant_a._ledger_facts())
+
+    results_a = vm.search(
+        "workflow method synthesis technique diagnostic automation",
+        top_k=10,
+        score_threshold=0.0,
+        tenant_id="tenant-a",
+    )
+    results_b = vm.search(
+        "workflow method synthesis technique diagnostic automation",
+        top_k=10,
+        score_threshold=0.0,
+        tenant_id="tenant-b",
+    )
+    assert [result["tenant_id"] for result in results_a] == ["tenant-a"]
+    assert [result["tenant_id"] for result in results_b] == ["tenant-b"]
+    assert "tenant_a_method" in results_a[0]["text"]
+    assert "tenant_b_method" in results_b[0]["text"]
+
+
 def test_ledger_stears_next_invention_away(vm, registry):
     """A confirmed technique in the ledger makes a duplicate synthesis rejected,
     so novelty compounds (the being does not re-invent what it already knows)."""

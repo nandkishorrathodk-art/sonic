@@ -164,6 +164,7 @@ class ReplanEngine:
         self,
         scope_checker: Any = None,
         allowed_targets: set[str] | None = None,
+        allowed_agent_types: set[str] | frozenset[str] | None = None,
     ):
         """
         Args:
@@ -172,6 +173,11 @@ class ReplanEngine:
         """
         self.scope_checker = scope_checker
         self.allowed_targets = allowed_targets or set()
+        self.allowed_agent_types = frozenset(
+            VALID_AGENT_TYPES
+            if allowed_agent_types is None
+            else allowed_agent_types
+        )
 
     # ============================================
     # Trigger Detection
@@ -343,7 +349,8 @@ class ReplanEngine:
 
         completed_tasks = [
             {"name": t.name, "agent_type": t.agent_type, "status": t.status.value}
-            for t in graph.get_completed_tasks()
+            for t in graph.tasks.values()
+            if t.status == TaskStatus.SUCCEEDED
         ]
         pending_tasks = [
             {"name": t.name, "agent_type": t.agent_type, "status": t.status.value}
@@ -384,7 +391,7 @@ Pending: {json.dumps(pending_tasks[:10])}
 {json.dumps(active_unknowns)}
 
 ## Valid Agent Types
-{json.dumps(sorted(VALID_AGENT_TYPES))}
+{json.dumps(sorted(self.allowed_agent_types))}
 
 {UNIVERSAL_ANTI_BYPASS_CLAUSE}
 
@@ -521,7 +528,14 @@ Rules:
             skip_task = graph.get_task(skip_id)
             if not skip_task:
                 result.warnings.append(f"Skip target '{skip_id}' not found in graph")
-            elif skip_task.status in (TaskStatus.RUNNING, TaskStatus.SUCCEEDED):
+            elif skip_task.status in (
+                TaskStatus.RUNNING,
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.SKIPPED,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
+            ):
                 result.errors.append(
                     f"Cannot skip task '{skip_id}' in status {skip_task.status}"
                 )
@@ -544,6 +558,10 @@ Rules:
         if task.agent_type not in VALID_AGENT_TYPES:
             errors.append(
                 f"Task '{task.name}': invalid agent_type '{task.agent_type}'"
+            )
+        elif task.agent_type not in self.allowed_agent_types:
+            errors.append(
+                f"Task '{task.name}': agent_type '{task.agent_type}' has no registered worker"
             )
 
         # Forbidden action patterns
@@ -589,6 +607,28 @@ Rules:
             elif recovery_source.status not in (TaskStatus.FAILED, TaskStatus.BLOCKED):
                 errors.append(
                     f"Task '{task.name}': recovery source must be failed or blocked"
+                )
+
+        for dependency_name in task.depends_on_completed:
+            dependency = graph.get_task(dependency_name) or next(
+                (
+                    node
+                    for node in graph.tasks.values()
+                    if node.name == dependency_name
+                ),
+                None,
+            )
+            if dependency is None:
+                errors.append(
+                    f"Task '{task.name}': dependency '{dependency_name}' not found"
+                )
+            elif (
+                dependency.status != TaskStatus.SUCCEEDED
+                and dependency.id != task.recovery_for
+            ):
+                errors.append(
+                    f"Task '{task.name}': dependency '{dependency_name}' is "
+                    f"{dependency.status}, not succeeded"
                 )
 
         # Scope validation (if targets are specified)
@@ -637,16 +677,18 @@ Rules:
                 changes["errors"].append(f"Skip failed for {skip_id}: {str(e)}")
 
         # Resolve dependency names to task IDs for new tasks
-        completed_name_to_id: dict[str, str] = {}
-        for t in graph.get_completed_tasks():
-            completed_name_to_id[t.name] = t.id
+        succeeded_name_to_id = {
+            task.name: task.id
+            for task in graph.tasks.values()
+            if task.status == TaskStatus.SUCCEEDED
+        }
 
         # Add new tasks
         for proposed in decision.new_tasks:
             try:
                 deps = []
                 for dep_name in proposed.depends_on_completed:
-                    dep_id = completed_name_to_id.get(dep_name)
+                    dep_id = succeeded_name_to_id.get(dep_name)
                     if dep_id:
                         # Recovery branches must be able to run after a
                         # failure; depending on the failed node would
@@ -654,9 +696,25 @@ Rules:
                         if dep_id != proposed.recovery_for:
                             deps.append(dep_id)
                     else:
-                        # Try direct ID match
-                        if graph.get_task(dep_name) and dep_name != proposed.recovery_for:
-                            deps.append(dep_name)
+                        dependency = graph.get_task(dep_name) or next(
+                            (
+                                node
+                                for node in graph.tasks.values()
+                                if node.name == dep_name
+                            ),
+                            None,
+                        )
+                        if dependency is None:
+                            raise TaskGraphError(
+                                f"Dependency '{dep_name}' does not exist"
+                            )
+                        if dependency.id == proposed.recovery_for:
+                            continue
+                        if dependency.status != TaskStatus.SUCCEEDED:
+                            raise TaskGraphError(
+                                f"Dependency '{dep_name}' is {dependency.status}, not succeeded"
+                            )
+                        deps.append(dependency.id)
 
                 task_node = TaskNode(
                     name=proposed.name,

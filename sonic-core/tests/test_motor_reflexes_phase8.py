@@ -1,14 +1,14 @@
 """
-Tests for Phase 8 Motor Reflexes, Deadlock Resolution & Visual Grounding
+Tests for Motor Reflexes, Desktop Recovery & Visual Grounding
 ========================================================================
 Verifies:
   1. GTK file dialog automation (Ctrl+L -> path type -> Return).
   2. Two-stage click (window focus -> settle delay -> physical click).
-  3. Burp Suite forward (Ctrl+F) and intercept toggle (Ctrl+T).
+  3. Generic application shortcuts.
   4. Hierarchical micro-crop toolbar targeting (`crop_toolbar_region`).
   5. Micro-crop coordinate translation (`map_crop_to_screen`).
-  6. Burp Suite UI landmark dictionary resolution in `resolve_ui_target`.
-  7. Intercept deadlock detection and autonomous packet forward in agent.
+  6. Perception-grounded UI target resolution.
+  7. Non-destructive active-window recovery.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ except ImportError:
 
 from sonic.computer.models import GUIAction, GUIActionType, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
+from sonic.computer_use.models import ComputerActionType
 from sonic.computer_use.grounding import (
     crop_toolbar_region,
     map_crop_to_screen,
@@ -65,13 +66,13 @@ async def test_motor_handle_gtk_file_dialog():
     comp = _MockMotorComputer()
     motor = MotorReflexes(comp)
 
-    res = await motor.handle_gtk_file_dialog("ws-1", "/tmp/burp-payloads.txt", delay_ms=10)
-    assert res == "file_selected: /tmp/burp-payloads.txt"
+    res = await motor.handle_gtk_file_dialog("ws-1", "/tmp/meeting-notes.txt", delay_ms=10)
+    assert res == "file_selected: /tmp/meeting-notes.txt"
 
     # Verify key sequence: ctrl+l -> type path -> Return
     executed = comp.commands_executed
     assert any("ctrl+l" in cmd for cmd in executed)
-    assert any("/tmp/burp-payloads.txt" in cmd and "xdotool type" in cmd for cmd in executed)
+    assert any("/tmp/meeting-notes.txt" in cmd and "xdotool type" in cmd for cmd in executed)
     assert any("Return" in cmd for cmd in executed)
 
 
@@ -82,19 +83,19 @@ async def test_motor_two_stage_click():
 
     res = await motor.two_stage_click(
         "ws-1",
-        target_window="Burp Suite",
+        target_window="Document Application",
         x=220,
         y=45,
         button=1,
         settle_seconds=0.01,
     )
     assert "two_stage_clicked" in res
-    assert "Burp Suite" in res
+    assert "Document Application" in res
     assert "(220,45)" in res
 
     # Stage 1: Window focus
     executed = comp.commands_executed
-    assert any("wmctrl -a 'Burp Suite'" in cmd or "windowactivate" in cmd for cmd in executed)
+    assert any("wmctrl -a 'Document Application'" in cmd or "windowactivate" in cmd for cmd in executed)
 
     # Stage 3: Physical mouse click via gui_action (or fallback shell command)
     assert len(comp.gui_actions) >= 1 or any("xdotool mousemove 220 45 click 1" in cmd for cmd in executed)
@@ -167,8 +168,9 @@ def test_grounding_webapp_landmarks():
 
 
 @pytest.mark.asyncio
-async def test_agent_intercept_deadlock_resolution():
+async def test_agent_recovery_refocuses_the_active_application():
     comp = _MockMotorComputer()
+    comp.status = AsyncMock(return_value=MagicMock(active_application="Document Application"))
     motor = MotorReflexes(comp)
 
     agent = ComputerUseAgent(
@@ -176,6 +178,11 @@ async def test_agent_intercept_deadlock_resolution():
         motor=motor,
     )
 
-    obs = ScreenObservation(active_window="Target Web Application - Dashboard")
-    resolved = await agent.check_and_resolve_intercept_deadlock("ws-1", screen_observation=obs)
-    assert resolved is False
+    result = await agent.recover(
+        "ws-1",
+        ComputerActionType.GUI_CLICK,
+        "visual target was not resolved",
+    )
+    assert result == "Refreshed desktop focus and window state"
+    assert comp.gui_actions[-1].action == GUIActionType.SELECT_WINDOW
+    assert comp.gui_actions[-1].app_name == "Document Application"

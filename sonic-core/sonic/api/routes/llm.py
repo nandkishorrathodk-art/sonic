@@ -163,12 +163,12 @@ LAYA_PRESETS: dict[str, dict[str, Any]] = {
             "criteria": {
                 "gui": (
                     "gui visual visually screen screenshot desktop window browser click button "
-                    "scroll drag ui page website open kholo dikhao ब्राउज़र स्क्रीन विंडो खोलो दिखाओ"
+                    "scroll drag ui page website open"
                 ),
                 "headless": (
                     "headless terminal cli command bash shell script directory mkdir author "
                     "source code file curl netstat ss port ports endpoints background git "
-                    "pytest test audit server likho banao टर्मिनल कोड फाइल कमांड"
+                    "pytest test audit server"
                 ),
             },
         }
@@ -287,9 +287,9 @@ async def laya_status(user: User = Depends(require_auth)):
     if "api_url" not in st:
         st["api_url"] = engine.api_url or None
     if "language_support" not in st:
-        st["language_support"] = ["en", "hi-Deva", "hi-Latn", "multilingual"]
+        st["language_support"] = ["en"]
     if "languages" not in st:
-        st["languages"] = ["en", "hi-Deva", "hi-Latn", "multilingual"]
+        st["languages"] = ["en"]
     if "ram_check" not in st:
         st["ram_check"] = {
             "sufficient": st.get("sufficient_ram", True),

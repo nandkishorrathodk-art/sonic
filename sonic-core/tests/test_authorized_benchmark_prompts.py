@@ -2,7 +2,6 @@
 Unit tests for general-purpose execution, identity, and safety prompt framing.
 """
 
-import pytest
 from sonic.llm.prompts import (
     AUTHORIZED_BENCHMARK_CLAUSE,
     COMPUTER_USE_SYSTEM_PROMPT,
@@ -12,6 +11,7 @@ from sonic.llm.prompts import (
     ASEA_IDENTITY,
     compose_system_prompt,
 )
+from sonic.evolution.engine import CORE_NORTH_STAR_GOAL
 
 
 def test_workstation_execution_clause_contents():
@@ -29,7 +29,7 @@ def test_computer_use_system_prompt_has_general_workstation_framing():
 
 
 def test_computer_use_system_prompt_compact_preserves_workstation_framing():
-    assert "Autonomous Computer Engineering Agent" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
+    assert "general-purpose Autonomous AI-Human Digital Being" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
     assert "graphical desktop" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
     assert "headless terminal" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
     assert "Prove every milestone with empirical receipts" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
@@ -42,7 +42,7 @@ def test_compose_system_prompt_includes_workstation_execution_clause():
 
 def test_default_identity_is_human_like_computer_engineering_first():
     """The default identity must not frame every task as cybersecurity work."""
-    assert "Autonomous Computer Engineering Agent" in ASEA_IDENTITY
+    assert "Autonomous AI-Human Digital Being" in ASEA_IDENTITY
     assert "senior computer engineer operating your personal computer workstation" in COMPUTER_USE_SYSTEM_PROMPT
     assert "Cybersecurity auditing is only an optional" in COMPUTER_USE_SYSTEM_PROMPT
     assert "PRIMARY ROLE:" in COMPUTER_USE_SYSTEM_PROMPT
@@ -56,3 +56,10 @@ def test_default_prompts_preserve_safety_and_anti_bypass_invariants():
         assert "HONESTY:" in prompt
         assert "SAFETY:" in prompt
         assert "Universal Anti-Bypass Invariant" in prompt
+
+
+def test_core_identity_and_prompt_do_not_center_a_specific_application_type():
+    assert "browser" not in CORE_NORTH_STAR_GOAL.lower()
+    for prompt in (COMPUTER_USE_SYSTEM_PROMPT, COMPUTER_USE_SYSTEM_PROMPT_COMPACT):
+        assert "BROWSER_" not in prompt
+        assert "WEB_BROWSER" not in prompt
