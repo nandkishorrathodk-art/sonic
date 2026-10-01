@@ -431,9 +431,19 @@ class CustomLLMProvider(LLMProvider):
                     if msg.content:
                         text_sections.append(msg.content)
             content_parts: list[dict] = []
+            model = (request.model or getattr(self, "default_model", "") or "").lower()
+            nvidia_llama_vision = (
+                getattr(self, "name", "") == "nvidia"
+                and "meta/llama-3.2-" in model
+                and "vision-instruct" in model
+            )
+            if nvidia_llama_vision:
+                # NVIDIA's Llama 3.2 Vision NIM expects image parts before text.
+                content_parts.extend(image_parts)
             if text_sections:
                 content_parts.append({"type": "text", "text": "\n\n".join(text_sections)})
-            content_parts.extend(image_parts)
+            if not nvidia_llama_vision:
+                content_parts.extend(image_parts)
             return [{"role": "user", "content": content_parts}]
 
         messages = []
