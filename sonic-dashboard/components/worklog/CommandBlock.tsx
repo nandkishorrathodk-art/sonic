@@ -8,6 +8,8 @@ interface CommandBlockProps {
   output?: string;
   durationSeconds?: number;
   exitCode?: number;
+  agentName?: string;
+  agentId?: string;
   initiallyExpanded?: boolean;
 }
 
@@ -16,6 +18,8 @@ export function CommandBlock({
   output,
   durationSeconds,
   exitCode,
+  agentName,
+  agentId,
   initiallyExpanded = false,
 }: CommandBlockProps) {
   const [expanded, setExpanded] = useState(initiallyExpanded);
@@ -52,6 +56,11 @@ export function CommandBlock({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0 ml-2">
+          {agentName && agentId && (
+            <span className="text-[9px] text-secondary-300 px-1.5 py-0.5 rounded bg-secondary-500/10 border border-secondary-500/25 whitespace-nowrap">
+              {agentName} · {agentId}
+            </span>
+          )}
           {durationSeconds !== undefined && durationSeconds > 0 && (
             <span className="text-[10px] text-muted-dim px-1.5 py-0.2 rounded bg-ink-900 border border-ink-800">
               {Math.max(0.1, Math.round(durationSeconds * 10) / 10)}s
