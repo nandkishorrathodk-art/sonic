@@ -125,17 +125,32 @@ class SelfCoderCandidateStore:
         return commit, branch
 
     def _remove_worktree(self, path: Path) -> None:
+        import gc
+        import os
+        import stat
+
+        gc.collect()
         if path.exists():
             try:
                 self._git(["worktree", "remove", "--force", str(path)])
-            except CandidateWorkflowError as git_error:
+            except Exception:
+                def _handle_remove_readonly(func, file_path, exc_info):
+                    try:
+                        os.chmod(file_path, stat.S_IWRITE)
+                        func(file_path)
+                    except Exception:
+                        pass
+
                 try:
-                    shutil.rmtree(path)
-                except OSError as remove_error:
-                    raise CandidateWorkflowError(
-                        f"{git_error}; fallback worktree cleanup failed: {remove_error}"
-                    ) from remove_error
-        self._git(["worktree", "prune"])
+                    if path.exists():
+                        shutil.rmtree(str(path), onerror=_handle_remove_readonly)
+                except Exception:
+                    pass
+
+        try:
+            self._git(["worktree", "prune"])
+        except Exception:
+            pass
 
     async def run_candidate(
         self,
