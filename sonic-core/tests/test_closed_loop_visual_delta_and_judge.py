@@ -240,7 +240,7 @@ async def test_judge_rejects_unverified_gui_actions_with_none_exit_code():
     )
 
     eval_result = await judge.evaluate_sub_mission("ws-1", sub_m, result)
-    assert eval_result.verdict == JudgeVerdict.FALSIFIED
+    assert eval_result.verdict == JudgeVerdict.INCONCLUSIVE
     assert eval_result.self_attestation_rejected is True
 
 

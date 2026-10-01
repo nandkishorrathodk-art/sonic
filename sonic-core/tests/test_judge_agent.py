@@ -174,7 +174,7 @@ async def test_judge_falsifies_missing_or_empty_claimed_file():
 
 
 @pytest.mark.asyncio
-async def test_judge_falsifies_gui_mission_without_window_or_gui_action():
+async def test_judge_does_not_confirm_gui_mission_without_successful_gui_action():
     mock_computer = MagicMock()
     # wmctrl returns only panels, no application window
     mock_computer.terminal = AsyncMock(return_value=ExecResult(
@@ -206,12 +206,11 @@ async def test_judge_falsifies_gui_mission_without_window_or_gui_action():
         result=result,
         worker_agent_id="sub-agent-gui",
     )
-    assert evaluation.verdict == JudgeVerdict.FALSIFIED
-    assert "GUI desktop interaction unverified" in evaluation.notes
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
 
 
 @pytest.mark.asyncio
-async def test_judge_confirms_gui_mission_with_real_window():
+async def test_judge_does_not_confirm_gui_mission_from_window_presence_alone():
     mock_computer = MagicMock()
     # wmctrl returns open application window
     mock_computer.terminal = AsyncMock(return_value=ExecResult(
@@ -242,4 +241,5 @@ async def test_judge_confirms_gui_mission_with_real_window():
         result=result,
         worker_agent_id="sub-agent-gui",
     )
-    assert evaluation.verdict == JudgeVerdict.CONFIRMED
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
+    assert "vision Judge or desktop provider is unavailable" in evaluation.notes
