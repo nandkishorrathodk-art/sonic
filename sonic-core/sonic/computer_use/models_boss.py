@@ -27,6 +27,7 @@ class SubMission(BaseModel):
     """A focused task assigned to a SubAgent or Sub-Planner."""
 
     id: str = Field(default_factory=lambda: _new_id("sub"))
+    name: str = ""
     goal: str
     role: str = "subagent"
     owned_paths: list[str] = Field(default_factory=list)
@@ -68,6 +69,8 @@ class SubMissionResult(BaseModel):
     """Output collected from a completed SubAgent or Sub-Planner."""
 
     sub_mission_id: str
+    agent_id: str = ""
+    agent_name: str = ""
     goal: str
     role: str = "worker"
     owned_paths: list[str] = Field(default_factory=list)

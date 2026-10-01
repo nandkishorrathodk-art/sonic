@@ -703,6 +703,15 @@ class SemanticTargetIndex:
         with self._lock:
             return len(self._index)
 
+    def observed_matches(
+        self, *, state_version: int | None = None
+    ) -> tuple[TargetMatch, ...]:
+        """Return controls grounded in the current observation, without aliases."""
+        with self._lock:
+            if state_version is not None and state_version != self._version:
+                return ()
+            return tuple(self._matches)
+
     def __contains__(self, query: str) -> bool:
         return self.lookup(query) is not None
 

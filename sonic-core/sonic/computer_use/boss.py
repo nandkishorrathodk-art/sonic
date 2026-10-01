@@ -59,6 +59,13 @@ def _trace_value(trace: Any, name: str, default: Any = "") -> Any:
     return getattr(trace, name, default)
 
 
+def _sub_mission_display_name(sub_mission: Any, agent_number: int) -> str:
+    """Name workers while tolerating SubMission records created by older runtimes."""
+    name = str(getattr(sub_mission, "name", "") or "").strip()
+    goal = str(getattr(sub_mission, "goal", "") or "")
+    return name or f"Worker {agent_number}: {goal[:48]}"
+
+
 def _safe_discovery_context(items: list[str]) -> str:
     """Serialize observations as bounded, explicitly untrusted evidence."""
     safe: list[dict[str, str]] = []
@@ -490,14 +497,21 @@ class BossAgent:
 
                     await self._emit(phase_callback, "sub_dispatch", {
                         "sub_mission_id": sub_m.id,
+                        "agent_id": f"sub-agent-{agent_num}",
+                        "agent_name": _sub_mission_display_name(sub_m, agent_num),
                         "goal": sub_m.goal,
                         "max_steps": sub_m.max_steps,
                         "sub_agent_number": agent_num,
+                        "status": "RUNNING",
                     })
 
                     try:
                         res = await self._dispatch_sub_agent(
-                            workspace_id, sub_m, phase_callback, sub_agent_num=agent_num
+                            workspace_id,
+                            sub_m,
+                            phase_callback,
+                            sub_agent_num=agent_num,
+                            interrupt_check=interrupt_check,
                         )
                     except Exception as e:
                         safe_err = str(e).encode("ascii", errors="replace").decode("ascii")
@@ -515,6 +529,8 @@ class BossAgent:
                             traces=[],
                         )
 
+                    res.agent_id = f"sub-agent-{agent_num}"
+                    res.agent_name = _sub_mission_display_name(sub_m, agent_num)
                     sub_m.status = "COMPLETED" if res.success else "FAILED"
                     if tg_t:
                         try:
@@ -530,9 +546,12 @@ class BossAgent:
 
                     await self._emit(phase_callback, "sub_report", {
                         "sub_mission_id": sub_m.id,
+                        "agent_id": res.agent_id,
+                        "agent_name": res.agent_name,
                         "sub_agent_number": agent_num,
                         "goal": sub_m.goal,
                         "success": res.success,
+                        "status": res.status,
                         "findings_summary": res.findings_summary,
                         "key_discoveries": res.key_discoveries,
                         "actions_taken": res.actions_taken,
@@ -630,14 +649,24 @@ class BossAgent:
                 if res.actions_taken > 0:
                     traces = list(getattr(res, "traces", []) or [])
                     if traces:
-                        has_successful_action = any(
-                            str(getattr(t, "status", "")).upper() in ("SUCCESS", "COMPLETED", "VERIFIED")
-                            or (
-                                getattr(t, "exit_code", None) == 0
-                                and str(getattr(t, "status", "")).upper() not in ("FAILED", "BLOCKED")
-                            )
-                            for t in traces
-                        )
+                        has_successful_action = False
+                        for trace in traces:
+                            action_type = getattr(trace, "action_type", "")
+                            if hasattr(action_type, "value"):
+                                action_type = action_type.value
+                            if str(action_type).upper() in {
+                                "GUI_SCREENSHOT",
+                                "BROWSER_SCREENSHOT",
+                            }:
+                                continue
+
+                            trace_status = str(getattr(trace, "status", "")).upper()
+                            if trace_status in ("SUCCESS", "COMPLETED", "VERIFIED") or (
+                                getattr(trace, "exit_code", None) == 0
+                                and trace_status not in ("FAILED", "BLOCKED")
+                            ):
+                                has_successful_action = True
+                                break
                         return has_successful_action
                     return str(getattr(res, "status", "")).upper() not in ("FAILED", "BLOCKED", "TIMED_OUT")
                 return False
@@ -715,6 +744,7 @@ Apply target-agnostic first-principles reasoning:
    - Boss owns planning, worker selection, task coordination, evidence review, and replanning.
    - Delegate to general computer-use workers. The selected execution plane is a binding per-worker contract: GUI workers use live perception and visible GUI controls; headless workers use terminal and file tools.
    - Each worker receives a clear operational outcome and relevant context, not a scripted action sequence.
+   - Never invent a product, application, or executable name from the objective. When the requested application is unspecified, have the GUI worker discover available applications from live desktop observations and use only controls actually visible there.
 
 Respond with EXACTLY this JSON format (no extra text):
 {{
@@ -724,6 +754,7 @@ Respond with EXACTLY this JSON format (no extra text):
   "sub_missions": [
     {{
       "id": "sub-1",
+      "name": "Short, distinct worker name",
       "goal": "Clear, focused goal for this worker agent with concrete inputs and expected observations.",
       "plane": "gui",
       "max_steps": 15,
@@ -735,6 +766,7 @@ Respond with EXACTLY this JSON format (no extra text):
 
 Rules:
 - Each sub_mission goal must be FOCUSED and SPECIFIC
+- Give each sub_mission a short, distinct human-readable name.
 - plane: "gui" for tasks requiring visible desktop interaction; "headless" ONLY for strictly non-visual CLI-only tasks
 - GUI workers must stay within visible desktop applications and controls. Do not substitute shell, file, or backend actions when a GUI operation fails; report the limitation or replan through another observed GUI path.
 - Keep multi-application desktop GUI tasks (launching, focusing, and switching between 1, 2, or more desktop GUI windows) inside a SINGLE unified sub_mission with plane="gui" and max_steps=30 so window state and visual grounding remain continuous
@@ -812,6 +844,7 @@ Rules:
 
             sub_missions.append(SubMission(
                 id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
+                name=str(sm.get("name") or "").strip(),
                 goal=goal,
                 role=role,
                 plane=plane,
@@ -927,6 +960,7 @@ Rules:
         sub_mission: SubMission,
         phase_callback: Callable | None = None,
         sub_agent_num: int = 0,
+        interrupt_check: Callable | None = None,
     ) -> SubMissionResult:
         """Create a focused ComputerUseAgent and run it on a sub-mission.
 
@@ -1007,6 +1041,8 @@ Rules:
                 if phase_callback:
                     await self._emit(phase_callback, "sub_step", {
                         "sub_mission_id": sub_mission.id,
+                        "agent_id": f"sub-agent-{sub_agent_num}",
+                        "agent_name": _sub_mission_display_name(sub_mission, sub_agent_num),
                         "sub_agent_number": sub_agent_num,
                         "trace": {
                                 "step_index": _trace_value(trace, "step_index", 0),
@@ -1059,6 +1095,7 @@ Rules:
                         goal=sub_goal,
                         steps=sub_mission.max_steps,
                         step_callback=_sub_step_callback,
+                        interrupt_check=interrupt_check,
                     ),
                     timeout=sub_timeout,
                 )
@@ -1565,6 +1602,7 @@ If the objective is complete or no more work is needed, return:
             role = raw_role if raw_role in ("worker", "subagent") else "subagent"
             sub_missions.append(SubMission(
                 id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
+                name=str(sm.get("name") or "").strip(),
                 goal=goal,
                 role=role,
                 plane=plane,

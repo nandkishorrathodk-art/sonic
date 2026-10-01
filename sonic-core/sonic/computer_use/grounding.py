@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
+import math
 import re
 from typing import Any
 
@@ -481,15 +483,67 @@ async def query_multimodal_grounding(
     )
     try:
         res = await asyncio.wait_for(llm_router.complete(req), timeout=8.0)
-        return extract_bbox_midpoint(
-            res.content,
-            width=width,
-            height=height,
-            coordinate_space="normalized_1000",
-        )
+        return _parse_normalized_grounding_response(res.content, width, height)
     except Exception as exc:
         logger.warning("multimodal_grounding_model_query_failed", query=query, error=str(exc))
         return None
+
+
+def _parse_normalized_grounding_response(
+    response: str,
+    width: int,
+    height: int,
+) -> tuple[int, int] | None:
+    """Accept only the declared machine-readable grounding formats."""
+    text = response.strip()
+    if text.upper() == "NOT_FOUND":
+        return None
+
+    number = r"-?\d+(?:\.\d+)?"
+    box_match = re.fullmatch(
+        rf"<\|box_start\|>\s*\(?\s*({number})\s*,\s*({number})\s*,"
+        rf"\s*({number})\s*,\s*({number})\s*\)?\s*<\|box_end\|>",
+        text,
+        re.IGNORECASE,
+    )
+    if box_match:
+        x1, y1, x2, y2 = (float(value) for value in box_match.groups())
+        point = ((x1 + x2) / 2, (y1 + y2) / 2)
+    else:
+        try:
+            decoded = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        if isinstance(decoded, dict) and "x" in decoded and "y" in decoded:
+            point = (decoded["x"], decoded["y"])
+        elif (
+            isinstance(decoded, dict)
+            and isinstance(decoded.get("point"), list)
+            and len(decoded["point"]) == 2
+        ):
+            point = tuple(decoded["point"])
+        elif isinstance(decoded, list) and len(decoded) == 2:
+            point = tuple(decoded)
+        else:
+            return None
+
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in point
+    ):
+        return None
+    try:
+        x, y = float(point[0]), float(point[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(value) and 0 <= value <= 1000 for value in (x, y)):
+        return None
+
+    pixel = (int(round(x * width / 1000)), int(round(y * height / 1000)))
+    if not (0 <= pixel[0] < width and 0 <= pixel[1] < height):
+        return None
+    return pixel
 
 
 def crop_toolbar_region(
