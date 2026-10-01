@@ -632,6 +632,7 @@ class ComputerUseAgent:
             action.value
             for action in ComputerActionType
             if action in self._GUI_ONLY_ACTIONS
+            and not action.name.startswith("BROWSER_")
         )
         return (
             "You are SONIC, a general-purpose AI-human colleague operating a live "
@@ -1136,7 +1137,8 @@ class ComputerUseAgent:
                             for key, value in arguments.items()
                             if key not in {"target", "expected"}
                         }
-                    payload_lines = [json.dumps(payload_value)]
+                        fields["PAYLOAD"] = json.dumps(payload_value)
+                        payload_lines = [fields["PAYLOAD"]]
 
         action_name = fields.get("ACTION", "").upper()
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", action_name):
@@ -2193,7 +2195,13 @@ class ComputerUseAgent:
         test_file: str,
     ) -> tuple[ComputerActionType | ActionExecutionStatus, str, dict[str, Any], str]:
         """Use the LLM to decide the next action from goal + observation + history."""
-        from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
+        from sonic.llm.schemas import (
+            ImageContent,
+            LLMRequest,
+            Message,
+            MessageRole,
+            ToolDefinition,
+        )
 
         system_prompt, obs_summary = self._build_reasoning_context(
             goal, observation, step_index, primary_file, test_file
@@ -2257,8 +2265,14 @@ class ComputerUseAgent:
             if self._gui_action_contract_active()
             else frozenset(ComputerActionType) - {ComputerActionType.VERIFY_PROBE}
         )
+        legacy_browser_actions = {
+            action
+            for action in self._GUI_ONLY_ACTIONS
+            if action.name.startswith("BROWSER_")
+        }
+        advertised_actions = available_actions - legacy_browser_actions
         action_schema = "|".join(
-            action.value for action in ComputerActionType if action in available_actions
+            action.value for action in ComputerActionType if action in advertised_actions
         )
         efficiency_directive = (
             "2. GUI CONTROL SEMANTICS: APP_LAUNCH targets an installed application executable/name only. "
@@ -2302,6 +2316,39 @@ class ComputerUseAgent:
             "================================================================================"
         )
 
+        action_tools = None
+        if self._gui_action_contract_active():
+            action_tools = [
+                ToolDefinition(
+                    name="computer_action",
+                    description=(
+                        "Select exactly one visible desktop GUI action grounded in "
+                        "the attached current screenshot and observation."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": [
+                                    action.value
+                                    for action in ComputerActionType
+                                    if action in advertised_actions
+                                ],
+                            },
+                            "target": {"type": "string"},
+                            "payload": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
+                            "expected": {"type": "string"},
+                        },
+                        "required": ["action", "target", "payload", "expected"],
+                        "additionalProperties": False,
+                    },
+                )
+            ]
+
         request = LLMRequest(
             messages=[
                 Message(role=MessageRole.SYSTEM, content=system_prompt),
@@ -2309,6 +2356,7 @@ class ComputerUseAgent:
             ],
             task_type="computer_use" if images else "reasoning",
             max_tokens=1024 if images else 2048,
+            tools=action_tools,
             # Concise action selection for real-time computer use (< 3s per step).
             reasoning_effort=None if images else "medium",
         )
@@ -2343,7 +2391,7 @@ class ComputerUseAgent:
             response = await self.llm_router.complete(request)
             self._last_thought_duration = round(time.perf_counter() - t_thought_start, 2)
             content_str = getattr(response, "content", "") or ""
-            reasoning_str = getattr(response, "reasoning_content", "") or ""
+            tool_calls = list(getattr(response, "tool_calls", []) or [])
 
             refusal_phrases = (
                 "can't help with that",
@@ -2360,7 +2408,7 @@ class ComputerUseAgent:
                 "creating malware",
                 "create malware",
             )
-            combined_response = f"{content_str} {reasoning_str}".lower()
+            combined_response = content_str.lower()
             is_refusal = any(p in combined_response for p in refusal_phrases) and not re.search(
                 r'\baction\s*:\s*(?:terminal_exec|gui_|browser_|file_|git_|app_|tool_|security_tool)',
                 combined_response,
@@ -2383,18 +2431,37 @@ class ComputerUseAgent:
                     "Record model refusal and trigger replan",
                 )
 
-            # Preserve genuine chain-of-thought/thinking tokens
-            if reasoning_str:
-                self._last_thought = reasoning_str.strip(" *_\n\r\t")
-            elif "ACTION:" in content_str:
-                action_idx = content_str.find("ACTION:")
-                self._last_thought = content_str[:action_idx].strip(" *_\n\r\t")
-            else:
-                t_match = re.search(r'(?:\*{1,2}|_)?\b(?:THOUGHT|REASONING)\b(?:\*{1,2}|_)?:\s*(.*?)(?=(?:\*{1,2}|_)?\b(?:ACTION|TARGET|PAYLOAD|EXPECTED)\b(?:\*{1,2}|_)?\:|$)', content_str, re.DOTALL | re.IGNORECASE)
-                self._last_thought = t_match.group(1).strip(" *_\n\r\t") if t_match else content_str.strip()
-
-            # If content_str is empty but reasoning_str contains ACTION, parse from reasoning_str
-            parse_target_str = content_str if ("ACTION:" in content_str or not reasoning_str) else reasoning_str
+            thought_match = re.search(
+                r"(?:^|\n)\s*THOUGHT\s*:\s*(.*?)(?=\n\s*(?:ACTION|TARGET|PAYLOAD|EXPECTED)\s*:|$)",
+                content_str,
+                re.DOTALL | re.IGNORECASE,
+            )
+            self._last_thought = (
+                thought_match.group(1).strip(" *_\n\r\t")
+                if thought_match
+                else ""
+            )
+            parse_target_str = content_str
+            if self._gui_action_contract_active() and tool_calls:
+                if len(tool_calls) != 1:
+                    self._last_thought = (
+                        "The model returned multiple GUI actions; one action is "
+                        "required per fresh observation."
+                    )
+                    return self._recover_rejected_gui_proposal(
+                        goal,
+                        "Multiple GUI actions returned in one response",
+                    )
+                tool_call = tool_calls[0]
+                tool_name = str(getattr(tool_call, "name", ""))
+                arguments = getattr(tool_call, "arguments", None)
+                if tool_name != "computer_action" or not isinstance(arguments, dict):
+                    self._last_thought = "The model returned an invalid structured GUI action."
+                    return self._recover_rejected_gui_proposal(
+                        goal,
+                        "Invalid structured GUI action",
+                    )
+                parse_target_str = json.dumps(arguments, ensure_ascii=False)
             if self._gui_action_contract_active():
                 action_type, target, payload, expected = self._parse_gui_action_response(
                     parse_target_str,

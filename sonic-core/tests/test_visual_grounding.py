@@ -60,6 +60,87 @@ async def test_multimodal_grounding_json_point_uses_normalized_screen_space():
     assert coords == (640, 400)
 
 
+@pytest.mark.asyncio
+async def test_multimodal_grounding_rejects_prose_coordinates():
+    from sonic.computer_use.grounding import query_multimodal_grounding
+
+    router = SimpleNamespace(
+        complete=AsyncMock(
+            return_value=SimpleNamespace(
+                content="The center of the menu is at (0.5, 0.5) normalized coordinates."
+            )
+        )
+    )
+    screenshot = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    coords = await query_multimodal_grounding(
+        router,
+        "Applications menu",
+        screenshot,
+        width=1280,
+        height=800,
+    )
+
+    assert coords is None
+
+
+@pytest.mark.asyncio
+async def test_multimodal_grounding_accepts_strict_normalized_box():
+    from sonic.computer_use.grounding import query_multimodal_grounding
+
+    router = SimpleNamespace(
+        complete=AsyncMock(
+            return_value=SimpleNamespace(
+                content="<|box_start|>(10, 20, 30, 40)<|box_end|>"
+            )
+        )
+    )
+    screenshot = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    coords = await query_multimodal_grounding(
+        router,
+        "Applications menu",
+        screenshot,
+        width=1280,
+        height=800,
+    )
+
+    assert coords == (26, 24)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        ('{"x": 1000, "y": 500}', None),
+        ('{"x": true, "y": 500}', None),
+        ('{"x": 0, "y": 0}', (0, 0)),
+    ],
+)
+async def test_multimodal_grounding_rejects_invalid_or_offscreen_points(response, expected):
+    from sonic.computer_use.grounding import query_multimodal_grounding
+
+    router = SimpleNamespace(
+        complete=AsyncMock(return_value=SimpleNamespace(content=response))
+    )
+    screenshot = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    coords = await query_multimodal_grounding(
+        router,
+        "visible control",
+        screenshot,
+        width=1280,
+        height=800,
+    )
+
+    assert coords == expected
+
+
 def test_draw_action_marker_fallback():
     dummy_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
     res = draw_action_marker(dummy_b64, (50, 50))
@@ -174,6 +255,37 @@ async def test_agent_click_blocked_when_unresolved():
     assert trace.status == "BLOCKED"
     assert "could not be resolved" in trace.actual_observation
     assert not mock_computer.gui_action.called
+
+
+@pytest.mark.asyncio
+async def test_agent_regrounds_natural_target_instead_of_trusting_model_coordinates(monkeypatch):
+    import sonic.computer_use.agent as agent_module
+
+    computer = MagicMock()
+    computer.status = AsyncMock(return_value=SimpleNamespace(
+        active_application="Desktop",
+        active_window="Desktop",
+    ))
+    computer.gui_action = AsyncMock(return_value=ScreenObservation(width=1280, height=800))
+    agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
+    agent._last_screenshot_b64 = "visible-screen"
+    monkeypatch.setattr(
+        agent_module,
+        "query_multimodal_grounding",
+        AsyncMock(return_value=None),
+    )
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.GUI_CLICK,
+        "maximize button",
+        {"x": 640, "y": 400},
+        "Maximize the window",
+    )
+
+    assert trace.status == "BLOCKED"
+    assert "could not be resolved from visual grounding" in trace.actual_observation
+    computer.gui_action.assert_not_awaited()
 
 
 @pytest.mark.asyncio

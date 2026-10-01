@@ -568,6 +568,8 @@ export function WorklogFeed({
                   output={outText}
                   durationSeconds={item.duration_seconds}
                   exitCode={item.exit_code}
+                  agentName={item.sub_agent_name}
+                  agentId={item.sub_agent_id}
                 />
               );
             }

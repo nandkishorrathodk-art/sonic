@@ -35,6 +35,7 @@ from sonic.agents.replan import (
 )
 from sonic.agents.task_graph import (
     TaskGraph,
+    TaskGraphError,
     TaskNode,
     TaskPriority,
     TaskStatus,
@@ -244,34 +245,73 @@ class BossAgent:
         return self.max_parallel_workers
 
     def _sync_phase_to_graph(self, phase: Phase) -> None:
-        """Register phase sub-missions into TaskGraph DAG."""
-        for sub in phase.sub_missions:
-            if sub.id in self.task_graph._tasks:
-                continue
-            valid_deps = [
-                d for d in sub.depends_on
-                if d in self.task_graph._tasks
+        """Register phase work in dependency order; invalid DAGs stop execution."""
+        remaining = [
+            sub for sub in phase.sub_missions
+            if self.task_graph.get_task(sub.id) is None
+        ]
+        known_ids = set(self.task_graph.tasks) | {sub.id for sub in remaining}
+        for sub in remaining:
+            missing = set(sub.depends_on) - known_ids
+            if missing:
+                raise TaskGraphError(
+                    f"Sub-mission '{sub.id}' has unknown dependencies: "
+                    f"{', '.join(sorted(missing))}"
+                )
+
+        while remaining:
+            ready = [
+                sub for sub in remaining
+                if all(self.task_graph.get_task(dep_id) for dep_id in sub.depends_on)
             ]
-            priority = TaskPriority.HIGH if sub.priority > 1 else TaskPriority.MEDIUM
-            tn = TaskNode(
-                id=sub.id,
-                name=sub.goal[:60],
-                agent_type="dynamic",
-                task_payload={
-                    "goal": sub.goal,
-                    "max_steps": sub.max_steps,
-                    "process_mode": sub.process_mode,
-                    "evidence_context": sub.evidence_context,
-                },
-                depends_on=valid_deps,
-                priority=priority,
-                engagement_id=self.task_graph.engagement_id,
-                tenant_id=self.task_graph.tenant_id,
-            )
-            try:
-                self.task_graph.add_task(tn)
-            except Exception as exc:
-                logger.debug("task_graph_add_skipped", sub_id=sub.id, error=str(exc))
+            if not ready:
+                waiting = ", ".join(sub.id for sub in remaining)
+                raise TaskGraphError(
+                    f"Sub-mission dependencies are cyclic or unresolved: {waiting}"
+                )
+
+            for sub in ready:
+                priority = (
+                    TaskPriority.HIGH if sub.priority > 1 else TaskPriority.MEDIUM
+                )
+                self.task_graph.add_task(TaskNode(
+                    id=sub.id,
+                    name=_sub_mission_display_name(sub, 0),
+                    agent_type="dynamic",
+                    task_payload={
+                        "goal": sub.goal,
+                        "max_steps": sub.max_steps,
+                        "process_mode": sub.process_mode,
+                        "evidence_context": sub.evidence_context,
+                    },
+                    depends_on=list(sub.depends_on),
+                    priority=priority,
+                    max_retries=0,
+                    engagement_id=self.task_graph.engagement_id,
+                    tenant_id=self.task_graph.tenant_id,
+                ))
+                remaining.remove(sub)
+
+    def _task_graph_snapshot(self) -> dict[str, Any]:
+        """Build a compact, serializable view of orchestration state."""
+        tasks = [
+            {
+                "task_id": task.id,
+                "name": task.name,
+                "status": task.status.value,
+                "depends_on": list(task.depends_on),
+                "agent_id": task.agent_id,
+                "attempt": task.retry_count + 1,
+                "error": task.error,
+            }
+            for task in self.task_graph.tasks.values()
+        ]
+        return {
+            "engagement_id": self.task_graph.engagement_id,
+            "tenant_id": self.task_graph.tenant_id,
+            "stats": self.task_graph.get_stats(),
+            "tasks": tasks,
+        }
 
     def _detect_sub_mission_trigger(self, result: SubMissionResult) -> ReplanTrigger | None:
         """Inspect sub-mission outcome from verified state to determine if replanning is warranted."""
@@ -396,9 +436,32 @@ class BossAgent:
                     )
 
             self.phases.append(first_phase)
-            self._sync_phase_to_graph(first_phase)
+            try:
+                self._sync_phase_to_graph(first_phase)
+            except TaskGraphError as exc:
+                logger.error("boss_task_graph_invalid", error=str(exc))
+                return BossReport(
+                    objective=objective,
+                    status="INCOMPLETE",
+                    findings_summary=f"Execution plan rejected by TaskGraph: {exc}",
+                    duration_seconds=round(time.perf_counter() - t_start, 2),
+                )
         else:
-            self._sync_phase_to_graph(self.phases[0])
+            try:
+                self._sync_phase_to_graph(self.phases[0])
+            except TaskGraphError as exc:
+                logger.error("boss_task_graph_invalid", error=str(exc))
+                return BossReport(
+                    objective=objective,
+                    status="INCOMPLETE",
+                    findings_summary=f"Execution plan rejected by TaskGraph: {exc}",
+                    duration_seconds=round(time.perf_counter() - t_start, 2),
+                )
+
+        await self._emit(phase_callback, "task_graph", {
+            "stage": "plan_registered",
+            **self._task_graph_snapshot(),
+        })
 
         # Store initial requested_plane from Phase 1 if not explicitly set
         if not self.requested_plane and self.phases and self.phases[0].sub_missions:
@@ -425,8 +488,7 @@ class BossAgent:
                 "content": current_phase.thinking,
             })
 
-            # Dispatch SubAgents in concurrent dependency waves
-            completed_sub_ids = {r.sub_mission_id for p in self.phases for r in p.results if r.success}
+            # Dispatch only tasks the dependency graph currently marks READY.
             pending_subs = sorted(current_phase.sub_missions, key=lambda s: -s.priority)
 
             while pending_subs:
@@ -434,9 +496,11 @@ class BossAgent:
                     break
 
                 # 1. Identify ready sub-missions (dependencies met)
+                graph_ready_ids = {
+                    task.id for task in self.task_graph.get_ready_tasks()
+                }
                 ready_batch = [
-                    s for s in pending_subs
-                    if not s.depends_on or all(dep_id in completed_sub_ids for dep_id in s.depends_on)
+                    sub for sub in pending_subs if sub.id in graph_ready_ids
                 ]
 
                 # Check TaskGraph blocked status
@@ -445,6 +509,7 @@ class BossAgent:
                     tg_task = self.task_graph.get_task(s.id)
                     if tg_task and tg_task.status == TaskStatus.BLOCKED:
                         logger.info("boss_sub_mission_blocked_in_graph", sub_id=s.id)
+                        s.status = "BLOCKED"
                         pending_subs.remove(s)
                         continue
                     unblocked_ready.append(s)
@@ -489,15 +554,24 @@ class BossAgent:
                 async def _run_sub_worker(sub_m: SubMission, agent_num: int):
                     sub_m.status = "RUNNING"
                     tg_t = self.task_graph.get_task(sub_m.id)
-                    if tg_t:
-                        try:
-                            self.task_graph.mark_running(sub_m.id)
-                        except Exception:
-                            pass
+                    if tg_t is None:
+                        raise TaskGraphError(
+                            f"Sub-mission '{sub_m.id}' is missing from TaskGraph"
+                        )
+                    agent_id = f"sub-agent-{agent_num}"
+                    execution_id = self.task_graph.mark_running(
+                        sub_m.id,
+                        agent_id=agent_id,
+                    )
+                    await self._emit(phase_callback, "task_graph", {
+                        "stage": "task_running",
+                        "task_id": sub_m.id,
+                        **self._task_graph_snapshot(),
+                    })
 
                     await self._emit(phase_callback, "sub_dispatch", {
                         "sub_mission_id": sub_m.id,
-                        "agent_id": f"sub-agent-{agent_num}",
+                        "agent_id": agent_id,
                         "agent_name": _sub_mission_display_name(sub_m, agent_num),
                         "goal": sub_m.goal,
                         "max_steps": sub_m.max_steps,
@@ -529,20 +603,43 @@ class BossAgent:
                             traces=[],
                         )
 
-                    res.agent_id = f"sub-agent-{agent_num}"
+                    res.agent_id = agent_id
                     res.agent_name = _sub_mission_display_name(sub_m, agent_num)
                     sub_m.status = "COMPLETED" if res.success else "FAILED"
-                    if tg_t:
-                        try:
-                            if res.success:
-                                self.task_graph.mark_completed(sub_m.id, {
+                    try:
+                        if res.success:
+                            self.task_graph.mark_completed(
+                                sub_m.id,
+                                {
                                     "findings": res.key_discoveries,
                                     "summary": res.findings_summary,
-                                })
-                            else:
-                                self.task_graph.mark_failed(sub_m.id, res.findings_summary)
-                        except Exception:
-                            pass
+                                },
+                                execution_id=execution_id,
+                            )
+                        else:
+                            self.task_graph.mark_failed(
+                                sub_m.id,
+                                res.findings_summary or "Sub-agent did not verify success.",
+                                execution_id=execution_id,
+                            )
+                    except TaskGraphError as exc:
+                        logger.error(
+                            "boss_task_graph_transition_failed",
+                            sub_id=sub_m.id,
+                            status=res.status,
+                            error=str(exc),
+                        )
+                        res.success = False
+                        res.status = "FAILED"
+                        res.findings_summary = (
+                            f"{res.findings_summary}\nTaskGraph transition failed: {exc}"
+                        ).strip()
+
+                    await self._emit(phase_callback, "task_graph", {
+                        "stage": "task_finished",
+                        "task_id": sub_m.id,
+                        **self._task_graph_snapshot(),
+                    })
 
                     await self._emit(phase_callback, "sub_report", {
                         "sub_mission_id": sub_m.id,
@@ -576,6 +673,20 @@ class BossAgent:
                     if isinstance(res, Exception):
                         sm, num = batch_tasks[idx]
                         sm.status = "FAILED"
+                        graph_task = self.task_graph.get_task(sm.id)
+                        if graph_task and graph_task.status == TaskStatus.RUNNING:
+                            try:
+                                self.task_graph.mark_failed(
+                                    sm.id,
+                                    f"Sub-agent orchestration error: {res}",
+                                    execution_id=graph_task.execution_id,
+                                )
+                            except TaskGraphError as graph_error:
+                                logger.error(
+                                    "boss_task_graph_exception_recovery_failed",
+                                    sub_id=sm.id,
+                                    error=str(graph_error),
+                                )
                         res = SubMissionResult(
                             sub_mission_id=sm.id,
                             goal=sm.goal,
@@ -590,8 +701,6 @@ class BossAgent:
                         )
                     current_phase.results.append(res)
                     self.all_traces.extend(res.traces)
-                    if res.success:
-                        completed_sub_ids.add(res.sub_mission_id)
 
                     # Replan trigger evaluation on SubAgent result
                     trigger = self._detect_sub_mission_trigger(res)
@@ -689,7 +798,27 @@ class BossAgent:
                 )
                 if next_phase and next_phase.sub_missions:
                     self.phases.append(next_phase)
-                    self._sync_phase_to_graph(next_phase)
+                    try:
+                        self._sync_phase_to_graph(next_phase)
+                    except TaskGraphError as exc:
+                        logger.error("boss_task_graph_invalid", error=str(exc))
+                        return BossReport(
+                            objective=objective,
+                            status="INCOMPLETE",
+                            findings_summary=(
+                                f"Next execution phase rejected by TaskGraph: {exc}"
+                            ),
+                            phases=self.phases,
+                            total_phases=len(self.phases),
+                            total_sub_agents=self._sub_agent_count,
+                            total_actions=len(self.all_traces),
+                            all_traces=self.all_traces,
+                            duration_seconds=round(time.perf_counter() - t_start, 2),
+                        )
+                    await self._emit(phase_callback, "task_graph", {
+                        "stage": "replan_registered",
+                        **self._task_graph_snapshot(),
+                    })
                 else:
                     logger.info("boss_agent_no_more_phases")
                     break

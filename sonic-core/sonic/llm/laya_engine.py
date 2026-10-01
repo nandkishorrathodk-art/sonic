@@ -227,7 +227,7 @@ class LayaSystem1Engine:
                         json={
                             "state": state,
                             "questions": questions,
-                            "model": chosen_model,
+                            "model": model,
                             "max_len": max_len,
                         },
                     )
@@ -252,7 +252,10 @@ class LayaSystem1Engine:
         local_router = self._get_local_router()
         if local_router is not None:
             try:
-                raw = local_router.predict(state, questions, model=chosen_model, max_len=max_len)
+                local_options: dict[str, Any] = {"max_len": max_len}
+                if model is not None:
+                    local_options["model"] = model
+                raw = local_router.predict(state, questions, **local_options)
                 result = self._validate_backend_result(
                     raw, questions, chosen_model, "laya_local"
                 )

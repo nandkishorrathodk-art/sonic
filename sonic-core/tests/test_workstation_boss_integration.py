@@ -133,7 +133,15 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
         ):
             if phase_callback:
                 await phase_callback("boss_thinking", {"content": "Planning attack phases", "thinking_type": "strategic_decomposition"})
-                await phase_callback("sub_dispatch", {"sub_agent_number": 1, "goal": "Discover endpoints", "max_steps": 5})
+                await phase_callback("sub_dispatch", {
+                    "sub_agent_number": 1,
+                    "sub_mission_id": "sub-discover-endpoints",
+                    "agent_id": "sub-agent-1",
+                    "agent_name": "Endpoint Scout",
+                    "status": "RUNNING",
+                    "goal": "Discover endpoints",
+                    "max_steps": 5,
+                })
                 await phase_callback("sub_step", {"trace": {
                     "step_index": 1,
                     "action_type": "TERMINAL_EXEC",
@@ -142,8 +150,15 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
                     "observation": "host-name",
                     "status": "SUCCESS",
                     "exit_code": None,
-                }})
-                await phase_callback("sub_report", {"sub_agent_number": 1, "findings_summary": "Found 12 endpoints"})
+                }, "agent_id": "sub-agent-1", "agent_name": "Endpoint Scout"})
+                await phase_callback("sub_report", {
+                    "sub_agent_number": 1,
+                    "sub_mission_id": "sub-discover-endpoints",
+                    "agent_id": "sub-agent-1",
+                    "agent_name": "Endpoint Scout",
+                    "status": "SUCCESS",
+                    "findings_summary": "Found 12 endpoints",
+                })
                 await phase_callback("phase_complete", {"phase_number": 1, "name": "Recon", "results_count": 1, "success_count": 1})
                 await phase_callback("boss_report", {"findings_summary": "Recon completed: Apache 2.4 + PHP 7.4 found."})
             return mock_report
@@ -162,8 +177,15 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
 
         titles = [w.get("title") for w in state.get("worklog", [])]
         assert any("Boss Thinking" in t for t in titles)
-        assert any("Dispatching SubAgent #1" in t for t in titles)
-        assert any("SubAgent #1 Report" in t for t in titles)
+        assert any("Dispatching Endpoint Scout (sub-agent-1)" in t for t in titles)
+        assert any("Endpoint Scout (sub-agent-1) Report — SUCCESS" in t for t in titles)
+        dispatch = next(w for w in state["worklog"] if "Dispatching Endpoint Scout" in w.get("title", ""))
+        assert dispatch["status"] == "RUNNING"
+        report = next(w for w in state["worklog"] if "Endpoint Scout (sub-agent-1) Report" in w.get("title", ""))
+        assert report["sub_mission_id"] == "sub-discover-endpoints"
+        command = next(w for w in state["worklog"] if w.get("type") == "command")
+        assert command["sub_agent_id"] == "sub-agent-1"
+        assert command["sub_agent_name"] == "Endpoint Scout"
         assert any("Phase 1 Complete" in t for t in titles)
         assert any("SONIC Boss Report" in t for t in titles)
 
@@ -430,7 +452,13 @@ async def test_boss_sub_goal_filters_raw_ips_and_diagnostic_context():
 
     with patch("sonic.computer_use.agent.ComputerUseAgent") as MockAgentClass:
         mock_agent = MagicMock()
-        async def fake_run_mission(workspace_id, goal, steps, step_callback=None):
+        async def fake_run_mission(
+            workspace_id,
+            goal,
+            steps,
+            step_callback=None,
+            interrupt_check=None,
+        ):
             dispatched_goals.append(goal)
             return []
         mock_agent.run_mission = AsyncMock(side_effect=fake_run_mission)

@@ -2,7 +2,7 @@
 
 Covers:
 1. ComputerUseAgent _consecutive_unchanged_screens active watchdog
-   (refocus at 2, Alt+F accelerator at 3, abort before burning quota at >= 4).
+   (no recovery input; abort before burning quota at >= 4).
 2. Typing verification rejecting garbage text and wrong fields instead of falsely marking SUCCESS.
 3. JudgeAgent requiring verified application state or artifacts for GUI actions with exit_code=None,
    rejecting terminal syntax errors, and verifying file artifacts on disk.
@@ -52,12 +52,12 @@ def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
 
 
 @pytest.mark.asyncio
-async def test_watchdog_refocuses_window_at_two_unchanged_screens():
+async def test_unchanged_click_is_unverified_without_refocusing_window():
     provider = _mock_static_gui_provider("fixed_screen_hash_123")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
     agent._last_screenshot_b64 = "fixed_screen_hash_123"
 
-    # Action 1: First unchanged screen
+    # An unchanged frame cannot prove whether a click focused a control.
     trace1 = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_CLICK,
@@ -66,9 +66,10 @@ async def test_watchdog_refocuses_window_at_two_unchanged_screens():
         "Click button",
     )
     assert agent._consecutive_unchanged_screens == 1
-    assert trace1.status == ActionExecutionStatus.FAILED
+    assert trace1.status == ActionExecutionStatus.UNVERIFIED
+    assert trace1.recovery_attempted is False
 
-    # Action 2: Second unchanged screen -> watchdog level 1: refocus window
+    # Re-observation is safe; the watchdog must not inject focus or key input.
     trace2 = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_CLICK,
@@ -77,29 +78,21 @@ async def test_watchdog_refocuses_window_at_two_unchanged_screens():
         "Click button again",
     )
     assert agent._consecutive_unchanged_screens == 2
-    assert "WATCHDOG ADAPTIVE RECOVERY (count=2)" in trace2.actual_observation
-    assert "Triggered window refocus" in trace2.actual_observation
-
-    # Verify provider was called to refocus active window
-    gui_calls = [
-        call.args[1] for call in provider.gui_action.call_args_list
-        if hasattr(call.args[1], "action")
-    ]
-    refocus_actions = [
-        a for a in gui_calls
-        if a.action in (GUIActionType.SELECT_WINDOW, GUIActionType.HOTKEY)
-    ]
-    assert len(refocus_actions) > 0
+    assert trace2.status == ActionExecutionStatus.UNVERIFIED
+    assert "No recovery input was sent" in trace2.actual_observation
+    gui_calls = [call.args[1] for call in provider.gui_action.call_args_list]
+    assert len(gui_calls) == 2
+    assert all(action.action == GUIActionType.CLICK for action in gui_calls)
 
 
 @pytest.mark.asyncio
-async def test_watchdog_triggers_alt_f_accelerator_at_three_unchanged_screens():
+async def test_watchdog_never_injects_application_specific_shortcuts():
     provider = _mock_static_gui_provider("fixed_screen_hash_456")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
     agent._last_screenshot_b64 = "fixed_screen_hash_456"
     agent._consecutive_unchanged_screens = 2  # Already at 2
 
-    # Action 3: Third unchanged screen -> watchdog level 2: Alt+F accelerator
+    # An unchanged frame in an arbitrary application must not cause Alt+F.
     trace = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_CLICK,
@@ -108,16 +101,11 @@ async def test_watchdog_triggers_alt_f_accelerator_at_three_unchanged_screens():
         "Click stuck element",
     )
     assert agent._consecutive_unchanged_screens == 3
-    assert "WATCHDOG ADAPTIVE RECOVERY (count=3)" in trace.actual_observation
-    assert "Alt+F" in trace.actual_observation
-
-    # Verify provider was dispatched Alt+F
+    assert trace.status == ActionExecutionStatus.UNVERIFIED
+    assert "No recovery input was sent" in trace.actual_observation
     gui_calls = [call.args[1] for call in provider.gui_action.call_args_list]
-    alt_f_calls = [
-        a for a in gui_calls
-        if getattr(a, "key", "") == "Alt+F" or getattr(a, "text", "") == "Alt+F"
-    ]
-    assert len(alt_f_calls) > 0
+    assert len(gui_calls) == 1
+    assert gui_calls[0].action == GUIActionType.CLICK
 
 
 @pytest.mark.asyncio
@@ -128,7 +116,7 @@ async def test_watchdog_aborts_run_mission_before_burning_quota():
 
     # Mock choose_action to repeatedly attempt GUI_CLICK
     async def _mock_choose(goal, obs, step):
-        return ComputerActionType.GUI_CLICK, "stuck_btn", {"x": 50, "y": 50}, "Click"
+        return ComputerActionType.GUI_CLICK, "50,50", {"x": 50, "y": 50}, "Click"
 
     agent.choose_action = AsyncMock(side_effect=_mock_choose)
 
@@ -137,6 +125,63 @@ async def test_watchdog_aborts_run_mission_before_burning_quota():
     assert len(traces) <= 5
     assert agent._consecutive_unchanged_screens >= 4
     assert any("WATCHDOG_ABORT" in h.get("action", "") for h in agent.history)
+    assert all(
+        call.args[1].action == GUIActionType.CLICK
+        for call in provider.gui_action.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_unchanged_focus_click_does_not_send_escape_before_typing():
+    provider = _mock_static_gui_provider("unchanged_dialog_frame")
+    agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+    agent._last_screenshot_b64 = "unchanged_dialog_frame"
+
+    click_trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_CLICK,
+        "text field",
+        {"x": 240, "y": 180},
+        "Focus the visible text field",
+    )
+
+    assert click_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert click_trace.recovery_attempted is False
+    assert provider.gui_action.await_count == 1
+    assert provider.gui_action.await_args.args[1].action == GUIActionType.CLICK
+
+
+@pytest.mark.asyncio
+async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
+    provider = _mock_static_gui_provider("unchanged_input_frame")
+    agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+    agent._last_screenshot_b64 = "unchanged_input_frame"
+
+    typing_trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_TYPE,
+        "text field",
+        {"x": 240, "y": 180, "text": "folder name"},
+        "Enter text in the focused field",
+    )
+    keypress_trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_KEYPRESS,
+        "text field",
+        {"key": "Return"},
+        "Submit the focused field",
+    )
+
+    assert typing_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert keypress_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert typing_trace.recovery_attempted is False
+    assert keypress_trace.recovery_attempted is False
+    actions = [call.args[1].action for call in provider.gui_action.call_args_list]
+    assert actions == [
+        GUIActionType.CLICK,
+        GUIActionType.TYPE,
+        GUIActionType.KEYPRESS,
+    ]
 
 
 # =========================================================================

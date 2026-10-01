@@ -2175,7 +2175,7 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
 - **Target Window Ownership Validation**: GUI actions specifying target window verify active window ownership before dispatch; mismatched focus triggers `SELECT_WINDOW` or fail-closed `BLOCKED`.
 - **Physical Display Mutex**: Keyed `DisplayLeaseManager` in `teamwork.py` to physical display identity (`:99`) preventing concurrent subagent mouse/keyboard race conditions.
 - **Reasoning Heartbeat & Observability**: Dispatches periodic (~2s) heartbeat events during heavy LLM thinking turns into the workstation worklog without injecting synthetic pixels or modifying raw screenshots.
-- **Universal Zero-Visual-Delta Enforcement**: Expanded zero visual delta checks across click, double-click, typing, and hotkeys to trigger re-observation and anti-stall recovery.
+- **Universal Zero-Visual-Delta Enforcement**: Detects unchanged frames after click, double-click, typing, and hotkeys; unchanged pixels make an action `UNVERIFIED`, not failed. Recovery must not inject Escape or application-specific shortcuts; repeated unchanged actions may stop the worker without changing desktop state.
 - **Micro-Crop Toolbar Ratio Compatibility**: Restored `crop_height_ratio` backwards compatibility in `crop_toolbar_region`.
 
 ## Phase 45 — Boss Direct Specialist Subagent Dispatch, Antigravity-Grade Dynamic Subagent Teamwork & 3-Way Parallel Branch Verification (DONE)
@@ -2270,5 +2270,63 @@ Every declared subsystem has exactly one authoritative department and team. Empl
 - `ComputerUseAgent.choose_action()` preserves the explicit `terminal: <operator command>` path, but GUI-only/GUI-plane workers without a reasoning router fail closed rather than selecting a generic workspace file diagnostic. If model reasoning raises an error, the GUI worker records a blocked reasoning-unavailable trace and stops instead of looping on screenshots.
 - GUI-plane `GOAL_COMPLETE` stops the worker as an explicit Judge handoff. The worker does not independently mark itself successful from visible wording; GUI-plane missions also skip the non-GUI post-mission verifier. The legacy `gui_only` verifier likewise never treats lexical overlap as proof.
 - `grounding_user_prompt()` defines normalized `[0,1000]` values for multimodal grounding output. `query_multimodal_grounding()` explicitly parses that coordinate space, including JSON `{x,y}` points; model action `TARGET`/`PAYLOAD` values are separately instructed to use screen pixels. Out-of-bounds points are rejected, never clamped.
+- An unchanged screenshot after a GUI click, typing action, or keypress is inconclusive: record `UNVERIFIED`, re-observe, and never send Escape or a guessed shortcut as recovery. Only repeated stalls may abort the worker; GUI completion still requires independent Judge evidence.
 - Focused validation for the bbox, perception, coordinate, GUI dispatch, and completion contracts: **97 passed**; Ruff and `git diff --check` clean. This validates mocked/unit contracts only, not completion of a real arbitrary GUI task.
 - Runtime check on 2026-09-29: API, Redis, SQLite, and local Docker workstation health were healthy; the LLM router was degraded with `No LLM API keys configured in environment.` No live GUI task was run because model-driven reasoning could not be verified as available. Recheck the active backend's LLM/vision readiness before attempting live GUI acceptance; do not claim SONIC's GUI task capability from unit tests alone.
+
+### GUI perception and execution regression rules (2026-09-30)
+- NSI frames must be read from the published port of the selected workstation
+  container. Resolve its `6080/tcp` host binding dynamically; never assume
+  `localhost:6080` for a named or isolated workstation, because that may read
+  another desktop's pixels and controls.
+- A valid screenshot is not sufficient perception evidence. If NSI exposes only
+  X11 window rectangles (or no actionable OCR/AT-SPI controls), preserve those
+  observations and run the current-frame screenshot OCR fallback. The
+  workstation image must include `tesseract-ocr`, and capture/OCR failures must
+  be reported rather than silently converted into an empty success-shaped
+  observation.
+- NSI OCR controls are actionable only when they carry confidence of at least
+  60 and valid screen-pixel bounds; missing confidence is not a pass. If OCR
+  quality is below that bar and no AT-SPI controls are available, preserve
+  non-OCR observations and run the current-frame fallback with both sparse-text
+  and block-text Tesseract layouts, deduplicating overlapping word detections.
+- When a GUI reasoning request includes screenshot pixels, route it through
+  `computer_use`/the configured multimodal model, not the text-only `reasoning`
+  route (the router may strip image content from models without image support).
+  Always retain current screenshot pixels for GUI decisions even when OCR or
+  AT-SPI controls are available; control metadata supplements rather than
+  replaces the visual frame. Grounded control-only requests may use text
+  reasoning only when no screenshot is being used.
+- GUI `TARGET` coordinates are integer screen pixels. Parse an exact `x,y`
+  target or an exact JSON `{"x": <integer>, "y": <integer>}` point into
+  coordinate fields before grounding; reject booleans, floats, extra fields,
+  and conflicting coordinate sources. Explicit pixel targets must bypass
+  semantic visual grounding and then be validated against the latest observed
+  screen bounds. Normalized coordinates are accepted only from explicitly
+  labeled multimodal grounding output and must never be guessed from their
+  numeric magnitude.
+- NSI startup must not use a self-matching `pkill -f` from its supervising
+  shell; track the worker with a PID file and bound readiness waits. Keep
+  `docker/entrypoint-workstation.sh` LF-terminated in the Windows worktree
+  (`.gitattributes` enforces this), because it is mounted and executed by Linux.
+- An operator interrupt must be forwarded from Boss through each delegated
+  `ComputerUseAgent.run_mission()`; a paused status alone is not evidence that
+  the worker has stopped interacting with the shared display.
+- A GUI worker must not turn repeated non-GUI or malformed model proposals into
+  a screenshot-only loop. A fresh observation may be attempted once; if the
+  next proposal still violates the visible-GUI contract, stop and stream an
+  explicit blocked trace to Boss/operator. `GUI_TYPE` must include explicit
+  text and must never type a target label or coordinates as a fallback.
+- GUI-only workers must receive one consistent visible-GUI action contract in
+  both system and user prompts. Do not expose dual-plane/terminal instructions,
+  file/tool authoring directives, or non-GUI action choices to a worker whose
+  assigned execution plane is `gui`; keep runtime action blocking as defense in
+  depth.
+- GUI acceptance must exercise a general non-browser desktop application as
+  well as browser-capable workflows where relevant. A pass requires a fresh
+  post-action observation, real worker action receipts, and independent
+  Judge-confirmed task evidence. Unit tests, an interactive screenshot, a
+  launched app, or a worker's `GOAL_COMPLETE` proposal alone are not an
+  end-to-end pass. Prefer isolated acceptance desktops; use the shared operator
+  workstation for a test mutation only with explicit operator authorization,
+  and retain any resulting user-visible artifact unless asked to remove it.

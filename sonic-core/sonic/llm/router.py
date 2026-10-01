@@ -773,7 +773,11 @@ class ModelRouter:
         active_model_name = (
             routed_request.model or getattr(provider, "default_model", "") or ""
         ).lower()
-        if has_images and not self._model_supports_images(active_model_name):
+        if (
+            has_images
+            and effective_task != "vision"
+            and not self._model_supports_images(active_model_name)
+        ):
             primary_request = routed_request.model_copy(deep=True)
             for msg in primary_request.messages:
                 if getattr(msg, "images", None):
@@ -821,6 +825,7 @@ class ModelRouter:
                 provider.name,
                 effective_task,
                 request_spent=request_spent,
+                primary_error=e,
             )
 
     @staticmethod
@@ -848,14 +853,25 @@ class ModelRouter:
         failed_provider: str,
         task_type: str | None,
         request_spent: list[Decimal] | None = None,
+        primary_error: Exception | None = None,
     ) -> LLMResponse:
         """Try fallback providers when the primary fails."""
         if request_spent is None:
             request_spent = [Decimal(0)]
         candidates = self._fallback_candidates(task_type)
         original_model = request.model
+        failures: list[str] = []
+        if primary_error is not None:
+            failures.append(
+                f"{failed_provider}/{original_model or 'default'}: "
+                f"{self._provider_error_summary(primary_error)}"
+            )
         for fb_name, fb_model in candidates:
             if not self._is_provider_ready(fb_name):
+                if task_type == "vision":
+                    failures.append(
+                        f"{fb_name}/{fb_model or 'default'}: provider not configured"
+                    )
                 continue
             # Skip if same provider and no different model specified
             if fb_name == failed_provider and (not fb_model or fb_model == original_model):
@@ -871,17 +887,34 @@ class ModelRouter:
                 raise
             except Exception as e:
                 logger.warning("fallback_failed", provider=fb_name, model=fb_model, error=str(e))
+                failures.append(
+                    f"{fb_name}/{fb_model or 'default'}: "
+                    f"{self._provider_error_summary(e)}"
+                )
                 continue
 
         if task_type == "vision":
+            failure_detail = f" Attempts: {'; '.join(failures)}." if failures else ""
             raise RuntimeError(
-                "All configured vision providers failed. Configure a working "
+                "All configured vision providers failed."
+                f"{failure_detail} Configure a working "
                 "vision provider or start its local vision model."
             )
         raise RuntimeError(
             f"All providers failed for task_type={task_type}. "
             f"Primary: {failed_provider} (model: {original_model}), Candidates tried: {candidates}"
         )
+
+    @staticmethod
+    def _provider_error_summary(error: Exception) -> str:
+        """Expose provider failure class/status without leaking response bodies."""
+        status_code = getattr(error, "status_code", None)
+        if status_code is None:
+            response = getattr(error, "response", None)
+            status_code = getattr(response, "status_code", None)
+        if status_code is not None:
+            return f"HTTP {status_code}"
+        return type(error).__name__
 
     async def stream(
         self,
@@ -917,7 +950,11 @@ class ModelRouter:
             if fallback_model:
                 attempt_request.model = fallback_model
             attempt_model = (attempt_request.model or attempt_provider.default_model).lower()
-            if has_images and not self._model_supports_images(attempt_model):
+            if (
+                has_images
+                and effective_task != "vision"
+                and not self._model_supports_images(attempt_model)
+            ):
                 for message in attempt_request.messages:
                     message.images = []
 

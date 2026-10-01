@@ -3066,6 +3066,8 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 duration_seconds = trace.get("duration_seconds", 0)
                                 exit_code = trace.get("exit_code")
                                 payload = trace.get("payload", "")
+                                sub_agent_id = str(trace.get("sub_agent_id") or "")
+                                sub_agent_name = str(trace.get("sub_agent_name") or "")
                             else:
                                 step_index = getattr(trace, "step_index", 1)
                                 act_type = getattr(trace, "action_type", "")
@@ -3078,8 +3080,16 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 exit_code = getattr(trace, "exit_code", None)
                                 payload = getattr(trace, "payload", "")
 
+                                sub_agent_id = ""
+                                sub_agent_name = ""
+                            worker_metadata = (
+                                {"sub_agent_id": sub_agent_id, "sub_agent_name": sub_agent_name}
+                                if sub_agent_id or sub_agent_name
+                                else {}
+                            )
                             step_type = "action" if trace_status in ("COMPLETED", "SUCCESS", "RECOVERED", "VERIFIED") else "error"
-                            state["current_action"] = f"Step {step_index}: {action_val} on {target_resource}"
+                            worker_label = f"{sub_agent_name} ({sub_agent_id}): " if worker_metadata else ""
+                            state["current_action"] = f"{worker_label}Step {step_index}: {action_val} on {target_resource}"
 
                             # Real unmocked Thought emission matching Devin timeline
                             if thought:
@@ -3090,6 +3100,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     "Thinking",
                                     thought,
                                     duration_seconds=t_dur,
+                                    **worker_metadata,
                                 )
 
                             # Real unmocked Action emission matching Devin timeline
@@ -3113,24 +3124,28 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     command=cmd, output=actual_observation,
                                     duration_seconds=duration_seconds,
                                     exit_code=exit_code,
+                                    **worker_metadata,
                                 )
                             elif action_val == "FILE_READ":
                                 _append_worklog(
                                     state, "read", f"Read {target_resource}", actual_observation,
                                     file=target_resource,
                                     duration_seconds=duration_seconds,
+                                    **worker_metadata,
                                 )
                             elif action_val == "FILE_WRITE":
                                 _append_worklog(
                                     state, "write", f"Write {target_resource}", actual_observation,
                                     file=target_resource,
                                     duration_seconds=duration_seconds,
+                                    **worker_metadata,
                                 )
                             elif action_val in ("SCREENSHOT", "BROWSER_SCREENSHOT"):
                                 _append_worklog(
                                     state, "screenshot", "Desktop Screenshot", actual_observation or "Captured desktop screenshot",
                                     image=actual_observation if (actual_observation and actual_observation.startswith("data:image")) else None,
                                     duration_seconds=duration_seconds,
+                                    **worker_metadata,
                                 )
                             else:
                                 _append_worklog(
@@ -3138,6 +3153,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     f"Step {step_index}: {action_val}",
                                     f"Target: {target_resource}\nResult: {actual_observation}\nStatus: {trace_status}",
                                     duration_seconds=duration_seconds,
+                                    **worker_metadata,
                                 )
 
                             # Auto-synthesize Evidence and Graph Memory nodes from discoveries
@@ -3266,7 +3282,26 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
 
                             async def _on_boss_event(event_type: str, data: dict) -> None:
                                 data = data or {}
-                                if event_type == "boss_thinking":
+                                if event_type == "task_graph":
+                                    stats = data.get("stats", {})
+                                    tasks = data.get("tasks", [])
+                                    task_lines = [
+                                        f"{task.get('status', 'unknown')}: "
+                                        f"{task.get('name', task.get('task_id', 'task'))}"
+                                        for task in tasks[:20]
+                                        if isinstance(task, dict)
+                                    ]
+                                    _mission_event(
+                                        state,
+                                        "info",
+                                        f"TaskGraph — {data.get('stage', 'updated')}",
+                                        (
+                                            f"Counts: {json.dumps(stats, sort_keys=True)}\n"
+                                            + "\n".join(task_lines)
+                                        ),
+                                        task_graph=data,
+                                    )
+                                elif event_type == "boss_thinking":
                                     content = data.get("content", "")
                                     _mission_event(
                                         state,
@@ -3278,23 +3313,45 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     )
                                 elif event_type == "sub_dispatch":
                                     sub_num = data.get("sub_agent_number")
-                                    title = f"Dispatching SubAgent #{sub_num}" if sub_num is not None else "Dispatching SubAgent"
+                                    agent_id = str(data.get("agent_id") or "")
+                                    agent_name = str(data.get("agent_name") or "")
+                                    title = (
+                                        f"Dispatching {agent_name} ({agent_id})"
+                                        if agent_name and agent_id
+                                        else f"Dispatching SubAgent #{sub_num}"
+                                        if sub_num is not None
+                                        else "Dispatching SubAgent"
+                                    )
                                     _mission_event(
                                         state,
                                         "action",
                                         title,
-                                        f"Goal: {data.get('goal')}\nMax Steps: {data.get('max_steps')}",
+                                        f"Status: {data.get('status', 'RUNNING')}\nGoal: {data.get('goal')}\nMax Steps: {data.get('max_steps')}",
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
+                                        agent_id=agent_id,
+                                        agent_name=agent_name,
+                                        status=data.get("status", "RUNNING"),
                                         goal=data.get("goal"),
                                         max_steps=data.get("max_steps"),
                                     )
                                 elif event_type == "sub_step":
                                     trace_data = data.get("trace", {})
+                                    trace_data["sub_agent_id"] = data.get("agent_id", "")
+                                    trace_data["sub_agent_name"] = data.get("agent_name", "")
                                     await _record_step_trace(trace_data)
                                 elif event_type == "sub_report":
                                     sub_num = data.get("sub_agent_number")
-                                    title = f"SubAgent #{sub_num} Report" if sub_num is not None else "SubAgent Report"
+                                    agent_id = str(data.get("agent_id") or "")
+                                    agent_name = str(data.get("agent_name") or "")
+                                    worker_status = str(data.get("status") or ("COMPLETED" if data.get("success") else "FAILED"))
+                                    title = (
+                                        f"{agent_name} ({agent_id}) Report — {worker_status}"
+                                        if agent_name and agent_id
+                                        else f"SubAgent #{sub_num} Report"
+                                        if sub_num is not None
+                                        else "SubAgent Report"
+                                    )
                                     _mission_event(
                                         state,
                                         "info",
@@ -3302,6 +3359,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         data.get("findings_summary", ""),
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
+                                        agent_id=agent_id,
+                                        agent_name=agent_name,
+                                        status=worker_status,
                                         goal=data.get("goal"),
                                         success=data.get("success"),
                                         findings_summary=data.get("findings_summary"),

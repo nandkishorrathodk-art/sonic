@@ -80,6 +80,33 @@ def test_perception_bus_normalizes_explicit_corner_bboxes_before_centering():
         assert match.center == (140, 215)
 
 
+def test_observed_matches_returns_only_controls_from_requested_observation():
+    bus = PerceptionBus()
+    first = bus.publish(
+        screenshot_base64="frame-a",
+        controls=[
+            {
+                "name": "File",
+                "role": "menuitem",
+                "bbox": (10, 20, 60, 45),
+                "bbox_format": "xyxy",
+                "source": "ocr",
+            }
+        ],
+    )
+
+    matches = bus.target_index.observed_matches(state_version=first.version)
+
+    assert len(matches) == 1
+    assert matches[0].query == "File"
+    assert matches[0].bbox == (10, 20, 50, 25)
+    assert matches[0].source == "ocr"
+    assert bus.target_index.observed_matches(state_version=first.version + 1) == ()
+
+    second = bus.publish(screenshot_base64="frame-b")
+    assert bus.target_index.observed_matches(state_version=second.version) == ()
+
+
 def test_perception_bus_rejects_invalid_bbox_format_and_empty_rectangles():
     bus = PerceptionBus()
     bus.publish(

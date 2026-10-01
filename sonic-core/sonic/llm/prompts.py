@@ -753,7 +753,8 @@ def grounding_user_prompt(query: str, width: int, height: int) -> str:
         "Return ONLY one of these formats, nothing else:\n"
         "<|box_start|>(x1, y1, x2, y2)<|box_end|>\n"
         "or [x, y] (both values normalized from 0 to 1000)\n"
-        "If the element is not visible or not found on screen, return NOT_FOUND."
+        "If the element is not clearly visible or you cannot identify its exact location, "
+        "return NOT_FOUND. Never guess the screen center or answer in prose."
     )
 
 
@@ -797,7 +798,7 @@ EFFICIENCY AND GOAL COMPLETION RULES:
 3. When the user's objective is verified in the live observation (screen state, open windows, or command output), immediately declare `ACTION: GOAL_COMPLETE`.
 
 AUTONOMOUS COGNITIVE REASONING:
-You are an autonomous intelligence, NOT a scripted form-filler. Reason naturally, deeply, and incisively in your own authentic voice inside your `THOUGHT` block: state what the latest screen or terminal observation revealed, verify which window or process is active, and explain the rationale for your single next move.
+You are an autonomous intelligence, NOT a scripted form-filler. In `THOUGHT`, provide only a brief action rationale grounded in the latest observation: identify the relevant visible state and why the single next action is appropriate. Do not provide hidden chain-of-thought or extended private reasoning.
 
 CRITICAL RULE — SINGLE IMMEDIATE ACTION ONLY:
 You MUST emit EXACTLY ONE action block at a time.
@@ -805,7 +806,7 @@ NEVER list multiple steps (e.g. do NOT write Step 1, Step 2, Step 3).
 After that action executes in the live sandbox, you will receive the updated screen/terminal observation and choose the subsequent action.
 
 Respond in this format (no markdown code fences):
-THOUGHT: <Your autonomous chain-of-thought analyzing the live desktop/terminal state and explaining your next action>
+THOUGHT: <Brief action rationale grounded in the live observation>
 ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_RIGHT_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_HOTKEY|GUI_MOVE|GUI_SCROLL|GUI_DRAG|GUI_SCREENSHOT|GUI_WAIT|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_STATUS|GIT_DIFF|GIT_BRANCH|GIT_COMMIT|GIT_PUSH|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_MAXIMIZE|WINDOW_MAXIMIZE|WINDOW_TILE|APP_INSTALL|SERVICE_ACTION|WAIT_FOR_HUMAN|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|METHOD_INVENT|DEFINE_SUBAGENT|INVOKE_SUBAGENT|SEND_MESSAGE|MANAGE_SUBAGENTS|GOAL_COMPLETE>
 TARGET: <resource path, application/window name, operator-supplied destination, coordinates, or UI element query>
 PAYLOAD: <json dict, e.g. {{"path": "...", "content": "..."}}, {{"command": "..."}}, {{"app_name": "..."}}, {{"key": "..."}}, {{"x": 640, "y": 400, "text": "..."}}>
@@ -832,8 +833,8 @@ For SEND_MESSAGE: TARGET is the subagent `conversationId` and PAYLOAD is {{"reci
 For MANAGE_SUBAGENTS: PAYLOAD is {{"action": "list|kill|kill_all", "conversation_ids": [...]}}
 EXPECTED: <short description of predicted outcome>
 
-EXAMPLE (format and organic thought reference):
-THOUGHT: The first desktop application window is open and visible in Open Windows, while the second requested utility has not been launched yet. I will launch the second desktop application so both GUI windows are running on the desktop, then focus and interact with each window as needed.
+EXAMPLE (format and concise rationale reference):
+THOUGHT: Open Windows shows the first requested application, but not the second. I will launch the second application so it can be verified on the desktop.
 ACTION: APP_LAUNCH
 TARGET: <app_name>
 PAYLOAD: {{"app_name": "<app_name>"}}
@@ -855,11 +856,12 @@ ARCHITECTURAL ROLES:
 2. Headless Terminal & Sandbox Plane: Use `TERMINAL_EXEC`, `FILE_*`, `GIT_*`, `TOOL_*` for background shell execution, script authoring, and repository management.
 
 Respond in EXACTLY this format (no markdown fences):
-THOUGHT: <organic technical rationale analyzing the live desktop/terminal observation and justifying the single next action>
+THOUGHT: <brief action rationale grounded in the live observation>
 ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_HOTKEY|GUI_SCROLL|GUI_SCREENSHOT|GUI_WAIT|GUI_DRAG|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_STATUS|GIT_DIFF|GIT_BRANCH|GIT_COMMIT|GIT_PUSH|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_MAXIMIZE|WINDOW_MAXIMIZE|WINDOW_TILE|APP_INSTALL|WAIT_FOR_HUMAN|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|GOAL_COMPLETE>
 TARGET: <path, application/window name, operator-supplied destination, coordinates "<x>,<y>", or visible UI element query>
 PAYLOAD: <json dict, e.g. {{"app_name": "..."}}, {{"text": "..."}}, {{"key": "..."}}, or {{"command": "..."}}>
 EXPECTED: <predicted outcome>
+Do not provide hidden chain-of-thought or extended private reasoning.
 
 KEY RULES:
 - APP_LAUNCH: To start any desktop application, use ACTION: APP_LAUNCH with an entry discovered in the live installed-application list.

@@ -10,7 +10,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
 from sonic.computer.daytona_computer import DaytonaComputerProvider
-from sonic.computer.docker_computer import DockerComputerProvider, _get_display
+from sonic.computer.docker_computer import (
+    DockerComputerProvider,
+    _get_display,
+    _has_actionable_nsi_controls,
+)
 from sonic.computer.models import GUIAction, GUIActionType
 
 
@@ -130,12 +134,206 @@ async def test_docker_screenshot_keeps_capture_age_unknown_for_invalid_clock_dat
         "ok": True,
         "b64": encoded,
         "capture_timestamp_ns": time.time_ns() + 1_000_000_000,
+        "detected_controls": [
+            {
+                "name": "Submit",
+                "role": "button",
+                "bbox": (10, 10, 40, 30),
+                "source": "atspi",
+            }
+        ],
     })
 
     observation = await provider.screenshot("ws-1")
 
     assert observation.capture_timestamp_ns is not None
     assert observation.capture_age_ms is None
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_falls_back_to_ocr_when_nsi_has_no_controls():
+    provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
+    nsi_frame = base64.b64encode(b"nsi-frame").decode()
+    fallback_frame = base64.b64encode(b"fallback-frame").decode()
+    provider._nsi_request = AsyncMock(return_value={
+        "ok": True,
+        "b64": nsi_frame,
+        "active_window": "workspace",
+        "visible_text": "Active Window: workspace",
+        "open_windows": ["workspace"],
+        "detected_controls": [
+            {
+                "name": "workspace",
+                "role": "window",
+                "bbox": [0, 30, 650, 540],
+                "bbox_format": "xyxy",
+                "source": "x11",
+            },
+            {
+                "name": "Na)",
+                "role": "text",
+                "bbox": [184, 167, 231, 180],
+                "bbox_format": "xyxy",
+                "source": "ocr",
+                "confidence": 31.0,
+            },
+        ],
+    })
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        (
+            f"___CAPTURE_TIMESTAMP_NS___\n{time.time_ns()}\n{fallback_frame}"
+            "\n___OCR_TSV___\n"
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            "5\t1\t1\t1\t1\t1\t100\t200\t40\t18\t95.0\tFile\n"
+            "___ACTIVE_WINDOW___\nworkspace\n___OPEN_WINDOWS___\n"
+            "0x01 0 0 0 workspace\n"
+        ),
+        "",
+    ))
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.screenshot_base64 == fallback_frame
+    assert observation.active_window == "workspace"
+    assert "Screen OCR Text: File" in observation.visible_text
+    assert observation.detected_controls == [
+        {
+            "name": "workspace",
+            "role": "window",
+            "bbox": [0, 30, 650, 540],
+            "bbox_format": "xyxy",
+            "source": "x11",
+        },
+        {
+            "name": "File",
+            "role": "text",
+            "bbox": (100, 200, 140, 218),
+            "bbox_format": "xyxy",
+            "source": "ocr",
+            "confidence": 95.0,
+        }
+    ]
+    provider._docker_exec.assert_awaited_once()
+
+
+@pytest.mark.no_live_infra
+def test_nsi_actionable_controls_require_reliable_ocr_or_atspi():
+    assert not _has_actionable_nsi_controls([
+        {
+            "name": "Na)",
+            "role": "text",
+            "bbox": [184, 167, 231, 180],
+            "source": "ocr",
+            "confidence": 31.0,
+        }
+    ])
+    assert not _has_actionable_nsi_controls([
+        {
+            "name": "workspace",
+            "role": "window",
+            "bbox": [0, 30, 650, 540],
+            "source": "x11",
+        }
+    ])
+    assert _has_actionable_nsi_controls([
+        {
+            "name": "Submit",
+            "role": "button",
+            "bbox": [10, 10, 40, 30],
+            "source": "atspi",
+        }
+    ])
+    assert _has_actionable_nsi_controls([
+        {
+            "name": "File",
+            "role": "text",
+            "bbox": [10, 10, 40, 30],
+            "source": "ocr",
+            "confidence": 82.0,
+        }
+    ])
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_provider_resolves_nsi_port_for_its_own_container(monkeypatch):
+    provider = DockerComputerProvider(
+        container_name="sonic-desktop-workstation-ci-smoke-20260929"
+    )
+    inspect_result = SimpleNamespace(
+        returncode=0,
+        stdout=b'{"6080/tcp":[{"HostIp":"127.0.0.1","HostPort":"6081"}]}',
+        stderr=b"",
+    )
+    to_thread = AsyncMock(return_value=inspect_result)
+    monkeypatch.setattr("sonic.computer.docker_computer.asyncio.to_thread", to_thread)
+
+    endpoint = await provider._resolve_nsi_frame_url()
+
+    assert endpoint == "http://127.0.0.1:6081/nsi_frame.json"
+    command = to_thread.await_args.args[1]
+    assert command[-1] == "sonic-desktop-workstation-ci-smoke-20260929"
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_provider_does_not_use_an_unrelated_nsi_port_when_unpublished(monkeypatch):
+    provider = DockerComputerProvider(container_name="unpublished-workstation")
+    inspect_result = SimpleNamespace(
+        returncode=0,
+        stdout=b'{"6080/tcp":null}',
+        stderr=b"",
+    )
+    monkeypatch.setattr(
+        "sonic.computer.docker_computer.asyncio.to_thread",
+        AsyncMock(return_value=inspect_result),
+    )
+
+    endpoint = await provider._resolve_nsi_frame_url()
+
+    assert endpoint is None
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_nsi_daemon_boot_does_not_kill_its_own_shell():
+    class TestProvider(DockerComputerProvider):
+        boot_command = ""
+
+        async def _docker_exec(self, cmd, timeout=60):
+            self.boot_command = cmd
+            return 0, "", ""
+
+    provider = TestProvider(container_name="isolated-workstation")
+    endpoint = "http://127.0.0.1:6092/nsi_frame.json"
+    frame = {
+        "ok": True,
+        "b64": base64.b64encode(b"fresh-frame").decode(),
+        "detected_controls": [],
+    }
+
+    class NsiHttp:
+        calls = 0
+
+        async def get(self, _url):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("NSI endpoint is not up yet")
+            return SimpleNamespace(status_code=200, json=lambda: frame)
+
+    provider._nsi_http = NsiHttp()
+    provider._nsi_booted = False
+    provider._resolve_nsi_frame_url = AsyncMock(return_value=endpoint)
+
+    result = await provider._nsi_request({"cmd": "frame"})
+
+    assert result == frame
+    boot_command = provider.boot_command
+    assert "nohup python3 /tmp/sonic_nsi_daemon.py" in boot_command
+    assert "pkill -f" not in boot_command
+    assert "/tmp/sonic_nsi_daemon.pid" in boot_command
 
 
 @pytest.mark.no_live_infra
@@ -170,8 +368,49 @@ async def test_docker_screenshot_parses_capture_timestamp_from_fallback_capture(
             "bbox": (100, 200, 180, 230),
             "bbox_format": "xyxy",
             "source": "ocr",
+            "confidence": 90.0,
         }
     ]
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_merges_tesseract_layout_passes_without_duplicate_controls():
+    provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
+    encoded = base64.b64encode(b"pixel-data" * 20).decode()
+    tsv_header = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\t"
+        "width\theight\tconf\ttext\n"
+    )
+    provider._nsi_request = AsyncMock(return_value=None)
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        (
+            f"___CAPTURE_TIMESTAMP_NS___\n{time.time_ns()}\n{encoded}"
+            "\n___OCR_TSV___\n"
+            f"{tsv_header}"
+            "5\t1\t1\t1\t1\t1\t100\t200\t80\t30\t62\tWorkspace\n"
+            f"{tsv_header}"
+            "5\t1\t1\t1\t1\t1\t102\t201\t78\t29\t91\tWorkspace\n"
+            "___OCR_EXIT___\n0,0\n"
+            "___ACTIVE_WINDOW___\nFile Manager\n___OPEN_WINDOWS___\n"
+        ),
+        "",
+    ))
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.detected_controls == [
+        {
+            "name": "Workspace",
+            "role": "text",
+            "bbox": (102, 201, 180, 230),
+            "bbox_format": "xyxy",
+            "source": "ocr",
+            "confidence": 91.0,
+        }
+    ]
+    assert "Screen OCR Text: Workspace" in observation.visible_text
 
 
 @pytest.mark.no_live_infra
