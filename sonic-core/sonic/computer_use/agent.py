@@ -1015,6 +1015,14 @@ class ComputerUseAgent:
         )
         if explicit_terminal:
             command = explicit_terminal.group("command").strip().rstrip(',;').strip()
+            if self._gui_action_contract_active():
+                return (
+                    ActionExecutionStatus.BLOCKED,
+                    "gui-contract-violation",
+                    {},
+                    "This worker is assigned to the visible GUI plane; terminal-prefixed "
+                    "goals cannot bypass the GUI execution contract.",
+                )
             return (
                 ComputerActionType.TERMINAL_EXEC,
                 command,
@@ -1137,8 +1145,8 @@ class ComputerUseAgent:
                             for key, value in arguments.items()
                             if key not in {"target", "expected"}
                         }
-                        fields["PAYLOAD"] = json.dumps(payload_value)
-                        payload_lines = [fields["PAYLOAD"]]
+                    fields["PAYLOAD"] = json.dumps(payload_value)
+                    payload_lines = [fields["PAYLOAD"]]
 
         action_name = fields.get("ACTION", "").upper()
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", action_name):
@@ -1238,21 +1246,79 @@ class ComputerUseAgent:
             ComputerActionType.GUI_DRAG,
             ComputerActionType.GUI_TYPE,
         }
-        coordinates = _parse_pixel_coordinate_target(parsed[1])
-        if action_type in coordinate_actions and coordinates is not None:
-            payload = dict(parsed[2])
+        payload = dict(parsed[2])
+        target_coordinates = _parse_pixel_coordinate_target(parsed[1])
+        has_payload_coordinates = "x" in payload or "y" in payload
+        payload_coordinates = None
+        if has_payload_coordinates:
+            x, y = payload.get("x"), payload.get("y")
             if (
-                ("x" in payload or "y" in payload)
-                and (payload.get("x"), payload.get("y")) != coordinates
+                not isinstance(x, int)
+                or isinstance(x, bool)
+                or not isinstance(y, int)
+                or isinstance(y, bool)
             ):
                 return (
                     ActionExecutionStatus.BLOCKED,
                     "gui-invalid-response",
                     {},
-                    "GUI target and payload specify conflicting screen coordinates.",
+                    "GUI payload must contain a complete valid integer coordinate x/y pair.",
                 )
+            payload_coordinates = (x, y)
+        if (
+            target_coordinates is not None
+            and payload_coordinates is not None
+            and target_coordinates != payload_coordinates
+        ):
+            return (
+                ActionExecutionStatus.BLOCKED,
+                "gui-invalid-response",
+                {},
+                "GUI target and payload specify conflicting screen coordinates.",
+            )
+        coordinates = target_coordinates or payload_coordinates
+        if action_type in coordinate_actions and coordinates is not None:
             payload["x"], payload["y"] = coordinates
-            parsed = (parsed[0], parsed[1], payload, parsed[3])
+
+        if action_type in (ComputerActionType.GUI_KEYPRESS, ComputerActionType.GUI_HOTKEY):
+            if (
+                not str(payload.get("key") or payload.get("keys") or "").strip()
+                and self._burst_gui_actions(payload) is None
+            ):
+                return (
+                    ActionExecutionStatus.BLOCKED,
+                    "gui-invalid-response",
+                    {},
+                    f"{action_type.value} requires an explicit key in PAYLOAD.",
+                )
+        elif action_type in coordinate_actions:
+            if action_type == ComputerActionType.GUI_DRAG:
+                start = (payload.get("x"), payload.get("y"))
+                end = (
+                    payload.get("end_x", payload.get("x2")),
+                    payload.get("end_y", payload.get("y2")),
+                )
+                if any(not isinstance(value, int) or isinstance(value, bool) for value in (*start, *end)):
+                    return (
+                        ActionExecutionStatus.BLOCKED,
+                        "gui-invalid-response",
+                        {},
+                        "GUI_DRAG requires integer start and destination coordinates.",
+                    )
+            elif coordinates is None:
+                safe_semantic_target = bool(
+                    parsed[1]
+                    and self.perception_bus.resolve(parsed[1]) is not None
+                )
+                if not safe_semantic_target:
+                    return (
+                        ActionExecutionStatus.BLOCKED,
+                        "gui-invalid-response",
+                        {},
+                        f"{action_type.value} requires integer screen coordinates or one "
+                        "unambiguous target in the current grounded control inventory.",
+                    )
+        parsed = (parsed[0], parsed[1], payload, parsed[3])
         return parsed
 
     def _gui_action_target_error(
@@ -1300,7 +1366,8 @@ class ComputerUseAgent:
                 ActionExecutionStatus.BLOCKED,
                 "gui-contract-violation",
                 {},
-                "Stopped after repeated model proposals outside the visible GUI action contract.",
+                "Stopped after repeated invalid model proposals outside the visible GUI action contract. "
+                f"Last proposal rejected: {reason}",
             )
         return self._gui_only_recovery_action(goal, reason)
 
@@ -3556,6 +3623,36 @@ class ComputerUseAgent:
         elif not isinstance(payload, dict):
             payload = {} if payload is None else {"raw": payload}
 
+        if action_type in (
+            ComputerActionType.GUI_KEYPRESS,
+            ComputerActionType.GUI_HOTKEY,
+        ) and not str(payload.get("key") or payload.get("keys") or "").strip() and (
+            self._burst_gui_actions(payload) is None
+        ):
+            actual_obs_str = (
+                f"{action_type.value} blocked: an explicit key is required; "
+                "no default key was sent."
+            )
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource=target_resource,
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
+            return trace
+
         async def resolve_visible_desktop_target(query: str) -> tuple[int, int] | None:
             """Ground a visible control on the shared desktop, independent of app vendor."""
             if not query or not self._last_screenshot_b64:
@@ -4152,32 +4249,92 @@ class ComputerUseAgent:
             return trace
 
         # ----- Visual Grounding Target Resolution -----
-        # Semantic targets must be grounded even when a model also supplies
-        # coordinates; only an explicit pixel target may bypass visual lookup.
+        # Exact screen-pixel coordinates are authoritative. They bypass
+        # semantic grounding, but both sources must agree when both are present.
         resolved_via_grounding = False
-        explicit_pixel_target = _parse_pixel_coordinate_target(target_resource)
-        payload_coordinates_provided = "x" in payload or "y" in payload
+        coordinate_actions = {
+            ComputerActionType.GUI_CLICK,
+            ComputerActionType.GUI_DOUBLE_CLICK,
+            ComputerActionType.GUI_RIGHT_CLICK,
+            ComputerActionType.GUI_TYPE,
+            ComputerActionType.GUI_MOVE,
+            ComputerActionType.GUI_SCROLL,
+            ComputerActionType.GUI_DRAG,
+        }
+        explicit_pixel_target = (
+            _parse_pixel_coordinate_target(target_resource)
+            if action_type in coordinate_actions
+            else None
+        )
+        payload_coordinates_provided = (
+            action_type in coordinate_actions
+            and ("x" in payload or "y" in payload)
+        )
+        payload_pixel_target: tuple[int, int] | None = None
+        if payload_coordinates_provided:
+            x_value, y_value = payload.get("x"), payload.get("y")
+            if (
+                not isinstance(x_value, int)
+                or isinstance(x_value, bool)
+                or not isinstance(y_value, int)
+                or isinstance(y_value, bool)
+            ):
+                actual_obs_str = (
+                    "GUI coordinate payload must contain a complete valid integer coordinate x/y pair."
+                )
+                status = ActionExecutionStatus.BLOCKED
+                action_exit_code = 126
+            else:
+                payload_pixel_target = (x_value, y_value)
+        if (
+            explicit_pixel_target is not None
+            and payload_pixel_target is not None
+            and explicit_pixel_target != payload_pixel_target
+        ):
+            actual_obs_str = (
+                "GUI target and payload specify conflicting screen coordinates."
+            )
+            status = ActionExecutionStatus.BLOCKED
+            action_exit_code = 126
+        if status == ActionExecutionStatus.BLOCKED:
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource=target_resource,
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=status,
+                exit_code=action_exit_code,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
+            return trace
+        if explicit_pixel_target is not None and payload_pixel_target is None:
+            payload["x"], payload["y"] = explicit_pixel_target
+            payload_pixel_target = explicit_pixel_target
         natural_target_needs_live_grounding = bool(
             self._last_screenshot_b64
             and explicit_pixel_target is None
+            and payload_pixel_target is None
         )
         if action_type in (
             ComputerActionType.GUI_CLICK,
             ComputerActionType.GUI_DOUBLE_CLICK,
             ComputerActionType.GUI_RIGHT_CLICK,
             ComputerActionType.GUI_MOVE,
+            ComputerActionType.GUI_SCROLL,
         ) + (
             # A typed target is resolved only when live pixels are available.
             # Headless/unit-test providers may still accept a pre-focused field.
             (ComputerActionType.GUI_TYPE,) if getattr(self, "_last_screenshot_b64", "") else ()
-        ) and (
-            (
-                payload.get("x") is None
-                or payload.get("y") is None
-            )
-            and not payload_coordinates_provided
-            or natural_target_needs_live_grounding
-        ):
+        )         and natural_target_needs_live_grounding:
             semantic_match = self.perception_bus.resolve(target_resource)
             if semantic_match is not None:
                 future = self.perception_bus.prepare(action_type.value, target_resource)
@@ -6771,6 +6928,8 @@ class ComputerUseAgent:
                 })
                 break
 
+            is_observation_only = action_type == ComputerActionType.GUI_SCREENSHOT
+
             # A policy denial is a terminal state for this mission attempt.
             # Continuing would only repeat the same unauthorized action and
             # turn a real safety decision into scripted retry noise. The
@@ -6778,7 +6937,7 @@ class ComputerUseAgent:
             trace_observation = str(getattr(trace, "actual_observation", "") or "")
             prediction_error = float(getattr(trace, "prediction_error", 0.0) or 0.0)
             action_type_val = getattr(action_type, "value", str(action_type))
-            if prediction_error >= 0.75 and trace.status not in (
+            if not is_observation_only and prediction_error >= 0.75 and trace.status not in (
                 ActionExecutionStatus.BLOCKED,
                 "BLOCKED",
             ):
@@ -6822,71 +6981,71 @@ class ComputerUseAgent:
                 )
                 break
 
-            # Track consecutive failures for stuck/replan detection.
-            is_failed_status = trace.status in (
-                ActionExecutionStatus.FAILED,
-                ActionExecutionStatus.TIMED_OUT,
-                ActionExecutionStatus.BLOCKED,
-                ActionExecutionStatus.CANCELLED,
-                "FAILED",
-                "TIMED_OUT",
-                "BLOCKED",
-                "CANCELLED",
-            )
-            if is_failed_status or trace.recovery_attempted:
-                self._consecutive_failures += 1
-                if getattr(self, "checklist", None) is not None:
-                    active_sg = self.checklist.active_sub_goal()
-                    if active_sg:
-                        active_sg.attempt_count += 1
-                if self._consecutive_failures >= self._STUCK_THRESHOLD:
-                    self._inject_replan(goal)
-            elif trace.status in (
-                ActionExecutionStatus.COMPLETED,
-                ActionExecutionStatus.SUCCESS,
-                ActionExecutionStatus.VERIFIED,
-                "COMPLETED",
-                "SUCCESS",
-                "VERIFIED",
-            ):
-                obs_txt = str(getattr(trace, "actual_observation", "") or "")
-                if "[VISUAL VERIFICATION]: Screen state unchanged" not in obs_txt:
-                    self._consecutive_failures = 0
-                self._consecutive_unverified_declarations = 0
-                if getattr(self, "checklist", None) is not None:
-                    active_sg = self.checklist.active_sub_goal()
-                    if active_sg:
-                        active_sg.attempt_count += 1
-                        obs_txt = str(getattr(trace, "actual_observation", "") or "")
-                        if "[VISUAL VERIFICATION]: Screen state unchanged" not in obs_txt:
-                            cmd_str = str(getattr(trace, "payload", "") or "").strip().lower()
-                            trivial_cmds = ("pwd", "whoami", "uname", "id", "echo", "true")
-                            is_trivial = any(cmd_str == tc or cmd_str.startswith(f"{tc} ") for tc in trivial_cmds)
-                            if not is_trivial:
-                                # Semantic relevance gate: the action or its
-                                # output must share keywords with the sub-goal.
-                                # This prevents `ls` from completing "Find SQL
-                                # injection" (zero overlap) while allowing
-                                # `sqlmap --url target` to complete it.
-                                _stop = {"the", "a", "an", "in", "on", "to", "for",
-                                         "of", "and", "or", "is", "it", "with", "run",
-                                         "use", "check", "find", "get", "set"}
-                                sg_words = set(re.findall(r'\b[a-z0-9_.-]+\b', active_sg.description.lower())) - _stop
-                                action_text = f"{obs_txt[:300]} {cmd_str} {getattr(action_type, 'value', str(action_type))}".lower()
-                                action_words = set(re.findall(r'\b[a-z0-9_.-]+\b', action_text)) - _stop
-                                overlap = sg_words & action_words
-                                relevance = len(overlap) / max(len(sg_words), 1)
-                                if relevance >= 0.10 or len(overlap) >= 1:
-                                    self.checklist.mark_active_completed(
-                                        evidence=f"{action_type} succeeded: {obs_txt[:100]}"
-                                    )
-                                # else: action succeeded but doesn't relate to
-                                # the sub-goal — don't mark it complete.
+            # An observation refresh is not task progress and must not erase
+            # accumulated failure/stall state or advance a checklist.
+            if not is_observation_only:
+                # Track consecutive failures for stuck/replan detection.
+                is_failed_status = trace.status in (
+                    ActionExecutionStatus.FAILED,
+                    ActionExecutionStatus.TIMED_OUT,
+                    ActionExecutionStatus.BLOCKED,
+                    ActionExecutionStatus.CANCELLED,
+                    "FAILED",
+                    "TIMED_OUT",
+                    "BLOCKED",
+                    "CANCELLED",
+                )
+                if is_failed_status or trace.recovery_attempted:
+                    self._consecutive_failures += 1
+                    if getattr(self, "checklist", None) is not None:
+                        active_sg = self.checklist.active_sub_goal()
+                        if active_sg:
+                            active_sg.attempt_count += 1
+                    if self._consecutive_failures >= self._STUCK_THRESHOLD:
+                        self._inject_replan(goal)
+                elif trace.status in (
+                    ActionExecutionStatus.COMPLETED,
+                    ActionExecutionStatus.SUCCESS,
+                    ActionExecutionStatus.VERIFIED,
+                    "COMPLETED",
+                    "SUCCESS",
+                    "VERIFIED",
+                ):
+                    obs_txt = str(getattr(trace, "actual_observation", "") or "")
+                    if "[VISUAL VERIFICATION]: Screen state unchanged" not in obs_txt:
+                        self._consecutive_failures = 0
+                    self._consecutive_unverified_declarations = 0
+                    if getattr(self, "checklist", None) is not None:
+                        active_sg = self.checklist.active_sub_goal()
+                        if active_sg:
+                            active_sg.attempt_count += 1
+                            obs_txt = str(getattr(trace, "actual_observation", "") or "")
+                            if "[VISUAL VERIFICATION]: Screen state unchanged" not in obs_txt:
+                                cmd_str = str(getattr(trace, "payload", "") or "").strip().lower()
+                                trivial_cmds = ("pwd", "whoami", "uname", "id", "echo", "true")
+                                is_trivial = any(cmd_str == tc or cmd_str.startswith(f"{tc} ") for tc in trivial_cmds)
+                                if not is_trivial:
+                                    # Semantic relevance gate: the action or its
+                                    # output must share keywords with the sub-goal.
+                                    _stop = {"the", "a", "an", "in", "on", "to", "for",
+                                             "of", "and", "or", "is", "it", "with", "run",
+                                             "use", "check", "find", "get", "set"}
+                                    sg_words = set(re.findall(r'\b[a-z0-9_.-]+\b', active_sg.description.lower())) - _stop
+                                    action_text = f"{obs_txt[:300]} {cmd_str} {getattr(action_type, 'value', str(action_type))}".lower()
+                                    action_words = set(re.findall(r'\b[a-z0-9_.-]+\b', action_text)) - _stop
+                                    overlap = sg_words & action_words
+                                    relevance = len(overlap) / max(len(sg_words), 1)
+                                    if relevance >= 0.10 or len(overlap) >= 1:
+                                        self.checklist.mark_active_completed(
+                                            evidence=f"{action_type} succeeded: {obs_txt[:100]}"
+                                        )
 
         # Update Telemetry Metrics.
         self.metrics.actions_total = len(self.traces)
         self.metrics.actions_successful = sum(
-            1 for t in self.traces if t.status in (
+            1 for t in self.traces
+            if t.action_type != ComputerActionType.GUI_SCREENSHOT
+            and t.status in (
                 ActionExecutionStatus.COMPLETED,
                 ActionExecutionStatus.SUCCESS,
                 ActionExecutionStatus.VERIFIED,

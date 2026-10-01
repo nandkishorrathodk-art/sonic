@@ -1593,7 +1593,7 @@ Rules:
 
         verified_results = [
             result for result in (results or [])
-            if result.evidence_verified
+            if result.success and result.evidence_verified
         ]
         if is_complete and not verified_results:
             is_complete = False
