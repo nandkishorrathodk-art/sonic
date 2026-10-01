@@ -13,6 +13,7 @@ Verifies:
 """
 
 from unittest.mock import AsyncMock, MagicMock
+import time
 
 import pytest
 
@@ -77,6 +78,111 @@ class DummyComputerProvider:
     async def service_action(self, workspace_id, service, action):
         self.service_actions_taken.append((service, action))
         return True
+
+
+class TransientScreenshotProvider(DummyComputerProvider):
+    def __init__(self):
+        super().__init__()
+        self.screenshot_calls = 0
+
+    async def screenshot(self, workspace_id):
+        self.screenshot_calls += 1
+        if self.screenshot_calls == 1:
+            return ScreenObservation(
+                screenshot_base64="",
+                active_window="Desktop",
+                width=1920,
+                height=1080,
+            )
+        return ScreenObservation(
+            screenshot_base64="valid-frame",
+            active_window="Desktop",
+            width=1920,
+            height=1080,
+        )
+
+
+class StateOnlyObservationProvider(DummyComputerProvider):
+    def __init__(self):
+        super().__init__()
+        self.screenshot_calls = 0
+        self.state_calls = 0
+
+    async def screenshot(self, workspace_id):
+        self.screenshot_calls += 1
+        return await super().screenshot(workspace_id)
+
+    async def observe_state(self, workspace_id):
+        self.state_calls += 1
+        return ScreenObservation(
+            screenshot_base64="",
+            capture_timestamp_ns=1,
+            capture_age_ms=15,
+            controls_age_ms=10,
+            perception_version=9,
+            width=1920,
+            height=1080,
+            active_window="Document",
+            visible_text="Document",
+            detected_controls=[
+                {
+                    "name": "Save",
+                    "role": "button",
+                    "bbox": (30, 40, 90, 70),
+                    "bbox_format": "xyxy",
+                    "source": "atspi",
+                }
+            ],
+            desktop_state="STATE_ONLY",
+        )
+
+
+@pytest.mark.asyncio
+async def test_observe_retries_transient_incomplete_desktop_frame():
+    provider = TransientScreenshotProvider()
+    agent = ComputerUseAgent(computer_provider=provider)
+
+    observation = await agent.observe("ws-1")
+
+    assert provider.screenshot_calls == 2
+    assert observation.screen.screenshot_base64 == "valid-frame"
+
+
+@pytest.mark.asyncio
+async def test_observe_uses_compact_state_without_fetching_screenshot():
+    provider = StateOnlyObservationProvider()
+    agent = ComputerUseAgent(computer_provider=provider)
+
+    observation = await agent.observe("ws-1")
+
+    assert provider.state_calls == 1
+    assert provider.screenshot_calls == 0
+    assert observation.screen.desktop_state == "STATE_ONLY"
+    assert observation.screen.screenshot_base64 == ""
+    assert observation.perception_version > 0
+    assert observation.perception_source == "nsi_state"
+    assert observation.accessible_scene_fresh is True
+    assert agent.perception_bus.resolve("Save") is not None
+    assert agent._perception_counters["nsi_state_observations"] == 1
+
+
+@pytest.mark.asyncio
+async def test_observe_records_action_to_next_state_latency():
+    provider = StateOnlyObservationProvider()
+    agent = ComputerUseAgent(computer_provider=provider)
+    trace = MagicMock(id="trace-state-latency", action_to_state_ms=None)
+    agent.traces.append(trace)
+    agent._pending_gui_action_observation = {
+        "started_ns": time.perf_counter_ns() - 1_000_000,
+        "trace_id": trace.id,
+    }
+
+    observation = await agent.observe("ws-1")
+
+    assert observation.action_to_state_ms is not None
+    assert observation.action_to_state_ms >= 0
+    assert trace.action_to_state_ms == observation.action_to_state_ms
+    assert agent._pending_gui_action_observation is None
 
 
 # ---------------------------------------------------------------------------

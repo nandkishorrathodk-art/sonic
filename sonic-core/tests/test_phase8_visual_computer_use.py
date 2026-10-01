@@ -14,6 +14,9 @@ from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionType,
     ComputerWorldObservation,
+    SubGoal,
+    SubGoalChecklist,
+    SubGoalStatus,
 )
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.safety.action_policy import ActionPolicy
@@ -40,6 +43,39 @@ def _mock_provider():
 
 class TestGUIActionDispatch:
     """ComputerUseAgent dispatches GUI actions to the provider."""
+
+    @pytest.mark.asyncio
+    async def test_app_launch_verifies_active_window_by_wm_class(self):
+        provider = _mock_provider()
+        provider.status.return_value = MagicMock(
+            active_application="workspace",
+            active_window="workspace",
+            open_applications=["Desktop", "workspace"],
+            installed_applications=["thunar"],
+            running_processes=["thunar"],
+        )
+        provider.screenshot.return_value = ScreenObservation(
+            width=1280,
+            height=800,
+            active_window="workspace",
+            screenshot_base64="fresh-frame",
+            desktop_state="INTERACTIVE",
+        )
+        provider.launch_application.return_value = True
+        provider.get_active_window_class = AsyncMock(return_value="thunar.Thunar")
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.APP_LAUNCH,
+            "thunar",
+            {"app_name": "thunar"},
+            "Focus the installed file manager",
+        )
+
+        assert trace.status == ActionExecutionStatus.COMPLETED
+        assert "active window: workspace" in trace.actual_observation
+        provider.get_active_window_class.assert_awaited_once_with("ws-1")
 
     @pytest.mark.asyncio
     async def test_gui_click_dispatches_to_provider(self):
@@ -80,7 +116,7 @@ class TestGUIActionDispatch:
         provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_gui_scroll_without_point_uses_screen_center(self):
+    async def test_gui_scroll_without_grounded_point_is_blocked(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
         await agent.observe("ws-1")
@@ -93,10 +129,8 @@ class TestGUIActionDispatch:
             "Scroll the current view",
         )
 
-        assert trace.status == ActionExecutionStatus.COMPLETED
-        scroll_action = provider.gui_action.call_args.args[1]
-        assert scroll_action.action == GUIActionType.SCROLL
-        assert (scroll_action.x, scroll_action.y) == (640, 400)
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_gui_type_dispatches_to_provider(self):
@@ -305,7 +339,7 @@ class TestGUIActionDispatch:
             "",
         )
 
-        assert action == ComputerActionType.GUI_CLICK
+        assert action == ActionExecutionStatus.BLOCKED
         assert "x" not in payload
         assert "y" not in payload
 
@@ -324,6 +358,149 @@ class TestGUIActionDispatch:
         assert target == "gui-invalid-response"
         assert payload == {}
         assert "conflicting screen coordinates" in reason
+
+    def test_gui_keypress_requires_explicit_key(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+        action, target, payload, reason = agent._parse_gui_action_response(
+            "ACTION: GUI_KEYPRESS\nTARGET: keyboard\nPAYLOAD: {}\nEXPECTED: Submit",
+            "",
+        )
+        assert action == ActionExecutionStatus.BLOCKED
+        assert target == "gui-invalid-response"
+        assert payload == {}
+        assert "explicit key" in reason
+
+    @pytest.mark.asyncio
+    async def test_malformed_keypress_never_dispatches_default_return(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_KEYPRESS,
+            "keyboard",
+            {},
+            "Submit",
+        )
+
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        assert "no default key was sent" in trace.actual_observation
+        provider.gui_action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explicit_pixel_payload_bypasses_grounding_and_uses_latest_bounds(
+        self, monkeypatch
+    ):
+        provider = _mock_provider()
+        provider.screenshot.return_value = ScreenObservation(
+            width=1280,
+            height=800,
+            screenshot_base64="latest-frame",
+        )
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+        await agent.observe("ws-1")
+        grounding = AsyncMock(side_effect=AssertionError("pixel coordinates must not ground"))
+        monkeypatch.setattr("sonic.computer_use.agent.resolve_ui_target_async", grounding)
+
+        accepted = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_CLICK,
+            "visible control",
+            {"x": 400, "y": 300},
+            "Click the observed point",
+        )
+        assert accepted.status == ActionExecutionStatus.SUCCESS
+        grounding.assert_not_awaited()
+        provider.gui_action.assert_awaited_once()
+
+        provider.gui_action.reset_mock()
+        rejected = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_CLICK,
+            "visible control",
+            {"x": 1280, "y": 300},
+            "Reject a point beyond the observed screen",
+        )
+        assert rejected.status == ActionExecutionStatus.BLOCKED
+        assert "outside screen 1280x800" in rejected.actual_observation
+        grounding.assert_not_awaited()
+        provider.gui_action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_gui_terminal_prefixed_goal_is_blocked_before_fast_path(self):
+        llm = AsyncMock()
+        agent = ComputerUseAgent(
+            computer_provider=_mock_provider(),
+            llm_router=llm,
+            execution_plane="gui",
+        )
+
+        action, target, _, reason = await agent.choose_action(
+            "terminal: echo must-not-run",
+            ComputerWorldObservation(),
+            1,
+        )
+        assert action == ActionExecutionStatus.BLOCKED
+        assert target == "gui-contract-violation"
+        assert "visible GUI plane" in reason
+        llm.complete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_gui_agent_keeps_terminal_prefixed_fast_path(self):
+        llm = AsyncMock()
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), llm_router=llm)
+
+        action, target, payload, _ = await agent.choose_action(
+            "terminal: echo allowed",
+            ComputerWorldObservation(),
+            1,
+        )
+        assert action == ComputerActionType.TERMINAL_EXEC
+        assert target == "echo allowed"
+        assert payload == {"command": "echo allowed"}
+        llm.complete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invalid_gui_proposal_gets_one_observation_then_stops_without_progress(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+        goal = "1. capture screenshot"
+        active = SubGoal(
+            description="capture screenshot",
+            status=SubGoalStatus.IN_PROGRESS,
+        )
+        agent.checklist = SubGoalChecklist(top_level_goal=goal, sub_goals=[active])
+        agent._last_mission_goal = goal
+        agent._consecutive_failures = 2
+        agent._consecutive_unchanged_screens = 3
+        agent.observe = AsyncMock(return_value=ComputerWorldObservation())
+        agent.choose_action = AsyncMock(side_effect=[
+            (
+                ComputerActionType.GUI_SCREENSHOT,
+                "visible-desktop",
+                {},
+                "Invalid proposal; inspect fresh screen",
+            ),
+            (
+                ActionExecutionStatus.BLOCKED,
+                "gui-contract-violation",
+                {},
+                "Stopped after repeated invalid model proposals outside the visible GUI action contract.",
+            ),
+        ])
+
+        traces = await agent.run_mission("ws-1", goal, steps=5)
+
+        assert agent.observe.await_count == 2
+        assert agent.choose_action.await_count == 2
+        assert len(traces) == 2
+        assert traces[0].action_type == ComputerActionType.GUI_SCREENSHOT
+        assert active.status == SubGoalStatus.IN_PROGRESS
+        assert active.attempt_count == 0
+        assert agent._consecutive_failures == 2
+        assert agent._consecutive_unchanged_screens == 3
+        assert agent.metrics.actions_successful == 0
+        assert "outside the visible GUI action contract" in traces[1].actual_observation
 
     def test_mission_blocks_redundant_screenshot_action_after_fresh_observation(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider())
@@ -554,6 +731,138 @@ class TestActionParsing:
         assert payload == {"x": 400, "y": 300}
         assert expected == "Button activates"
 
+    def test_gui_worker_accepts_json_action_envelope(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        action_type, target, payload, expected = agent._parse_gui_action_response(
+            '{"action":"GUI_HOTKEY","target":"keyboard",'
+            '"payload":{"key":"Ctrl+L"},"expected":"Focus the location field"}',
+            "",
+        )
+
+        assert action_type == ComputerActionType.GUI_HOTKEY
+        assert target == "keyboard"
+        assert payload == {"key": "Ctrl+L"}
+        assert expected == "Focus the location field"
+
+    def test_gui_worker_accepts_one_exact_json_envelope_inside_prose(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        response = (
+            "The file manager is open. "
+            '{"action":"GUI_HOTKEY","target":"keyboard",'
+            '"payload":{"key":"Ctrl+L"},"expected":"Focus the location field"}'
+            " I will inspect the resulting view next."
+        )
+
+        action_type, target, payload, expected = agent._parse_gui_action_response(
+            response,
+            "",
+        )
+
+        assert action_type == ComputerActionType.GUI_HOTKEY
+        assert target == "keyboard"
+        assert payload == {"key": "Ctrl+L"}
+        assert expected == "Focus the location field"
+
+    def test_gui_worker_rejects_ambiguous_or_extended_json_envelopes(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        envelope = (
+            '{"action":"GUI_HOTKEY","target":"keyboard",'
+            '"payload":{"key":"Ctrl+L"},"expected":"Focus the location field"}'
+        )
+        for response in (
+            f"{envelope} {envelope}",
+            envelope[:-1] + ',"commentary":"extra"}',
+        ):
+            action_type, target, _, _ = agent._parse_gui_action_response(
+                response,
+                "",
+            )
+            assert action_type == ActionExecutionStatus.BLOCKED
+            assert target == "gui-invalid-response"
+
+    def test_gui_worker_accepts_markdown_wrapped_action_fields(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        action_type, target, payload, expected = agent._parse_gui_action_response(
+            "- **ACTION:** `GUI_HOTKEY` — focus the location field\n"
+            "- **TARGET:** keyboard\n"
+            '- **PAYLOAD:** {"key":"Ctrl+L"}\n'
+            "- **EXPECTED:** Focus the location field",
+            "",
+        )
+
+        assert action_type == ComputerActionType.GUI_HOTKEY
+        assert target == "keyboard"
+        assert payload == {"key": "Ctrl+L"}
+        assert expected == "Focus the location field"
+
+    def test_gui_worker_allows_visual_target_only_with_attached_grounding(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        response = (
+            '{"action":"GUI_CLICK","target":"the unique file manager icon",'
+            '"payload":{},"expected":"Open the file manager"}'
+        )
+
+        blocked, *_ = agent._parse_gui_action_response(response, "")
+        assert blocked == ActionExecutionStatus.BLOCKED
+
+        agent._last_screenshot_b64 = "fresh-frame"
+        agent._last_reasoning_perception = {"image_attached": True}
+        agent.llm_router = MagicMock()
+        action, target, *_ = agent._parse_gui_action_response(response, "")
+
+        assert action == ComputerActionType.GUI_CLICK
+        assert target == "the unique file manager icon"
+
+    def test_gui_screenshot_can_omit_empty_target_and_payload(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+
+        action_type, target, payload, _ = agent._parse_gui_action_response(
+            "ACTION: GUI_SCREENSHOT",
+            "",
+        )
+
+        assert action_type == ComputerActionType.GUI_SCREENSHOT
+        assert target == "visible-desktop"
+        assert payload == {}
+
+    @pytest.mark.asyncio
+    async def test_gui_reasoning_requests_json_action_output(self):
+        agent = ComputerUseAgent(
+            computer_provider=_mock_provider(),
+            execution_plane="gui",
+        )
+        agent.llm_router = MagicMock()
+        agent.llm_router.complete = AsyncMock(return_value=MagicMock(
+            content=(
+                '{"action":"GUI_SCREENSHOT","target":"visible-desktop",'
+                '"payload":{},"expected":"Inspect the current desktop"}'
+            ),
+            reasoning_content="",
+            tool_calls=[],
+        ))
+
+        action, *_ = await agent._llm_choose_action(
+            "Inspect the visible desktop",
+            ComputerWorldObservation(),
+            1,
+            "",
+            "",
+        )
+        request = agent.llm_router.complete.await_args.args[0]
+        schema = request.extra_body["response_format"]["json_schema"]["schema"]
+
+        assert action == ComputerActionType.GUI_SCREENSHOT
+        assert request.extra_body["response_format"]["type"] == "json_schema"
+        assert schema["properties"]["action"]["enum"] == [
+            action.value
+            for action in ComputerActionType
+            if action in agent._GUI_ONLY_ACTIONS
+            and not action.name.startswith("BROWSER_")
+        ] + ["GOAL_COMPLETE"]
+        assert schema["required"] == ["action", "target", "payload", "expected"]
+        assert "return exactly one JSON object" in request.messages[0].content
+        assert "Return exactly one JSON object" in request.messages[1].content
+
     def test_gui_launch_does_not_treat_observed_controls_as_app_names(self, monkeypatch):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
         monkeypatch.setattr(
@@ -649,11 +958,13 @@ class TestReasoningPrompt:
         assert "TERMINAL_EXEC" not in system_prompt
         assert "Which GUI application window or terminal command" not in user_prompt
         assert "AUTONOMOUS TOOL AUTHORING" not in user_prompt
-        assert "attached current screenshot is the source of truth" in user_prompt
+        assert "use only the fresh current screenshot when attached" in user_prompt
+        assert "otherwise use only the fresh grounded control inventory" in user_prompt
         assert "exact integer screen-pixel coordinates" in user_prompt
         assert "Never describe a desktop shortcut as an already-open window" in system_prompt
-        assert "TARGET must be exact integer screen-pixel coordinates `x,y`" in user_prompt
-        assert "exactly matches an unambiguous label" in user_prompt
+        assert "TARGET may be exact integer screen-pixel coordinates `x,y`" in user_prompt
+        assert "concise unique visual description" in user_prompt
+        assert "must resolve it before execution" in user_prompt
         assert "Last Command Output" not in user_prompt
         assert '"command": "..."' not in user_prompt
 
@@ -698,6 +1009,142 @@ class TestReasoningPrompt:
         assert request.tools[0].name == "computer_action"
         assert "BROWSER_NAVIGATE" not in request.tools[0].parameters["properties"]["action"]["enum"]
         assert agent._last_thought == ""
+
+    @pytest.mark.asyncio
+    async def test_rejected_non_gui_proposal_is_explained_to_next_gui_decision(self):
+        agent = ComputerUseAgent(
+            computer_provider=_mock_provider(),
+            execution_plane="gui",
+        )
+        agent.llm_router = MagicMock()
+        agent.llm_router.complete = AsyncMock(side_effect=[
+            MagicMock(
+                content=(
+                    "ACTION: TERMINAL_EXEC\nTARGET: mkdir\n"
+                    'PAYLOAD: {"command":"mkdir"}\nEXPECTED: Create folder'
+                ),
+                reasoning_content="",
+                tool_calls=[],
+            ),
+            MagicMock(
+                content=(
+                    "ACTION: GUI_CLICK\nTARGET: 400,300\n"
+                    "PAYLOAD: {}\nEXPECTED: Open the visible folder menu"
+                ),
+                reasoning_content="",
+                tool_calls=[],
+            ),
+        ])
+        observation = ComputerWorldObservation()
+
+        first = await agent._llm_choose_action(
+            "Create a folder using the visible desktop",
+            observation,
+            1,
+            "",
+            "",
+        )
+        assert first[0] == ComputerActionType.GUI_SCREENSHOT
+        assert "TERMINAL_EXEC" in first[3]
+        assert agent._pending_gui_contract_feedback
+
+        second = await agent._llm_choose_action(
+            "Create a folder using the visible desktop",
+            observation,
+            2,
+            "",
+            "",
+        )
+        second_request = agent.llm_router.complete.await_args_list[1].args[0]
+
+        assert second[0] == ComputerActionType.GUI_CLICK
+        assert "GUI CONTRACT FEEDBACK" in second_request.messages[1].content
+        assert "TERMINAL_EXEC" in second_request.messages[1].content
+        assert agent._pending_gui_contract_feedback == ""
+
+    @pytest.mark.asyncio
+    async def test_invalid_gui_response_gets_format_feedback_before_contract_stop(self):
+        agent = ComputerUseAgent(
+            computer_provider=_mock_provider(),
+            execution_plane="gui",
+        )
+        agent.llm_router = MagicMock()
+        agent.llm_router.complete = AsyncMock(side_effect=[
+            MagicMock(
+                content="I will take a look at the screen now.",
+                reasoning_content="",
+                tool_calls=[],
+            ),
+            MagicMock(
+                content=(
+                    "ACTION: GUI_HOTKEY\nTARGET: keyboard\n"
+                    'PAYLOAD: {"key":"Ctrl+L"}\nEXPECTED: Focus the location field'
+                ),
+                reasoning_content="",
+                tool_calls=[],
+            ),
+        ])
+        observation = ComputerWorldObservation()
+
+        first = await agent._llm_choose_action(
+            "Use the visible desktop",
+            observation,
+            1,
+            "",
+            "",
+        )
+        assert first[0] == ComputerActionType.GUI_SCREENSHOT
+        assert "structured ACTION block" in first[3]
+        assert agent._pending_gui_contract_feedback
+        assert agent._consecutive_gui_contract_violations == 1
+
+        second = await agent._llm_choose_action(
+            "Use the visible desktop",
+            observation,
+            2,
+            "",
+            "",
+        )
+        second_request = agent.llm_router.complete.await_args_list[1].args[0]
+
+        assert second[0] == ComputerActionType.GUI_HOTKEY
+        assert "GUI CONTRACT FEEDBACK" in second_request.messages[1].content
+        assert "structured ACTION block" in second_request.messages[1].content
+        assert agent._consecutive_gui_contract_violations == 0
+        assert agent._pending_gui_contract_feedback == ""
+
+    @pytest.mark.asyncio
+    async def test_repeated_invalid_gui_responses_stop_without_another_screenshot(self):
+        agent = ComputerUseAgent(
+            computer_provider=_mock_provider(),
+            execution_plane="gui",
+        )
+        agent.llm_router = MagicMock()
+        agent.llm_router.complete = AsyncMock(return_value=MagicMock(
+            content="I will use the desktop.",
+            reasoning_content="",
+            tool_calls=[],
+        ))
+
+        first = await agent._llm_choose_action(
+            "Use the visible desktop",
+            ComputerWorldObservation(),
+            1,
+            "",
+            "",
+        )
+        second = await agent._llm_choose_action(
+            "Use the visible desktop",
+            ComputerWorldObservation(),
+            2,
+            "",
+            "",
+        )
+
+        assert first[0] == ComputerActionType.GUI_SCREENSHOT
+        assert second[0] == ActionExecutionStatus.BLOCKED
+        assert second[1] == "gui-contract-violation"
+        assert agent.llm_router.complete.await_count == 2
 
     @pytest.mark.asyncio
     async def test_valid_screenshot_does_not_reset_gui_contract_violation_streak(self):

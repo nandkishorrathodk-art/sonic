@@ -16,6 +16,8 @@ class _Desktop:
     async def screenshot(self, workspace_id):
         return SimpleNamespace(
             screenshot_base64="dGVzdC1mcmFtZQ==",
+            capture_timestamp_ns=time.time_ns(),
+            capture_age_ms=0.0,
             desktop_state="INTERACTIVE",
             active_window="Document editor",
         )
@@ -83,6 +85,60 @@ async def test_gui_judge_does_not_confirm_ambiguous_screenshot():
     )
 
     assert verdict.verdict == JudgeVerdict.INCONCLUSIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capture_timestamp_ns", "capture_age_ms"),
+    ((None, None), (time.time_ns() - 5_000_000_000, None), (None, 2_001.0)),
+)
+async def test_gui_judge_rejects_missing_or_stale_screenshot(
+    capture_timestamp_ns,
+    capture_age_ms,
+):
+    router = _VisionJudge(
+        '{"verdict":"CONFIRMED","visible_evidence":"The requested result is visible."}'
+    )
+    screen = SimpleNamespace(
+        screenshot_base64="dGVzdC1mcmFtZQ==",
+        capture_timestamp_ns=capture_timestamp_ns,
+        capture_age_ms=capture_age_ms,
+        desktop_state="INTERACTIVE",
+        active_window="Document editor",
+    )
+    judge = JudgeAgent(
+        computer_provider=SimpleNamespace(screenshot=AsyncMock(return_value=screen)),
+        llm_router=router,
+    )
+
+    verdict = await judge.evaluate_sub_mission(
+        "workspace",
+        SubMission(id="gui-task", goal="Save the requested report", plane="gui"),
+        _gui_result(),
+    )
+
+    assert verdict.verdict == JudgeVerdict.INCONCLUSIVE
+    router.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gui_judge_requires_a_successful_gui_action_receipt():
+    router = _VisionJudge(
+        '{"verdict":"CONFIRMED","visible_evidence":"The requested result is visible."}'
+    )
+    judge = JudgeAgent(computer_provider=_Desktop(), llm_router=router)
+    result = _gui_result()
+    result.traces[0].status = "BLOCKED"
+
+    verdict = await judge.evaluate_sub_mission(
+        "workspace",
+        SubMission(id="gui-task", goal=result.goal, plane="gui"),
+        result,
+    )
+
+    assert verdict.verdict == JudgeVerdict.INCONCLUSIVE
+    assert "successful GUI interaction" in verdict.notes
+    router.complete.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -163,6 +219,28 @@ async def test_completion_checker_does_not_accept_success_trace_as_judge_proof()
         "Inspect and update the workspace",
         "Worker claims completion",
         [result],
+    )
+
+    assert complete is False
+    assert "no independently verified" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_completion_checker_requires_success_as_well_as_verified_evidence():
+    router = _VisionJudge('{"complete":true,"reason":"verification flag is set"}')
+    boss = BossAgent(computer_provider=_Desktop(), llm_router=router)
+    inconsistent = SubMissionResult(
+        sub_mission_id="failed-but-marked-verified",
+        goal="Create a document",
+        success=False,
+        evidence_verified=True,
+        findings_summary="The worker failed.",
+    )
+
+    complete, reason = await boss._check_objective_complete(
+        "Create a document",
+        "Worker failed",
+        [inconsistent],
     )
 
     assert complete is False

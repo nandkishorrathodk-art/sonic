@@ -26,6 +26,18 @@ from sonic.computer_use.models import (
 from sonic.computer_use.models_boss import SubMission, SubMissionResult
 
 
+@pytest.fixture(autouse=True)
+def _keep_visual_grounding_offline(monkeypatch):
+    """Use deterministic mocked grounding; these unit tests never call a model."""
+    async def _grounded_target(*args, **kwargs):
+        return (240, 180)
+
+    monkeypatch.setattr(
+        "sonic.computer_use.agent.resolve_ui_target_async",
+        _grounded_target,
+    )
+
+
 def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
     """Mock provider that always returns the exact same screenshot hash."""
     provider = AsyncMock()
@@ -182,6 +194,76 @@ async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
         GUIActionType.TYPE,
         GUIActionType.KEYPRESS,
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("updated_text", "changed_region", "expected_status", "expected_changed"),
+    [
+        ("Document - Saved", None, ActionExecutionStatus.SUCCESS, True),
+        ("Document - Untitled", None, ActionExecutionStatus.UNVERIFIED, False),
+        (
+            "Document - Untitled",
+            (10, 20, 90, 70),
+            ActionExecutionStatus.SUCCESS,
+            True,
+        ),
+    ],
+)
+async def test_state_only_gui_receipt_verifies_delta_without_screenshot(
+    updated_text, changed_region, expected_status, expected_changed
+):
+    class StateReceiptProvider:
+        async def gui_action_state(self, workspace_id, action, actor="operator"):
+            return ScreenObservation(
+                screenshot_base64="",
+                capture_age_ms=20,
+                controls_age_ms=15,
+                perception_version=2,
+                width=1280,
+                height=800,
+                active_window="Document",
+                visible_text=updated_text,
+                changed_region=changed_region,
+                detected_controls=[],
+                desktop_state="STATE_ONLY",
+            )
+
+        async def gui_action(self, workspace_id, action, actor="operator"):
+            raise AssertionError("state-only path should dispatch via gui_action_state")
+
+        async def status(self, workspace_id):
+            return MagicMock(active_application="Document", active_window="Document")
+
+    provider = StateReceiptProvider()
+    agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+    agent._last_observed_screen = ScreenObservation(
+        screenshot_base64="",
+        capture_age_ms=20,
+        controls_age_ms=15,
+        perception_version=1,
+        width=1280,
+        height=800,
+        active_window="Document",
+        visible_text="Document - Untitled",
+        detected_controls=[],
+        desktop_state="STATE_ONLY",
+    )
+
+    trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_CLICK,
+        "100,100",
+        {"x": 100, "y": 100},
+        "Save document",
+    )
+
+    assert trace.status == expected_status, trace.actual_observation
+    assert trace.state_changed is expected_changed
+    assert trace.verification_evidence.startswith("accessibility_state_changed=")
+    assert "ACCESSIBILITY STATE" in trace.actual_observation or expected_changed is False
+    assert agent._last_screenshot_b64 == ""
+    assert agent._last_gui_state_observation.desktop_state == "STATE_ONLY"
 
 
 # =========================================================================

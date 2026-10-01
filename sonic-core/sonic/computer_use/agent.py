@@ -478,6 +478,7 @@ class ComputerUseAgent:
         self._last_gui_navigation_target: str = ""
         self._recent_action_signatures: list[tuple[str, str, str]] = []
         self._consecutive_gui_contract_violations: int = 0
+        self._pending_gui_contract_feedback: str = ""
         self._last_action_output: dict[str, Any] = {}
         self._last_gui_action_result: dict[str, Any] = {}
         self.checklist: SubGoalChecklist | None = None
@@ -627,30 +628,49 @@ class ComputerUseAgent:
             or str(getattr(self, "execution_plane", "") or "").lower().strip() == "gui"
         )
 
-    def _gui_only_system_prompt(self) -> str:
+    def _gui_only_system_prompt(
+        self,
+        *,
+        image_attached: bool = False,
+        accessible_scene_fresh: bool = False,
+    ) -> str:
         actions = "|".join(
             action.value
             for action in ComputerActionType
             if action in self._GUI_ONLY_ACTIONS
             and not action.name.startswith("BROWSER_")
         )
+        if image_attached:
+            grounding_source = "the attached current screenshot and live observation"
+            coordinate_source = "the screenshot or exact screen-pixel bounds in the current grounded control inventory"
+        elif accessible_scene_fresh:
+            grounding_source = "the fresh accessibility/control inventory and live window observation"
+            coordinate_source = "exact screen-pixel bounds in the current grounded control inventory"
+        else:
+            grounding_source = "the current live observation, with no fresh screenshot or accessible scene"
+            coordinate_source = "current evidence only; if it contains no point, choose GUI_SCREENSHOT"
         return (
             "You are SONIC, a general-purpose AI-human colleague operating a live "
             "desktop. This worker's assigned plane is the visible GUI only.\n"
-            f"Only these ACTION values are valid: {actions}.\n"
-            "Choose one immediate action from the latest screenshot and live "
-            "observation. Do not infer a window, application state, or control from "
-            "the objective or earlier history.\n"
+            "For every turn, return exactly one JSON object with the keys "
+            '"action", "target", "payload", and "expected"; do not return '
+            "Markdown, prose, or omit keys.\n"
+            f"Only these ACTION values are valid: {actions}. Never invent "
+            "an action name or synonym.\n"
+            f"Choose one immediate action from {grounding_source}. Do not infer a "
+            "window, application state, or control from the objective or earlier history.\n"
             "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and "
-            "GUI_SCROLL, use exact integer screen-pixel coordinates `x,y` read from "
-            "the attached screenshot. A semantic target is allowed only when it "
+            f"GUI_SCROLL, use exact integer screen-pixel coordinates `x,y` read from {coordinate_source}. "
+            "A semantic target is allowed only when it "
             "exactly matches one unambiguous label in the current grounded control "
             "inventory. Never describe a desktop shortcut as an already-open window "
             "or add inferred words such as 'window' or 'active'.\n"
             "APP_LAUNCH may name only an observed installed application, never a "
             "directory or destination path. GUI_TYPE requires explicit text and "
-            "grounded pixel coordinates. If the target cannot be grounded from the "
-            "current frame, observe once, then stop as blocked rather than guessing. "
+            "grounded pixel coordinates. If a visual target cannot be grounded, do "
+            "not repeat it or guess coordinates: use another observed route, including "
+            "keyboard navigation when appropriate. If no route is grounded, choose "
+            "GUI_SCREENSHOT once, then stop as blocked. "
             "GOAL_COMPLETE is only a handoff proposal; the independent Judge decides "
             "completion from fresh visual evidence and worker receipts."
         )
@@ -757,7 +777,9 @@ class ComputerUseAgent:
         The current application state is grounded in the visible desktop
         observation so the same reasoning loop can operate any GUI workflow.
         """
+        perception_source = "unavailable"
         if getattr(self, "execution_plane", "") == "headless":
+            perception_source = "headless"
             screen_obs = ScreenObservation(
                 screenshot_base64="",
                 width=getattr(self, "_screen_width", 1920) or 1920,
@@ -768,8 +790,58 @@ class ComputerUseAgent:
                 desktop_state="HEADLESS_DECOUPLED",
             )
         elif getattr(self, "observe_desktop", True):
-            screen_obs = await self.computer.screenshot(workspace_id)
+            state_observer = getattr(self.computer, "observe_state", None)
+            state_obs = None
+            if callable(state_observer):
+                try:
+                    state_obs = await state_observer(workspace_id)
+                except Exception as exc:
+                    logger.warning(
+                        "desktop_state_observation_failed",
+                        workspace_id=workspace_id,
+                        error=str(exc),
+                    )
+            state_is_usable = (
+                state_obs is not None
+                and int(getattr(state_obs, "width", 0) or 0) > 0
+                and int(getattr(state_obs, "height", 0) or 0) > 0
+                and bool(getattr(state_obs, "active_window", ""))
+                and getattr(state_obs, "desktop_state", "") == "STATE_ONLY"
+                and getattr(state_obs, "perception_version", 0) > 0
+                and getattr(state_obs, "capture_age_ms", None) is not None
+                and getattr(state_obs, "capture_age_ms", 0)
+                <= 2_000
+            )
+            if state_is_usable:
+                screen_obs = state_obs
+                perception_source = "nsi_state"
+            else:
+                screen_obs = await self.computer.screenshot(workspace_id)
+                # A virtualized desktop can briefly return metadata without
+                # pixels. Retry once before publishing it as grounding state.
+                for attempt in range(2):
+                    has_pixels = bool(getattr(screen_obs, "screenshot_base64", ""))
+                    has_dimensions = (
+                        int(getattr(screen_obs, "width", 0) or 0) > 0
+                        and int(getattr(screen_obs, "height", 0) or 0) > 0
+                    )
+                    if has_pixels and has_dimensions:
+                        perception_source = "screenshot"
+                        break
+                    if attempt == 1:
+                        logger.warning(
+                            "desktop_observation_incomplete",
+                            workspace_id=workspace_id,
+                            has_pixels=has_pixels,
+                            width=getattr(screen_obs, "width", 0),
+                            height=getattr(screen_obs, "height", 0),
+                        )
+                        perception_source = "screenshot_unavailable"
+                        break
+                    await asyncio.sleep(0.05)
+                    screen_obs = await self.computer.screenshot(workspace_id)
         else:
+            perception_source = "not_requested"
             screen_obs = ScreenObservation(
                 screenshot_base64="",
                 width=0,
@@ -780,6 +852,34 @@ class ComputerUseAgent:
                 desktop_state="NOT_REQUESTED",
             )
         screen_received_at_ns = time.perf_counter_ns()
+        self._last_observed_screen = screen_obs
+        if getattr(screen_obs, "desktop_state", "") == "STATE_ONLY":
+            self._last_gui_state_observation = screen_obs
+        else:
+            self._last_gui_state_observation = None
+        action_to_state_ms = None
+        pending_gui_action = getattr(self, "_pending_gui_action_observation", None)
+        if isinstance(pending_gui_action, dict):
+            started_ns = pending_gui_action.get("started_ns")
+            if isinstance(started_ns, int) and not isinstance(started_ns, bool):
+                action_to_state_ms = max(
+                    0.0, (screen_received_at_ns - started_ns) / 1_000_000
+                )
+                action_trace_id = pending_gui_action.get("trace_id")
+                for previous_trace in reversed(getattr(self, "traces", [])):
+                    if getattr(previous_trace, "id", None) == action_trace_id:
+                        previous_trace.action_to_state_ms = action_to_state_ms
+                        break
+                logger.info(
+                    "computer_action_to_state_observed",
+                    workspace_id=workspace_id,
+                    trace_id=action_trace_id,
+                    latency_ms=round(action_to_state_ms, 2),
+                    perception_source=perception_source,
+                    capture_age_ms=getattr(screen_obs, "capture_age_ms", None),
+                    perception_version=getattr(screen_obs, "perception_version", 0),
+                )
+            self._pending_gui_action_observation = None
         # Store screenshot for vision-in-the-loop (VLM image input)
         self._last_screenshot_b64 = getattr(screen_obs, "screenshot_base64", "")
         # Track real screen dimensions so coordinate actions can be validated
@@ -794,7 +894,10 @@ class ComputerUseAgent:
             self.perception_bus = PerceptionBus()
         self._screen_width = int(getattr(screen_obs, "width", self._screen_width) or self._screen_width)
         self._screen_height = int(getattr(screen_obs, "height", self._screen_height) or self._screen_height)
-        nsi_cached = getattr(self.computer, "_last_nsi_frame", None)
+        nsi_cached = (
+            getattr(self.computer, "_last_nsi_state", None)
+            or getattr(self.computer, "_last_nsi_frame", None)
+        )
         now_loop = asyncio.get_event_loop().time()
         _nsi_active = (
             nsi_cached is not None
@@ -954,7 +1057,7 @@ class ComputerUseAgent:
         branch_val = getattr(git_st, "branch", "main")
         if not isinstance(branch_val, str):
             branch_val = "main"
-        return ComputerWorldObservation(
+        world_observation = ComputerWorldObservation(
             screen=screen_obs,
             active_application=active_app,
             windows=open_apps,
@@ -976,11 +1079,96 @@ class ComputerUseAgent:
                 else None
             ),
             observation_received_monotonic_ns=screen_received_at_ns,
+            perception_source=perception_source,
+            action_to_state_ms=action_to_state_ms,
         )
+        world_observation.accessible_scene_fresh = self._has_fresh_accessible_scene(
+            world_observation
+        )
+        counters = getattr(self, "_perception_counters", None)
+        if not isinstance(counters, dict):
+            counters = {
+                "observations": 0,
+                "nsi_state_observations": 0,
+                "screenshot_observations": 0,
+                "fresh_accessible_scenes": 0,
+                "image_attached_requests": 0,
+                "visual_escalations": 0,
+            }
+            self._perception_counters = counters
+        counters["observations"] += 1
+        if perception_source == "nsi_state":
+            counters["nsi_state_observations"] += 1
+        elif perception_source == "screenshot":
+            counters["screenshot_observations"] += 1
+        if world_observation.accessible_scene_fresh:
+            counters["fresh_accessible_scenes"] += 1
+        logger.info(
+            "computer_perception_observation",
+            workspace_id=workspace_id,
+            source=perception_source,
+            perception_version=world_observation.perception_version,
+            capture_age_ms=screen_obs.capture_age_ms,
+            controls_age_ms=screen_obs.controls_age_ms,
+            accessible_scene_fresh=world_observation.accessible_scene_fresh,
+            screenshot_pixels_available=bool(screen_obs.screenshot_base64),
+            action_to_state_ms=(
+                round(action_to_state_ms, 2)
+                if action_to_state_ms is not None
+                else None
+            ),
+            counters=dict(counters),
+        )
+        return world_observation
 
     # =============================================================
     # 2. Closed-Loop Reasoning & Action Selection
     # =============================================================
+    def _has_fresh_accessible_scene(
+        self, observation: ComputerWorldObservation
+    ) -> bool:
+        """Return whether fresh, unambiguous accessibility state can ground reasoning."""
+        version = getattr(observation, "perception_version", 0)
+        age_ms = getattr(observation, "observation_age_ms", None)
+        if (
+            not isinstance(version, int)
+            or version <= 0
+            or not isinstance(age_ms, (int, float))
+            or isinstance(age_ms, bool)
+            or age_ms > 250
+            or not isinstance(
+                getattr(observation.screen, "controls_age_ms", None),
+                (int, float),
+            )
+            or isinstance(observation.screen.controls_age_ms, bool)
+            or observation.screen.controls_age_ms > 250
+        ):
+            return False
+
+        snapshot = self.perception_bus.current()
+        if (
+            snapshot.version != version
+            or snapshot.width <= 0
+            or snapshot.height <= 0
+            or not snapshot.active_window
+        ):
+            return False
+
+        matches = self.perception_bus.target_index.observed_matches(
+            state_version=version
+        )
+        accessible_matches = [
+            match
+            for match in matches
+            if match.source.lower() == "atspi"
+            and match.confidence >= 0.6
+            and match.center is not None
+            and 0 <= match.center[0] < snapshot.width
+            and 0 <= match.center[1] < snapshot.height
+        ]
+        labels = [match.query.strip().casefold() for match in accessible_matches]
+        return bool(labels) and len(labels) == len(set(labels))
+
     async def choose_action(
         self,
         goal: str,
@@ -1085,7 +1273,9 @@ class ComputerUseAgent:
     ) -> tuple[ComputerActionType | ActionExecutionStatus, str, dict[str, Any], str]:
         """Accept GUI-worker output only when it contains a strict action block."""
         field_pattern = re.compile(
-            r"^\s*(?:\*\*|__)?(ACTION|TARGET|PAYLOAD|EXPECTED)(?:\*\*|__)?\s*:\s*(.*)$",
+            r"^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__)?"
+            r"(ACTION|TARGET|PAYLOAD|EXPECTED)(?:\*\*|__)?\s*:\s*"
+            r"(?:\*\*|__)?(.*)$",
             re.IGNORECASE,
         )
         fields: dict[str, str] = {}
@@ -1121,40 +1311,102 @@ class ComputerUseAgent:
                 envelope = json.loads(structured_text)
             except json.JSONDecodeError:
                 envelope = None
-            if isinstance(envelope, dict):
-                action_value = envelope.get("action", envelope.get("name"))
-                arguments = envelope.get("arguments", envelope.get("payload", {}))
-                if (
-                    isinstance(action_value, str)
-                    and isinstance(arguments, dict)
-                ):
-                    fields["ACTION"] = action_value
-                    raw_target = envelope.get("target", arguments.get("target", ""))
-                    fields["TARGET"] = (
-                        json.dumps(raw_target)
-                        if isinstance(raw_target, dict)
-                        else str(raw_target)
+            direct_keys = {"action", "target", "payload", "expected"}
+            if not (
+                isinstance(envelope, dict)
+                and set(envelope) == direct_keys
+                and isinstance(envelope.get("action"), str)
+                and isinstance(envelope.get("target"), str)
+                and isinstance(envelope.get("payload"), dict)
+                and isinstance(envelope.get("expected"), str)
+            ):
+                decoder = json.JSONDecoder()
+                candidates: list[tuple[int, int, dict[str, Any]]] = []
+                for start, character in enumerate(structured_text):
+                    if character != "{":
+                        continue
+                    try:
+                        candidate, end = decoder.raw_decode(structured_text, start)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        isinstance(candidate, dict)
+                        and set(candidate) == direct_keys
+                        and isinstance(candidate.get("action"), str)
+                        and isinstance(candidate.get("target"), str)
+                        and isinstance(candidate.get("payload"), dict)
+                        and isinstance(candidate.get("expected"), str)
+                    ):
+                        candidates.append((start, end, candidate))
+                outer_candidates = [
+                    item
+                    for item in candidates
+                    if not any(
+                        other_start <= item[0]
+                        and item[1] <= other_end
+                        and (other_start, other_end) != (item[0], item[1])
+                        for other_start, other_end, _ in candidates
                     )
-                    fields["EXPECTED"] = str(envelope.get("expected", ""))
-                    explicit_payload = arguments.get("payload")
-                    if isinstance(explicit_payload, dict):
-                        payload_value = explicit_payload
-                    else:
-                        payload_value = {
-                            key: value
-                            for key, value in arguments.items()
-                            if key not in {"target", "expected"}
-                        }
-                    fields["PAYLOAD"] = json.dumps(payload_value)
+                ]
+                envelope = (
+                    outer_candidates[0][2]
+                    if len(outer_candidates) == 1
+                    else None
+                )
+            if isinstance(envelope, dict):
+                if set(envelope) == direct_keys:
+                    fields["ACTION"] = envelope["action"]
+                    fields["TARGET"] = envelope["target"]
+                    fields["EXPECTED"] = envelope["expected"]
+                    fields["PAYLOAD"] = json.dumps(envelope["payload"])
                     payload_lines = [fields["PAYLOAD"]]
+                else:
+                    action_value = envelope.get("action", envelope.get("name"))
+                    arguments = envelope.get("arguments", envelope.get("payload", {}))
+                    if isinstance(action_value, str) and isinstance(arguments, dict):
+                        fields["ACTION"] = action_value
+                        raw_target = envelope.get("target", arguments.get("target", ""))
+                        fields["TARGET"] = (
+                            json.dumps(raw_target)
+                            if isinstance(raw_target, dict)
+                            else str(raw_target)
+                        )
+                        fields["EXPECTED"] = str(envelope.get("expected", ""))
+                        explicit_payload = arguments.get("payload")
+                        if isinstance(explicit_payload, dict):
+                            payload_value = explicit_payload
+                        else:
+                            payload_value = {
+                                key: value
+                                for key, value in arguments.items()
+                                if key not in {"target", "expected"}
+                            }
+                        fields["PAYLOAD"] = json.dumps(payload_value)
+                        payload_lines = [fields["PAYLOAD"]]
 
-        action_name = fields.get("ACTION", "").upper()
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", action_name):
+        if "ACTION" not in fields:
             return (
                 ActionExecutionStatus.BLOCKED,
                 "gui-invalid-response",
                 {},
                 "GUI reasoning did not return a structured ACTION block.",
+            )
+        raw_action = fields["ACTION"].strip().strip("`*_")
+        if not raw_action:
+            return (
+                ActionExecutionStatus.BLOCKED,
+                "gui-invalid-response",
+                {},
+                "GUI reasoning returned an empty ACTION field.",
+            )
+        action_match = re.match(r"([A-Za-z][A-Za-z0-9_]*)\b", raw_action)
+        action_name = action_match.group(1).upper() if action_match else ""
+        if not action_name:
+            return (
+                ActionExecutionStatus.BLOCKED,
+                "gui-invalid-response",
+                {},
+                "GUI reasoning ACTION must begin with a valid action identifier.",
             )
 
         if action_name == "GOAL_COMPLETE":
@@ -1183,12 +1435,22 @@ class ComputerUseAgent:
                 fields.get("EXPECTED", ""),
             )
 
-        if "TARGET" not in fields or "PAYLOAD" not in fields:
+        missing_fields = [
+            field for field in ("TARGET", "PAYLOAD") if field not in fields
+        ]
+        if missing_fields and action_type == ComputerActionType.GUI_SCREENSHOT:
+            fields.setdefault("TARGET", "visible-desktop")
+            if "PAYLOAD" not in fields:
+                fields["PAYLOAD"] = "{}"
+                payload_lines = ["{}"]
+            missing_fields = []
+        if missing_fields:
             return (
                 ActionExecutionStatus.BLOCKED,
                 "gui-invalid-response",
                 {},
-                "GUI action block must include TARGET and PAYLOAD fields.",
+                f"GUI {action_type.value} action block is missing required fields: "
+                f"{', '.join(missing_fields)}.",
             )
 
         payload_text = "\n".join(payload_lines).strip()
@@ -1310,7 +1572,19 @@ class ComputerUseAgent:
                     parsed[1]
                     and self.perception_bus.resolve(parsed[1]) is not None
                 )
-                if not safe_semantic_target:
+                reasoning_perception = getattr(
+                    self,
+                    "_last_reasoning_perception",
+                    {},
+                )
+                visual_grounding_available = bool(
+                    parsed[1]
+                    and self._last_screenshot_b64
+                    and self.llm_router
+                    and isinstance(reasoning_perception, dict)
+                    and reasoning_perception.get("image_attached")
+                )
+                if not safe_semantic_target and not visual_grounding_available:
                     return (
                         ActionExecutionStatus.BLOCKED,
                         "gui-invalid-response",
@@ -1362,6 +1636,7 @@ class ComputerUseAgent:
             getattr(self, "_consecutive_gui_contract_violations", 0) + 1
         )
         if self._consecutive_gui_contract_violations > 1:
+            self._pending_gui_contract_feedback = ""
             return (
                 ActionExecutionStatus.BLOCKED,
                 "gui-contract-violation",
@@ -1369,6 +1644,7 @@ class ComputerUseAgent:
                 "Stopped after repeated invalid model proposals outside the visible GUI action contract. "
                 f"Last proposal rejected: {reason}",
             )
+        self._pending_gui_contract_feedback = reason
         return self._gui_only_recovery_action(goal, reason)
 
     @staticmethod
@@ -1654,6 +1930,14 @@ class ComputerUseAgent:
         self._last_working_dir = workdir
         active_app = observation.active_application or "UNKNOWN"
         windows_str = ", ".join(observation.windows) if observation.windows else "UNKNOWN"
+        changed_region = getattr(
+            getattr(observation, "screen", None), "changed_region", None
+        )
+        change_summary = (
+            f"\nLatest changed screen region (pixels): {changed_region}"
+            if changed_region is not None
+            else ""
+        )
         if observation.filesystem_files is not None and len(observation.filesystem_files) > 0:
             raw_files = observation.filesystem_files
             file_limit = 15 if has_live_pixels else 60
@@ -1904,7 +2188,7 @@ class ComputerUseAgent:
         application_content = (
             f"Active application: {active_app}\n"
             f"Open windows: {windows_str}\n"
-            f"Visible content: {screen_text}"
+            f"Visible content: {screen_text}{change_summary}"
         )
         tool_content = tool_lines.strip() if tool_lines else "None"
         gui_policy_text = (
@@ -2039,14 +2323,15 @@ class ComputerUseAgent:
                 f"OBSERVED INSTALLED APPLICATIONS: {observed_apps}\n"
                 f"SCREEN-VISIBLE TEXT (OCR may be incomplete): {screen_text}\n"
                 f"{visible_controls}\n"
-                "GROUNDING RULE: the attached current screenshot is the source of truth. "
-                "Do not infer that a window or control is open from the objective, prior "
+                "GROUNDING RULE: use only the fresh current screenshot when attached, "
+                "otherwise use only the fresh grounded control inventory and live window "
+                "state. Do not infer that a window or control is open from the objective, "
                 "worker history, or a previous screenshot. For a click on an icon/control, "
-                "prefer exact integer screen-pixel coordinates read from this screenshot "
-                "as TARGET `x,y`. Use a semantic TARGET only when its exact label appears "
-                "in the grounded control inventory above. If the target is not visible or "
-                "cannot be located in this frame, choose a permitted observation action "
-                "once and then stop blocked if still unresolved.\n"
+                "use exact screen-pixel coordinates from the current screenshot or a "
+                "grounded control bound; use a semantic TARGET only when its exact label "
+                "appears in the current grounded control inventory. If the target is not "
+                "grounded by current evidence, choose a permitted observation action once "
+                "and then stop blocked if still unresolved.\n"
                 "Choose one immediate visible GUI action; do not provide a multi-step plan."
             )
 
@@ -2273,31 +2558,67 @@ class ComputerUseAgent:
         system_prompt, obs_summary = self._build_reasoning_context(
             goal, observation, step_index, primary_file, test_file
         )
-        if self._gui_action_contract_active():
-            system_prompt = self._gui_only_system_prompt()
-        # Pixels and grounded OCR/AT-SPI controls are complementary evidence;
-        # available controls must never suppress the visual frame.
+        # Use the lower-bandwidth structured path only when its accessibility
+        # controls belong to the current, fresh, unambiguous desktop snapshot.
         prev_action_list = getattr(self, "action_history", None) or getattr(self, "traces", None) or []
         prev_act_type = getattr(prev_action_list[-1], "action_type", None) if prev_action_list else None
         plane = str(getattr(self, "execution_plane", "dual") or "dual").lower().strip()
-        should_attach_image = (
+        gui_reasoning = (
             plane in ("gui", "dual")
             or getattr(self, "gui_only", False)
-            or prev_act_type in (
-                ComputerActionType.GUI_SCREENSHOT,
-                ComputerActionType.APP_LAUNCH,
-                ComputerActionType.APP_FOCUS,
-                ComputerActionType.APP_MAXIMIZE,
-                ComputerActionType.WINDOW_MAXIMIZE,
-                ComputerActionType.WINDOW_TILE,
-                ComputerActionType.GUI_CLICK,
-                ComputerActionType.GUI_DOUBLE_CLICK,
-                ComputerActionType.GUI_TYPE,
+        )
+        structured_scene_available = self._has_fresh_accessible_scene(observation)
+        if (
+            gui_reasoning
+            and not structured_scene_available
+            and not self._last_screenshot_b64
+            and getattr(self, "_active_workspace_id", "")
+            and hasattr(self.computer, "screenshot")
+        ):
+            visual_observation = await self.computer.screenshot(
+                self._active_workspace_id
             )
-            or (
-                bool(self._last_screenshot_b64)
-                and not getattr(observation, "screenshot_base64", "")
-                and getattr(observation, "perception_version", 0) == 0
+            visual_age = getattr(visual_observation, "capture_age_ms", None)
+            if (
+                visual_observation.screenshot_base64
+                and visual_observation.width > 0
+                and visual_observation.height > 0
+                and (visual_age is None or visual_age <= 2_000)
+            ):
+                self._last_screenshot_b64 = visual_observation.screenshot_base64
+                self._screen_width = visual_observation.width
+                self._screen_height = visual_observation.height
+                observation.screen = visual_observation
+                refreshed = self.perception_bus.publish(
+                    screenshot_base64=visual_observation.screenshot_base64,
+                    width=visual_observation.width,
+                    height=visual_observation.height,
+                    active_window=visual_observation.active_window,
+                    windows=observation.windows,
+                    processes=observation.processes,
+                    visible_text=visual_observation.visible_text,
+                    controls=visual_observation.detected_controls,
+                )
+                observation.perception_version = refreshed.version
+                observation.visible_text = visual_observation.visible_text
+                observation.observation_age_ms = visual_age
+                observation.perception_source = "visual_escalation"
+                structured_scene_available = self._has_fresh_accessible_scene(
+                    observation
+                )
+            else:
+                logger.warning(
+                    "desktop_visual_escalation_unavailable",
+                    active_window=getattr(visual_observation, "active_window", ""),
+                    width=getattr(visual_observation, "width", 0),
+                    height=getattr(visual_observation, "height", 0),
+                    capture_age_ms=visual_age,
+                )
+        should_attach_image = (
+            gui_reasoning
+            and (
+                not structured_scene_available
+                or prev_act_type == ComputerActionType.GUI_SCREENSHOT
             )
         )
         images: list[ImageContent] = []
@@ -2321,11 +2642,82 @@ class ComputerUseAgent:
                             images.append(ImageContent(base64=crop_b64, media_type="image/png"))
                     except Exception:
                         pass
-                user_text = f"{obs_summary}\n\nBased on the desktop screenshot and observation above, choose the next action."
+                user_text = (
+                    f"{obs_summary}\n\nBased on the live desktop pixels and "
+                    "observation above, choose the next action."
+                )
             else:
                 user_text = obs_summary
+        elif structured_scene_available:
+            user_text = (
+                f"{obs_summary}\n\nUse the fresh, grounded accessibility "
+                "controls and window state above to choose the next action. "
+                "Escalate to visual reasoning if that state is insufficient."
+            )
         else:
             user_text = obs_summary
+
+        image_attached = bool(images)
+        if gui_reasoning:
+            if image_attached and prev_act_type == ComputerActionType.GUI_SCREENSHOT:
+                escalation_reason = "explicit_screenshot_action"
+            elif image_attached and not structured_scene_available:
+                escalation_reason = "accessibility_scene_stale_ambiguous_or_missing"
+            elif image_attached:
+                escalation_reason = "visual_reasoning_requested"
+            elif structured_scene_available:
+                escalation_reason = "fresh_accessibility_scene"
+            else:
+                escalation_reason = "visual_frame_unavailable"
+        else:
+            escalation_reason = "non_gui_reasoning"
+
+        observation.accessible_scene_fresh = structured_scene_available
+        observation.image_attached = image_attached
+        observation.visual_escalation_reason = escalation_reason
+        counters = getattr(self, "_perception_counters", None)
+        if not isinstance(counters, dict):
+            counters = {
+                "observations": 0,
+                "nsi_state_observations": 0,
+                "screenshot_observations": 0,
+                "fresh_accessible_scenes": 0,
+                "image_attached_requests": 0,
+                "visual_escalations": 0,
+            }
+            self._perception_counters = counters
+        if image_attached:
+            counters["image_attached_requests"] += 1
+        if image_attached and gui_reasoning and not structured_scene_available:
+            counters["visual_escalations"] += 1
+        observation.image_escalation_count = counters["visual_escalations"]
+        self._last_reasoning_perception = {
+            "source": observation.perception_source,
+            "version": observation.perception_version,
+            "screen_age_ms": getattr(observation.screen, "capture_age_ms", None),
+            "controls_age_ms": getattr(observation.screen, "controls_age_ms", None),
+            "accessible_scene_fresh": structured_scene_available,
+            "image_attached": image_attached,
+            "visual_escalation_reason": escalation_reason,
+            "image_escalation_count": counters["visual_escalations"],
+        }
+        logger.info(
+            "computer_reasoning_perception",
+            perception_source=observation.perception_source,
+            perception_version=observation.perception_version,
+            screen_age_ms=getattr(observation.screen, "capture_age_ms", None),
+            controls_age_ms=getattr(observation.screen, "controls_age_ms", None),
+            accessible_scene_fresh=structured_scene_available,
+            image_attached=image_attached,
+            visual_escalation_reason=escalation_reason,
+            image_escalation_count=counters["visual_escalations"],
+            counters=dict(counters),
+        )
+        if self._gui_action_contract_active():
+            system_prompt = self._gui_only_system_prompt(
+                image_attached=image_attached,
+                accessible_scene_fresh=structured_scene_available,
+            )
 
         available_actions = (
             self._GUI_ONLY_ACTIONS
@@ -2338,9 +2730,12 @@ class ComputerUseAgent:
             if action.name.startswith("BROWSER_")
         }
         advertised_actions = available_actions - legacy_browser_actions
-        action_schema = "|".join(
-            action.value for action in ComputerActionType if action in advertised_actions
-        )
+        gui_action_values = [
+            action.value
+            for action in ComputerActionType
+            if action in advertised_actions
+        ]
+        action_schema = "|".join(gui_action_values)
         efficiency_directive = (
             "2. GUI CONTROL SEMANTICS: APP_LAUNCH targets an installed application executable/name only. "
             "For a visible menu, button, launcher, or other on-screen control, use GUI_CLICK grounded "
@@ -2353,10 +2748,12 @@ class ComputerUseAgent:
         if self._gui_action_contract_active():
             action_instructions = (
                 "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and GUI_SCROLL, "
-                "TARGET must be exact integer screen-pixel coordinates `x,y` read from the "
-                "attached screenshot; do not use a natural-language description. A semantic "
-                "target is permitted only when it exactly matches an unambiguous label in "
-                "the current grounded control inventory. PAYLOAD must be a JSON object; "
+                "TARGET may be exact integer screen-pixel coordinates `x,y` read from "
+                "the attached screenshot, or an exact unambiguous label in the current "
+                "grounded control inventory. When a screenshot is attached but the "
+                "control has no readable label or bounds, use a concise unique visual "
+                "description; a separate visual-grounding check must resolve it before "
+                "execution or the action will be blocked. Never guess. PAYLOAD must be a JSON object; "
                 "e.g. GUI_TYPE requires "
                 "{\"x\": 10, \"y\": 20, \"text\": \"visible-field input\"}, and GUI_HOTKEY "
                 "requires {\"key\": \"Ctrl+L\"}. Do not include shell commands.\n"
@@ -2371,17 +2768,44 @@ class ComputerUseAgent:
                 "3. EARLY COMPLETION: If command output or screen observations already satisfy "
                 "the objective, declare GOAL_COMPLETE immediately."
             )
-        user_text += (
-            "\n\n================================================================================\n"
-            "CRITICAL INSTRUCTIONS FOR YOUR NEXT IMMEDIATE ACTION:\n"
-            "1. Output EXACTLY ONE action block in this format:\n"
-            "THOUGHT: <brief observation and rationale for the next action>\n"
-            f"ACTION: <{action_schema}>\n"
-            f"{action_instructions}\n"
-            "EXPECTED: <observable outcome>\n"
-            "For GOAL_COMPLETE use TARGET: goal_complete, PAYLOAD: {}, EXPECTED: hand off for independent verification.\n"
-            "================================================================================"
-        )
+        if self._gui_action_contract_active():
+            user_text += (
+                "\n\n================================================================================\n"
+                "CRITICAL GUI RESPONSE CONTRACT:\n"
+                "Return exactly one JSON object and no Markdown or surrounding prose. "
+                "Include all four keys: action, target, payload, expected. "
+                f"The action value must be exactly one of: {action_schema}. "
+                "target and expected must be strings; payload must be a JSON object. "
+                "Do not omit keys, even when their values are empty. "
+                "For GUI_SCREENSHOT use "
+                '{"action":"GUI_SCREENSHOT","target":"visible-desktop",'
+                '"payload":{},"expected":"Inspect the current desktop"}. '
+                "For GOAL_COMPLETE use "
+                '{"action":"GOAL_COMPLETE","target":"goal_complete",'
+                '"payload":{},"expected":"Hand off for independent verification"}.\n'
+                f"{action_instructions}\n"
+                "================================================================================"
+            )
+        else:
+            user_text += (
+                "\n\n================================================================================\n"
+                "CRITICAL INSTRUCTIONS FOR YOUR NEXT IMMEDIATE ACTION:\n"
+                "1. Output EXACTLY ONE action block in this format:\n"
+                "THOUGHT: <brief observation and rationale for the next action>\n"
+                f"ACTION: <{action_schema}>\n"
+                f"{action_instructions}\n"
+                "EXPECTED: <observable outcome>\n"
+                "For GOAL_COMPLETE use TARGET: goal_complete, PAYLOAD: {}, EXPECTED: hand off for independent verification.\n"
+                "================================================================================"
+            )
+        if self._gui_action_contract_active() and self._pending_gui_contract_feedback:
+            feedback = " ".join(self._pending_gui_contract_feedback.split())[:240]
+            user_text += (
+                "\n\nGUI CONTRACT FEEDBACK: Your previous proposal was not executed "
+                f"because {feedback} Choose one allowed visible GUI action from the "
+                "current evidence. Do not repeat the rejected action. If the current "
+                "frame does not ground a task action, choose GUI_SCREENSHOT once."
+            )
 
         action_tools = None
         if self._gui_action_contract_active():
@@ -2397,11 +2821,7 @@ class ComputerUseAgent:
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": [
-                                    action.value
-                                    for action in ComputerActionType
-                                    if action in advertised_actions
-                                ],
+                                "enum": gui_action_values,
                             },
                             "target": {"type": "string"},
                             "payload": {
@@ -2426,6 +2846,38 @@ class ComputerUseAgent:
             tools=action_tools,
             # Concise action selection for real-time computer use (< 3s per step).
             reasoning_effort=None if images else "medium",
+            extra_body=(
+                {
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "computer_action",
+                            "strict": False,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "action": {
+                                        "type": "string",
+                                        "enum": gui_action_values + ["GOAL_COMPLETE"],
+                                    },
+                                    "target": {"type": "string"},
+                                    "payload": {"type": "object"},
+                                    "expected": {"type": "string"},
+                                },
+                                "required": [
+                                    "action",
+                                    "target",
+                                    "payload",
+                                    "expected",
+                                ],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                }
+                if self._gui_action_contract_active()
+                else {}
+            ),
         )
         t_thought_start = time.perf_counter()
         heartbeat_task: asyncio.Task[Any] | None = None
@@ -2539,6 +2991,41 @@ class ComputerUseAgent:
                     parse_target_str, primary_file
                 )
             if self._gui_action_contract_active():
+                if (
+                    action_type == ActionExecutionStatus.BLOCKED
+                    and target == "gui-invalid-response"
+                ):
+                    parsed_action_match = re.match(
+                        r"GUI ([A-Z][A-Z0-9_]*) action block",
+                        expected,
+                    )
+                    logger.warning(
+                        "gui_action_response_invalid",
+                        parsed_action=(
+                            parsed_action_match.group(1)
+                            if parsed_action_match
+                            else "BLOCKED"
+                        ),
+                        parser_reason=" ".join(expected.split())[:160],
+                        response_chars=len(parse_target_str),
+                        action_marker_present=bool(
+                            re.search(
+                                r'(?:^|\n)\s*(?:[-*+]\s*)?(?:\*\*)?ACTION(?:\*\*)?\s*:'
+                                r'|["\']action["\']\s*:',
+                                parse_target_str,
+                                re.IGNORECASE,
+                            )
+                        ),
+                        tool_call_count=len(tool_calls),
+                    )
+                    self._last_thought = (
+                        "The model response did not satisfy the structured GUI action "
+                        f"format: {expected}"
+                    )
+                    return self._recover_rejected_gui_proposal(
+                        goal,
+                        f"the response failed GUI action validation: {expected}",
+                    )
                 target_error = self._gui_action_target_error(
                     action_type,
                     target,
@@ -2552,13 +3039,26 @@ class ComputerUseAgent:
                 and expected != _GOAL_COMPLETE_SENTINEL
                 and action_type not in self._GUI_ONLY_ACTIONS
             ):
+                proposed_action = (
+                    action_type.value
+                    if isinstance(action_type, ComputerActionType)
+                    else str(action_type)
+                )
+                rejection_reason = (
+                    f"the proposed action {proposed_action} is not allowed on the GUI plane"
+                )
+                logger.warning(
+                    "gui_contract_proposal_rejected",
+                    proposed_action=proposed_action,
+                    reason="non_gui_action",
+                )
                 self._last_thought = (
-                    "The model proposed a non-GUI action; discard it and re-observe "
-                    "the visible desktop instead."
+                    f"The model proposed {proposed_action}, which is not a GUI action; "
+                    "discard it and re-observe the visible desktop."
                 )
                 return self._recover_rejected_gui_proposal(
                     goal,
-                    "Non-GUI proposal discarded",
+                    rejection_reason,
                 )
 
             if target == "diagnostic-verification" and "LLM safety refusal detected" in expected:
@@ -2581,6 +3081,7 @@ class ComputerUseAgent:
                 and action_type != ComputerActionType.GUI_SCREENSHOT
             ):
                 self._consecutive_gui_contract_violations = 0
+                self._pending_gui_contract_feedback = ""
             return action_type, target, payload, expected
         except Exception as e:
             self._last_thought_duration = round(time.perf_counter() - t_thought_start, 2)
@@ -3510,6 +4011,115 @@ class ComputerUseAgent:
                 "reason": f"native governance unavailable: {e}",
             }
 
+    @staticmethod
+    def _screen_state_signature(screen: Any) -> str:
+        """Return a stable UI-state fingerprint that excludes sampling metadata."""
+        controls = []
+        for control in getattr(screen, "detected_controls", []) or []:
+            if not isinstance(control, dict):
+                continue
+            controls.append(
+                {
+                    key: control.get(key)
+                    for key in (
+                        "name",
+                        "role",
+                        "bbox",
+                        "bbox_format",
+                        "source",
+                        "enabled",
+                        "focused",
+                        "checked",
+                        "selected",
+                        "value",
+                    )
+                    if key in control
+                }
+            )
+        return json.dumps(
+            {
+                "active_window": str(getattr(screen, "active_window", "") or ""),
+                "visible_text": " ".join(
+                    str(getattr(screen, "visible_text", "") or "").split()
+                ),
+                "changed_region": getattr(screen, "changed_region", None),
+                "controls": sorted(
+                    controls,
+                    key=lambda control: json.dumps(
+                        control, sort_keys=True, default=str
+                    ),
+                ),
+            },
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+
+    async def _dispatch_gui_action(
+        self,
+        workspace_id: str,
+        action: GUIAction,
+    ) -> ScreenObservation:
+        """Prefer provider state receipts while keeping legacy image behavior."""
+        before_screen = getattr(self, "_last_gui_state_observation", None)
+        if before_screen is None:
+            before_screen = getattr(self, "_last_observed_screen", None)
+        state_action = getattr(type(self.computer), "gui_action_state", None)
+        if callable(state_action):
+            result = await self.computer.gui_action_state(workspace_id, action)
+        else:
+            result = await self.computer.gui_action(workspace_id, action)
+
+        self._last_gui_state_delta = None
+        if getattr(result, "desktop_state", "") == "STATE_ONLY":
+            signature = self._screen_state_signature(result)
+            before_signature = (
+                self._screen_state_signature(before_screen)
+                if before_screen is not None
+                else None
+            )
+            state_changed = (
+                before_signature != signature
+                if before_signature is not None
+                else None
+            )
+            self._last_gui_state_delta = {
+                "changed": state_changed,
+                "before_version": getattr(before_screen, "perception_version", 0),
+                "after_version": getattr(result, "perception_version", 0),
+                "active_window": getattr(result, "active_window", ""),
+                "visible_text": getattr(result, "visible_text", ""),
+            }
+            self._last_gui_state_observation = result
+            self._last_observed_screen = result
+            self._last_screenshot_b64 = ""
+            if not hasattr(self, "perception_bus"):
+                self.perception_bus = PerceptionBus()
+            self._screen_width = result.width
+            self._screen_height = result.height
+            snapshot = self.perception_bus.publish(
+                screenshot_base64="",
+                width=result.width,
+                height=result.height,
+                active_window=result.active_window,
+                visible_text=result.visible_text,
+                controls=result.detected_controls,
+            )
+            logger.info(
+                "gui_action_state_receipt",
+                action=action.action.value,
+                before_version=getattr(before_screen, "perception_version", 0),
+                after_version=result.perception_version,
+                state_changed=state_changed,
+                state_version=snapshot.version,
+                capture_age_ms=result.capture_age_ms,
+                controls_age_ms=result.controls_age_ms,
+            )
+        else:
+            self._last_observed_screen = result
+            self._last_gui_state_observation = None
+        return result
+
     async def execute_action(
         self,
         workspace_id: str,
@@ -3592,6 +4202,7 @@ class ComputerUseAgent:
         action_exit_code: int | None = None
         action_stderr: str = ""
         typing_validation_error = ""
+        self._last_gui_state_delta = None
         if action_type == ComputerActionType.GUI_TYPE:
             raw_text = str(payload.get("text") or payload.get("value") or payload.get("input") or "")
             invalid_text, text_reason = self._validate_typing_text(sanitize_typing_text(raw_text))
@@ -3751,7 +4362,7 @@ class ComputerUseAgent:
                     raise RuntimeError("active window is unknown")
                 if requested_window:
                     if active_window.casefold() != str(requested_window).strip().casefold():
-                        focus_result = await self.computer.gui_action(
+                        focus_result = await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(
                                 action=GUIActionType.SELECT_WINDOW,
@@ -4319,10 +4930,8 @@ class ComputerUseAgent:
         if explicit_pixel_target is not None and payload_pixel_target is None:
             payload["x"], payload["y"] = explicit_pixel_target
             payload_pixel_target = explicit_pixel_target
-        natural_target_needs_live_grounding = bool(
-            self._last_screenshot_b64
-            and explicit_pixel_target is None
-            and payload_pixel_target is None
+        natural_target_needs_live_grounding = (
+            explicit_pixel_target is None and payload_pixel_target is None
         )
         if action_type in (
             ComputerActionType.GUI_CLICK,
@@ -4366,6 +4975,8 @@ class ComputerUseAgent:
                 x, y, width, height = semantic_match.bbox
                 payload["x"] = x + max(0, width // 2)
                 payload["y"] = y + max(0, height // 2)
+                payload_pixel_target = (payload["x"], payload["y"])
+                natural_target_needs_live_grounding = False
                 resolved_via_grounding = False
                 logger.info(
                     "perception_bus_target_resolved",
@@ -4399,10 +5010,9 @@ class ComputerUseAgent:
                     width=self._screen_width,
                     height=self._screen_height,
                     grounding_fn=grounding_fn,
-                    # Static landmarks are only a compatibility fallback when no
-                    # screenshot exists. Once pixels are available, unresolved
-                    # targets must be blocked rather than guessed.
-                    allow_landmarks=not bool(self._last_screenshot_b64),
+                    # A missing frame is not permission to substitute guessed
+                    # landmarks; unresolved targets must remain blocked.
+                    allow_landmarks=False,
                 )
                 if res_coords is not None:
                     payload["x"], payload["y"] = res_coords
@@ -4417,6 +5027,12 @@ class ComputerUseAgent:
                 else:
                     target = target_resource
                     actual_obs_str = f"Target UI element '{target}' could not be resolved from visual grounding. Re-observing screen."
+                    if self._gui_action_contract_active():
+                        self._pending_gui_contract_feedback = (
+                            f"Target '{target}' was not grounded in the current frame. "
+                            "Do not repeat that target; choose a different observed "
+                            "route or appropriate keyboard navigation."
+                        )
                     status = ActionExecutionStatus.BLOCKED
                     logger.warning(
                         "action_failed_unresolved_visual_grounding",
@@ -4464,6 +5080,22 @@ class ComputerUseAgent:
             and ("burst_actions" in payload or payload.get("burst") is True)
         )
         coord_err = None if is_gui_burst else self._validate_coordinates(action_type, payload)
+        # Missing point coordinates are resolved from the current visual
+        # target below. Other coordinate errors (negative, non-integer, or
+        # off-screen values) remain fail-closed before any grounding call.
+        can_ground_missing_point = (
+            action_type in {
+                ComputerActionType.GUI_CLICK,
+                ComputerActionType.GUI_DOUBLE_CLICK,
+                ComputerActionType.GUI_RIGHT_CLICK,
+                ComputerActionType.GUI_MOVE,
+            }
+            and payload.get("x") is None
+            and payload.get("y") is None
+            and bool(target_resource)
+        )
+        if can_ground_missing_point and coord_err == "point coordinates (x, y) are required":
+            coord_err = None
         if coord_err is not None:
             actual_obs_str = f"Coordinate out of bounds: {coord_err}"
             status = ActionExecutionStatus.BLOCKED
@@ -4568,7 +5200,7 @@ class ComputerUseAgent:
                         self._last_screenshot_b64 = draw_action_marker(
                             self._last_screenshot_b64, (x, y), label="CLICK", color="#00ffcc"
                         )
-                    obs_after = await self.computer.gui_action(
+                    obs_after = await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(action=GUIActionType.CLICK, x=x, y=y),
                     )
@@ -4607,7 +5239,7 @@ class ComputerUseAgent:
                         self._last_screenshot_b64 = draw_action_marker(
                             self._last_screenshot_b64, (x, y), label="DOUBLE_CLICK", color="#ffaa00"
                         )
-                    obs_after = await self.computer.gui_action(
+                    obs_after = await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(action=GUIActionType.DOUBLE_CLICK, x=x, y=y),
                     )
@@ -4646,7 +5278,7 @@ class ComputerUseAgent:
                         self._last_screenshot_b64 = draw_action_marker(
                             self._last_screenshot_b64, (x, y), label="RIGHT_CLICK", color="#ff3366"
                         )
-                    obs_after = await self.computer.gui_action(
+                    obs_after = await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(action=GUIActionType.RIGHT_CLICK, x=x, y=y),
                     )
@@ -4696,7 +5328,7 @@ class ComputerUseAgent:
                         status = ActionExecutionStatus.BLOCKED
                         action_exit_code = 126
                     else:
-                        await self.computer.gui_action(
+                        await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(
                                 action=GUIActionType.CLICK,
@@ -4721,7 +5353,7 @@ class ComputerUseAgent:
                     if status == ActionExecutionStatus.BLOCKED:
                         pass
                     elif self._gui_action_contract_active():
-                        obs_after = await self.computer.gui_action(
+                        obs_after = await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(
                                 action=GUIActionType.TYPE,
@@ -4734,7 +5366,7 @@ class ComputerUseAgent:
                     else:
                         await self.motor.human_type(workspace_id, text, delay_ms=payload.get("delay_ms", 25))
                 elif status != ActionExecutionStatus.BLOCKED:
-                    obs_after = await self.computer.gui_action(
+                    obs_after = await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(
                             action=GUIActionType.TYPE,
@@ -4781,7 +5413,7 @@ class ComputerUseAgent:
                 key = str(payload.get("key") or payload.get("keys") or target_resource or "Return").strip()
                 pre_key_b64 = getattr(self, "_last_screenshot_b64", "")
                 gui_act_type = getattr(GUIActionType, "HOTKEY", GUIActionType.KEYPRESS) if (action_type == ComputerActionType.GUI_HOTKEY or "+" in key) else GUIActionType.KEYPRESS
-                obs_key = await self.computer.gui_action(
+                obs_key = await self._dispatch_gui_action(
                     workspace_id,
                     GUIAction(action=gui_act_type, key=key),
                 )
@@ -4817,7 +5449,7 @@ class ComputerUseAgent:
                 else:
                     x = int(payload.get("x", 0))
                     y = int(payload.get("y", 0))
-                    obs_move = await self.computer.gui_action(
+                    obs_move = await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(action=GUIActionType.MOVE, x=x, y=y),
                     )
@@ -4849,7 +5481,7 @@ class ComputerUseAgent:
                     y = int(raw_y)
                     x2 = int(raw_end_x)
                     y2 = int(raw_end_y)
-                    obs_drag = await self.computer.gui_action(
+                    obs_drag = await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(action=GUIActionType.DRAG, x=x, y=y, x2=x2, y2=y2),
                     )
@@ -4866,7 +5498,7 @@ class ComputerUseAgent:
                 x = int(payload.get("x") if payload.get("x") is not None else def_x)
                 y = int(payload.get("y") if payload.get("y") is not None else def_y)
                 delta = int(payload.get("delta", -3))
-                obs_scroll = await self.computer.gui_action(
+                obs_scroll = await self._dispatch_gui_action(
                     workspace_id,
                     GUIAction(action=GUIActionType.SCROLL, x=x, y=y, scroll_delta=delta),
                 )
@@ -4921,7 +5553,7 @@ class ComputerUseAgent:
                         if not launched:
                             raise RuntimeError(f"application launch failed for '{app_name}'")
                     else:
-                        await self.computer.gui_action(
+                        await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(action=GUIActionType.OPEN_APP, app_name=app_request),
                         )
@@ -4935,6 +5567,16 @@ class ComputerUseAgent:
                     after_status = await self.computer.status(workspace_id)
                     if not active_w:
                         active_w = str(getattr(after_status, "active_window", "") or "").strip()
+                    active_window_class = ""
+                    get_active_window_class = getattr(
+                        self.computer,
+                        "get_active_window_class",
+                        None,
+                    )
+                    if callable(get_active_window_class):
+                        active_window_class = await get_active_window_class(
+                            workspace_id
+                        )
                     windows_after = {
                         str(window).strip()
                         for window in (getattr(after_status, "open_applications", None) or [])
@@ -4947,6 +5589,10 @@ class ComputerUseAgent:
                         or active_w.lower() in {"", "desktop"}
                         or not (
                             self._window_matches_application(app_name, active_w)
+                            or self._window_matches_application(
+                                app_name,
+                                active_window_class,
+                            )
                             or newly_focused_window
                         )
                     ):
@@ -4972,7 +5618,7 @@ class ComputerUseAgent:
                         if closed is False:
                             raise RuntimeError(f"application close failed for '{app_name}'")
                     else:
-                        await self.computer.gui_action(
+                        await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(action=GUIActionType.CLOSE_APP, app_name=app_name),
                         )
@@ -4989,7 +5635,7 @@ class ComputerUseAgent:
                     if "\n" in app_name:
                         app_name = app_name.split("\n")[0].strip(" *_\n\r\t`\"'")
                     try:
-                        obs_focus = await self.computer.gui_action(
+                        obs_focus = await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(action=GUIActionType.SELECT_WINDOW, app_name=app_name),
                         )
@@ -5030,7 +5676,7 @@ class ComputerUseAgent:
                     window_id=window_target,
                     app_name=window_target,
                 )
-                await self.computer.gui_action(workspace_id, action)
+                await self._dispatch_gui_action(workspace_id, action)
                 actual_obs_str = (
                     f"Maximized window: {window_target}"
                     if window_target
@@ -5038,7 +5684,7 @@ class ComputerUseAgent:
                 )
 
             elif action_type == ComputerActionType.WINDOW_TILE:
-                await self.computer.gui_action(
+                await self._dispatch_gui_action(
                     workspace_id,
                     GUIAction(action=GUIActionType.WINDOW_TILE),
                 )
@@ -5365,15 +6011,15 @@ class ComputerUseAgent:
                     elif "." in url and " " not in url:
                         url = f"https://{url}"
 
-                await self.computer.gui_action(
+                await self._dispatch_gui_action(
                     workspace_id,
                     GUIAction(action=GUIActionType.KEYPRESS, key="ctrl+l"),
                 )
-                await self.computer.gui_action(
+                await self._dispatch_gui_action(
                     workspace_id,
                     GUIAction(action=GUIActionType.TYPE, text=url, delay_ms=25),
                 )
-                await self.computer.gui_action(
+                await self._dispatch_gui_action(
                     workspace_id,
                     GUIAction(action=GUIActionType.KEYPRESS, key="Return"),
                 )
@@ -5404,7 +6050,7 @@ class ComputerUseAgent:
                     )
                     status = ActionExecutionStatus.FAILED
                 else:
-                    select_obs = await self.computer.gui_action(
+                    select_obs = await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(
                             action=GUIActionType.CLICK,
@@ -5430,7 +6076,7 @@ class ComputerUseAgent:
                             )
                             status = ActionExecutionStatus.FAILED
                         else:
-                            await self.computer.gui_action(
+                            await self._dispatch_gui_action(
                                 workspace_id,
                                 GUIAction(
                                     action=GUIActionType.CLICK,
@@ -6001,6 +6647,51 @@ class ComputerUseAgent:
                     error_class=err_class,
                     raw_error=str(e),
                 )
+        state_delta = getattr(self, "_last_gui_state_delta", None)
+        state_verification_actions = {
+            ComputerActionType.GUI_CLICK,
+            ComputerActionType.GUI_DOUBLE_CLICK,
+            ComputerActionType.GUI_RIGHT_CLICK,
+            ComputerActionType.GUI_TYPE,
+            ComputerActionType.GUI_KEYPRESS,
+            ComputerActionType.GUI_HOTKEY,
+            ComputerActionType.GUI_SCROLL,
+            ComputerActionType.GUI_DRAG,
+        }
+        if (
+            isinstance(state_delta, dict)
+            and action_type in state_verification_actions
+            and status not in (
+                ActionExecutionStatus.BLOCKED,
+                ActionExecutionStatus.FAILED,
+            )
+        ):
+            state_changed = state_delta.get("changed")
+            if state_changed is False:
+                self._consecutive_unchanged_screens += 1
+                status = ActionExecutionStatus.UNVERIFIED
+                visual_stall_detected = True
+                actual_obs_str = (
+                    f"{actual_obs_str} | [ACCESSIBILITY VERIFICATION]: Fresh state "
+                    "did not change after the action; its effect is unverified. "
+                    "No recovery input was sent."
+                )
+                actual_obs_str, self._watchdog_aborted = await self._handle_visual_stall_watchdog(
+                    workspace_id, action_type, actual_obs_str
+                )
+            elif state_changed is True:
+                self._consecutive_unchanged_screens = 0
+                actual_obs_str = (
+                    f"{actual_obs_str} | [ACCESSIBILITY STATE]: Fresh accessibility "
+                    "state changed after the action; task completion is not implied."
+                )
+            else:
+                status = ActionExecutionStatus.UNVERIFIED
+                actual_obs_str = (
+                    f"{actual_obs_str} | [ACCESSIBILITY VERIFICATION]: A fresh "
+                    "post-action state was received but no pre-action state was "
+                    "available for comparison."
+                )
         # Adaptive Closed-Loop Recovery if needed
         if recovery_needed:
             if self.recovery_events < self.max_recovery_attempts:
@@ -6090,6 +6781,14 @@ class ComputerUseAgent:
             self.experience_records = []
         self.experience_records.append(experience)
         trace.state_changed = experience.state_changed
+        if isinstance(state_delta, dict):
+            trace.state_changed = state_delta.get("changed")
+            trace.verification_evidence = (
+                f"accessibility_state_changed={state_delta.get('changed')}; "
+                f"version={state_delta.get('before_version')}->"
+                f"{state_delta.get('after_version')}; "
+                f"active_window={state_delta.get('active_window')}"
+            )
         trace.prediction_error = experience.prediction_error
         trace.graph_delta = experience.graph_delta
         before_receipt_state = self._contract_state(before_state)
@@ -6270,7 +6969,7 @@ class ComputerUseAgent:
 
         if self._gui_action_contract_active():
             try:
-                await self.computer.gui_action(
+                await self._dispatch_gui_action(
                     workspace_id,
                     GUIAction(action=GUIActionType.KEYPRESS, key="Escape"),
                 )
@@ -6280,7 +6979,7 @@ class ComputerUseAgent:
                 comp_status = await self.computer.status(workspace_id)
                 active_app = getattr(comp_status, "active_application", None)
                 if active_app and str(active_app).lower() not in ("desktop", "none", ""):
-                    await self.computer.gui_action(
+                    await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(action=GUIActionType.SELECT_WINDOW, app_name=active_app),
                     )
@@ -6312,7 +7011,7 @@ class ComputerUseAgent:
                     comp_status = await self.computer.status(workspace_id)
                     active_app = getattr(comp_status, "active_application", None)
                     if active_app and str(active_app).lower() not in ("desktop", "none", ""):
-                        await self.computer.gui_action(
+                        await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(action=GUIActionType.SELECT_WINDOW, app_name=active_app),
                         )
@@ -6729,6 +7428,7 @@ class ComputerUseAgent:
         interrupt_check: Any | None = None,
     ) -> list[ComputerDecisionTrace]:
         """Runs an end-to-end closed-loop autonomous engineering mission."""
+        self._active_workspace_id = workspace_id
         t_start = time.perf_counter()
         self._interrupted = False
         self._watchdog_aborted = False
@@ -6752,6 +7452,7 @@ class ComputerUseAgent:
             else:
                 self.checklist = None
         self._consecutive_gui_contract_violations = 0
+        self._pending_gui_contract_feedback = ""
 
         # Backend bootstrap may inspect/install packages through a shell. It is
         # intentionally unavailable on the GUI-only Computer plane.
@@ -6896,7 +7597,29 @@ class ComputerUseAgent:
                 continue
 
             # 3. ACT & VERIFY
+            action_started_ns = time.perf_counter_ns()
             trace = await self.execute_action(workspace_id, action_type, target, payload, expected)
+            perception_receipt = getattr(self, "_last_reasoning_perception", None)
+            if isinstance(perception_receipt, dict):
+                trace.perception_source = str(perception_receipt.get("source", "unknown"))
+                trace.perception_version = int(perception_receipt.get("version", 0) or 0)
+                trace.screen_age_ms = perception_receipt.get("screen_age_ms")
+                trace.controls_age_ms = perception_receipt.get("controls_age_ms")
+                trace.accessible_scene_fresh = perception_receipt.get(
+                    "accessible_scene_fresh"
+                )
+                trace.image_attached = bool(perception_receipt.get("image_attached"))
+                trace.visual_escalation_reason = str(
+                    perception_receipt.get("visual_escalation_reason", "")
+                )
+                trace.image_escalation_count = int(
+                    perception_receipt.get("image_escalation_count", 0) or 0
+                )
+            if action_type in getattr(self, "_GUI_ONLY_ACTIONS", set()):
+                self._pending_gui_action_observation = {
+                    "started_ns": action_started_ns,
+                    "trace_id": trace.id,
+                }
 
             # Invoke real-time step streaming callback if provided
             if step_callback is not None:

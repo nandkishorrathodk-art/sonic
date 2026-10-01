@@ -480,6 +480,7 @@ async def query_multimodal_grounding(
         task_type="vision",
         max_tokens=64,
         temperature=0.1,
+        extra_body={"response_format": {"type": "json_object"}},
     )
     try:
         res = await asyncio.wait_for(llm_router.complete(req), timeout=8.0)
@@ -515,6 +516,8 @@ def _parse_normalized_grounding_response(
         except (json.JSONDecodeError, TypeError):
             return None
 
+        if isinstance(decoded, dict) and decoded.get("not_found") is True:
+            return None
         if isinstance(decoded, dict) and "x" in decoded and "y" in decoded:
             point = (decoded["x"], decoded["y"])
         elif (

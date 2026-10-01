@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from enum import StrEnum
 from typing import Any
 
@@ -30,6 +31,14 @@ from sonic.evidence.reproduction_engine import ReproductionEngine
 from sonic.logger import get_logger
 
 logger = get_logger(__name__)
+_GUI_JUDGE_MAX_FRAME_AGE_MS = 2_000
+_SUCCESSFUL_GUI_RECEIPT_STATUSES = {
+    "COMPLETED",
+    "SUCCESS",
+    "SUCCEEDED",
+    "RECOVERED",
+    "VERIFIED",
+}
 
 
 def _t_val(t: Any, key: str, default: Any = "") -> Any:
@@ -105,11 +114,19 @@ class JudgeAgent:
             action = _t_val(trace, "action_type", "")
             action = action.value if hasattr(action, "value") else str(action)
             if action.startswith("GUI_") or action in ("APP_LAUNCH", "APP_FOCUS", "APP_CLOSE"):
+                receipt_status = _t_val(trace, "status", "")
+                receipt_status = (
+                    receipt_status.value
+                    if hasattr(receipt_status, "value")
+                    else str(receipt_status)
+                ).upper()
+                if receipt_status not in _SUCCESSFUL_GUI_RECEIPT_STATUSES:
+                    continue
                 gui_actions.append(
                     {
                         "action": action,
                         "target": str(_t_val(trace, "target_resource", ""))[:240],
-                        "status": str(_t_val(trace, "status", ""))[:40],
+                        "status": receipt_status[:40],
                         "observation": str(
                             _t_val(trace, "actual_observation", "")
                             or _t_val(trace, "observation", "")
@@ -120,7 +137,10 @@ class JudgeAgent:
             return JudgeEvaluation(
                 verdict=JudgeVerdict.INCONCLUSIVE,
                 confidence=0.0,
-                notes="GUI outcome cannot be confirmed: worker supplied no GUI interaction receipts.",
+                notes=(
+                    "GUI outcome cannot be confirmed: worker supplied no successful "
+                    "GUI interaction receipts."
+                ),
                 self_attestation_rejected=True,
             )
 
@@ -146,6 +166,35 @@ class JudgeAgent:
                     verdict=JudgeVerdict.INCONCLUSIVE,
                     confidence=0.0,
                     notes="GUI outcome cannot be confirmed: workstation reports no active display.",
+                    self_attestation_rejected=True,
+                )
+            capture_age_ms = getattr(screen, "capture_age_ms", None)
+            if (
+                not isinstance(capture_age_ms, (int, float))
+                or isinstance(capture_age_ms, bool)
+            ):
+                capture_timestamp_ns = getattr(screen, "capture_timestamp_ns", None)
+                if (
+                    isinstance(capture_timestamp_ns, int)
+                    and not isinstance(capture_timestamp_ns, bool)
+                    and capture_timestamp_ns > 0
+                ):
+                    age_ns = time.time_ns() - capture_timestamp_ns
+                    capture_age_ms = age_ns / 1_000_000 if age_ns >= 0 else None
+                else:
+                    capture_age_ms = None
+            if (
+                capture_age_ms is None
+                or capture_age_ms < 0
+                or capture_age_ms > _GUI_JUDGE_MAX_FRAME_AGE_MS
+            ):
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.INCONCLUSIVE,
+                    confidence=0.0,
+                    notes=(
+                        "GUI outcome cannot be confirmed: screenshot freshness "
+                        "is missing or outside the allowed age."
+                    ),
                     self_attestation_rejected=True,
                 )
 

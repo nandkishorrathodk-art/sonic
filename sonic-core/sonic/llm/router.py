@@ -271,6 +271,11 @@ class ModelRouter:
                 for model in models
                 if "cost_per_1k_input" in model and "cost_per_1k_output" in model
             }
+            kwargs["model_capabilities"] = {
+                str(model["id"]): [str(capability) for capability in model["capabilities"]]
+                for model in models
+                if isinstance(model.get("capabilities"), list)
+            }
             # Groq on-demand accounts enforce a hard output-tokens-per-minute
             # limit (OTPM=1000). Any request declaring more is rejected with 429
             # before generation starts, regardless of actual output length.

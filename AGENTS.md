@@ -1,25 +1,25 @@
 .# AGENTS.md — SONIC repository memory
 
 ## Project overview & Priority #1 (Base Foundation)
-SONIC is an **Autonomous AI-Human Digital Being** operating its own dedicated personal computer workstation (`DISPLAY=:99` full graphical desktop + dedicated headless terminal).
+SONIC's product goal is an **Autonomous AI-Human Digital Being** that can use a general-purpose computer like a capable human colleague: perceive the desktop, operate arbitrary installed GUI applications, switch between them, use files and other appropriate computer capabilities, and complete multi-step outcomes. The workstation provides a graphical desktop and a separate execution plane; this product goal is not proof that every arbitrary task or application already works reliably.
 
 > **PRIORITY #1 (FOUNDATIONAL MANDATE)**:
-> SONIC is **NOT** a hacker, pentester, or cybersecurity-first bot. First and foremost, SONIC's base is a **complete, general-purpose AI-Human Being** that operates its computer just like a real human: launching and switching between multiple arbitrary desktop GUI applications concurrently, browsing the web, creating and managing accounts on any operator-requested platform, creating and pushing Git repositories, building software projects, authoring its own pages/profiles, telling people about itself (`Being` + `BeingMind` + `BeingCraft` + `BeingVault`), and learning continuously from real execution receipts (no success-by-decree).
-> Never bias or lock SONIC's identity, prompts, `BossAgent` task decomposition, or `ActionPolicy` navigation rules into a pentest/hacker pipeline or a scripted platform checklist.
+> SONIC is a general-purpose AI computer user, not a cybersecurity-first bot. Its intended capability is to take an operator's desired outcome, understand and plan it, discover and operate relevant GUI applications, move between windows and tools, maintain progress across a long task, adapt to unexpected states, and verify the actual result. Cybersecurity is one possible workload, not SONIC's identity or default workflow.
+> Never imply that an intended capability is already reliable without task-specific evidence. Never hardcode a vendor application sequence as a substitute for general computer-use reasoning.
 
-> **Current Computer & Interaction contract:** Boss owns task analysis, delegation, evidence review, and replanning. Every actionable workstation prompt enters Boss orchestration; chat and explicit observation-only requests remain outside execution. If planning omits workers for a non-empty objective, Boss delegates one bounded adaptive worker rather than bypassing orchestration. Boss delegates to ordinary `ComputerUseAgent` workers, which operate arbitrary installed GUI applications on the shared visible desktop and retain access to the separate terminal plane. GUI completion requires Judge confirmation against a fresh desktop frame and worker receipts; missing or inconclusive verification cannot produce a success claim. There is no dedicated BrowserAgent specialist; website and online-service tasks, when requested, are handled as ordinary visible-desktop GUI work. Historical BrowserAgent/Playwright notes below describe prior implementations, not the current workstation route.
+> **Current Computer & Interaction contract:** Boss owns task analysis, delegation, evidence review, and replanning. Every actionable workstation prompt enters Boss orchestration; chat and explicit observation-only requests remain outside execution. If planning omits workers for a non-empty objective, Boss delegates one bounded adaptive worker rather than bypassing orchestration. Boss delegates to ordinary `ComputerUseAgent` workers, which operate arbitrary installed GUI applications on the shared visible desktop and retain access to the separate execution plane as permitted by the task. GUI completion requires Judge confirmation against fresh desktop evidence and worker receipts; missing or inconclusive verification cannot produce a success claim. There is no dedicated BrowserAgent specialist; website and online-service tasks, when requested, are handled as ordinary visible-desktop GUI work. Historical phase notes below describe changes at the time they were made; they are not proof of present runtime readiness or arbitrary-task capability.
 Architecture: FastAPI backend (`sonic-core/`), Next.js dashboard
 (`sonic-dashboard/`), Docker desktop workstation (`sonic-desktop-workstation`), Neo4j/SQLite persistent memory, multi-tenant RBAC.
 
 ## Core Architecture: AI-Human Being with Dedicated Computer Workstation
-SONIC is designed as an autonomous **AI-Human Digital Being** operating its own dedicated personal computer workstation, combining human-grade cognitive intuition and visual desktop fluency with native terminal execution capabilities.
+SONIC's intended design is an autonomous **AI-Human Digital Being** operating its own personal computer workstation, combining adaptive reasoning, general GUI fluency, and appropriate direct execution capabilities. Treat claims below as architecture goals or implemented components only where current code and evidence support them.
 
 ### 0. Foundational Priority: Clear AI-Human Base (Zero Hacker/Pentester Lock-In)
 - **Human-First Identity**: All prompts (`prompts.py`), orchestrators (`BossAgent`, `MissionDirector`), and agents treat SONIC as an autonomous AI-Human colleague operating its personal workstation—never forcing tasks into offensive security checklists (`Recon -> Exploit`), scripted platform routines, or blocking normal web/app workflows as "out-of-scope targets".
 - **Full Digital Agency**: Can open and switch between 1, 2, or N desktop GUI applications concurrently, interact with operator-requested online services through the visible desktop, sign up and maintain persistent application profiles/accounts (`BeingVault`), pause for human assistance on CAPTCHA/OTP (`WAIT_FOR_HUMAN`), create git repositories, write code, and publish content about its own persistent self (`Being`).
 
 ### 1. Dual-Plane Operational Model (Full Computer Desktop + Dedicated Terminal)
-SONIC operates concurrently across two clean execution planes with **complete computer agency** — it can do everything on its computer and autonomously decides whether to use GUI applications, multiple desktop windows, or the separate terminal:
+SONIC has two complementary execution planes and should select the appropriate capability from the operator's outcome and live state. The intended computer agency is broad; actual coverage must be established with task-specific acceptance evidence:
 - **Workstation Application Plane (Computer-Use)**: Interacts with the full graphical desktop environment (X11/Wayland via `GUI_*`, `APP_*`). Boss delegates to ordinary `ComputerUseAgent` workers; each worker perceives and operates arbitrary installed desktop applications and multiple windows through visible, dynamically grounded GUI controls. No dedicated BrowserAgent is part of the workstation route. The GUI is NEVER disabled.
 - **Operator & Sandbox Plane (Direct Headless Execution)**: Dedicated, non-graphical execution plane (`TERMINAL_EXEC`, `FILE_*`, `GIT_*`, `TOOL_*`, Toolsmith, and native Rust `sonic-kernel-rs`). High-throughput, precise tasks (writing code, running servers/tests, file management, git commits/pushes, custom script compilation) execute directly in the sandbox without cluttering the desktop GUI or wasting perception tokens.
 - **Autonomous Selection (Zero Puppet Scripts)**: SONIC itself decides which plane or tool to use based on observations and goals. There are no scripted puppet heuristics forcing or forbidding either plane.
@@ -36,7 +36,7 @@ SONIC operates concurrently across two clean execution planes with **complete co
 2. **Zero Scripted Puppet Heuristics**: Rigid keyword-matching trees, canned 3-step checklists, prompt keyword-matching classifiers (e.g. `if "app" in goal`), hardcoded refusal fallbacks, and regex string manipulation of model intent are strictly prohibited. The agent must reason freely and adaptively from live observations and typed ActionContracts.
 3. **Zero External/Mock Domains & Endpoints**: Hardcoded public commercial domains and fake proxy endpoints (e.g. `http://proxy/cert`) are strictly forbidden in production logic, prompts, and tests. All URLs must be operator-supplied, dynamically discovered targets, RFC 2606 `.test` domains, or RFC 5737 test documentation network addresses (`198.51.100.1`).
 4. **Dynamic Perception Grounding**: All UI interactions must derive strictly from real multimodal visual perception and dynamic window/accessibility coordinates. Static coordinate lookup tables, landmark percentage fallbacks, and canned prompt-based fallbacks are prohibited.
-5. **Zero Siloing or Disabling of Planes**: Turning off GUI (`observe_desktop=False`) or turning off terminal (`gui_only=True`) is strictly forbidden. Both planes must be active concurrently at all times.
+5. **Task-Appropriate Computer Access**: Do not globally remove or disable GUI or execution capabilities. Route each worker through the plane(s) appropriate to its assigned work; a GUI-only assignment must receive a GUI-only contract and must not silently substitute terminal work for visible interaction. Do not force terminal work into GUI or GUI work into terminal.
 6. **Zero Silent Failure Masking**: Shell failure masking idioms like `|| true`, `2>/dev/null || true`, or treating blocked executions (exit code 126) as successes are strictly forbidden. All execution receipts must reflect ground-truth exit codes and stderr.
 7. **Deterministic State-First Convergence (HDCE)**: Complex tasks must proceed state-first, not workflow-first. Workflows must pass only typed `StateDelta` mappings between nodes, purge raw temporary chatter, and validate every mutation through `ActionContract` pre/post-conditions.
 8. **Execution Plane Purity & Multi-Phase Persistence**: When a mission requests an execution plane (`requested_plane`), that plane must persist throughout all subsequent decomposition phases (`_plan_next_phase`). Headless tasks must not be contaminated by redundant GUI screenshot polling.
@@ -51,6 +51,14 @@ SONIC operates concurrently across two clean execution planes with **complete co
     - All pointer movements (`GUI_MOVE`, `GUI_CLICK`, `GUI_DOUBLE_CLICK`, `GUI_RIGHT_CLICK`) must use smooth cosine-eased motor interpolation (`sonic_cursor.py`) over 200–300 ms so human operators can visually follow the agent's intent.
     - Keystroke typing (`GUI_TYPE`) must always focus the target element (`x, y`) before typing to ensure the cursor actively interacts with the intended field.
     - Tasks involving visual applications, browsing, or desktop UI must actively dispatch to the desktop GUI plane rather than taking silent headless terminal shortcuts.
+
+## Historical engineering record
+
+The phase-by-phase notes below preserve implementation history, prior test
+results, and past architectural decisions. They are not a guarantee that a
+feature remains wired, available, or reliable in the current runtime. They do
+not override the general-purpose computer-user product goal or the current
+perception, execution, and verification contracts at the end of this document.
 
 ## Layout
 - `sonic-core/` — Python backend (uv workspace, Python 3.12+). `pip install -e sonic-core[dev]`.
@@ -2293,10 +2301,11 @@ Every declared subsystem has exactly one authoritative department and team. Empl
 - When a GUI reasoning request includes screenshot pixels, route it through
   `computer_use`/the configured multimodal model, not the text-only `reasoning`
   route (the router may strip image content from models without image support).
-  Always retain current screenshot pixels for GUI decisions even when OCR or
-  AT-SPI controls are available; control metadata supplements rather than
-  replaces the visual frame. Grounded control-only requests may use text
-  reasoning only when no screenshot is being used.
+  Keep the latest screenshot available as a perception sensor, but do not
+  require attaching a full frame to every reasoning request when fresh,
+  unambiguous structured state is sufficient. Control metadata supplements
+  pixels when visual evidence is needed; grounded control-only requests may use
+  text reasoning when no screenshot is being used.
 - GUI `TARGET` coordinates are integer screen pixels. Parse an exact `x,y`
   target or an exact JSON `{"x": <integer>, "y": <integer>}` point into
   coordinate fields before grounding; reject booleans, floats, extra fields,
@@ -2330,3 +2339,51 @@ Every declared subsystem has exactly one authoritative department and team. Empl
   end-to-end pass. Prefer isolated acceptance desktops; use the shared operator
   workstation for a test mutation only with explicit operator authorization,
   and retain any resulting user-visible artifact unless asked to remove it.
+
+## Authoritative product goal: general-purpose AI computer user
+
+The product goal and acceptance contract are documented in
+[`docs/SONIC_COMPUTER_USER_GOAL.md`](docs/SONIC_COMPUTER_USER_GOAL.md). This
+section is authoritative for future computer-use work; earlier phase entries
+are a historical engineering record and must not override it.
+
+- Start from the operator's desired outcome, not a fixed app/tool checklist.
+- Handle arbitrary installed GUI applications, not only browsers. Discover
+  applications and controls from the live workstation; do not encode vendor
+  names, screen coordinates, or app-specific click macros in control flow.
+- Treat perception as a continuously refreshed estimate of desktop state.
+  Prefer event, accessibility, window, and changed-region updates when
+  available; use screenshot pixels and vision reasoning when visual evidence
+  is needed. Real-time perception does not mean pixels are never necessary.
+- Decompose long objectives into adaptive, resumable checkpoints. Preserve
+  useful progress and replan when observed application state differs from the
+  expected state.
+- Every GUI action must have current evidence and a grounded target. Ambiguous,
+  stale, or off-screen targets are blocked rather than guessed. Risky or
+  irreversible actions follow the approval policy.
+- Verify meaningful postconditions using fresh observations and real artifacts.
+  A model proposal, launched application, unchanged screen, or missing error is
+  not proof of completion. Report partial progress and blockers truthfully.
+- Improve incrementally with measurable latency and task-success tests. A
+  design proposal or passing unit test is not evidence that SONIC can complete
+  arbitrary real-world desktop tasks. Validate using isolated desktop
+  acceptance tasks across more than one non-browser application, with worker
+  receipts and independent Judge evidence.
+
+### Current implementation evidence (2026-10-01)
+
+- The Docker NSI worker publishes a compact `nsi_state.json` sidecar without
+  screenshot Base64. It contains version/timestamps, dimensions, active window,
+  visible text, detected controls, and changed-region metadata.
+- `DockerComputerProvider.observe_state()` validates this feed; the agent uses
+  it before requesting a full screenshot. Invalid or stale state falls back to
+  screenshot capture.
+- Fresh state-only bounds can validate pointer coordinates without a
+  pre-action screenshot.
+- GUI reasoning skips image transfer only for a fresh, unambiguous AT-SPI
+  scene. OCR-only, stale, ambiguous, or missing controls trigger visual
+  escalation when a live workspace is available.
+- GUI action dispatch still captures a post-action screenshot, and real
+  multi-application completion has not yet been demonstrated. Do not describe
+  this slice as a complete push/event subscription or proven real-time
+  computer-use capability.

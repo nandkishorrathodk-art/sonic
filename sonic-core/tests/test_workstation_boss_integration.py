@@ -9,6 +9,7 @@ from sonic.api.routes.workstation import (
     _infer_program_profile,
     _is_action_prompt,
     _is_observation_only_prompt,
+    _record_unverified_observation,
     _requires_desktop_observation,
     _run_prompt_reasoning,
 )
@@ -24,6 +25,25 @@ from sonic.computer_use.models_boss import (
     SubMission,
 )
 from sonic.mission_engine.director import MissionDirector
+
+
+def test_workstation_observation_is_not_marked_verified_without_judge(monkeypatch):
+    import sonic.api.routes.workstation as workstation
+
+    monkeypatch.setattr(workstation, "_persist_workstation_state", lambda: None)
+    state = {}
+
+    record = _record_unverified_observation(
+        state,
+        "TERMINAL_EXEC",
+        "workspace",
+        "Found an open item during execution.",
+    )
+
+    assert state["evidence"] == [record]
+    assert record["verified"] is False
+    assert record["verification_status"] == "UNVERIFIED"
+    assert record["sha256"]
 
 
 def test_conversational_prompts_do_not_start_desktop_observation():

@@ -730,6 +730,30 @@ def _record_mission_evidence(state: dict[str, Any], mission_id: str, target: str
     return record
 
 
+def _record_unverified_observation(
+    state: dict[str, Any],
+    action: str,
+    target: str,
+    output: str,
+) -> dict[str, Any]:
+    """Persist an execution observation without promoting it to verified evidence."""
+    digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
+    record = {
+        "id": f"ev-{uuid.uuid4().hex[:8]}",
+        "title": f"{action}: {target}",
+        "target": target,
+        "severity": "INFORMATIONAL",
+        "verified": False,
+        "verification_status": "UNVERIFIED",
+        "sha256": digest,
+        "output": output[:3000],
+        "captured_at": datetime.now(UTC).isoformat(),
+    }
+    state.setdefault("evidence", []).append(record)
+    _persist_workstation_state()
+    return record
+
+
 async def _run_mission_preflight(tenant_id: str, session_id: str, mission_id: str) -> None:
     """Run only read-only discovery in the authorized target sandbox.
 
@@ -3068,6 +3092,14 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 payload = trace.get("payload", "")
                                 sub_agent_id = str(trace.get("sub_agent_id") or "")
                                 sub_agent_name = str(trace.get("sub_agent_name") or "")
+                                perception_source = str(trace.get("perception_source", "unknown"))
+                                perception_version = trace.get("perception_version", 0)
+                                screen_age_ms = trace.get("screen_age_ms")
+                                controls_age_ms = trace.get("controls_age_ms")
+                                accessible_scene_fresh = trace.get("accessible_scene_fresh")
+                                image_attached = bool(trace.get("image_attached", False))
+                                visual_escalation_reason = str(trace.get("visual_escalation_reason", ""))
+                                image_escalation_count = trace.get("image_escalation_count", 0)
                             else:
                                 step_index = getattr(trace, "step_index", 1)
                                 act_type = getattr(trace, "action_type", "")
@@ -3079,6 +3111,16 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 duration_seconds = getattr(trace, "duration_seconds", 0)
                                 exit_code = getattr(trace, "exit_code", None)
                                 payload = getattr(trace, "payload", "")
+                                perception_source = str(getattr(trace, "perception_source", "unknown"))
+                                perception_version = getattr(trace, "perception_version", 0)
+                                screen_age_ms = getattr(trace, "screen_age_ms", None)
+                                controls_age_ms = getattr(trace, "controls_age_ms", None)
+                                accessible_scene_fresh = getattr(trace, "accessible_scene_fresh", None)
+                                image_attached = bool(getattr(trace, "image_attached", False))
+                                visual_escalation_reason = str(
+                                    getattr(trace, "visual_escalation_reason", "")
+                                )
+                                image_escalation_count = getattr(trace, "image_escalation_count", 0)
 
                                 sub_agent_id = ""
                                 sub_agent_name = ""
@@ -3090,6 +3132,34 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             step_type = "action" if trace_status in ("COMPLETED", "SUCCESS", "RECOVERED", "VERIFIED") else "error"
                             worker_label = f"{sub_agent_name} ({sub_agent_id}): " if worker_metadata else ""
                             state["current_action"] = f"{worker_label}Step {step_index}: {action_val} on {target_resource}"
+                            perception_summary = ""
+                            if action_val.startswith(("GUI_", "APP_", "WINDOW_")) and perception_source != "unknown":
+                                scene_label = (
+                                    "fresh"
+                                    if accessible_scene_fresh is True
+                                    else "not-confirmed-fresh"
+                                )
+                                image_label = "attached" if image_attached else "omitted"
+                                age_label = (
+                                    f"{float(screen_age_ms):.1f}ms"
+                                    if isinstance(screen_age_ms, (int, float))
+                                    and not isinstance(screen_age_ms, bool)
+                                    else "unknown"
+                                )
+                                controls_age_label = (
+                                    f"{float(controls_age_ms):.1f}ms"
+                                    if isinstance(controls_age_ms, (int, float))
+                                    and not isinstance(controls_age_ms, bool)
+                                    else "unknown"
+                                )
+                                perception_summary = (
+                                    f"\nPerception: source={perception_source}, "
+                                    f"version={perception_version}, scene={scene_label}, "
+                                    f"image={image_label}, screen_age={age_label}, "
+                                    f"controls_age={controls_age_label}, "
+                                    f"image_escalations={image_escalation_count}, "
+                                    f"escalation_reason={visual_escalation_reason or 'none'}"
+                                )
 
                             # Real unmocked Thought emission matching Devin timeline
                             if thought:
@@ -3151,7 +3221,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 _append_worklog(
                                     state, step_type,
                                     f"Step {step_index}: {action_val}",
-                                    f"Target: {target_resource}\nResult: {actual_observation}\nStatus: {trace_status}",
+                                    (
+                                        f"Target: {target_resource}\nResult: {actual_observation}\n"
+                                        f"Status: {trace_status}{perception_summary}"
+                                    ),
                                     duration_seconds=duration_seconds,
                                     **worker_metadata,
                                 )
@@ -3164,55 +3237,12 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 and not any(k in obs_text.lower() for k in ("exit 125", "exit 126", "exit 1", "blocked fail-closed", "command blocked"))
                             )
                             if has_discovery and target_resource and is_valid_success:
-                                import hashlib
-                                ev_id = f"ev-{uuid.uuid4().hex[:8]}"
-                                sha256_hash = hashlib.sha256(obs_text.encode("utf-8")).hexdigest()
-
-                                # Add to session evidence
-                                if "evidence" not in state:
-                                    state["evidence"] = []
-                                state["evidence"].append({
-                                    "id": ev_id,
-                                    "title": f"{action_val}: {target_resource}",
-                                    "target": target_resource,
-                                    "severity": "INFORMATIONAL",
-                                    "verified": True,
-                                    "sha256": sha256_hash,
-                                    "output": obs_text[:3000],
-                                    "captured_at": datetime.now(UTC).isoformat(),
-                                })
-
-                                # Add to persistent Graph Memory
-                                try:
-                                    from sonic.memory.router import get_smart_memory
-                                    from sonic.memory.schemas import (
-                                        AssetNode,
-                                        FindingNode,
-                                        FindingSeverity,
-                                        RelationshipType,
-                                    )
-                                    mem = await get_smart_memory()
-                                    target_clean = target_resource.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
-                                    if target_clean and len(target_clean) > 2:
-                                        asset_uid = f"asset-{target_clean}"
-                                        await mem.create_node(AssetNode(uid=asset_uid, value=target_clean, asset_type="domain", tenant_id=tenant_id))
-                                        finding_uid = f"finding-{sha256_hash[:8]}"
-                                        await mem.create_node(FindingNode(
-                                            uid=finding_uid,
-                                            title=f"{action_val}: {target_resource}",
-                                            description=obs_text[:200],
-                                            vulnerability_class="observation",
-                                            severity=FindingSeverity.INFO,
-                                            tenant_id=tenant_id,
-                                        ))
-                                        await mem.create_relationship(
-                                            from_label="Finding", from_uid=finding_uid,
-                                            to_label="Asset", to_uid=asset_uid,
-                                            rel_type=RelationshipType.DISCOVERED_ON.value,
-                                            tenant_id=tenant_id,
-                                        )
-                                except Exception as mem_err:
-                                    logger.debug("workstation_graph_memory_update_failed", error=str(mem_err))
+                                _record_unverified_observation(
+                                    state,
+                                    action_val,
+                                    target_resource,
+                                    obs_text,
+                                )
 
                         from sonic.being.craft import BeingCraft
                         from sonic.being.identity import get_being_store, get_or_create_being

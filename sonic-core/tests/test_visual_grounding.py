@@ -35,7 +35,8 @@ def test_grounding_prompt_declares_normalized_coordinate_space():
     prompt = grounding_user_prompt("visible button", 1280, 800)
 
     assert "normalized 0-1000 screen space" in prompt
-    assert "[x, y] (both values normalized from 0 to 1000)" in prompt
+    assert 'Return exactly one JSON object: {"x": <integer>, "y": <integer>}' in prompt
+    assert '{"not_found": true}' in prompt
 
 
 @pytest.mark.asyncio
@@ -58,6 +59,8 @@ async def test_multimodal_grounding_json_point_uses_normalized_screen_space():
     )
 
     assert coords == (640, 400)
+    request = router.complete.await_args.args[0]
+    assert request.extra_body == {"response_format": {"type": "json_object"}}
 
 
 @pytest.mark.asyncio
@@ -117,6 +120,7 @@ async def test_multimodal_grounding_accepts_strict_normalized_box():
     [
         ('{"x": 1000, "y": 500}', None),
         ('{"x": true, "y": 500}', None),
+        ('{"not_found": true}', None),
         ('{"x": 0, "y": 0}', (0, 0)),
     ],
 )
@@ -253,12 +257,41 @@ async def test_agent_click_blocked_when_unresolved():
         predicted_outcome="Open application menu",
     )
     assert trace.status == "BLOCKED"
-    assert "could not be resolved" in trace.actual_observation
+    assert "could not be resolved from visual grounding" in trace.actual_observation
     assert not mock_computer.gui_action.called
 
 
 @pytest.mark.asyncio
-async def test_agent_regrounds_natural_target_instead_of_trusting_model_coordinates(monkeypatch):
+async def test_gui_worker_instructs_replanning_after_unresolved_target(monkeypatch):
+    import sonic.computer_use.agent as agent_module
+
+    computer = MagicMock()
+    agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
+    agent.llm_router = MagicMock()
+    agent._last_screenshot_b64 = "fresh-frame"
+    agent._last_reasoning_perception = {"image_attached": True}
+    monkeypatch.setattr(
+        agent_module,
+        "query_multimodal_grounding",
+        AsyncMock(return_value=None),
+    )
+
+    trace = await agent.execute_action(
+        "test-ws",
+        ComputerActionType.GUI_CLICK,
+        "File System",
+        {},
+        "Open the observed location",
+    )
+
+    assert trace.status == "BLOCKED"
+    assert "Do not repeat that target" in agent._pending_gui_contract_feedback
+    assert "keyboard navigation" in agent._pending_gui_contract_feedback
+    assert not computer.gui_action.called
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_explicit_payload_pixels_without_semantic_regrounding(monkeypatch):
     import sonic.computer_use.agent as agent_module
 
     computer = MagicMock()
@@ -269,10 +302,11 @@ async def test_agent_regrounds_natural_target_instead_of_trusting_model_coordina
     computer.gui_action = AsyncMock(return_value=ScreenObservation(width=1280, height=800))
     agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
     agent._last_screenshot_b64 = "visible-screen"
+    grounding = AsyncMock(return_value=None)
     monkeypatch.setattr(
         agent_module,
         "query_multimodal_grounding",
-        AsyncMock(return_value=None),
+        grounding,
     )
 
     trace = await agent.execute_action(
@@ -283,9 +317,11 @@ async def test_agent_regrounds_natural_target_instead_of_trusting_model_coordina
         "Maximize the window",
     )
 
-    assert trace.status == "BLOCKED"
-    assert "could not be resolved from visual grounding" in trace.actual_observation
-    computer.gui_action.assert_not_awaited()
+    assert trace.status == "COMPLETED"
+    grounding.assert_not_awaited()
+    computer.gui_action.assert_awaited_once()
+    gui_action = computer.gui_action.await_args.args[1]
+    assert (gui_action.x, gui_action.y) == (640, 400)
 
 
 @pytest.mark.asyncio

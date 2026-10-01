@@ -287,6 +287,71 @@ def test_vision_routes_configure_distinct_multimodal_fallbacks():
         "groq/qwen/qwen3.8-27b",
         "openrouter/openai/gpt-4o",
     ]
+    nvidia = router.providers["nvidia"]
+    assert "vision" in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
+    assert "tool_use" not in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
+    assert "tool_use" in nvidia.model_capabilities["nvidia/nemotron-3-super-120b-a12b"]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_model_without_tool_use_uses_text_action_fallback():
+    model = "meta/llama-3.2-11b-vision-instruct"
+    provider = CustomLLMProvider(
+        name="nvidia",
+        base_url="https://example.invalid/v1",
+        api_key="",
+        default_model=model,
+        capabilities=["vision", "computer_use", "multimodal"],
+        model_capabilities={
+            model: ["vision", "computer_use", "multimodal"],
+        },
+        max_retries=0,
+    )
+    create = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(
+                content="ACTION: GUI_SCREENSHOT",
+                reasoning_content=None,
+                tool_calls=None,
+            ),
+            finish_reason="stop",
+        )],
+        usage=None,
+    ))
+    provider._openai_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create),
+        ),
+    )
+    request = LLMRequest(
+        model=model,
+        messages=[
+            Message(role=MessageRole.SYSTEM, content="Choose one GUI action."),
+            Message(
+                role=MessageRole.USER,
+                content="Describe this frame and choose an action.",
+                images=[ImageContent(base64="synthetic-image", media_type="image/png")],
+            ),
+        ],
+        tools=[ToolDefinition(
+            name="computer_action",
+            description="Choose one action.",
+            parameters={"type": "object", "properties": {"action": {"type": "string"}}},
+        )],
+    )
+    text_request = request.model_copy(deep=True)
+    text_request.messages[-1].images = []
+    assert provider._tools_for_request(text_request, model) is not None
+    provider.model_capabilities[model] = frozenset({"vision", "multimodal", "tool_use"})
+    assert provider._tools_for_request(request, model) is not None
+    provider.model_capabilities[model] = frozenset({"vision", "computer_use", "multimodal"})
+
+    response = await provider._complete_openai(request)
+
+    kwargs = create.await_args.kwargs
+    assert "tools" not in kwargs
+    assert kwargs["messages"][0]["content"][0]["type"] == "image_url"
+    assert response.content == "ACTION: GUI_SCREENSHOT"
 
 
 @pytest.mark.asyncio
