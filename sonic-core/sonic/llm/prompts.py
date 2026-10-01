@@ -751,8 +751,9 @@ def grounding_user_prompt(query: str, width: int, height: int) -> str:
         f"Locate the UI element: '{query}'. "
         "Return ONLY one of these formats, nothing else:\n"
         "<|box_start|>(x1, y1, x2, y2)<|box_end|>\n"
-        "or [x, y]\n"
-        "If the element is not visible or not found on screen, return NOT_FOUND."
+        "or [x, y] (both values normalized from 0 to 1000)\n"
+        "If the element is not clearly visible or you cannot identify its exact location, "
+        "return NOT_FOUND. Never guess the screen center or answer in prose."
     )
 
 
