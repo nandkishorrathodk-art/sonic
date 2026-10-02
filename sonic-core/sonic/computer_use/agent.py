@@ -3698,7 +3698,9 @@ class ComputerUseAgent:
                             break
             if not raw_cmd and target and target != default_file and not target.startswith("{"):
                 raw_cmd = target
-            payload["command"] = ComputerUseAgent._clean_terminal_command(raw_cmd)
+            payload["command"] = sanitize_command_payload(
+                ComputerUseAgent._clean_terminal_command(raw_cmd)
+            )
             if payload["command"].lower() in (
                 "none", "null", "_exec", "exec", "terminal",
                 "terminal window", "the terminal", "bash", "shell", "console",

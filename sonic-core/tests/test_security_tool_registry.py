@@ -202,7 +202,10 @@ def test_agent_dispatches_real_adapter_via_registry():
     llm = _StubLLM()
     agent = ComputerUseAgent(
         computer_provider=_StubComputer(), llm_router=llm,
-        safety=ActionPolicy(workspace_root="/ws"),
+        safety=ActionPolicy(
+            workspace_root="/ws",
+            allow_security_tool_targets={"scanme.nmap.org"},
+        ),
         security_tools=reg.as_dict(),
     )
 
@@ -243,7 +246,11 @@ def test_registry_tool_failclosed_triggers_recovery():
 
     agent = ComputerUseAgent(
         computer_provider=_StubComputer(), llm_router=_BlockedLLM(),
-        safety=ActionPolicy(workspace_root="/ws"), security_tools=reg.as_dict(),
+        safety=ActionPolicy(
+            workspace_root="/ws",
+            allow_security_tool_targets={"scanme.nmap.org"},
+        ),
+        security_tools=reg.as_dict(),
     )
 
     async def run():

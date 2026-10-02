@@ -99,5 +99,5 @@ async def test_visual_verification_detects_unchanged_screen():
     )
 
     assert "[VISUAL VERIFICATION]: Screen state unchanged" in trace.actual_observation
-    assert trace.status == ActionExecutionStatus.UNVERIFIED
+    assert trace.status == ActionExecutionStatus.FAILED
     assert trace.recovery_attempted is False
