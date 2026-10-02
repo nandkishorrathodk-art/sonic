@@ -39,6 +39,13 @@ def build_security_tools(
     tools["ffuf"] = FFUFAdapter(provider)
     tools["http_client"] = HTTPClientAdapter(provider)
 
+    if enabled_tools is not None:
+        requested = {name.strip().lower() for name in enabled_tools}
+        unknown = requested - tools.keys()
+        if unknown:
+            raise ValueError(f"Unknown security tools requested: {sorted(unknown)}")
+        tools = {name: tool for name, tool in tools.items() if name in requested}
+
     logger.info("security_tools_built", count=len(tools), tools=list(tools.keys()))
     return tools
 
@@ -60,11 +67,14 @@ class SecurityToolRegistry:
 
     def register(self, name: str, tool: SecurityTool) -> None:
         """Register (or replace) a tool by name. Extension point for plugins."""
-        self._tools[name] = tool
-        logger.info("security_tool_registered", tool=name, type=type(tool).__name__)
+        normalized_name = name.strip().lower()
+        if not normalized_name:
+            raise ValueError("Security tool name must not be empty")
+        self._tools[normalized_name] = tool
+        logger.info("security_tool_registered", tool=normalized_name, type=type(tool).__name__)
 
     def get(self, name: str) -> SecurityTool | None:
-        return self._tools.get(name)
+        return self._tools.get(name.strip().lower())
 
     def names(self) -> list[str]:
         return list(self._tools.keys())
@@ -77,7 +87,7 @@ class SecurityToolRegistry:
         return len(self._tools)
 
     def __contains__(self, name: str) -> bool:
-        return name in self._tools
+        return name.strip().lower() in self._tools
 
 
 # ---------------------------------------------------------------------------

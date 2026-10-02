@@ -163,7 +163,8 @@ def test_native_kernel_evaluate_probe_rpc():
         assert res["evidence_payload"]["extracted_artifact"] == "flag{pwn_flag}"
 
 
-def test_action_broker_native_kernel_deny_blocks_execution():
+@pytest.mark.asyncio
+async def test_action_broker_native_kernel_deny_blocks_execution():
     """ActionBroker blocks execution and returns exit code 126 when NativeKernel denies."""
     from sonic.computer_use.models import ActionExecutionStatus
     from sonic.kernel.action_broker import ActionBroker
@@ -186,7 +187,7 @@ def test_action_broker_native_kernel_deny_blocks_execution():
     )
 
     mock_provider = MagicMock()
-    res = broker.execute(
+    res = await broker.execute(
         action_type="TERMINAL_COMMAND",
         parameters={"command": "curl http://10.0.0.1/admin"},
         provider=mock_provider,
@@ -202,7 +203,8 @@ def test_action_broker_native_kernel_deny_blocks_execution():
     mock_safety_kernel.authorize.assert_not_called()
 
 
-def test_action_broker_native_kernel_require_approval_blocks_when_unapproved():
+@pytest.mark.asyncio
+async def test_action_broker_native_kernel_require_approval_blocks_when_unapproved():
     """ActionBroker blocks approval-required actions unless approved=True."""
     from sonic.computer_use.models import ActionExecutionStatus
     from sonic.kernel.action_broker import ActionBroker
@@ -226,7 +228,7 @@ def test_action_broker_native_kernel_require_approval_blocks_when_unapproved():
 
     mock_provider = MagicMock()
     # 1. Unapproved -> Blocked
-    res_blocked = broker.execute(
+    res_blocked = await broker.execute(
         action_type="TERMINAL_COMMAND",
         parameters={"command": "rm -rf /tmp/test"},
         provider=mock_provider,
@@ -242,9 +244,9 @@ def test_action_broker_native_kernel_require_approval_blocks_when_unapproved():
     mock_safety_kernel.authorize.return_value = mock_auth
     mock_provider.execute.return_value = MagicMock(exit_code=0, stdout="deleted", stderr="")
 
-    res_approved = broker.execute(
+    res_approved = await broker.execute(
         action_type="TERMINAL_COMMAND",
-        parameters={"command": "rm -rf /tmp/test"},
+        parameters={"command": "rm -rf /tmp/test", "workspace_id": "test-workspace"},
         provider=mock_provider,
         approved=True,
     )
@@ -252,7 +254,8 @@ def test_action_broker_native_kernel_require_approval_blocks_when_unapproved():
     mock_provider.execute.assert_called_once()
 
 
-def test_action_broker_native_kernel_seal_tampered_fails_closed():
+@pytest.mark.asyncio
+async def test_action_broker_native_kernel_seal_tampered_fails_closed():
     """ActionBroker fails-closed immediately if NativeKernel reports seal_intact=False."""
     from sonic.computer_use.models import ActionExecutionStatus
     from sonic.kernel.action_broker import ActionBroker
@@ -273,7 +276,7 @@ def test_action_broker_native_kernel_seal_tampered_fails_closed():
     )
 
     mock_provider = MagicMock()
-    res = broker.execute(
+    res = await broker.execute(
         action_type="TERMINAL_COMMAND",
         parameters={"command": "ls /home/sonic/workspace"},
         provider=mock_provider,
@@ -308,4 +311,3 @@ def test_native_kernel_persistent_daemon_streaming():
 
     client.close()
     assert mock_proc.terminate.called
-

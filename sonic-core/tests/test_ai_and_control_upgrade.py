@@ -16,7 +16,6 @@ Control:
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
 
@@ -349,12 +348,29 @@ class _StubComputer(ComputerProvider):
     async def create(self, *a, **k): return type("W", (), {"id": self.workspace_id})()
     async def destroy(self, *a, **k): return True
     async def status(self, workspace_id):
-        return ComputerState(workspace_id=workspace_id, tenant_id="t", active_application="x")
+        return ComputerState(
+            workspace_id=workspace_id,
+            tenant_id="t",
+            active_application="x",
+        )
     async def screenshot(self, workspace_id):
-        return ScreenObservation(width=self.width, height=self.height, visible_text="ui")
+        return ScreenObservation(
+            width=self.width,
+            height=self.height,
+            visible_text="ui",
+            active_window="x",
+            capture_age_ms=0,
+            controls_age_ms=0,
+        )
     async def gui_action(self, workspace_id, action, actor="operator"):
         self.gui_calls.append((action.action, action.x or 0, action.y or 0))
-        return ScreenObservation(width=self.width, height=self.height)
+        return ScreenObservation(
+            width=self.width,
+            height=self.height,
+            active_window="x",
+            capture_age_ms=0,
+            controls_age_ms=0,
+        )
     async def terminal(self, workspace_id, command, timeout=60, actor="operator"):
         return ExecResult(command=command, exit_code=0, stdout="", stderr="")
     async def read_file(self, *a, **k): return ""
@@ -713,4 +729,3 @@ def test_clean_terminal_command_strips_exec():
     assert ComputerUseAgent._clean_terminal_command("_EXEC") == "echo 'ERROR: Empty command' >&2; exit 1"
     assert ComputerUseAgent._clean_terminal_command("_EXEC ls -la") == "ls -la"
     assert ComputerUseAgent._clean_terminal_command("EXEC ps aux") == "ps aux"
-

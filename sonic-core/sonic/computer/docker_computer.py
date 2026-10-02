@@ -13,16 +13,22 @@ with a full, unrestricted, self-contained cyber environment:
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
+import json
+import math
 import os
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
 import uuid
+import zlib
 
 from sonic.computer.models import (
     ApplicationPolicy,
@@ -46,6 +52,8 @@ from sonic.sandbox.provider import ExecResult
 
 logger = get_logger(__name__)
 
+_SCREEN_CAPTURE_FRESHNESS_BUDGET_MS = 2_000
+
 
 def _get_display(workspace_id: str | None = None) -> str:
     """Check if environment has DISPLAY, default to :99 if running docker Xvfb."""
@@ -68,6 +76,143 @@ def _docker_binary() -> str | None:
             if Path(candidate).exists():
                 return candidate
     return None
+
+
+def _validated_png_dimensions(encoded: Any) -> tuple[int, int] | None:
+    """Return PNG dimensions only for a complete, structurally valid PNG."""
+    if not isinstance(encoded, str) or not encoded:
+        return None
+    try:
+        image = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError, TypeError):
+        return None
+    if len(image) < 57 or image[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+
+    offset = 8
+    dimensions: tuple[int, int] | None = None
+    row_bytes: int | None = None
+    height: int | None = None
+    image_data = bytearray()
+    found_idat = False
+    found_iend = False
+    while offset + 12 <= len(image):
+        chunk_length = struct.unpack_from(">I", image, offset)[0]
+        chunk_end = offset + 12 + chunk_length
+        if chunk_end > len(image):
+            return None
+        chunk_type = image[offset + 4:offset + 8]
+        chunk_data = image[offset + 8:offset + 8 + chunk_length]
+        chunk_crc = struct.unpack_from(">I", image, offset + 8 + chunk_length)[0]
+        if (binascii.crc32(chunk_type + chunk_data) & 0xFFFFFFFF) != chunk_crc:
+            return None
+
+        if offset == 8:
+            if chunk_type != b"IHDR" or chunk_length != 13:
+                return None
+            width, height = struct.unpack_from(">II", chunk_data)
+            if width <= 0 or height <= 0 or width > 16_384 or height > 16_384:
+                return None
+            bit_depth, color_type, _, _, interlace = chunk_data[8:13]
+            channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
+            if (
+                channels is None
+                or bit_depth not in (1, 2, 4, 8, 16)
+                or (color_type == 3 and bit_depth not in (1, 2, 4, 8))
+                or (color_type == 2 and bit_depth not in (8, 16))
+                or (color_type == 4 and bit_depth not in (8, 16))
+                or (color_type == 6 and bit_depth not in (8, 16))
+                or chunk_data[10:12] != b"\x00\x00"
+                or interlace != 0
+            ):
+                return None
+            row_bytes = (width * channels * bit_depth + 7) // 8
+            if (row_bytes + 1) * height > 64 * 1024 * 1024:
+                return None
+            dimensions = (width, height)
+        elif chunk_type == b"IHDR":
+            return None
+
+        if chunk_type == b"IDAT":
+            found_idat = True
+            image_data.extend(chunk_data)
+        if chunk_type == b"IEND":
+            if chunk_length != 0 or not found_idat or chunk_end != len(image):
+                return None
+            found_iend = True
+            break
+        offset = chunk_end
+
+    if not dimensions or row_bytes is None or height is None or not found_iend:
+        return None
+    expected_size = (row_bytes + 1) * height
+    try:
+        decompressor = zlib.decompressobj()
+        pixels = decompressor.decompress(bytes(image_data), expected_size + 1)
+        if (
+            len(pixels) != expected_size
+            or not decompressor.eof
+            or decompressor.unused_data
+            or decompressor.unconsumed_tail
+        ):
+            return None
+    except zlib.error:
+        return None
+    if any(pixels[row * (row_bytes + 1)] > 4 for row in range(height)):
+        return None
+    return dimensions
+
+
+def _has_actionable_nsi_controls(
+    controls: list[Any],
+    *,
+    width: int,
+    height: int,
+    max_age_ms: float = 250.0,
+) -> bool:
+    for control in controls:
+        if not isinstance(control, dict):
+            continue
+        name = str(control.get("name", "")).strip()
+        bbox = control.get("bbox")
+        if (
+            not name
+            or not isinstance(bbox, (list, tuple))
+            or len(bbox) != 4
+        ):
+            continue
+        try:
+            x1, y1, x2, y2 = (float(value) for value in bbox)
+            freshness_ms = float(control.get("freshness_ms"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not all(math.isfinite(value) for value in (x1, y1, x2, y2, freshness_ms))
+            or freshness_ms < 0
+            or freshness_ms > max_age_ms
+            or x1 < 0
+            or y1 < 0
+            or x2 > width
+            or y2 > height
+            or x2 <= x1
+            or y2 <= y1
+        ):
+            continue
+        if control.get("source") == "atspi":
+            return True
+        if control.get("source") != "ocr" or control.get("role") == "window":
+            continue
+        try:
+            confidence = float(control.get("confidence", 0))
+        except (TypeError, ValueError):
+            continue
+        if (
+            math.isfinite(confidence)
+            and confidence >= 60
+            and sum(character.isalpha() for character in name) >= 3
+        ):
+            return True
+    return False
 
 
 class DockerComputerProvider(ComputerProvider):
@@ -101,6 +246,10 @@ class DockerComputerProvider(ComputerProvider):
         self._gui_lock = asyncio.Lock()
         self._last_screenshot: ScreenObservation | None = None
         self._last_screenshot_time: float = 0.0
+        self._last_state_observation: ScreenObservation | None = None
+        self._last_state_observed_at: float = 0.0
+        self._nsi_frame_url: str | None = None
+        self._nsi_frame_url_checked_at: float = 0.0
 
     def _ensure_default_workspace(self, tenant_id: str = "default", engagement_id: str = "default") -> ComputerWorkspace:
         if self._default_workspace_id not in self.workspaces:
@@ -349,16 +498,21 @@ class DockerComputerProvider(ComputerProvider):
 
     async def get_vnc_url(self, workspace_id: str) -> str | None:
         # Fail-closed: a stream URL is only real when the container actually
-        # runs and a VNC/noVNC listener is reachable on the configured port.
+        # runs, its noVNC listener is reachable, and that container's published
+        # port can be resolved without crossing into another desktop session.
         if not await self._container_is_running():
             return None
-        port = os.environ.get("SONIC_WORKSTATION_VNC_PORT", "6080")
+        frame_url = await self._resolve_nsi_frame_url()
+        port_match = re.search(r":(\d+)/nsi_frame\.json$", frame_url or "")
+        if port_match is None:
+            return None
+        published_port = port_match.group(1)
         code, out, _ = await self._docker_exec(
-            f"if (exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null; then echo 0; else echo 1; fi",
+            "if (exec 3<>/dev/tcp/127.0.0.1/6080) 2>/dev/null; then echo 0; else echo 1; fi",
             timeout=8,
         )
         if code == 0 and out.strip() == "0":
-            return f"http://localhost:{port}/vnc.html"
+            return f"http://localhost:{published_port}/vnc.html"
         return None
 
     async def get_stream_url(self, workspace_id: str) -> str | None:
@@ -436,12 +590,45 @@ class DockerComputerProvider(ComputerProvider):
             resource_usage={"cpu_pct": 5.0, "memory_mb": 512.0},
         )
 
+    async def get_active_window_class(self, workspace_id: str) -> str:
+        """Return the WM_CLASS identity of the active window, independent of its title."""
+        disp = self._get_display(workspace_id)
+        code, output, error = await self._docker_exec(
+            f"DISPLAY={disp} xprop -root _NET_ACTIVE_WINDOW",
+            timeout=5,
+        )
+        window_id_match = re.search(r"window id # (0x[0-9a-fA-F]+)", output)
+        if code != 0 or window_id_match is None:
+            logger.warning(
+                "active_window_id_unavailable",
+                exit_code=code,
+                error=error.strip(),
+            )
+            return ""
+
+        code, output, error = await self._docker_exec(
+            f"DISPLAY={disp} xprop -id {window_id_match.group(1)} WM_CLASS",
+            timeout=5,
+        )
+        class_match = re.search(
+            r'WM_CLASS\(STRING\)\s*=\s*"([^"]+)"\s*,\s*"([^"]+)"',
+            output,
+        )
+        if code != 0 or class_match is None:
+            logger.warning(
+                "active_window_class_unavailable",
+                exit_code=code,
+                error=error.strip(),
+            )
+            return ""
+        return ".".join(class_match.groups())
+
     # -------------------------------------------------------------
     # NSI (Neural-Symbolic Instant Eye) Persistent 8-15ms Retina Pipe
     # -------------------------------------------------------------
 
     _NSI_DAEMON_SCRIPT = r"""
-import base64, hashlib, io, json, os, subprocess, sys, threading, time, urllib.request
+import base64, hashlib, io, json, os, signal, subprocess, sys, threading, time, urllib.request
 def _detect_display():
     d = os.environ.get("DISPLAY", "").strip()
     if d:
@@ -479,20 +666,51 @@ class _State:
         self.installed_applications = []
         self.working_directory = "/home/sonic/workspace"
         self.capture_timestamp_ns = 0
+        self.controls_timestamp_ns = 0
+        self.changed_region = None
         self.version = 0
         self.tile_hashes = {}
         self.cached_ocr_controls = []
         self.cached_ocr_lines = []
+        self.ocr_error = ""
+        self.ocr_retry_after = 0.0
+        self.ocr_retry_delay = 1.0
+        self.last_ocr_timestamp_ns = 0
+        self.last_atspi_timestamp_ns = 0
         self.last_env_ts = 0.0
         self.last_apps_ts = 0.0
 
 S = _State()
 
 def _run(cmd, timeout=2.0):
+    proc = None
     try:
-        r = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, text=True)
-        return r.returncode, r.stdout, r.stderr
+        proc = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stdout, stderr
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate()
+            return 124, stdout, stderr or f"Command timed out after {timeout} seconds"
+        return 124, "", f"Command timed out after {timeout} seconds"
     except Exception as e:
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()
         return 1, "", str(e)
 
 def _grab():
@@ -543,7 +761,7 @@ def _dirty_bbox(img):
 
 def _delta_ocr(img, png_bytes, bbox):
     if bbox is None:
-        return S.cached_ocr_controls, S.cached_ocr_lines
+        return S.cached_ocr_controls, S.cached_ocr_lines, True, ""
     x1, y1, x2, y2 = bbox
     cp = "/dev/shm/sonic_nsi_crop.png"
     try:
@@ -553,19 +771,30 @@ def _delta_ocr(img, png_bytes, bbox):
             x1, y1 = 0, 0
             with open(cp, "wb") as f:
                 f.write(png_bytes)
-    except Exception:
-        return S.cached_ocr_controls, S.cached_ocr_lines
-    code, out, _ = _run(f"tesseract {cp} stdout --psm 11 tsv 2>/dev/null", timeout=2.5)
+    except Exception as exc:
+        return S.cached_ocr_controls, S.cached_ocr_lines, False, str(exc)
+    code, out, err = _run(f"tesseract {cp} stdout --psm 11 tsv", timeout=5.0)
+    succeeded = code == 0 and bool(out.strip())
+    error = "" if succeeded else (
+        err.strip() or f"Tesseract exited with status {code} without TSV output"
+    )
     kept = [c for c in S.cached_ocr_controls if not (x1 <= (c["bbox"][0] + c["bbox"][2]) // 2 <= x2 and y1 <= (c["bbox"][1] + c["bbox"][3]) // 2 <= y2)]
     added = []
-    if code == 0 and out:
+    if succeeded:
         for row in out.splitlines()[1:]:
             cols = row.split("\t")
             if len(cols) >= 12 and cols[11].strip():
                 try:
                     conf, wx, wy, ww, wh = float(cols[10]), int(cols[6]), int(cols[7]), int(cols[8]), int(cols[9])
                     if conf >= 25.0 and ww > 2 and wh > 2:
-                        added.append({"name": cols[11].strip(), "role": "text", "bbox": [x1 + wx, y1 + wy, x1 + wx + ww, y1 + wy + wh], "source": "ocr"})
+                        added.append({
+                            "name": cols[11].strip(),
+                            "role": "text",
+                            "bbox": [x1 + wx, y1 + wy, x1 + wx + ww, y1 + wy + wh],
+                            "bbox_format": "xyxy",
+                            "source": "ocr",
+                            "confidence": conf,
+                        })
                 except Exception:
                     pass
     merged = kept + added
@@ -574,7 +803,7 @@ def _delta_ocr(img, png_bytes, bbox):
     for c in merged:
         lmap.setdefault(c["bbox"][1] // 18, []).append(c["name"])
     lines = [" ".join(w) for _, w in sorted(lmap.items())[:45]]
-    return merged, lines
+    return merged, lines, succeeded, error
 
 def _atspi_and_cdp():
     ctrls, page_txt = [], ""
@@ -611,7 +840,18 @@ def _atspi_and_cdp():
                             if cp:
                                 rc = cp.get_extents(Atspi.CoordType.SCREEN)
                                 if rc and rc.width > 4 and rc.height > 4 and rc.x >= 0 and rc.y >= 0:
-                                    ctrls.append({"name": nm, "role": rn, "bbox": [int(rc.x), int(rc.y), int(rc.x + rc.width), int(rc.y + rc.height)], "source": "atspi"})
+                                    states = n.get_state_set()
+                                    editable = states.contains(Atspi.StateType.EDITABLE)
+                                    focused = states.contains(Atspi.StateType.FOCUSED)
+                                    ctrls.append({
+                                        "name": nm,
+                                        "role": rn,
+                                        "bbox": [int(rc.x), int(rc.y), int(rc.x + rc.width), int(rc.y + rc.height)],
+                                        "bbox_format": "xyxy",
+                                        "source": "atspi",
+                                        "editable": bool(editable),
+                                        "focused": bool(focused),
+                                    })
                         for ci in range(min(n.get_child_count(), 16)):
                             ch = n.get_child_at_index(ci)
                             if ch: st.append((ch, dp + 1))
@@ -638,7 +878,8 @@ def _fast_retina_worker():
                         ows.append(lp[7])
                         try:
                             wx, wy, ww, wh = int(lp[2]), int(lp[3]), int(lp[4]), int(lp[5])
-                            wctrls.append({"name": lp[7], "role": "window", "bbox": [max(0, wx), max(0, wy), max(0, wx + ww), max(0, wy + wh)], "source": "x11"})
+                            x0, y0 = max(0, wx), max(0, wy)
+                            wctrls.append({"name": lp[7], "role": "window", "bbox": [x0, y0, max(0, wx + ww), max(0, wy + wh)], "bbox_format": "xyxy", "source": "x11"})
                         except Exception:
                             pass
             b64 = base64.b64encode(png_b).decode("ascii") if png_b else ""
@@ -654,41 +895,90 @@ def _fast_retina_worker():
                 olines = list(S.cached_ocr_lines)
                 actrls = list(getattr(S, "cached_atspi_controls", []))
                 ptxt = getattr(S, "cached_page_txt", "")
+                now_ns = time.time_ns()
+                fresh_controls = []
+                for control in actrls + wctrls + octrls:
+                    control = dict(control)
+                    source = str(control.get("source", "")).casefold()
+                    source_timestamp = (
+                        S.last_ocr_timestamp_ns
+                        if source == "ocr"
+                        else S.last_atspi_timestamp_ns
+                        if source == "atspi"
+                        else now_ns
+                    )
+                    control["freshness_ms"] = (
+                        max(0.0, (now_ns - source_timestamp) / 1_000_000)
+                        if source_timestamp
+                        else None
+                    )
+                    fresh_controls.append(control)
                 vparts = []
                 if aw and aw != "Desktop": vparts.append(f"Active Window: {aw}")
                 if ows: vparts.append(f"Open Windows: {', '.join(ows)}")
                 if ptxt: vparts.append(ptxt)
                 if olines: vparts.append("Screen OCR Text: " + " | ".join(olines))
                 S.visible_text = "\n".join(vparts)
-                S.detected_controls = actrls + wctrls + octrls
+                S.detected_controls = fresh_controls
+                S.controls_timestamp_ns = time.time_ns()
                 S.version += 1
+                width, height = img.size if img is not None else (0, 0)
                 pkt = {
                     "ok": True,
                     "version": S.version,
                     "ts": time.time(),
                     "capture_timestamp_ns": S.capture_timestamp_ns or None,
+                    "controls_timestamp_ns": S.controls_timestamp_ns or None,
+                    "capture_age_ms": (
+                        max(0.0, (time.time_ns() - S.capture_timestamp_ns) / 1_000_000)
+                        if S.capture_timestamp_ns
+                        else None
+                    ),
+                    "controls_age_ms": (
+                        max(0.0, (time.time_ns() - S.controls_timestamp_ns) / 1_000_000)
+                        if S.controls_timestamp_ns
+                        else None
+                    ),
+                    "width": width,
+                    "height": height,
+                    "changed_region": S.changed_region,
                     "b64": S.b64,
                     "active_window": S.active_window,
                     "open_windows": S.open_windows,
                     "visible_text": S.visible_text,
                     "detected_controls": S.detected_controls,
+                    "ocr_error": S.ocr_error or None,
                     "files": S.files,
                     "running_processes": S.running_processes,
                     "installed_applications": getattr(S, "installed_applications", []),
                     "working_directory": S.working_directory,
                 }
+                state_pkt = {key: value for key, value in pkt.items() if key != "b64"}
             tmp_f = "/dev/shm/sonic_nsi_frame.tmp"
             shm_f = "/dev/shm/sonic_nsi_frame.json"
             novnc_f = "/usr/share/novnc/nsi_frame.json"
+            state_tmp_f = "/dev/shm/sonic_nsi_state.tmp"
+            state_shm_f = "/dev/shm/sonic_nsi_state.json"
+            state_novnc_f = "/usr/share/novnc/nsi_state.json"
             try:
                 with open(tmp_f, "w") as f:
                     json.dump(pkt, f)
                 os.replace(tmp_f, shm_f)
+                with open(state_tmp_f, "w") as f:
+                    json.dump(state_pkt, f, separators=(",", ":"))
+                os.replace(state_tmp_f, state_shm_f)
                 if os.path.isdir("/usr/share/novnc") and not os.path.islink(novnc_f):
                     try:
                         if os.path.exists(novnc_f):
                             os.remove(novnc_f)
                         os.symlink(shm_f, novnc_f)
+                    except Exception:
+                        pass
+                if os.path.isdir("/usr/share/novnc") and not os.path.islink(state_novnc_f):
+                    try:
+                        if os.path.exists(state_novnc_f):
+                            os.remove(state_novnc_f)
+                        os.symlink(state_shm_f, state_novnc_f)
                     except Exception:
                         pass
             except Exception:
@@ -704,16 +994,31 @@ def _ocr_and_semantic_worker():
             png_b = getattr(S, "latest_png", b"")
             if png_b:
                 chg, dbox, nh = _dirty_bbox(img)
-                if chg:
-                    octrls, olines = _delta_ocr(img, png_b, dbox)
+                with S.lock:
+                    S.changed_region = list(dbox) if chg and dbox is not None else None
+                if chg and time.monotonic() >= S.ocr_retry_after:
+                    octrls, olines, ocr_succeeded, ocr_error = _delta_ocr(
+                        img, png_b, dbox
+                    )
                     with S.lock:
-                        S.tile_hashes = nh
                         S.cached_ocr_controls = octrls
                         S.cached_ocr_lines = olines
+                        S.ocr_error = ocr_error
+                        if ocr_succeeded:
+                            S.tile_hashes = nh
+                            S.last_ocr_timestamp_ns = time.time_ns()
+                            S.ocr_retry_after = 0.0
+                            S.ocr_retry_delay = 1.0
+                        else:
+                            S.ocr_retry_after = (
+                                time.monotonic() + S.ocr_retry_delay
+                            )
+                            S.ocr_retry_delay = min(S.ocr_retry_delay * 2, 15.0)
             actrls, ptxt = _atspi_and_cdp()
             with S.lock:
                 S.cached_atspi_controls = actrls
                 S.cached_page_txt = ptxt
+                S.last_atspi_timestamp_ns = time.time_ns()
             now = time.time()
             if now - S.last_env_ts > 1.5:
                 S.last_env_ts = now
@@ -745,25 +1050,131 @@ while True:
     time.sleep(10.0)
 """
 
+    async def _resolve_nsi_frame_url(self) -> str | None:
+        """Resolve this container's published noVNC port without crossing desktop sessions."""
+        now = asyncio.get_event_loop().time()
+        if now - self._nsi_frame_url_checked_at < 5.0:
+            return self._nsi_frame_url
+
+        self._nsi_frame_url_checked_at = now
+        docker = _docker_binary()
+        if not docker:
+            logger.warning("nsi_frame_unavailable", reason="docker_binary_not_found")
+            return None
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    docker,
+                    "inspect",
+                    "--format",
+                    "{{json .NetworkSettings.Ports}}",
+                    self.container_name,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=3,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning(
+                "nsi_frame_port_lookup_failed",
+                container=self.container_name,
+                error=str(exc),
+            )
+            return None
+
+        if result.returncode != 0:
+            logger.warning(
+                "nsi_frame_port_lookup_failed",
+                container=self.container_name,
+                exit_code=result.returncode,
+                error=result.stderr.decode("utf-8", errors="replace").strip()[:300],
+            )
+            return None
+        try:
+            ports = json.loads(result.stdout.decode("utf-8", errors="replace"))
+            bindings = ports.get("6080/tcp") if isinstance(ports, dict) else None
+            binding = next(
+                (
+                    item for item in (bindings or [])
+                    if isinstance(item, dict)
+                    and str(item.get("HostPort", "")).isdigit()
+                    and item.get("HostIp") in {"127.0.0.1", "0.0.0.0", "::", ""}
+                ),
+                None,
+            )
+            if binding is None:
+                logger.warning(
+                    "nsi_frame_port_unavailable",
+                    container=self.container_name,
+                    reason="no_localhost_6080_binding",
+                )
+                self._nsi_frame_url = None
+                return None
+            self._nsi_frame_url = (
+                f"http://127.0.0.1:{binding['HostPort']}/nsi_frame.json"
+            )
+            return self._nsi_frame_url
+        except (json.JSONDecodeError, TypeError, KeyError) as exc:
+            logger.warning(
+                "nsi_frame_port_lookup_invalid",
+                container=self.container_name,
+                error=str(exc),
+            )
+            return None
+
+    async def _resolve_nsi_state_url(self) -> str | None:
+        frame_url = await self._resolve_nsi_frame_url()
+        if frame_url is None:
+            return None
+        return frame_url.rsplit("/", 1)[0] + "/nsi_state.json"
+
     async def _nsi_request(self, payload: dict[str, Any], timeout: float = 2.5) -> dict[str, Any] | None:
-        """Read fused NSI Retina snapshot over persistent loopback HTTP in ~2-10ms (zero docker exec!)."""
+        """Read the requested frame, state, or X11 receipt from this workstation."""
         if "_docker_exec" in self.__dict__:
             return None
-        if payload.get("cmd") != "frame":
+        command = payload.get("cmd")
+        if command not in {"frame", "state"}:
+            return None
+        nsi_url = (
+            await self._resolve_nsi_state_url()
+            if command == "state"
+            else await self._resolve_nsi_frame_url()
+        )
+        if nsi_url is None:
             return None
         if not hasattr(self, "_nsi_http"):
             import httpx
-            self._nsi_http = httpx.AsyncClient(timeout=0.5, trust_env=False)
+            self._nsi_http = httpx.AsyncClient(timeout=timeout, trust_env=False)
             self._nsi_booted = False
         try:
-            resp = await self._nsi_http.get("http://127.0.0.1:6080/nsi_frame.json")
+            resp = await self._nsi_http.get(nsi_url)
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get("ok") and data.get("b64"):
-                    self._last_nsi_frame = (asyncio.get_event_loop().time(), data)
+                valid_payload = data.get("ok") and (
+                    (
+                        command == "state"
+                        and isinstance(data.get("version"), int)
+                        and not isinstance(data.get("version"), bool)
+                    )
+                    or (command == "frame" and bool(data.get("b64")))
+                )
+                if valid_payload:
+                    cache_name = "_last_nsi_state" if command == "state" else "_last_nsi_frame"
+                    setattr(self, cache_name, (asyncio.get_event_loop().time(), data))
                     return data
-        except Exception:
-            pass
+                logger.warning(
+                    "nsi_frame_response_invalid",
+                    container=self.container_name,
+                    status_code=resp.status_code,
+                )
+        except Exception as exc:
+            logger.debug(
+                "nsi_frame_request_failed",
+                container=self.container_name,
+                error=str(exc),
+            )
 
         # If daemon isn't running yet inside container, start it once in background
         if not getattr(self, "_nsi_booted", False):
@@ -772,18 +1183,48 @@ while True:
                 import base64
                 b64_script = base64.b64encode(self._NSI_DAEMON_SCRIPT.encode("utf-8")).decode("ascii")
                 boot_cmd = (
-                    f"echo '{b64_script}' | base64 -d > /tmp/sonic_nsi_daemon.py && "
-                    f"pkill -f sonic_nsi_daemon.py 2>/dev/null || true; "
-                    f"rm -f /dev/shm/sonic_nsi_frame.json && "
-                    f"nohup python3 /tmp/sonic_nsi_daemon.py >/tmp/sonic_nsi.log 2>&1 & "
-                    f"for _ in $(seq 1 40); do [ -s /dev/shm/sonic_nsi_frame.json ] && break; sleep 0.05; done"
+                    f"printf '%s' '{b64_script}' | base64 -d > /tmp/sonic_nsi_daemon.py && "
+                    "daemon_pid=$(cat /tmp/sonic_nsi_daemon.pid 2>/dev/null || printf '') && "
+                    "if [ -z \"$daemon_pid\" ] || ! kill -0 \"$daemon_pid\" 2>/dev/null; then "
+                    "rm -f /dev/shm/sonic_nsi_frame.json /dev/shm/sonic_nsi_state.json; "
+                    "nohup python3 /tmp/sonic_nsi_daemon.py "
+                    "</dev/null >/tmp/sonic_nsi.log 2>&1 & "
+                    "printf '%s\\n' \"$!\" > /tmp/sonic_nsi_daemon.pid; "
+                    "fi; "
+                    "for _ in $(seq 1 40); do "
+                    "[ -s /dev/shm/sonic_nsi_frame.json ] && break; sleep 0.05; done; "
+                    "[ -s /dev/shm/sonic_nsi_frame.json ]"
                 )
-                await self._docker_exec(boot_cmd, timeout=6)
-                resp = await self._nsi_http.get("http://127.0.0.1:6080/nsi_frame.json")
+                boot_code, _, boot_err = await self._docker_exec(boot_cmd, timeout=6)
+                if boot_code != 0:
+                    logger.warning(
+                        "nsi_daemon_boot_failed",
+                        container=self.container_name,
+                        exit_code=boot_code,
+                        error=boot_err[:300],
+                    )
+                    return None
+                nsi_url = (
+                    await self._resolve_nsi_state_url()
+                    if command == "state"
+                    else await self._resolve_nsi_frame_url()
+                )
+                if nsi_url is None:
+                    return None
+                resp = await self._nsi_http.get(nsi_url)
                 if resp.status_code == 200:
                     data = resp.json()
-                    if data.get("ok") and data.get("b64"):
-                        self._last_nsi_frame = (asyncio.get_event_loop().time(), data)
+                    valid_payload = data.get("ok") and (
+                        (
+                            command == "state"
+                            and isinstance(data.get("version"), int)
+                            and not isinstance(data.get("version"), bool)
+                        )
+                        or (command == "frame" and bool(data.get("b64")))
+                    )
+                    if valid_payload:
+                        cache_name = "_last_nsi_state" if command == "state" else "_last_nsi_frame"
+                        setattr(self, cache_name, (asyncio.get_event_loop().time(), data))
                         return data
             except Exception:
                 pass
@@ -793,30 +1234,191 @@ while True:
     # Multi-Modal Perception: Screen Observation
     # -------------------------------------------------------------
 
+    async def observe_state(self, workspace_id: str) -> ScreenObservation | None:
+        """Read the live compact NSI state without transferring screenshot pixels."""
+        data = await self._nsi_request({"cmd": "state"}, timeout=0.5)
+        if not data or not data.get("ok"):
+            return None
+        version = data.get("version")
+        width, height = data.get("width"), data.get("height")
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version <= 0
+            or not isinstance(width, int)
+            or isinstance(width, bool)
+            or width <= 0
+            or not isinstance(height, int)
+            or isinstance(height, bool)
+            or height <= 0
+        ):
+            logger.warning(
+                "nsi_state_response_invalid",
+                container=self.container_name,
+                version=version,
+                width=width,
+                height=height,
+            )
+            return None
+
+        capture_timestamp_ns = data.get("capture_timestamp_ns")
+        if (
+            not isinstance(capture_timestamp_ns, int)
+            or isinstance(capture_timestamp_ns, bool)
+            or capture_timestamp_ns <= 0
+        ):
+            logger.warning(
+                "nsi_state_timestamp_invalid",
+                container=self.container_name,
+                version=version,
+            )
+            return None
+
+        now_ns = time.time_ns()
+        capture_age_ms = (now_ns - capture_timestamp_ns) / 1_000_000
+        controls_timestamp_ns = data.get("controls_timestamp_ns")
+        controls_age_ms = (
+            (now_ns - controls_timestamp_ns) / 1_000_000
+            if isinstance(controls_timestamp_ns, int)
+            and not isinstance(controls_timestamp_ns, bool)
+            and controls_timestamp_ns > 0
+            else None
+        )
+        if (
+            capture_age_ms < 0
+            or capture_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+            or controls_age_ms is None
+            or controls_age_ms < 0
+            or controls_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+        ):
+            logger.warning(
+                "nsi_state_stale",
+                container=self.container_name,
+                version=version,
+                capture_age_ms=round(capture_age_ms, 1),
+                controls_age_ms=(
+                    round(controls_age_ms, 1) if controls_age_ms is not None else None
+                ),
+            )
+            return None
+
+        raw_changed_region = data.get("changed_region")
+        changed_region = None
+        if isinstance(raw_changed_region, (list, tuple)) and len(raw_changed_region) == 4:
+            try:
+                candidate = tuple(int(value) for value in raw_changed_region)
+                x1, y1, x2, y2 = candidate
+                if 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height:
+                    changed_region = candidate
+            except (TypeError, ValueError):
+                logger.warning(
+                    "nsi_state_changed_region_invalid",
+                    container=self.container_name,
+                    version=version,
+                )
+
+        observation = ScreenObservation(
+            screenshot_base64="",
+            capture_timestamp_ns=capture_timestamp_ns,
+            capture_age_ms=capture_age_ms,
+            controls_age_ms=controls_age_ms,
+            perception_version=version,
+            changed_region=changed_region,
+            width=width,
+            height=height,
+            active_window=str(data.get("active_window") or "Desktop"),
+            visible_text=str(data.get("visible_text") or ""),
+            detected_controls=list(data.get("detected_controls") or []),
+            desktop_state="STATE_ONLY",
+        )
+        self._last_state_observation = observation
+        self._last_state_observed_at = asyncio.get_event_loop().time()
+        return observation
+
     async def screenshot(self, workspace_id: str) -> ScreenObservation:
         now = asyncio.get_event_loop().time()
         nsi_data = await self._nsi_request({"cmd": "frame"}, timeout=2.5)
-        if nsi_data and nsi_data.get("ok") and nsi_data.get("b64"):
-            capture_timestamp_ns = nsi_data.get("capture_timestamp_ns")
-            capture_age_ms = None
-            if isinstance(capture_timestamp_ns, int) and not isinstance(capture_timestamp_ns, bool):
-                age_ns = time.time_ns() - capture_timestamp_ns
-                if age_ns >= 0:
-                    capture_age_ms = age_ns / 1_000_000
-            obs = ScreenObservation(
-                screenshot_base64=nsi_data["b64"],
-                capture_timestamp_ns=capture_timestamp_ns,
-                capture_age_ms=capture_age_ms,
-                width=1280,
-                height=800,
-                active_window=nsi_data.get("active_window") or "Desktop",
-                visible_text=nsi_data.get("visible_text") or "",
-                detected_controls=nsi_data.get("detected_controls") or [],
-                desktop_state="INTERACTIVE",
+        nsi_b64 = (nsi_data or {}).get("b64")
+        nsi_dimensions = _validated_png_dimensions(nsi_b64)
+        nsi_controls = (
+            list(nsi_data.get("detected_controls") or [])
+            if nsi_data and nsi_data.get("ok") and nsi_dimensions is not None
+            else []
+        )
+        has_actionable_nsi_controls = bool(
+            nsi_dimensions
+            and _has_actionable_nsi_controls(
+                nsi_controls,
+                width=nsi_dimensions[0],
+                height=nsi_dimensions[1],
             )
-            self._last_screenshot = obs
-            self._last_screenshot_time = now
-            return obs
+        )
+        if nsi_data and nsi_data.get("ok") and nsi_dimensions is not None:
+            nsi_ocr_error = nsi_data.get("ocr_error")
+            if nsi_ocr_error:
+                logger.warning(
+                    "nsi_frame_ocr_failed",
+                    container=self.container_name,
+                    error=str(nsi_ocr_error)[:300],
+                )
+            capture_timestamp_ns = nsi_data.get("capture_timestamp_ns")
+            if (
+                not isinstance(capture_timestamp_ns, int)
+                or isinstance(capture_timestamp_ns, bool)
+                or capture_timestamp_ns <= 0
+            ):
+                capture_timestamp_ns = None
+            capture_age_ms = nsi_data.get("capture_age_ms")
+            if capture_timestamp_ns is not None:
+                age_ns = time.time_ns() - capture_timestamp_ns
+                capture_age_ms = (
+                    max(
+                        float(capture_age_ms),
+                        age_ns / 1_000_000,
+                    )
+                    if isinstance(capture_age_ms, (int, float))
+                    and not isinstance(capture_age_ms, bool)
+                    and math.isfinite(capture_age_ms)
+                    and capture_age_ms >= 0
+                    and age_ns >= 0
+                    else age_ns / 1_000_000 if age_ns >= 0 else None
+                )
+            else:
+                capture_age_ms = None
+            nsi_frame_is_fresh = (
+                isinstance(capture_age_ms, (int, float))
+                and not isinstance(capture_age_ms, bool)
+                and math.isfinite(capture_age_ms)
+                and 0 <= capture_age_ms <= _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+            )
+            if has_actionable_nsi_controls and nsi_frame_is_fresh:
+                obs = ScreenObservation(
+                    screenshot_base64=nsi_b64,
+                    capture_timestamp_ns=capture_timestamp_ns,
+                    capture_age_ms=capture_age_ms,
+                    width=nsi_dimensions[0],
+                    height=nsi_dimensions[1],
+                    active_window=nsi_data.get("active_window") or "Desktop",
+                    visible_text=nsi_data.get("visible_text") or "",
+                    detected_controls=nsi_controls,
+                    desktop_state="INTERACTIVE",
+                )
+                self._last_screenshot = obs
+                self._last_screenshot_time = now
+                return obs
+            logger.info(
+                "nsi_frame_using_ocr_fallback",
+                active_window=nsi_data.get("active_window") or "Desktop",
+                detected_control_count=len(nsi_controls),
+                actionable_controls_found=has_actionable_nsi_controls,
+                capture_age_ms=capture_age_ms,
+                capture_fresh=nsi_frame_is_fresh,
+            )
+        elif nsi_data:
+            logger.warning(
+                "nsi_frame_invalid_image_using_ocr_fallback",
+                active_window=nsi_data.get("active_window") or "Desktop",
+            )
 
         disp = self._get_display(workspace_id)
         tmp_id = uuid.uuid4().hex[:8]
@@ -825,22 +1427,29 @@ while True:
             f"DISPLAY={disp} scrot -p -o {tmp_path} 2>/dev/null || "
             f"DISPLAY={disp} import -window root {tmp_path} 2>/dev/null; "
             "echo '___CAPTURE_TIMESTAMP_NS___'; date +%s%N; "
-            f"base64 -w0 {tmp_path} 2>/dev/null && "
-            f"echo '___OCR_TSV___' && "
-            f"(tesseract {tmp_path} stdout --psm 11 tsv 2>/dev/null || true) && "
-            f"rm -f {tmp_path} && "
+            f"base64 -w0 {tmp_path} 2>/dev/null && echo '___OCR_TSV___'; "
+            f"tesseract {tmp_path} stdout --psm 11 tsv; ocr_exit_11=$?; "
+            f"tesseract {tmp_path} stdout --psm 6 tsv; ocr_exit_6=$?; "
+            "echo '___OCR_EXIT___'; printf '%s,%s\\n' \"$ocr_exit_11\" \"$ocr_exit_6\"; "
+            f"rm -f {tmp_path}; "
             f"echo '___ACTIVE_WINDOW___' && "
             f"(DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null || echo 'Desktop') && "
             f"echo '___OPEN_WINDOWS___' && "
             f"DISPLAY={disp} wmctrl -l 2>/dev/null"
         )
-        code, out, _ = await self._docker_exec(scr_cmd, timeout=15)
+        code, out, err = await self._docker_exec(scr_cmd, timeout=15)
+        if code != 0:
+            logger.warning(
+                "desktop_screenshot_capture_command_failed",
+                exit_code=code,
+            )
         b64 = ""
-        ocr_tsv = ""
+        ocr_tsvs: list[str] = []
+        ocr_exit_codes: list[int] = []
         capture_timestamp_ns = None
         active_win = "Desktop"
         open_wins: list[str] = []
-        if code == 0 and out:
+        if out:
             parts = out.split("___ACTIVE_WINDOW___", 1)
             first_chunk = parts[0]
             if "___CAPTURE_TIMESTAMP_NS___" in first_chunk:
@@ -850,12 +1459,25 @@ while True:
                     capture_timestamp_ns = int(timestamp_text.strip())
                 except ValueError:
                     capture_timestamp_ns = None
+                if capture_timestamp_ns is not None and capture_timestamp_ns < 0:
+                    capture_timestamp_ns = None
                 first_chunk = image_text
             if "___OCR_TSV___" in first_chunk:
-                b64_part, ocr_tsv = first_chunk.split("___OCR_TSV___", 1)
+                b64_part, ocr_output = first_chunk.split("___OCR_TSV___", 1)
                 b64 = b64_part.strip()
             else:
+                ocr_output = ""
                 b64 = first_chunk.strip()
+            if "___OCR_EXIT___" in ocr_output:
+                ocr_output, ocr_status = ocr_output.split("___OCR_EXIT___", 1)
+                try:
+                    ocr_exit_codes = [
+                        int(value)
+                        for value in ocr_status.strip().splitlines()[0].split(",")
+                    ]
+                except (ValueError, IndexError):
+                    ocr_exit_codes = []
+            ocr_tsvs = [ocr_output.strip()] if ocr_output.strip() else []
             rest = parts[1] if len(parts) > 1 else ""
             if "___OPEN_WINDOWS___" in rest:
                 win_parts = rest.split("___OPEN_WINDOWS___", 1)
@@ -867,9 +1489,22 @@ while True:
             else:
                 active_win = rest.strip() or "Desktop"
 
+        if ocr_exit_codes and all(code != 0 for code in ocr_exit_codes):
+            logger.warning(
+                "desktop_screenshot_ocr_failed",
+                exit_codes=ocr_exit_codes,
+                error=err.strip(),
+            )
+        elif any(code != 0 for code in ocr_exit_codes):
+            logger.warning(
+                "desktop_screenshot_ocr_partial_failure",
+                exit_codes=ocr_exit_codes,
+                error=err.strip(),
+            )
+
         detected_controls: list[dict[str, Any]] = []
-        ocr_lines_map: dict[tuple[int, int, int], list[str]] = {}
-        if ocr_tsv:
+        ocr_candidates: list[dict[str, Any]] = []
+        for ocr_tsv in ocr_tsvs:
             for row in ocr_tsv.splitlines()[1:]:
                 cols = row.split("\t")
                 if len(cols) >= 12:
@@ -879,17 +1514,62 @@ while True:
                     try:
                         conf = float(cols[10])
                         x, y, w, h = int(cols[6]), int(cols[7]), int(cols[8]), int(cols[9])
-                        line_key = (int(cols[2]), int(cols[3]), int(cols[4]))
                     except (ValueError, TypeError):
                         continue
                     if conf >= 25.0 and w > 2 and h > 2:
-                        ocr_lines_map.setdefault(line_key, []).append(word)
-                        detected_controls.append({
+                        ocr_candidates.append({
                             "name": word,
                             "role": "text",
                             "bbox": (x, y, x + w, y + h),
+                            "bbox_format": "xyxy",
                             "source": "ocr",
+                            "confidence": conf,
                         })
+        unique_ocr: list[dict[str, Any]] = []
+        for candidate in sorted(
+            ocr_candidates,
+            key=lambda control: float(control["confidence"]),
+            reverse=True,
+        ):
+            name = str(candidate["name"]).casefold()
+            x1, y1, x2, y2 = candidate["bbox"]
+            center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
+            duplicate = any(
+                str(existing["name"]).casefold() == name
+                and abs(
+                    center_x
+                    - (existing["bbox"][0] + existing["bbox"][2]) / 2
+                ) <= max(8, min(x2 - x1, existing["bbox"][2] - existing["bbox"][0]) // 2)
+                and abs(
+                    center_y
+                    - (existing["bbox"][1] + existing["bbox"][3]) / 2
+                ) <= max(8, min(y2 - y1, existing["bbox"][3] - existing["bbox"][1]) // 2)
+                for existing in unique_ocr
+            )
+            if not duplicate:
+                unique_ocr.append(candidate)
+        ocr_lines_map: dict[int, list[str]] = {}
+        for control in unique_ocr:
+            y = control["bbox"][1]
+            line = y // 18
+            words = ocr_lines_map.setdefault(line, [])
+            if str(control["name"]).casefold() not in {
+                word.casefold() for word in words
+            }:
+                words.append(str(control["name"]))
+            detected_controls.append(control)
+        unique_controls: list[dict[str, Any]] = []
+        control_signatures: set[tuple[str, str, str]] = set()
+        for control in detected_controls:
+            signature = (
+                str(control.get("source", "")),
+                " ".join(str(control.get("name", "")).casefold().split()),
+                str(control.get("bbox", "")),
+            )
+            if signature not in control_signatures:
+                control_signatures.add(signature)
+                unique_controls.append(control)
+        detected_controls = unique_controls
 
         vis_lines = []
         if active_win and active_win != "Desktop":
@@ -899,27 +1579,64 @@ while True:
         if ocr_lines_map:
             ocr_text_summary = " | ".join(" ".join(words) for words in list(ocr_lines_map.values())[:40])
             vis_lines.append(f"Screen OCR Text: {ocr_text_summary}")
-        visible_text = "\n".join(vis_lines)
+        fallback_dimensions = _validated_png_dimensions(b64) if code == 0 else None
+        if fallback_dimensions is None:
+            b64 = ""
+            detected_controls = []
+            visible_text = "Desktop capture unavailable: fallback did not produce a valid PNG frame."
+            capture_timestamp_ns = None
+        else:
+            visible_text = "\n".join(vis_lines)
+
+        capture_age_ms = None
+        if (
+            fallback_dimensions is not None
+            and isinstance(capture_timestamp_ns, int)
+            and not isinstance(capture_timestamp_ns, bool)
+        ):
+            age_ns = time.time_ns() - capture_timestamp_ns
+            if age_ns >= 0:
+                capture_age_ms = age_ns / 1_000_000
+        if (
+            fallback_dimensions is not None
+            and (
+                capture_age_ms is None
+                or not math.isfinite(capture_age_ms)
+                or capture_age_ms < 0
+                or capture_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+            )
+        ):
+            logger.warning(
+                "desktop_screenshot_capture_timestamp_unusable",
+                capture_timestamp_ns=capture_timestamp_ns,
+                capture_age_ms=capture_age_ms,
+            )
+            b64 = ""
+            detected_controls = []
+            visible_text = "Desktop capture unavailable: frame freshness could not be verified."
+            fallback_dimensions = None
 
         obs = ScreenObservation(
             screenshot_base64=b64,
             capture_timestamp_ns=capture_timestamp_ns,
-            capture_age_ms=(
-                max(0, time.time_ns() - capture_timestamp_ns) / 1_000_000
-                if capture_timestamp_ns is not None
-                and time.time_ns() >= capture_timestamp_ns
-                else None
-            ),
-            width=1280,
-            height=800,
-            active_window=active_win,
+            capture_age_ms=capture_age_ms,
+            width=fallback_dimensions[0] if fallback_dimensions else 1280,
+            height=fallback_dimensions[1] if fallback_dimensions else 800,
+            active_window=active_win or "Desktop",
             visible_text=visible_text,
             detected_controls=detected_controls,
-            desktop_state="INTERACTIVE" if b64 else "NO_DISPLAY",
+            desktop_state=(
+                "INTERACTIVE"
+                if fallback_dimensions is not None
+                else "NO_DISPLAY"
+            ),
         )
-        if b64:
+        if obs.screenshot_base64:
             self._last_screenshot = obs
             self._last_screenshot_time = now
+        else:
+            self._last_screenshot = None
+            self._last_screenshot_time = 0.0
         return obs
 
     # -------------------------------------------------------------
@@ -957,8 +1674,15 @@ while True:
         workspace_id: str,
         action: GUIAction,
         actor: str = "operator",
+        *,
+        capture_screenshot: bool = True,
     ) -> ScreenObservation:
         async with self._gui_lock:
+            previous_state_version = getattr(
+                getattr(self, "_last_state_observation", None),
+                "perception_version",
+                0,
+            )
             atype = action.action
             disp = self._get_display(workspace_id)
 
@@ -972,42 +1696,126 @@ while True:
                 if code != 0:
                     raise RuntimeError(f"GUI action failed with exit code {code}: {err.strip()}")
 
-            def _validate_coords(cx: int | None, cy: int | None) -> None:
-                if cx is not None and cy is not None:
-                    if int(cx) < 0 or int(cy) < 0 or int(cx) > 10000 or int(cy) > 10000:
-                        raise ValueError(f"GUI coordinates ({cx}, {cy}) out of valid desktop bounds")
+            async def _validate_pointer_coords(
+                *points: tuple[int | None, int | None],
+            ) -> None:
+                if any(
+                    not isinstance(value, int) or isinstance(value, bool)
+                    for point in points
+                    for value in point
+                ):
+                    raise ValueError("Pointer actions require explicit integer coordinates")
+
+                now = asyncio.get_event_loop().time()
+                state_observation = self._last_state_observation
+                state_age_ms = (
+                    (
+                        state_observation.capture_age_ms
+                        + max(0.0, now - self._last_state_observed_at) * 1000
+                    )
+                    if state_observation is not None
+                    and state_observation.capture_age_ms is not None
+                    and self._last_state_observed_at > 0
+                    else float("inf")
+                )
+                state_dimensions = (
+                    (state_observation.width, state_observation.height)
+                    if state_observation is not None
+                    and state_observation.desktop_state == "STATE_ONLY"
+                    and state_observation.width > 0
+                    and state_observation.height > 0
+                    and state_age_ms <= _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+                    else None
+                )
+                observation = self._last_screenshot
+                cache_age_ms = (
+                    max(0.0, now - self._last_screenshot_time) * 1000
+                    if observation is not None and self._last_screenshot_time > 0
+                    else float("inf")
+                )
+                cached_dimensions = (
+                    _validated_png_dimensions(observation.screenshot_base64)
+                    if observation is not None
+                    and observation.desktop_state == "INTERACTIVE"
+                    else None
+                )
+                if state_dimensions is not None:
+                    dimensions = state_dimensions
+                else:
+                    if (
+                        observation is None
+                        or cached_dimensions is None
+                        or cache_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+                        or (
+                            observation.capture_age_ms is not None
+                            and observation.capture_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+                        )
+                    ):
+                        observation = await self.screenshot(workspace_id)
+
+                    dimensions = (
+                        _validated_png_dimensions(observation.screenshot_base64)
+                        if observation is not None
+                        and observation.desktop_state == "INTERACTIVE"
+                        and (
+                            observation.capture_age_ms is None
+                            or observation.capture_age_ms
+                            <= _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+                        )
+                        else None
+                    )
+                if dimensions is None:
+                    raise RuntimeError("Pointer action blocked: no current captured screen bounds")
+                width, height = dimensions
+                for cx, cy in points:
+                    if cx < 0 or cy < 0 or cx >= width or cy >= height:
+                        raise ValueError(
+                            f"GUI coordinates ({cx}, {cy}) outside captured screen bounds "
+                            f"{width}x{height}"
+                        )
+
+            pointer_points: tuple[tuple[int | None, int | None], ...] = ()
+            if atype in (
+                GUIActionType.CLICK,
+                GUIActionType.DOUBLE_CLICK,
+                GUIActionType.RIGHT_CLICK,
+                GUIActionType.MOVE,
+                GUIActionType.SCROLL,
+            ):
+                pointer_points = ((action.x, action.y),)
+            elif atype == GUIActionType.DRAG:
+                pointer_points = (
+                    (action.x, action.y),
+                    (action.x2, action.y2),
+                )
+            if pointer_points:
+                await _validate_pointer_coords(*pointer_points)
+            elif atype == GUIActionType.TYPE and (
+                action.x is not None or action.y is not None
+            ):
+                if action.x is None or action.y is None:
+                    raise ValueError("Typing focus coordinates require both x and y")
+                await _validate_pointer_coords((action.x, action.y))
 
             if atype in (GUIActionType.CLICK, GUIActionType.DOUBLE_CLICK):
                 if action.button is not None and action.button not in (1, 2, 3):
                     raise ValueError(f"Unsupported mouse button: {action.button}")
                 button = action.button if action.button in (1, 2, 3) else 1
                 repeat = 2 if atype == GUIActionType.DOUBLE_CLICK else 1
-                if action.x is not None and action.y is not None:
-                    _validate_coords(action.x, action.y)
-                    move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
-                    await exec_gui(f"export DISPLAY={disp}; {move_cmd} && xdotool click --repeat {repeat} {button}")
-                else:
-                    await exec_gui(f"DISPLAY={disp} xdotool click --repeat {repeat} {button}")
+                move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
+                await exec_gui(f"export DISPLAY={disp}; {move_cmd} && xdotool click --repeat {repeat} {button}")
 
             elif atype == GUIActionType.RIGHT_CLICK:
-                if action.x is not None and action.y is not None:
-                    _validate_coords(action.x, action.y)
-                    move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
-                    await exec_gui(f"export DISPLAY={disp}; {move_cmd} && xdotool click 3")
-                else:
-                    await exec_gui(f"DISPLAY={disp} xdotool click 3")
+                move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
+                await exec_gui(f"export DISPLAY={disp}; {move_cmd} && xdotool click 3")
 
-            elif atype == GUIActionType.MOVE and action.x is not None and action.y is not None:
-                _validate_coords(action.x, action.y)
+            elif atype == GUIActionType.MOVE:
                 move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
                 await exec_gui(f"export DISPLAY={disp}; {move_cmd}")
 
             elif atype == GUIActionType.DRAG:
-                sx, sy = action.x or 0, action.y or 0
-                dx = action.x2 if action.x2 is not None else sx
-                dy = action.y2 if action.y2 is not None else sy
-                _validate_coords(sx, sy)
-                _validate_coords(dx, dy)
+                sx, sy = action.x, action.y
+                dx, dy = action.x2, action.y2
                 cursor = "test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py"
                 await exec_gui(
                     f"export DISPLAY={disp}; {cursor} drag {sx} {sy} {dx} {dy}"
@@ -1020,7 +1828,6 @@ while True:
                 safe_text = shlex.quote(action.text)
                 focus_prefix = ""
                 if action.x is not None and action.y is not None:
-                    _validate_coords(action.x, action.y)
                     focus_prefix = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py click {action.x} {action.y} && sleep 0.05 && "
                 await exec_gui(f"export DISPLAY={disp}; {focus_prefix}xdotool type --clearmodifiers --delay {delay} -- {safe_text}")
 
@@ -1032,11 +1839,7 @@ while True:
             elif atype == GUIActionType.SCROLL:
                 btn = 5 if action.scroll_delta < 0 else 4
                 times = abs(action.scroll_delta) if action.scroll_delta != 0 else 3
-                move_prefix = (
-                    f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} && "
-                    if action.x is not None and action.y is not None
-                    else ""
-                )
+                move_prefix = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} && "
                 await exec_gui(f"export DISPLAY={disp}; {move_prefix}xdotool click --repeat {times} {btn}")
 
             elif atype in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
@@ -1120,8 +1923,46 @@ while True:
 
             # Invalidate 2-second cache so fresh post-action screen is captured
             self._last_screenshot_time = 0.0
+            self._last_state_observed_at = 0.0
             await asyncio.sleep(0.3)
+            if not capture_screenshot:
+                state_observation = await self.observe_state(workspace_id)
+                state_version = getattr(
+                    state_observation, "perception_version", 0
+                )
+                if (
+                    state_observation is not None
+                    and state_observation.desktop_state == "STATE_ONLY"
+                    and state_version > previous_state_version
+                ):
+                    return state_observation
+                logger.info(
+                    "gui_action_state_fell_back_to_screenshot",
+                    workspace_id=workspace_id,
+                    action=atype.value,
+                    previous_version=previous_state_version,
+                    observed_version=state_version,
+                    reason=(
+                        "state_unavailable"
+                        if state_observation is None
+                        else "state_not_newer_than_pre_action"
+                    ),
+                )
             return await self.screenshot(workspace_id)
+
+    async def gui_action_state(
+        self,
+        workspace_id: str,
+        action: GUIAction,
+        actor: str = "operator",
+    ) -> ScreenObservation:
+        """Prefer a fresh NSI state receipt after dispatch; preserve image fallback."""
+        return await self.gui_action(
+            workspace_id,
+            action,
+            actor=actor,
+            capture_screenshot=False,
+        )
 
     async def maximize_window(self, workspace_id: str, target: str | None = None) -> bool:
         """Maximize the active or targeted window using wmctrl."""

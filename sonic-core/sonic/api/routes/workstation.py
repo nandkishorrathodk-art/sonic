@@ -235,8 +235,13 @@ async def _run_prompt_reasoning_with_timeout(
     """Bound one-shot reasoning so a provider outage cannot strand a session."""
     state = _get_or_create_session(tenant_id, session_id)
     try:
-        # Dynamically scale timeout for complex/multi-phase missions (up to 900s)
-        timeout_sec = 900 if _is_complex_or_multi_part_objective(prompt) else 300
+        # Actionable computer tasks run through Boss planning, worker execution,
+        # and verification; reserve the longer mission budget for that path.
+        timeout_sec = (
+            900
+            if _is_action_prompt(prompt) and not _is_observation_only_prompt(prompt)
+            else 300
+        )
         await asyncio.wait_for(
             _run_prompt_reasoning(tenant_id, session_id, prompt),
             timeout=timeout_sec,
@@ -441,6 +446,7 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
                 "scope_verified": False,
                 "created_at": "",
             },
+            "last_mission_outcome": None,
             "mission": {
                 "mission_id": "",
                 "objective": "",
@@ -719,6 +725,30 @@ def _record_mission_evidence(state: dict[str, Any], mission_id: str, target: str
         "sha256": digest,
         "verified": execution.status == "SUCCESS",
         "captured_at": _timestamp(),
+    }
+    state.setdefault("evidence", []).append(record)
+    _persist_workstation_state()
+    return record
+
+
+def _record_unverified_observation(
+    state: dict[str, Any],
+    action: str,
+    target: str,
+    output: str,
+) -> dict[str, Any]:
+    """Persist an execution observation without promoting it to verified evidence."""
+    digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
+    record = {
+        "id": f"ev-{uuid.uuid4().hex[:8]}",
+        "title": f"{action}: {target}",
+        "target": target,
+        "severity": "INFORMATIONAL",
+        "verified": False,
+        "verification_status": "UNVERIFIED",
+        "sha256": digest,
+        "output": output[:3000],
+        "captured_at": datetime.now(UTC).isoformat(),
     }
     state.setdefault("evidence", []).append(record)
     _persist_workstation_state()
@@ -1077,6 +1107,7 @@ async def delete_workstation_session(
                     "scope_verified": False,
                     "created_at": "",
                 },
+                "last_mission_outcome": None,
                 "mission": {
                     "mission_id": "",
                     "objective": "",
@@ -2474,36 +2505,6 @@ def _is_research_prompt(prompt: str) -> bool:
     return False
 
 
-def _is_complex_or_multi_part_objective(prompt: str) -> bool:
-    """Check if an objective requests multi-step or Boss Agent subagent orchestration."""
-    p_lower = prompt.lower().strip()
-    if any(k in p_lower for k in ("[boss]", "subagent", "sub-agent", "multi-phase", "orchestrat", "swarm")):
-        return True
-    if re.search(r"\bdeep\s+dive\b", p_lower):
-        return True
-    words = p_lower.split()
-    if len(words) >= 25:
-        return True
-    if len(words) >= 8 and len(re.findall(r"\band\b", p_lower)) >= 2:
-        return True
-    profile = _infer_program_profile(prompt)
-    target_hint = str(profile.get("target") or "")
-    network_target = bool(re.search(
-        r"(?:https?://|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|ai|app)\b)",
-        target_hint,
-    ))
-    if profile["objective_present"] and (
-        network_target
-        or (
-            profile["modalities"] != ["UNKNOWN"]
-            and any(modality != "DATA_FORENSICS" for modality in profile["modalities"])
-        )
-        or re.search(r"\b(?:phase|recon|attack\s+surface)\b", p_lower)
-    ):
-        return True
-    return False
-
-
 def _infer_program_profile(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a lightweight, evidence-labelled intake profile.
 
@@ -3091,6 +3092,16 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 duration_seconds = trace.get("duration_seconds", 0)
                                 exit_code = trace.get("exit_code")
                                 payload = trace.get("payload", "")
+                                sub_agent_id = str(trace.get("sub_agent_id") or "")
+                                sub_agent_name = str(trace.get("sub_agent_name") or "")
+                                perception_source = str(trace.get("perception_source", "unknown"))
+                                perception_version = trace.get("perception_version", 0)
+                                screen_age_ms = trace.get("screen_age_ms")
+                                controls_age_ms = trace.get("controls_age_ms")
+                                accessible_scene_fresh = trace.get("accessible_scene_fresh")
+                                image_attached = bool(trace.get("image_attached", False))
+                                visual_escalation_reason = str(trace.get("visual_escalation_reason", ""))
+                                image_escalation_count = trace.get("image_escalation_count", 0)
                             else:
                                 step_index = getattr(trace, "step_index", 1)
                                 act_type = getattr(trace, "action_type", "")
@@ -3102,9 +3113,55 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 duration_seconds = getattr(trace, "duration_seconds", 0)
                                 exit_code = getattr(trace, "exit_code", None)
                                 payload = getattr(trace, "payload", "")
+                                perception_source = str(getattr(trace, "perception_source", "unknown"))
+                                perception_version = getattr(trace, "perception_version", 0)
+                                screen_age_ms = getattr(trace, "screen_age_ms", None)
+                                controls_age_ms = getattr(trace, "controls_age_ms", None)
+                                accessible_scene_fresh = getattr(trace, "accessible_scene_fresh", None)
+                                image_attached = bool(getattr(trace, "image_attached", False))
+                                visual_escalation_reason = str(
+                                    getattr(trace, "visual_escalation_reason", "")
+                                )
+                                image_escalation_count = getattr(trace, "image_escalation_count", 0)
 
+                                sub_agent_id = ""
+                                sub_agent_name = ""
+                            worker_metadata = (
+                                {"sub_agent_id": sub_agent_id, "sub_agent_name": sub_agent_name}
+                                if sub_agent_id or sub_agent_name
+                                else {}
+                            )
                             step_type = "action" if trace_status in ("COMPLETED", "SUCCESS", "RECOVERED", "VERIFIED") else "error"
-                            state["current_action"] = f"Step {step_index}: {action_val} on {target_resource}"
+                            worker_label = f"{sub_agent_name} ({sub_agent_id}): " if worker_metadata else ""
+                            state["current_action"] = f"{worker_label}Step {step_index}: {action_val} on {target_resource}"
+                            perception_summary = ""
+                            if action_val.startswith(("GUI_", "APP_", "WINDOW_")) and perception_source != "unknown":
+                                scene_label = (
+                                    "fresh"
+                                    if accessible_scene_fresh is True
+                                    else "not-confirmed-fresh"
+                                )
+                                image_label = "attached" if image_attached else "omitted"
+                                age_label = (
+                                    f"{float(screen_age_ms):.1f}ms"
+                                    if isinstance(screen_age_ms, (int, float))
+                                    and not isinstance(screen_age_ms, bool)
+                                    else "unknown"
+                                )
+                                controls_age_label = (
+                                    f"{float(controls_age_ms):.1f}ms"
+                                    if isinstance(controls_age_ms, (int, float))
+                                    and not isinstance(controls_age_ms, bool)
+                                    else "unknown"
+                                )
+                                perception_summary = (
+                                    f"\nPerception: source={perception_source}, "
+                                    f"version={perception_version}, scene={scene_label}, "
+                                    f"image={image_label}, screen_age={age_label}, "
+                                    f"controls_age={controls_age_label}, "
+                                    f"image_escalations={image_escalation_count}, "
+                                    f"escalation_reason={visual_escalation_reason or 'none'}"
+                                )
 
                             # Real unmocked Thought emission matching Devin timeline
                             if thought:
@@ -3115,6 +3172,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     "Thinking",
                                     thought,
                                     duration_seconds=t_dur,
+                                    **worker_metadata,
                                 )
 
                             # Real unmocked Action emission matching Devin timeline
@@ -3138,31 +3196,39 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     command=cmd, output=actual_observation,
                                     duration_seconds=duration_seconds,
                                     exit_code=exit_code,
+                                    **worker_metadata,
                                 )
                             elif action_val == "FILE_READ":
                                 _append_worklog(
                                     state, "read", f"Read {target_resource}", actual_observation,
                                     file=target_resource,
                                     duration_seconds=duration_seconds,
+                                    **worker_metadata,
                                 )
                             elif action_val == "FILE_WRITE":
                                 _append_worklog(
                                     state, "write", f"Write {target_resource}", actual_observation,
                                     file=target_resource,
                                     duration_seconds=duration_seconds,
+                                    **worker_metadata,
                                 )
                             elif action_val in ("SCREENSHOT", "BROWSER_SCREENSHOT"):
                                 _append_worklog(
                                     state, "screenshot", "Desktop Screenshot", actual_observation or "Captured desktop screenshot",
                                     image=actual_observation if (actual_observation and actual_observation.startswith("data:image")) else None,
                                     duration_seconds=duration_seconds,
+                                    **worker_metadata,
                                 )
                             else:
                                 _append_worklog(
                                     state, step_type,
                                     f"Step {step_index}: {action_val}",
-                                    f"Target: {target_resource}\nResult: {actual_observation}\nStatus: {trace_status}",
+                                    (
+                                        f"Target: {target_resource}\nResult: {actual_observation}\n"
+                                        f"Status: {trace_status}{perception_summary}"
+                                    ),
                                     duration_seconds=duration_seconds,
+                                    **worker_metadata,
                                 )
 
                             # Auto-synthesize Evidence and Graph Memory nodes from discoveries
@@ -3173,55 +3239,12 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 and not any(k in obs_text.lower() for k in ("exit 125", "exit 126", "exit 1", "blocked fail-closed", "command blocked"))
                             )
                             if has_discovery and target_resource and is_valid_success:
-                                import hashlib
-                                ev_id = f"ev-{uuid.uuid4().hex[:8]}"
-                                sha256_hash = hashlib.sha256(obs_text.encode("utf-8")).hexdigest()
-
-                                # Add to session evidence
-                                if "evidence" not in state:
-                                    state["evidence"] = []
-                                state["evidence"].append({
-                                    "id": ev_id,
-                                    "title": f"{action_val}: {target_resource}",
-                                    "target": target_resource,
-                                    "severity": "INFORMATIONAL",
-                                    "verified": True,
-                                    "sha256": sha256_hash,
-                                    "output": obs_text[:3000],
-                                    "captured_at": datetime.now(UTC).isoformat(),
-                                })
-
-                                # Add to persistent Graph Memory
-                                try:
-                                    from sonic.memory.router import get_smart_memory
-                                    from sonic.memory.schemas import (
-                                        AssetNode,
-                                        FindingNode,
-                                        FindingSeverity,
-                                        RelationshipType,
-                                    )
-                                    mem = await get_smart_memory()
-                                    target_clean = target_resource.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
-                                    if target_clean and len(target_clean) > 2:
-                                        asset_uid = f"asset-{target_clean}"
-                                        await mem.create_node(AssetNode(uid=asset_uid, value=target_clean, asset_type="domain", tenant_id=tenant_id))
-                                        finding_uid = f"finding-{sha256_hash[:8]}"
-                                        await mem.create_node(FindingNode(
-                                            uid=finding_uid,
-                                            title=f"{action_val}: {target_resource}",
-                                            description=obs_text[:200],
-                                            vulnerability_class="observation",
-                                            severity=FindingSeverity.INFO,
-                                            tenant_id=tenant_id,
-                                        ))
-                                        await mem.create_relationship(
-                                            from_label="Finding", from_uid=finding_uid,
-                                            to_label="Asset", to_uid=asset_uid,
-                                            rel_type=RelationshipType.DISCOVERED_ON.value,
-                                            tenant_id=tenant_id,
-                                        )
-                                except Exception as mem_err:
-                                    logger.debug("workstation_graph_memory_update_failed", error=str(mem_err))
+                                _record_unverified_observation(
+                                    state,
+                                    action_val,
+                                    target_resource,
+                                    obs_text,
+                                )
 
                         from sonic.being.craft import BeingCraft
                         from sonic.being.identity import get_being_store, get_or_create_being
@@ -3249,6 +3272,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             llm=llm_router,
                             vector_memory=vec_mem,
                             toolsmith=toolsmith,
+                            tenant_id=tenant_id,
                         )
                         lessons_ledger = LessonsLedger(
                             tenant_id=tenant_id,
@@ -3256,7 +3280,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             semantic_memory=vec_mem,
                         )
 
-                        if _is_complex_or_multi_part_objective(prompt):
+                        # Every actionable workstation objective is planned and
+                        # delegated by Boss. Simple objectives naturally become
+                        # a single bounded worker instead of bypassing orchestration.
+                        if execution_prompt:
                             from sonic.computer_use.boss import BossAgent
 
                             boss = BossAgent(
@@ -3287,7 +3314,26 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
 
                             async def _on_boss_event(event_type: str, data: dict) -> None:
                                 data = data or {}
-                                if event_type == "boss_thinking":
+                                if event_type == "task_graph":
+                                    stats = data.get("stats", {})
+                                    tasks = data.get("tasks", [])
+                                    task_lines = [
+                                        f"{task.get('status', 'unknown')}: "
+                                        f"{task.get('name', task.get('task_id', 'task'))}"
+                                        for task in tasks[:20]
+                                        if isinstance(task, dict)
+                                    ]
+                                    _mission_event(
+                                        state,
+                                        "info",
+                                        f"TaskGraph — {data.get('stage', 'updated')}",
+                                        (
+                                            f"Counts: {json.dumps(stats, sort_keys=True)}\n"
+                                            + "\n".join(task_lines)
+                                        ),
+                                        task_graph=data,
+                                    )
+                                elif event_type == "boss_thinking":
                                     content = data.get("content", "")
                                     _mission_event(
                                         state,
@@ -3299,23 +3345,45 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     )
                                 elif event_type == "sub_dispatch":
                                     sub_num = data.get("sub_agent_number")
-                                    title = f"Dispatching SubAgent #{sub_num}" if sub_num is not None else "Dispatching SubAgent"
+                                    agent_id = str(data.get("agent_id") or "")
+                                    agent_name = str(data.get("agent_name") or "")
+                                    title = (
+                                        f"Dispatching {agent_name} ({agent_id})"
+                                        if agent_name and agent_id
+                                        else f"Dispatching SubAgent #{sub_num}"
+                                        if sub_num is not None
+                                        else "Dispatching SubAgent"
+                                    )
                                     _mission_event(
                                         state,
                                         "action",
                                         title,
-                                        f"Goal: {data.get('goal')}\nMax Steps: {data.get('max_steps')}",
+                                        f"Status: {data.get('status', 'RUNNING')}\nGoal: {data.get('goal')}\nMax Steps: {data.get('max_steps')}",
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
+                                        agent_id=agent_id,
+                                        agent_name=agent_name,
+                                        status=data.get("status", "RUNNING"),
                                         goal=data.get("goal"),
                                         max_steps=data.get("max_steps"),
                                     )
                                 elif event_type == "sub_step":
                                     trace_data = data.get("trace", {})
+                                    trace_data["sub_agent_id"] = data.get("agent_id", "")
+                                    trace_data["sub_agent_name"] = data.get("agent_name", "")
                                     await _record_step_trace(trace_data)
                                 elif event_type == "sub_report":
                                     sub_num = data.get("sub_agent_number")
-                                    title = f"SubAgent #{sub_num} Report" if sub_num is not None else "SubAgent Report"
+                                    agent_id = str(data.get("agent_id") or "")
+                                    agent_name = str(data.get("agent_name") or "")
+                                    worker_status = str(data.get("status") or ("COMPLETED" if data.get("success") else "FAILED"))
+                                    title = (
+                                        f"{agent_name} ({agent_id}) Report — {worker_status}"
+                                        if agent_name and agent_id
+                                        else f"SubAgent #{sub_num} Report"
+                                        if sub_num is not None
+                                        else "SubAgent Report"
+                                    )
                                     _mission_event(
                                         state,
                                         "info",
@@ -3323,6 +3391,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         data.get("findings_summary", ""),
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
+                                        agent_id=agent_id,
+                                        agent_name=agent_name,
+                                        status=worker_status,
                                         goal=data.get("goal"),
                                         success=data.get("success"),
                                         findings_summary=data.get("findings_summary"),
@@ -3356,9 +3427,42 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 objective=effective_goal,
                                 phase_callback=_on_boss_event,
                                 interrupt_check=lambda: bool(state.get("interrupted")),
+                                requested_plane="gui" if desktop_prompt else None,
                             )
                             report = boss_report
                             summary_msg = report.findings_summary
+                            mission_outcome = {
+                                "status": str(
+                                    getattr(boss_report, "status", "INCOMPLETE")
+                                ).upper(),
+                                "completed_at": _timestamp(),
+                                "objective": clean_prompt,
+                                "summary": str(
+                                    summary_msg
+                                    or "Mission ended without a summary."
+                                ),
+                                "total_phases": int(
+                                    getattr(boss_report, "total_phases", 0) or 0
+                                ),
+                                "total_sub_agents": int(
+                                    getattr(boss_report, "total_sub_agents", 0)
+                                    or 0
+                                ),
+                                "total_actions": int(
+                                    getattr(boss_report, "total_actions", 0) or 0
+                                ),
+                            }
+                            state["last_mission_outcome"] = mission_outcome
+                            mission_state = state.get("mission")
+                            if (
+                                isinstance(mission_state, dict)
+                                and mission_state.get("status") == "RUNNING"
+                                and mission_state.get("objective") == clean_prompt
+                            ):
+                                mission_state.update(mission_outcome)
+                                mission_state["outcome_summary"] = (
+                                    mission_outcome["summary"]
+                                )
 
                             boss_waiting_human = (
                                 getattr(boss_report, "waiting_for_human", False) is True
@@ -3385,7 +3489,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 state["current_action"] = "Agent paused by user."
                             else:
                                 state["status"] = "IDLE"
-                                state["current_action"] = "Ready when you are."
+                                state["current_action"] = (
+                                    f"Mission {mission_outcome['status'].lower()}: "
+                                    f"{mission_outcome['summary'][:240]}"
+                                    if mission_outcome
+                                    else "Ready when you are."
+                                )
+                            _persist_workstation_state()
 
                             try:
                                 boss_success = str(getattr(boss_report, "status", "")).upper() == "COMPLETE"

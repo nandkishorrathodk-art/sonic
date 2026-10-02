@@ -11,6 +11,7 @@ This directory contains the master architectural blueprints, core system invaria
 | Document | File Path | Summary |
 | :--- | :--- | :--- |
 | **System Architecture** | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Six-layer architecture, cognitive loop, epistemic reasoning, and data flow. |
+| **Computer-User Product Goal** | [`SONIC_COMPUTER_USER_GOAL.md`](SONIC_COMPUTER_USER_GOAL.md) | Product behavior, real-time perception direction, safety contract, and multi-app acceptance criteria. |
 | **Master Blueprint** | [`BLUEPRINT.md`](BLUEPRINT.md) | High-level system design, terminology glossary, and subsystem interactions. |
 | **AI Agent Guide** | [`AI_AGENT_GUIDE.md`](AI_AGENT_GUIDE.md) | Onboarding guide, 60-second mental model, and orientation for autonomous agents. |
 | **Core Invariants & Rules** | [`RULES.md`](RULES.md) | Mandatory invariants (*Aisa Karna Mana Hai*), anti-puppet rules, and prohibitions. |

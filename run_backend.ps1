@@ -1,9 +1,12 @@
-﻿$env:APP_ENV = "development"
+$env:APP_ENV = "development"
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host " Starting SONIC-REDA Backend (Port 12000)" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Green
 
 $pythonPath = Join-Path $PSScriptRoot "sonic-core\.venv\Scripts\python.exe"
+if (-not (Test-Path $pythonPath)) {
+    $pythonPath = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+}
 if (-not (Test-Path $pythonPath)) {
     $pythonCommand = Get-Command python -ErrorAction Stop
     $pythonPath = $pythonCommand.Source

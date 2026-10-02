@@ -41,6 +41,10 @@ def test_ai_human_being_identity_and_vault_persistence(tmp_path, monkeypatch):
     """Being and BeingVault persist accounts and persona across restarts using RFC 2606 .test domains."""
     db_file = tmp_path / "being_vault_test.db"
     monkeypatch.setenv("SONIC_BEING_DB_PATH", str(db_file))
+    monkeypatch.setenv(
+        "SONIC_BEING_VAULT_KEY",
+        base64.urlsafe_b64encode(b"test-only-key-material-32-bytes!").decode("ascii"),
+    )
     reset_being_singleton()
 
     being = get_or_create_being(tenant_id="tenant-human-1", name="SONIC")
@@ -144,6 +148,7 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
     from sonic.computer.models import ScreenObservation
 
     visual_revision = {"value": 0}
+    focus_state = {"focused": False}
 
     def _make_screen(active_window: str, open_windows: list[str]) -> ScreenObservation:
         image = Image.new("RGB", (1, 1), (18, 22, 31))
@@ -159,11 +164,22 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
             detected_controls=(
                 [
                     {"name": active_window, "role": "window", "bbox": (0, 0, 1280, 800)},
-                    {"name": "editor", "role": "textbox", "bbox": (100, 120, 600, 400)},
+                    {
+                        "name": "editor",
+                        "role": "textbox",
+                        "bbox": (100, 120, 600, 400),
+                        "source": "atspi",
+                        "editable": True,
+                        "focused": focus_state["focused"],
+                        "confidence": 0.95,
+                        "freshness_ms": 0,
+                    },
                 ]
                 if active_window != "Desktop"
                 else []
             ),
+            capture_age_ms=0,
+            controls_age_ms=0,
             desktop_state="INTERACTIVE",
         )
 
@@ -224,11 +240,13 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
             if atype == "SELECT_WINDOW":
                 target = action.app_name or action.window_id or ""
                 self.active_window = target
+                focus_state["focused"] = False
                 self.gui_events.append(("FOCUS", target))
             elif atype == "TYPE":
                 self.gui_events.append(("TYPE", f"{self.active_window}:{action.text}"))
                 visual_revision["value"] = 1
             elif atype == "CLICK":
+                focus_state["focused"] = True
                 self.gui_events.append(("CLICK", f"{self.active_window}:({action.x},{action.y})"))
             elif atype in ("KEYPRESS", "HOTKEY"):
                 self.gui_events.append(("KEY", f"{self.active_window}:{action.key}"))
@@ -302,7 +320,7 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
         payload={"text": "SONIC multi-window note"},
         predicted_outcome="Type note in App #1",
     )
-    assert t4.status == ActionExecutionStatus.COMPLETED
+    assert t4.status == ActionExecutionStatus.COMPLETED, t4.actual_observation
 
     # 5. Switch focus to App #2 (APP_FOCUS), click canvas, then switch BACK to App #1 within 4 steps!
     t5 = await agent.execute_action(

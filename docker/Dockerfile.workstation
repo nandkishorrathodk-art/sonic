@@ -11,7 +11,8 @@
 # when explicitly requested; this image does not force a tool workflow.
 
 
-FROM debian:12
+ARG WORKSTATION_BASE=debian:12
+FROM ${WORKSTATION_BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -48,6 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wmctrl \
     imagemagick \
     scrot \
+    tesseract-ocr \
     websockify \
     novnc \
     fonts-liberation \

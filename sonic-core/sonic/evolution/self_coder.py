@@ -502,7 +502,9 @@ class SelfCoder:
                     tools=len(cres.tool_calls),
                     has_diagnosis=bool(diagnosis),
                 )
-                if not cres.finished or not diagnosis.strip():
+                has_tools = bool(getattr(cres, "tool_calls", []))
+                completed = cres.finished or (has_tools and bool(diagnosis.strip()))
+                if not completed or not diagnosis.strip():
                     cycle.stage = "investigation_incomplete"
                     cycle.reason = (
                         "No patch was generated because the coding agent did not "

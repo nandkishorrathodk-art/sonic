@@ -188,33 +188,52 @@ class HealthChecker:
 
     @classmethod
     async def check_llm(cls) -> ComponentHealth:
-        has_nvidia = bool(os.environ.get("NVIDIA_API_KEY"))
-        has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
-        has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-        has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
-        has_deepseek = bool(os.environ.get("DEEPSEEK_API_KEY"))
-        has_openrouter = bool(os.environ.get("OPENROUTER_API_KEY"))
-        has_groq = bool(os.environ.get("GROQ_API_KEY"))
+        try:
+            from sonic.llm.router import ModelRouter
 
-        if has_nvidia or has_gemini or has_openai or has_anthropic or has_deepseek or has_openrouter or has_groq:
-            active = []
-            if has_openrouter: active.append("OpenRouter")
-            if has_deepseek: active.append("DeepSeek")
-            if has_anthropic: active.append("Anthropic")
-            if has_openai: active.append("OpenAI")
-            if has_groq: active.append("Groq")
-            if has_gemini: active.append("Gemini")
-            if has_nvidia: active.append("NVIDIA NIM")
+            router = ModelRouter.from_config()
+        except Exception as exc:
+            logger.error("llm_health_router_load_failed", error=str(exc))
             return ComponentHealth(
                 name="llm_router",
-                status=HealthStatus.HEALTHY,
-                message=f"Configured providers: {', '.join(active)}",
+                status=HealthStatus.DEGRADED,
+                message="LLM routing configuration could not be loaded.",
+                is_critical=True,
+            )
+
+        active = sorted(
+            name
+            for name in router.providers
+            if router._is_provider_ready(name)
+        )
+        vision_rule = router.routing_rules.get("vision", {})
+        vision_candidates = [vision_rule.get("provider", "")]
+        for fallback in vision_rule.get("fallback", []):
+            vision_candidates.append(
+                fallback.split("/", 1)[0] if "/" in fallback else fallback
+            )
+        ready_vision = sorted({
+            name for name in vision_candidates
+            if name in router.providers and router._is_provider_ready(name)
+        })
+        if not ready_vision:
+            active_names = ", ".join(active) if active else "none"
+            return ComponentHealth(
+                name="llm_router",
+                status=HealthStatus.DEGRADED,
+                message=(
+                    "No configured vision provider credentials are available for GUI reasoning. "
+                    f"Other ready providers: {active_names}."
+                ),
                 is_critical=True,
             )
         return ComponentHealth(
             name="llm_router",
-            status=HealthStatus.DEGRADED,
-            message="No LLM API keys configured in environment.",
+            status=HealthStatus.HEALTHY,
+            message=(
+                "Configured vision providers: "
+                f"{', '.join(ready_vision)}; remote reachability is not probed."
+            ),
             is_critical=True,
         )
 

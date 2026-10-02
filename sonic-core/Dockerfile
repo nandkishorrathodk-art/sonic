@@ -5,11 +5,11 @@
 # ============================================
 
 # Stage 1: Build Native Rust Kernel
-FROM rust:1.80-slim AS rust-builder
+FROM rust:1.85-slim AS rust-builder
 WORKDIR /kernel-build
 COPY sonic-kernel-rs/Cargo.toml sonic-kernel-rs/Cargo.lock* ./
 COPY sonic-kernel-rs/src ./src
-RUN cargo build --release
+RUN cargo build --locked --release
 
 # Stage 2: Python builder
 FROM python:3.12-slim AS builder

@@ -310,6 +310,7 @@ class CustomLLMProvider(LLMProvider):
         cost_per_1k_output: float = 0.0,
         max_context_tokens: int = 128000,
         capabilities: list[str] | None = None,
+        model_capabilities: dict[str, list[str]] | None = None,
         speed_tier: SpeedTier = SpeedTier.MEDIUM,
         timeout_seconds: int = 120,
         fallback_models: list[str] | None = None,
@@ -347,6 +348,10 @@ class CustomLLMProvider(LLMProvider):
         )
         self.max_context_tokens = max_context_tokens
         self.capabilities = capabilities or ["general"]
+        self.model_capabilities = {
+            model: frozenset(model_capabilities)
+            for model, model_capabilities in (model_capabilities or {}).items()
+        }
         self.speed_tier = speed_tier
         self.timeout_seconds = timeout_seconds
         self.is_anthropic = _is_anthropic_endpoint(base_url)
@@ -514,6 +519,21 @@ class CustomLLMProvider(LLMProvider):
             for tool in tools
         ]
 
+    def _tools_for_request(self, request: LLMRequest, model: str) -> list[dict] | None:
+        """Omit native tools from multimodal requests when the selected model lacks tool use."""
+        tools = self._to_openai_tools(request.tools)
+        capabilities = self.model_capabilities.get(model)
+        has_images = any(message.has_images for message in request.messages)
+        if tools and has_images and capabilities is not None and "tool_use" not in capabilities:
+            logger.info(
+                "llm_native_tools_omitted_unsupported_model",
+                name=self.name,
+                model=model,
+                reason="multimodal_model_does_not_declare_tool_use",
+            )
+            return None
+        return tools
+
     def _to_anthropic_tools(self, tools: list[ToolDefinition] | None) -> list[dict] | None:
         """Convert SONIC tools to Anthropic tool format."""
         if not tools:
@@ -636,7 +656,7 @@ class CustomLLMProvider(LLMProvider):
         """Complete via OpenAI-compatible API (works for most providers)."""
         model = request.model or self.default_model
         messages = self._to_openai_messages(request)
-        tools = self._to_openai_tools(request.tools)
+        tools = self._tools_for_request(request, model)
 
         if self._openai_client:
             # Use official SDK
@@ -942,7 +962,7 @@ class CustomLLMProvider(LLMProvider):
     async def _stream_openai(self, request: LLMRequest) -> AsyncIterator[LLMChunk]:
         """Stream via OpenAI-compatible API."""
         model = request.model or self.default_model
-        tools = self._to_openai_tools(request.tools)
+        tools = self._tools_for_request(request, model)
 
         if self._openai_client:
             messages = self._to_openai_messages(request)

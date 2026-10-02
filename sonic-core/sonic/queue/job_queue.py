@@ -244,12 +244,35 @@ class RedisJobQueue:
             return None
         return job
 
-    async def list_jobs(self, tenant_id: str, limit: int = 50) -> list[Job]:
-        """List jobs belonging to tenant."""
-        return [
-            j for j in self._jobs_store.values()
-            if j.tenant_id == tenant_id
-        ][:limit]
+    async def list_jobs(
+        self,
+        tenant_id: str,
+        owner_id: str | None = None,
+        limit: int = 50,
+    ) -> list[Job]:
+        """List persisted jobs visible to an owner within one tenant."""
+        if self._redis_client is not None:
+            try:
+                async for key in self._redis_client.scan_iter(match="sonic:job:*"):
+                    job_id = key.rsplit(":", 1)[-1]
+                    if job_id not in self._jobs_store:
+                        raw_data = await self._redis_client.hget(key, "data")
+                        if raw_data:
+                            job = Job.model_validate_json(raw_data)
+                            self._jobs_store[job.id] = job
+            except Exception as exc:
+                if self._is_production():
+                    raise RuntimeError("Production Queue Failure: Redis job listing failed") from exc
+                logger.warning("redis_job_listing_failed", error=str(exc))
+
+        jobs = [
+            job
+            for job in self._jobs_store.values()
+            if job.tenant_id == tenant_id
+            and (owner_id is None or job.owner_id == owner_id)
+        ]
+        jobs.sort(key=lambda job: job.created_at, reverse=True)
+        return jobs[:limit]
 
     async def update_job(self, job: Job) -> None:
         """Update job state in store and Redis."""

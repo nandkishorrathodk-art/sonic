@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
+import math
 import re
 from typing import Any
 
@@ -35,7 +37,12 @@ def _parse_grounding_coords(
     height: int = 1080,
 ) -> tuple[int, int] | None:
     """Parse grounding model coordinate text, scaling [0, 1000] tagged boxes to screen dimensions."""
-    return extract_bbox_midpoint(text, width=width, height=height)
+    return extract_bbox_midpoint(
+        text,
+        width=width,
+        height=height,
+        coordinate_space="normalized_1000",
+    )
 
 
 def extract_bbox_midpoint(
@@ -93,6 +100,11 @@ def _extract_bbox_midpoint_impl(
     if not bbox_response:
         return None
 
+    def _screen_point(x: int, y: int) -> tuple[int, int] | None:
+        if 0 <= x < width and 0 <= y < height:
+            return x, y
+        return None
+
     if isinstance(bbox_response, str) and "{" in bbox_response and "}" in bbox_response:
         try:
             import json
@@ -132,20 +144,22 @@ def _extract_bbox_midpoint_impl(
                 else:
                     mid_x = int((x1 + x2) / 2.0)
                     mid_y = int((y1 + y2) / 2.0)
-                mid_pt = (min(max(0, mid_x), max(0, width - 1)), min(max(0, mid_y), max(0, height - 1)))
-                return mid_pt
+                return _screen_point(mid_x, mid_y)
             elif len(bbox_response) >= 2:
                 x, y = float(bbox_response[0]), float(bbox_response[1])
                 if max(x, y) <= 1.0:
                     px = int(x * width)
                     py = int(y * height)
-                elif is_normalized_1000 is True or (is_normalized_1000 is None and (x > width or y > height)):
+                elif is_normalized_1000 is True or (
+                    is_normalized_1000 is None
+                    and max(x, y) <= 1000
+                    and (x > width or y > height)
+                ):
                     px = int((x / 1000.0) * width)
                     py = int((y / 1000.0) * height)
                 else:
                     px, py = int(x), int(y)
-                pt = (min(max(0, px), max(0, width - 1)), min(max(0, py), max(0, height - 1)))
-                return pt
+                return _screen_point(px, py)
         except (ValueError, TypeError):
             pass
 
@@ -156,7 +170,7 @@ def _extract_bbox_midpoint_impl(
     match = re.search(r"(?:<\|box_start\|>|<box>)(.*?)(?:<\|box_end\|>|</box>)", bbox_response, re.DOTALL)
     inner_text = match.group(1) if match else bbox_response
 
-    numbers = [float(num) for num in re.findall(r"\d+\.?\d*", inner_text)]
+    numbers = [float(num) for num in re.findall(r"-?\d+\.?\d*", inner_text)]
     if not numbers:
         return None
 
@@ -185,8 +199,7 @@ def _extract_bbox_midpoint_impl(
         else:
             mid_x = int(raw_x)
             mid_y = int(raw_y)
-        mid_pt = (max(0, min(width - 1, mid_x)), max(0, min(height - 1, mid_y)))
-        return mid_pt
+        return _screen_point(mid_x, mid_y)
 
     elif len(numbers) >= 2:
         raw_x, raw_y = numbers[0], numbers[1]
@@ -213,8 +226,7 @@ def _extract_bbox_midpoint_impl(
         else:
             px = int(raw_x)
             py = int(raw_y)
-        pt = (max(0, min(width - 1, px)), max(0, min(height - 1, py)))
-        return pt
+        return _screen_point(px, py)
 
     return None
 
@@ -468,13 +480,73 @@ async def query_multimodal_grounding(
         task_type="vision",
         max_tokens=64,
         temperature=0.1,
+        extra_body={"response_format": {"type": "json_object"}},
     )
     try:
         res = await asyncio.wait_for(llm_router.complete(req), timeout=8.0)
-        return extract_bbox_midpoint(res.content, width=width, height=height)
+        return _parse_normalized_grounding_response(res.content, width, height)
     except Exception as exc:
         logger.warning("multimodal_grounding_model_query_failed", query=query, error=str(exc))
         return None
+
+
+def _parse_normalized_grounding_response(
+    response: str,
+    width: int,
+    height: int,
+) -> tuple[int, int] | None:
+    """Accept only the declared machine-readable grounding formats."""
+    text = response.strip()
+    if text.upper() == "NOT_FOUND":
+        return None
+
+    number = r"-?\d+(?:\.\d+)?"
+    box_match = re.fullmatch(
+        rf"<\|box_start\|>\s*\(?\s*({number})\s*,\s*({number})\s*,"
+        rf"\s*({number})\s*,\s*({number})\s*\)?\s*<\|box_end\|>",
+        text,
+        re.IGNORECASE,
+    )
+    if box_match:
+        x1, y1, x2, y2 = (float(value) for value in box_match.groups())
+        point = ((x1 + x2) / 2, (y1 + y2) / 2)
+    else:
+        try:
+            decoded = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        if isinstance(decoded, dict) and decoded.get("not_found") is True:
+            return None
+        if isinstance(decoded, dict) and "x" in decoded and "y" in decoded:
+            point = (decoded["x"], decoded["y"])
+        elif (
+            isinstance(decoded, dict)
+            and isinstance(decoded.get("point"), list)
+            and len(decoded["point"]) == 2
+        ):
+            point = tuple(decoded["point"])
+        elif isinstance(decoded, list) and len(decoded) == 2:
+            point = tuple(decoded)
+        else:
+            return None
+
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in point
+    ):
+        return None
+    try:
+        x, y = float(point[0]), float(point[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(value) and 0 <= value <= 1000 for value in (x, y)):
+        return None
+
+    pixel = (int(round(x * width / 1000)), int(round(y * height / 1000)))
+    if not (0 <= pixel[0] < width and 0 <= pixel[1] < height):
+        return None
+    return pixel
 
 
 def crop_toolbar_region(

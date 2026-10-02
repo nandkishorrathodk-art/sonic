@@ -20,6 +20,8 @@ export interface WorklogItem {
   role?: "user" | "assistant" | "system" | string;
   proposed_actions?: any[];
   sub_agent_number?: number;
+  sub_agent_id?: string;
+  sub_agent_name?: string;
   sub_mission_id?: string;
   goal?: string;
   success?: boolean;
@@ -97,6 +99,7 @@ export interface CommandResult {
   command: string;
   exit_code: number;
   output: string;
+  stderr?: string;
   execution_environment?: string;
 }
 

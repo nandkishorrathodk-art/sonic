@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from sonic.agents.judge import JudgeVerdict
 from sonic.computer_use.boss import BossAgent
 from sonic.computer_use.models_boss import SubMission
 
@@ -26,7 +28,12 @@ class _MockLLM:
 @pytest.mark.asyncio
 async def test_visual_mission_uses_shared_gui_computer_use_worker():
     boss = BossAgent(computer_provider=_MockProvider(), llm_router=_MockLLM())
-    boss.judge = None
+    boss.judge.evaluate_sub_mission = AsyncMock(
+        return_value=SimpleNamespace(
+            verdict=JudgeVerdict.CONFIRMED,
+            notes="The Judge confirms the visible GUI action receipt.",
+        )
+    )
     sub_mission = SubMission(
         id="sub-desktop-web",
         goal="Open the provided resource in an installed desktop application and inspect it",

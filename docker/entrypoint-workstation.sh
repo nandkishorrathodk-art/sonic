@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+if ! command -v tesseract >/dev/null 2>&1; then
+    echo "[!] tesseract-ocr is required for workstation NSI perception." >&2
+    exit 1
+fi
+
 # Remove any stale X locks
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 
@@ -28,21 +33,6 @@ fi
 # Ensure the generic Python command name exists
 if [ -x /usr/bin/python3 ]; then
     ln -sf /usr/bin/python3 /usr/local/bin/python
-fi
-
-# Ensure container web browser wrapper has --no-sandbox, CDP port 9222, and First Run state initialized
-if [ -x /usr/bin/google-chrome-stable ]; then
-    mkdir -p /root/.config/google-chrome
-    touch "/root/.config/google-chrome/First Run"
-    rm -f /root/.config/google-chrome/Singleton* 2>/dev/null || true
-    cat << 'EOF' > /usr/local/bin/chrome
-#!/bin/bash
-mkdir -p /root/.config/google-chrome
-touch "/root/.config/google-chrome/First Run"
-rm -f /root/.config/google-chrome/Singleton* 2>/dev/null
-exec /usr/bin/google-chrome-stable --no-sandbox --disable-dev-shm-usage --no-first-run --disable-fre --no-default-browser-check --remote-debugging-port=9222 "$@"
-EOF
-    chmod +x /usr/local/bin/chrome
 fi
 
 # Ensure smooth human-like mouse cursor glide helper exists for visible VNC cursor movement

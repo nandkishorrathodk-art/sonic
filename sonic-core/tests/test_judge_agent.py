@@ -183,7 +183,7 @@ async def test_judge_falsifies_gui_mission_without_window_or_gui_action():
         stdout="",
         stderr="",
     ))
-    judge = JudgeAgent(computer_provider=mock_computer)
+    judge = JudgeAgent(computer_provider=mock_computer, llm_router=MagicMock())
     sub_m = SubMission(goal="Launch browser on desktop and observe UI", plane="gui")
     # Worker bypassed GUI using terminal curl
     trace = {
@@ -206,21 +206,33 @@ async def test_judge_falsifies_gui_mission_without_window_or_gui_action():
         result=result,
         worker_agent_id="sub-agent-gui",
     )
-    assert evaluation.verdict == JudgeVerdict.FALSIFIED
-    assert "GUI desktop interaction unverified" in evaluation.notes
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
+    assert "no GUI interaction receipts" in evaluation.notes
 
 
 @pytest.mark.asyncio
 async def test_judge_confirms_gui_mission_with_real_window():
     mock_computer = MagicMock()
-    # wmctrl returns open application window
+    mock_computer.screenshot = AsyncMock(return_value=type(
+        "Screen", (), {
+            "screenshot_base64": "c2NyZWVu",
+            "desktop_state": "READY",
+            "active_window": "Terminal",
+        }
+    )())
     mock_computer.terminal = AsyncMock(return_value=ExecResult(
         command="DISPLAY=:99 wmctrl -l 2>/dev/null | grep -v ' -1 '",
         exit_code=0,
         stdout="0x02600003  1 8e8d478afea9 Terminal - root@8e8d478afea9: /\n",
         stderr="",
     ))
-    judge = JudgeAgent(computer_provider=mock_computer)
+    vision_judge = MagicMock()
+    vision_judge.complete = AsyncMock(return_value=type(
+        "Response", (), {
+            "content": '{"verdict":"CONFIRMED","visible_evidence":"Terminal window is visible"}'
+        }
+    )())
+    judge = JudgeAgent(computer_provider=mock_computer, llm_router=vision_judge)
     sub_m = SubMission(goal="Launch terminal window on desktop", plane="gui")
     trace = {
         "action_type": "APP_LAUNCH",

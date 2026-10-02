@@ -152,6 +152,9 @@ class ScreenObservation(BaseModel):
     screenshot_base64: str = ""
     capture_timestamp_ns: int | None = Field(default=None, ge=0)
     capture_age_ms: float | None = Field(default=None, ge=0)
+    controls_age_ms: float | None = Field(default=None, ge=0)
+    perception_version: int = Field(default=0, ge=0)
+    changed_region: tuple[int, int, int, int] | None = None
     width: int = 1920
     height: int = 1080
     active_window: str = "Desktop"

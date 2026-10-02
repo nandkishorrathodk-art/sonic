@@ -9,7 +9,7 @@ from sonic.computer_use.grounding import (
     resolve_ui_target,
 )
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ComputerActionType, ActionExecutionStatus
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
 from sonic.computer.models import ScreenObservation
 
 
@@ -32,6 +32,14 @@ def test_extract_bbox_midpoint_formats():
     mid_scale = extract_bbox_midpoint([100, 900, 300, 950], width=1280, height=800)
     # y coordinates 900, 950 exceed height (800), triggering [0, 1000] normalization
     assert mid_scale[1] == int(((900 + 950) / 2.0 / 1000.0) * 800)
+
+
+def test_grounding_rejects_offscreen_points_instead_of_clamping():
+    assert extract_bbox_midpoint((1280, 400), width=1280, height=800) is None
+    assert extract_bbox_midpoint((400, 800), width=1280, height=800) is None
+    assert extract_bbox_midpoint((1300, 400), width=1280, height=800) is None
+    assert extract_bbox_midpoint("-10, 400", width=1280, height=800) is None
+    assert extract_bbox_midpoint("<|box_start|>(800, 500, 1000, 700)<|box_end|>", width=1280, height=800) == (1152, 480)
 
 
 def test_landmark_substring_collision_prevention():
@@ -78,9 +86,11 @@ async def test_visual_verification_detects_unchanged_screen():
     trace = await agent.execute_action(
         workspace_id="ws-test",
         action_type=ComputerActionType.GUI_CLICK,
-        target_resource="search button",
+        target_resource="500,300",
         payload={"x": 500, "y": 300},
         predicted_outcome="search bar clicked",
     )
 
     assert "[VISUAL VERIFICATION]: Screen state unchanged" in trace.actual_observation
+    assert trace.status == ActionExecutionStatus.UNVERIFIED
+    assert trace.recovery_attempted is False

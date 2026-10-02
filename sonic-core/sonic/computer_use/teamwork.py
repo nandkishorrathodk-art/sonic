@@ -194,7 +194,11 @@ class SubagentTeamworkManager:
             ),
         }
         self.conversations: dict[str, SubagentConversation] = {}
-        self.judge = JudgeAgent(computer_provider=self.computer, judge_id=f"teamwork-judge-{tenant_id}")
+        self.judge = JudgeAgent(
+            computer_provider=self.computer,
+            judge_id=f"teamwork-judge-{tenant_id}",
+            llm_router=self.llm_router,
+        )
         self._baseline_snapshots: dict[str, dict[str, tuple[int, str]]] = {}
 
     # ------------------------------------------------------------------

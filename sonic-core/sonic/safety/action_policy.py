@@ -33,7 +33,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -282,6 +282,10 @@ class ActionPolicy:
             clean_path = str(path or "").strip().replace("\\", "/")
             if not clean_path:
                 return PolicyVerdict(False, f"{action_name} empty path")
+            if os.name != "nt" and PureWindowsPath(clean_path).drive:
+                return PolicyVerdict(
+                    False, f"{action_name} escapes workspace: Windows drive path {path}"
+                )
             resolved = Path(clean_path).expanduser()
             # Resolve strictly=False so a not-yet-written path still confines.
             # On Windows, POSIX paths starting with / return is_absolute() == False.

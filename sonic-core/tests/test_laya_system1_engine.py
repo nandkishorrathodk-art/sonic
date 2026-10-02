@@ -156,3 +156,82 @@ def test_laya_status_reports_last_successful_backend(monkeypatch):
 
     assert result.routing["backend"] == "laya_local"
     assert engine.status()["backend"] == "laya_local"
+
+
+@pytest.mark.no_live_infra
+def test_laya_local_router_auto_routes_language_when_model_is_not_explicit():
+    class _AutoRoutingRouter:
+        received_options: dict[str, object] = {}
+
+        def predict(self, _state, _questions, **options):
+            self.received_options = options
+            return {
+                "answers": {"choice": {"choice": "yes", "probability": 0.8}},
+                "routing": {"model": "multilingual"},
+            }
+
+    router = _AutoRoutingRouter()
+    engine = LayaSystem1Engine(enable_local_model=True)
+    engine._local_router = router
+
+    result = engine.predict(
+        state="texto de teste",
+        questions={
+            "choice": {
+                "type": "choice",
+                "criteria": {"yes": "affirmative", "no": "negative"},
+            }
+        },
+    )
+
+    assert "model" not in router.received_options
+    assert router.received_options["max_len"] == 1024
+    assert result.routing["model"] == "multilingual"
+
+
+@pytest.mark.no_live_infra
+def test_laya_remote_api_receives_no_forced_english_model(monkeypatch):
+    request_payload: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "answers": {"choice": {"choice": "yes", "probability": 0.8}},
+                "routing": {"model": "multilingual", "language": "pt"},
+            }
+
+    class _Client:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, _url, json):
+            request_payload.update(json)
+            return _Response()
+
+    monkeypatch.setattr(laya_engine.httpx, "Client", _Client)
+    engine = LayaSystem1Engine(
+        api_url="http://laya.example.test",
+        enable_local_model=False,
+    )
+
+    result = engine.predict(
+        state="texto de teste",
+        questions={
+            "choice": {
+                "type": "choice",
+                "criteria": {"yes": "affirmative", "no": "negative"},
+            }
+        },
+    )
+
+    assert request_payload["model"] is None
+    assert result.routing["model"] == "multilingual"
