@@ -52,7 +52,6 @@ from sonic.computer_use.scratchpad import HackerScratchpad
 from sonic.computer_use.wire_telemetry import WireTelemetryEngine
 from sonic.llm.prompts import COMPUTER_USE_SYSTEM_PROMPT
 from sonic.logger import get_logger
-from sonic.orchestration.dual_process import DualProcessController
 from sonic.research.failure_budget import FailureBudgetTracker
 from sonic.research.failure_classifier import classify_failure
 
@@ -2208,6 +2207,7 @@ class ComputerUseAgent:
                 skill.can_apply(current_graph)
                 for skill in skill_ledger.verified_skills()
             )
+        from sonic.orchestration.dual_process import DualProcessController
         mode_decision = DualProcessController.decide_from_observation(
             prediction_error=recent_error,
             graph_changed=bool(getattr(self, "experience_records", []) and
