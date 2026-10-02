@@ -49,24 +49,17 @@ import os
 from typing import Any
 
 from sonic.logger import get_logger
-from sonic.safety.action_policy import ActionPolicy, PolicyVerdict
+from sonic.safety.action_policy import (
+    ActionPolicy,
+    PolicyVerdict,
+    _MANDATORY_EGRESS_BLOCKED_NETWORKS,
+)
 from sonic.safety.scope import ScopeChecker
 from sonic.sandbox import egress
 
 logger = get_logger(__name__)
 
 # Mandatory metadata & loopback blocked networks even under private scope
-_METADATA_AND_LOOPBACK = (
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fe80::/10"),
-    ipaddress.ip_network("::ffff:127.0.0.0/104"),
-    ipaddress.ip_network("::ffff:169.254.0.0/112"),
-    ipaddress.ip_network("64:ff9b::7f00:0/104"),
-    ipaddress.ip_network("64:ff9b::a9fe:0/112"),
-)
-
 # Fields whose values determine a verdict. After sealing these MUST NOT change.
 _SEALED_FIELDS = (
     "allowed_types",
@@ -268,30 +261,24 @@ class SealedActionPolicy(ActionPolicy):
     # Egress uses the FROZEN blocked-networks snapshot, not the live module list.
     # ------------------------------------------------------------------
     def _check_egress(self, target: str, label: str) -> PolicyVerdict:
-        host = self._host_of(target).lower().split(":")[0]
-        # Sandbox loopback and local container bindings are always permitted within the container
-        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "0") or host.startswith("127."):
-            return PolicyVerdict(True, "local sandbox loopback allowed")
-
         verdict = self._check_target_and_scope(target, label)
         if verdict is not None:
             return verdict
-        if getattr(self, "allow_private_networks", False):
-            # Cloud Metadata and loopback must ALWAYS remain blocked even under private scope
-            try:
-                ok, reason = egress.is_target_allowed(
-                    target,
-                    blocked_networks=_METADATA_AND_LOOPBACK,
-                )
-                if not ok:
-                    return PolicyVerdict(False, f"{label} egress denied: {reason}")
-            except Exception as e:
-                return PolicyVerdict(False, f"egress check failed: {e}")
-            return PolicyVerdict(True, f"{label} target allowed by private-network scope policy")
+        allow_private = bool(self.allow_private_networks)
+        if label == "security_tool" and self.security_tool_targets:
+            host = self._host_of(target)
+            allow_private = allow_private or host in self.security_tool_targets or target in self.security_tool_targets
+        blocked_networks = self._blocked_networks_snapshot
+        if allow_private:
+            mandatory = {str(network) for network in _MANDATORY_EGRESS_BLOCKED_NETWORKS}
+            blocked_networks = tuple(
+                network for network in self._blocked_networks_snapshot
+                if str(network) in mandatory
+            )
         try:
             ok, reason = egress.is_target_allowed(
                 target,
-                blocked_networks=self._blocked_networks_snapshot,
+                blocked_networks=blocked_networks,
             )
         except Exception as e:
             return PolicyVerdict(False, f"egress check failed: {e}")

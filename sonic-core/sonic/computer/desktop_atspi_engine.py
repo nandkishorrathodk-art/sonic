@@ -5,7 +5,7 @@ Dual-plane native GUI perception engine satisfying Requirement R1:
 - Plane A: Native Linux AT-SPI2 Accessibility Bus + X11 Direct Protocol discovering
   desktop GUI controls (buttons, inputs, menus, windows, panels) with exact pixel
   bounding boxes in < 2ms.
-- Plane B: Chrome DevTools Protocol (CDP) on port 9222 over persistent WebSocket
+- Plane B: browser DevTools Protocol (CDP) on port 9222 over persistent WebSocket
   extracting interactive DOM elements (input, button, select, a, etc.) in < 2ms.
 - Coordinate Translation: Translates browser DOM viewport coordinates to absolute
   desktop screen coordinates using X11 window geometry and window chrome offsets.
@@ -67,7 +67,7 @@ class DesktopControl(BaseModel):
 
 
 class BrowserControl(BaseModel):
-    """An interactive DOM element discovered via Chrome DevTools Protocol (CDP)."""
+    """An interactive DOM element discovered through the browser debugging protocol."""
 
     name: str = Field(default="", description="Inner text, placeholder, or aria-label")
     role: str = Field(default="", description="Role or HTML tag (button, input, link, select, etc.)")
@@ -342,7 +342,7 @@ class X11DirectProtocolParser:
 
 
 # =====================================================================
-# Plane B: Chrome DevTools Protocol (CDP) WebSocket Client
+# Plane B: Browser DevTools Protocol (CDP) WebSocket Client
 # =====================================================================
 
 # Bundled JavaScript query executed in a single roundtrip (< 0.5ms inside V8 engine)
@@ -409,7 +409,7 @@ class DesktopATSPIDOMEngine:
 
     Fulfills Requirement R1:
     - Plane A: Native Linux AT-SPI2 Accessibility Bus + X11 Direct Protocol (< 2ms)
-    - Plane B: Chrome DevTools Protocol (CDP) on port 9222 (< 2ms)
+    - Plane B: Browser DevTools Protocol (CDP) on port 9222 (< 2ms)
     - Screen coordinate translation using exact window geometry and chrome offsets (< 0.1ms)
     - Combined concurrent discovery via asyncio.gather (< 5ms)
     """
@@ -449,8 +449,9 @@ class DesktopATSPIDOMEngine:
         self._mock_plane_a_source: Callable[[], list[DesktopControl]] | None = None
         self._mock_plane_b_source: Callable[[], tuple[list[dict[str, Any]], dict[str, Any]]] | None = None
 
-        # Known browser window geometry
+        # Match the active protocol page to its desktop window by live document title.
         self._browser_window_geometry: WindowGeometry | None = None
+        self._browser_document_title = ""
 
     # -----------------------------------------------------------------
     # Configuration & Test Fixture Injection (Zero Mock Gates)
@@ -491,7 +492,7 @@ class DesktopATSPIDOMEngine:
             controls = self._mock_plane_a_source()
             self._cached_desktop_controls = controls
             self._last_desktop_time = time.perf_counter()
-            self._update_browser_window_from_controls(controls)
+            self._update_browser_window_from_controls(controls, self._browser_document_title)
             return controls
 
         # 2. Container or local shell execution adapter
@@ -535,14 +536,29 @@ class DesktopATSPIDOMEngine:
 
         self._cached_desktop_controls = controls
         self._last_desktop_time = time.perf_counter()
-        self._update_browser_window_from_controls(controls)
+        self._update_browser_window_from_controls(controls, self._browser_document_title)
         return controls
 
-    def _update_browser_window_from_controls(self, controls: list[DesktopControl]) -> None:
-        """Find the browser window geometry from desktop controls to ground DOM coordinates."""
+    def _update_browser_window_from_controls(
+        self,
+        controls: list[DesktopControl],
+        document_title: str,
+    ) -> None:
+        """Match a live document title to its desktop window without application-name guesses."""
+        expected_title = re.sub(r"\s+", " ", document_title).strip().casefold()
+        self._browser_window_geometry = None
+        if not expected_title:
+            return
+
         for c in controls:
-            name_lower = c.name.lower()
-            if any(k in name_lower for k in ("chrome", "chromium", "browser", "navigator")):
+            if c.role.casefold() != "window":
+                continue
+            window_title = re.sub(r"\s+", " ", c.name).strip().casefold()
+            if (
+                window_title == expected_title
+                or window_title.startswith(f"{expected_title} - ")
+                or window_title.startswith(f"{expected_title} — ")
+            ):
                 self._browser_window_geometry = WindowGeometry(
                     window_id=c.window_id,
                     x=c.bbox[0],
@@ -554,7 +570,7 @@ class DesktopATSPIDOMEngine:
                 return
 
     # -----------------------------------------------------------------
-    # Plane B: Chrome DevTools Protocol (CDP) on Port 9222 (< 2ms)
+    # Plane B: Browser DevTools Protocol (CDP) on Port 9222 (< 2ms)
     # -----------------------------------------------------------------
 
     async def inspect_plane_b(self, force_refresh: bool = False) -> list[BrowserControl]:
@@ -566,6 +582,11 @@ class DesktopATSPIDOMEngine:
         # 1. Custom genuine source (used in unit test benchmarks)
         if self._mock_plane_b_source is not None:
             raw_elements, window_metrics = self._mock_plane_b_source()
+            self._browser_document_title = str(window_metrics.get("title", ""))
+            self._update_browser_window_from_controls(
+                self._cached_desktop_controls,
+                self._browser_document_title,
+            )
             controls = self._build_browser_controls(raw_elements, window_metrics)
             self._cached_browser_controls = controls
             self._last_browser_time = time.perf_counter()
@@ -584,7 +605,13 @@ class DesktopATSPIDOMEngine:
                     "outerWidth": result.get("outerWidth", 1280),
                     "outerHeight": result.get("outerHeight", 800),
                     "devicePixelRatio": result.get("devicePixelRatio", 1.0),
+                    "title": result.get("title", ""),
                 }
+                self._browser_document_title = str(window_metrics["title"])
+                self._update_browser_window_from_controls(
+                    self._cached_desktop_controls,
+                    self._browser_document_title,
+                )
                 controls = self._build_browser_controls(raw_elements, window_metrics)
                 self._cached_browser_controls = controls
                 self._last_browser_time = time.perf_counter()
@@ -796,7 +823,7 @@ class DesktopATSPIDOMEngine:
     ) -> tuple[int, int, int, int]:
         """Translate a DOM viewport bounding box to absolute desktop screen coordinates."""
         geo = window_geo or self._browser_window_geometry or WindowGeometry()
-        t_chrome = top_chrome if top_chrome is not None else 72  # Standard Linux Chromium title+url bar
+        t_chrome = top_chrome if top_chrome is not None else 72  # Window title and toolbar area
         l_chrome = left_chrome if left_chrome is not None else 0
         return CoordinateTranslator.translate_dom_to_screen(
             dom_bbox=dom_bbox,

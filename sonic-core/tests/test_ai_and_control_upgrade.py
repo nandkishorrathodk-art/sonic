@@ -16,6 +16,7 @@ Control:
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -724,8 +725,20 @@ def test_action_parser_prevents_exec_command_not_found():
 
 
 def test_clean_terminal_command_strips_exec():
-    """Verify _clean_terminal_command strips spurious _EXEC or EXEC prefixes."""
+    """Verify wrapper markers are removed without inventing successful commands."""
     from sonic.computer_use.agent import ComputerUseAgent
-    assert ComputerUseAgent._clean_terminal_command("_EXEC") == "echo 'ERROR: Empty command' >&2; exit 1"
+
+    assert ComputerUseAgent._clean_terminal_command("_EXEC") == ""
     assert ComputerUseAgent._clean_terminal_command("_EXEC ls -la") == "ls -la"
     assert ComputerUseAgent._clean_terminal_command("EXEC ps aux") == "ps aux"
+
+
+def test_clean_terminal_command_preserves_shell_arguments_and_trailing_operators():
+    from sonic.computer_use.agent import ComputerUseAgent
+
+    command = "printf '%s\\n' 'two words';"
+    assert ComputerUseAgent._clean_terminal_command(command) == command
+    assert ComputerUseAgent._clean_terminal_command(
+        json.dumps({"command": command})
+    ) == command
+    assert ComputerUseAgent._clean_terminal_command(None) == ""

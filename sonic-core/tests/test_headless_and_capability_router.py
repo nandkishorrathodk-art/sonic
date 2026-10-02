@@ -261,6 +261,20 @@ def test_capability_router_action_classification():
         CapabilityRouter.route_action(ComputerActionType.BROWSER_NAVIGATE, {"render_js": True})
         == ExecutionSubstrate.COMPUTER
     )
+    assert (
+        CapabilityRouter.route_action(
+            ComputerActionType.BROWSER_NAVIGATE, {}, requested_plane="gui"
+        )
+        == ExecutionSubstrate.COMPUTER
+    )
+    assert (
+        CapabilityRouter.route_action(
+            ComputerActionType.BROWSER_NAVIGATE,
+            {"interactive": True},
+            requested_plane="headless",
+        )
+        == ExecutionSubstrate.HEADLESS
+    )
 
     # Headless actions -> HEADLESS
     headless_actions = [
