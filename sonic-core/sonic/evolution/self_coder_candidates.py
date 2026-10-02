@@ -127,7 +127,6 @@ class SelfCoderCandidateStore:
     def _remove_worktree(self, path: Path) -> None:
         import gc
         import os
-        import shutil
         import stat
 
 

@@ -216,9 +216,9 @@ async def test_judge_confirms_gui_mission_with_real_window():
     mock_computer.screenshot = AsyncMock(return_value=type(
         "Screen", (), {
             "screenshot_base64": "c2NyZWVu",
-            "capture_age_ms": 1,
-            "desktop_state": "READY",
+            "desktop_state": "INTERACTIVE",
             "active_window": "Terminal",
+            "capture_age_ms": 0,
         }
     )())
     mock_computer.terminal = AsyncMock(return_value=ExecResult(

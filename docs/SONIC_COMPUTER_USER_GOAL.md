@@ -248,3 +248,15 @@ failures in live-container checks (VNC URL availability and workspace file
 write) even though the test helper detected a running workstation container.
 These are not counted as passing. Neither run is live, multi-application
 acceptance evidence.
+
+### Validation snapshot (2026-10-02)
+
+- Backend suite on the development worktree after the post-merge regression
+  fixes: **1,699 passed, 39 skipped**. This is automated regression evidence,
+  not live desktop acceptance.
+- A successful end-to-end task across multiple non-browser GUI applications,
+  with fresh observations, actual worker action receipts and independent Judge
+  confirmation, has **not** yet been demonstrated.
+- The dashboard PNGs in `assets/` are historical UI snapshots and do not show a
+  verified task. The updated architecture SVG is a component/flow overview,
+  not execution evidence.

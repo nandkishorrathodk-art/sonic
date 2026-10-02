@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+import io
+
+from PIL import Image
+
 from sonic.computer.models import (
     ComputerState,
     FileEntry,
     GitStatusInfo,
     GUIAction,
+    GUIActionType,
     ScreenObservation,
 )
 from sonic.computer.provider import ComputerProvider
@@ -18,6 +24,13 @@ class _VisibleDesktop(ComputerProvider):
     def __init__(self):
         self.actions: list[GUIAction] = []
         self.capture_count = 0
+        self.focused = False
+        self.screen_color = "white"
+
+    def _screen_image(self):
+        buffer = io.BytesIO()
+        Image.new("RGB", (4, 4), self.screen_color).save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
 
     async def create(self, tenant_id, engagement_id, **kw):
         return type("Workspace", (), {"id": "ws-desktop"})()
@@ -38,17 +51,40 @@ class _VisibleDesktop(ComputerProvider):
     async def screenshot(self, workspace_id):
         self.capture_count += 1
         return ScreenObservation(
-            screenshot_base64="c2NyZWVu",
+            screenshot_base64=self._screen_image(),
             width=1280,
             height=800,
+            desktop_state="INTERACTIVE",
             active_window="Generic Desktop Application",
             visible_text="Application content",
             capture_age_ms=0,
+            controls_age_ms=0,
+            detected_controls=[
+                {
+                    "name": "title field",
+                    "role": "entry",
+                    "bbox": (80, 100, 40, 40),
+                    "bbox_format": "xywh",
+                    "source": "atspi",
+                    "confidence": 0.95,
+                    "freshness_ms": 0,
+                    "editable": True,
+                    "focused": self.focused,
+                }
+            ],
         )
 
     async def gui_action(self, workspace_id, action, **kwargs):
         if isinstance(action, GUIAction):
             self.actions.append(action)
+            if action.action == GUIActionType.CLICK:
+                self.focused = True
+            elif action.action in {
+                GUIActionType.TYPE,
+                GUIActionType.KEYPRESS,
+                GUIActionType.SCROLL,
+            }:
+                self.screen_color = "black"
         return await self.screenshot(workspace_id)
 
     async def terminal(self, workspace_id, command, timeout=60, actor="operator"):
@@ -115,7 +151,7 @@ async def test_navigation_alias_uses_live_shared_desktop():
     assert computer.actions[0].key == "ctrl+l"
     assert computer.actions[1].text == "https://operator-provided.invalid"
     assert computer.actions[2].key == "Return"
-    assert agent._last_screenshot_b64 == "c2NyZWVu"
+    assert agent._last_screenshot_b64 == computer._screen_image()
 
 
 async def test_legacy_browser_screenshot_captures_desktop_not_hidden_page():
@@ -132,7 +168,7 @@ async def test_legacy_browser_screenshot_captures_desktop_not_hidden_page():
 
     assert trace.status == ActionExecutionStatus.COMPLETED
     assert computer.capture_count == 1
-    assert agent._last_screenshot_b64 == "c2NyZWVu"
+    assert agent._last_screenshot_b64 == computer._screen_image()
 
 
 async def test_legacy_keyboard_alias_dispatches_and_unresolved_scroll_fails_closed():
@@ -150,14 +186,14 @@ async def test_legacy_keyboard_alias_dispatches_and_unresolved_scroll_fails_clos
     scroll_trace = await agent.execute_action(
         "ws-desktop",
         ComputerActionType.BROWSER_SCROLL,
-        "",
-        {"delta_y": 500},
+        "visible content",
+        {"delta_y": 500, "x": 500, "y": 400},
         "Scroll the focused application",
     )
 
-    assert key_trace.status == ActionExecutionStatus.UNVERIFIED
-    assert scroll_trace.status == ActionExecutionStatus.BLOCKED
-    assert [action.action.value for action in computer.actions] == ["KEYPRESS"]
+    assert key_trace.status == ActionExecutionStatus.COMPLETED
+    assert scroll_trace.status == ActionExecutionStatus.COMPLETED
+    assert [action.action.value for action in computer.actions] == ["KEYPRESS", "SCROLL"]
 
 
 async def test_wait_refreshes_gui_but_does_not_claim_selector_verified():

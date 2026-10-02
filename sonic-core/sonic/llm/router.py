@@ -780,7 +780,6 @@ class ModelRouter:
         ).lower()
         if (
             has_images
-            and effective_task != "vision"
             and not self._model_supports_images(active_model_name)
         ):
             primary_request = routed_request.model_copy(deep=True)
@@ -957,7 +956,6 @@ class ModelRouter:
             attempt_model = (attempt_request.model or attempt_provider.default_model).lower()
             if (
                 has_images
-                and effective_task != "vision"
                 and not self._model_supports_images(attempt_model)
             ):
                 for message in attempt_request.messages:

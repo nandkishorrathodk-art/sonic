@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from unittest.mock import patch
 
 import pytest
 
@@ -739,6 +738,8 @@ class TestLessonsLedger:
         def _make_agent():
             a = ComputerUseAgent.__new__(ComputerUseAgent)
             a.computer = _FakeComputer()
+            from sonic.computer_use.perception_bus import PerceptionBus
+            a.perception_bus = PerceptionBus()
             a.llm_router = None
             a.traces = []
             a.history = []

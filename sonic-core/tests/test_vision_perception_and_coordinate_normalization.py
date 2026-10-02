@@ -146,6 +146,7 @@ async def test_fresh_accessibility_state_avoids_image_transfer():
                 "bbox": (30, 40, 90, 70),
                 "bbox_format": "xyxy",
                 "source": "atspi",
+                "confidence": 0.95,
                 "freshness_ms": 10,
             }
         ],
@@ -169,6 +170,8 @@ async def test_fresh_accessibility_state_avoids_image_transfer():
     obs = ComputerWorldObservation(
         screen=ScreenObservation(
             screenshot_base64=fake_b64,
+            desktop_state="INTERACTIVE",
+            capture_age_ms=0,
             controls_age_ms=10,
             width=1280,
             height=800,
@@ -180,6 +183,7 @@ async def test_fresh_accessibility_state_avoids_image_transfer():
                     "bbox": (30, 40, 90, 70),
                     "bbox_format": "xyxy",
                     "source": "atspi",
+                    "confidence": 0.95,
                     "freshness_ms": 10,
                 }
             ],

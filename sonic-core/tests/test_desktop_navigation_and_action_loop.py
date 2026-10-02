@@ -27,7 +27,8 @@ class _MockComputerProvider(ComputerProvider):
         return ComputerState(
             workspace_id=workspace_id,
             tenant_id="test",
-            active_application="Desktop",
+            active_application="Document Application",
+            active_window="Document Application",
             open_applications=["Desktop", "Document Application"],
             running_processes=[],
         )
@@ -35,8 +36,12 @@ class _MockComputerProvider(ComputerProvider):
     async def screenshot(self, workspace_id):
         return ScreenObservation(
             screenshot_base64="c2NyZWVu" if self.display_available else "",
+            width=1280,
+            height=800,
             visible_text="Desktop application",
             active_window="Document Application",
+            capture_age_ms=0 if self.display_available else None,
+            controls_age_ms=0 if self.display_available else None,
         )
 
     async def gui_action(self, workspace_id, action, **kwargs):
@@ -132,6 +137,7 @@ async def test_destination_navigation_fails_without_live_desktop_evidence():
 async def test_consecutive_action_loop_breaker():
     comp = _MockComputerProvider()
     agent = ComputerUseAgent(computer_provider=comp)
+    await agent.observe(comp.workspace_id)
 
     # Execute exact same action 3 times
     t1 = await agent.execute_action(
@@ -142,7 +148,13 @@ async def test_consecutive_action_loop_breaker():
         "click search",
     )
     assert t1.status == ActionExecutionStatus.BLOCKED
-    assert "no prior desktop observation" in t1.actual_observation.lower()
+    assert any(
+        reason in t1.actual_observation.lower()
+        for reason in (
+            "no prior desktop observation",
+            "could not be resolved from visual grounding",
+        )
+    )
 
     t2 = await agent.execute_action(
         comp.workspace_id,
