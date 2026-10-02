@@ -369,6 +369,23 @@ async def test_typing_verification_rejects_wrong_field_targets():
 async def test_typing_verification_accepts_valid_field_and_text():
     provider = _mock_static_gui_provider("diff_screen_3")
     screen_obs = provider.screenshot.return_value
+    screen_obs = screen_obs.model_copy(
+        update={
+            "detected_controls": [
+                {
+                    "name": "search input",
+                    "role": "entry",
+                    "bbox": (220, 160, 80, 40),
+                    "bbox_format": "xywh",
+                    "source": "atspi",
+                    "confidence": 0.95,
+                    "freshness_ms": 0,
+                    "editable": True,
+                    "focused": True,
+                }
+            ]
+        }
+    )
     provider.screenshot.side_effect = [
         screen_obs,
         screen_obs,
@@ -386,7 +403,7 @@ async def test_typing_verification_accepts_valid_field_and_text():
         {"text": "my search query"},
         "Type query",
     )
-    assert trace.status == ActionExecutionStatus.COMPLETED
+    assert trace.status == ActionExecutionStatus.COMPLETED, trace.actual_observation
     assert "Typed 15 chars" in trace.actual_observation
 
 

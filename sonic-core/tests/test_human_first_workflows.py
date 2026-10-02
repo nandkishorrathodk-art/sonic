@@ -8,7 +8,7 @@ independent of Docker and a live display server.
 from __future__ import annotations
 
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ComputerActionType
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
 from sonic.sandbox.provider import ExecResult
 from tests.test_phase4_visible_desktop_actions import _VisibleDesktop
 
@@ -75,6 +75,7 @@ def test_document_workflow_writes_then_reads_real_provider_state():
 def test_gui_workflow_uses_grounded_controls_in_the_shared_desktop():
     computer = _WorkflowComputer()
     agent = ComputerUseAgent(computer_provider=computer)
+    _run(agent.observe(computer.workspace_id))
 
     typed = _run(agent.execute_action(
         computer.workspace_id,
@@ -84,7 +85,7 @@ def test_gui_workflow_uses_grounded_controls_in_the_shared_desktop():
         "Enter the requested document title",
     ))
 
-    assert typed.status == "SUCCESS"
+    assert typed.status == ActionExecutionStatus.COMPLETED
     assert [action.action.value for action in computer.actions] == ["CLICK", "TYPE"]
     assert computer.actions[0].x == 100
     assert computer.actions[1].text == "Quarterly notes"

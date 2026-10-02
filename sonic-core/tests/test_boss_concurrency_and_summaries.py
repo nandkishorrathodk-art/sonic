@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from sonic.computer_use.boss import BossAgent
 from sonic.computer_use.models_boss import Phase, SubMission, SubMissionResult
-from sonic.agents.task_graph import TaskStatus
 
 
 class MockComputerProvider:
@@ -111,7 +110,13 @@ async def test_concurrent_dependency_waves():
     execution_log = []
 
     # Mock _dispatch_sub_agent to simulate asynchronous work and record execution timing
-    async def fake_dispatch(workspace_id, sub_m, phase_callback=None, sub_agent_num=1):
+    async def fake_dispatch(
+        workspace_id,
+        sub_m,
+        phase_callback=None,
+        sub_agent_num=1,
+        interrupt_check=None,
+    ):
         execution_log.append({
             "sub_id": sub_m.id,
             "agent_num": sub_agent_num,
@@ -173,7 +178,13 @@ async def test_shared_desktop_dependency_wave_is_serialized():
     boss = BossAgent(MockComputerProvider(), MockLLMRouter(), max_phases=1, max_parallel_workers=3)
     execution_log = []
 
-    async def fake_dispatch(workspace_id, sub_m, phase_callback=None, sub_agent_num=1):
+    async def fake_dispatch(
+        workspace_id,
+        sub_m,
+        phase_callback=None,
+        sub_agent_num=1,
+        interrupt_check=None,
+    ):
         execution_log.append(time.perf_counter())
         await asyncio.sleep(0.03)
         return SubMissionResult(
@@ -302,4 +313,3 @@ async def test_synthesize_final_report_does_not_label_failed_items_as_verified()
     assert report.thinking_log
     # Final summary should exist and acknowledge execution
     assert report.findings_summary
-

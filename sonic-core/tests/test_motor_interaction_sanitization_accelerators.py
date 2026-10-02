@@ -14,10 +14,12 @@ Verifies:
 
 from __future__ import annotations
 
-import asyncio
+import base64
+import io
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from PIL import Image
 
 from sonic.computer.models import GUIAction, GUIActionType, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
@@ -32,19 +34,59 @@ class _MockMotorComputer:
     def __init__(self):
         self.commands_executed: list[str] = []
         self.gui_actions: list[GUIAction] = []
+        self.focused = False
+        self.typed = ""
+        self.screen_base64 = self._image("white")
         self._docker_exec = AsyncMock(side_effect=self._mock_docker_exec)
         self.gui_action = AsyncMock(side_effect=self._mock_gui_action)
         self.terminal = AsyncMock(side_effect=self._mock_terminal)
-        self.screenshot = AsyncMock(return_value=ScreenObservation(width=1280, height=800))
+        self.screenshot = AsyncMock(side_effect=self._mock_screenshot)
+
+    async def _mock_screenshot(self, workspace_id: str = "") -> ScreenObservation:
+        return ScreenObservation(
+            screenshot_base64=self.screen_base64,
+            width=1280,
+            height=800,
+            desktop_state="INTERACTIVE",
+            active_window="Desktop",
+            capture_age_ms=0,
+            controls_age_ms=0,
+            detected_controls=[
+                {
+                    "name": "input",
+                    "role": "entry",
+                    "bbox": (80, 180, 40, 40),
+                    "bbox_format": "xywh",
+                    "source": "atspi",
+                    "confidence": 0.95,
+                    "freshness_ms": 0,
+                    "editable": True,
+                    "focused": self.focused,
+                }
+            ],
+        )
+    @staticmethod
+    def _image(color: str) -> str:
+        buffer = io.BytesIO()
+        Image.new("RGB", (4, 4), color=color).save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+
     async def _mock_docker_exec(self, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
         self.commands_executed.append(cmd)
+        if "xdotool type" in cmd:
+            self.screen_base64 = self._image("black")
         return (0, "", "")
 
     async def _mock_gui_action(
         self, workspace_id: str, action: GUIAction, actor: str = "operator"
     ) -> ScreenObservation:
         self.gui_actions.append(action)
-        return ScreenObservation(width=1280, height=800)
+        if action.action == GUIActionType.CLICK:
+            self.focused = True
+        elif action.action == GUIActionType.TYPE:
+            self.typed += action.text
+            self.screen_base64 = self._image("black")
+        return await self._mock_screenshot(workspace_id)
 
     async def _mock_terminal(self, workspace_id: str, cmd: str, timeout: int = 60):
         self.commands_executed.append(cmd)
@@ -56,6 +98,12 @@ class _MockMotorComputer:
             open_applications=["Desktop"],
             running_processes=["xvfb"],
         )
+
+    async def list_files(self, workspace_id: str, path: str = "."):
+        return []
+
+    async def git_action(self, workspace_id: str, action: str):
+        return MagicMock()
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +248,7 @@ async def test_agent_gui_type_preserves_existing_field_contents_by_default():
     """Typing into a grounded control must not clear unrelated active content."""
     comp = _MockMotorComputer()
     agent = ComputerUseAgent(computer_provider=comp)
+    await agent.observe("ws-1")
 
     trace = await agent.execute_action(
         "ws-1",
@@ -219,14 +268,19 @@ async def test_agent_gui_type_clears_only_after_grounded_target_is_focused():
     """Explicit replacement clears the selected field after the visible focus click."""
     comp = _MockMotorComputer()
     events: list[tuple[str, object]] = []
-    comp._docker_exec.side_effect = lambda cmd, timeout=60: (
-        events.append(("exec", cmd)) or (0, "", "")
-    )
-    comp.gui_action.side_effect = lambda workspace_id, action, actor="operator": (
+
+    async def record_exec(cmd, timeout=60):
+        events.append(("exec", cmd))
+        return await comp._mock_docker_exec(cmd, timeout)
+
+    async def record_gui_action(workspace_id, action, actor="operator"):
         events.append(("gui", action))
-        or ScreenObservation(width=1280, height=800)
-    )
+        return await comp._mock_gui_action(workspace_id, action, actor)
+
+    comp._docker_exec.side_effect = record_exec
+    comp.gui_action.side_effect = record_gui_action
     agent = ComputerUseAgent(computer_provider=comp)
+    await agent.observe("ws-1")
 
     trace = await agent.execute_action(
         "ws-1",

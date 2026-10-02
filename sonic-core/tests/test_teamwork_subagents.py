@@ -9,7 +9,6 @@ Verifies:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 import subprocess
@@ -286,7 +285,7 @@ async def test_subagent_default_separate_workspace_and_dual_plane_gui_and_termin
     assert conv.effective_workspace_id != ws_id
     assert conv.agent_instance.observe_desktop is True
     assert conv.agent_instance.gui_only is False
-    assert conv.agent_instance.execution_plane == "gui"
+    assert conv.agent_instance.execution_plane == "dual"
     assert conv.verified is True
     assert "dual_plane_result.txt" in conv.merged_files
     assert (ws_dir / "dual_plane_result.txt").read_text(encoding="utf-8") == "GUI + Terminal Dual-Plane Verified"
