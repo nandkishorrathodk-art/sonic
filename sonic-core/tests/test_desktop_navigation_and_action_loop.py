@@ -142,7 +142,7 @@ async def test_consecutive_action_loop_breaker():
         "click search",
     )
     assert t1.status == ActionExecutionStatus.BLOCKED
-    assert "visual grounding" in t1.actual_observation.lower()
+    assert "no prior desktop observation" in t1.actual_observation.lower()
 
     t2 = await agent.execute_action(
         comp.workspace_id,

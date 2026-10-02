@@ -50,6 +50,16 @@ class FalsificationJudge:
         result: ExperimentResult,
     ) -> JudgeEvaluation:
         """Evaluates an experiment outcome and updates hypothesis pair."""
+        if (
+            result.experiment_id != experiment.experiment_id
+            or result.hypothesis_id != experiment.hypothesis_id
+        ):
+            return JudgeEvaluation(
+                verdict=EpistemicVerdict.INCONCLUSIVE,
+                confidence_delta=0.0,
+                reason="Experiment result identifiers do not match the requested experiment.",
+                evidence_valid=False,
+            )
         hyp = self.hypothesis_engine.get(experiment.hypothesis_id)
         if not hyp:
             return JudgeEvaluation(
@@ -81,6 +91,20 @@ class FalsificationJudge:
                 evidence_valid=False,
             )
 
+        if (
+            result.status != "completed"
+            or (
+                result.behavioral_difference_detected
+                and not result.difference_description.strip()
+            )
+        ):
+            return JudgeEvaluation(
+                verdict=EpistemicVerdict.INCONCLUSIVE,
+                confidence_delta=0.0,
+                reason="The experiment did not provide a completed, distinct, described observation.",
+                evidence_valid=False,
+            )
+
         # Rule 2: No behavioral difference between baseline and probe -> Falsifies vulnerability hypothesis
         if not result.behavioral_difference_detected or (
             result.baseline_observation and result.baseline_observation == result.probe_observation
@@ -103,7 +127,27 @@ class FalsificationJudge:
             )
 
         # Rule 3: Concrete behavioral difference + evidence payload present -> Supports hypothesis
-        evidence_present = bool(result.evidence_payload)
+        evidence_present = bool(result.evidence_payload) and not (
+            len(result.evidence_payload) == 1
+            and next(iter(result.evidence_payload)).casefold() in {"placeholder", "mock", "synthetic"}
+        )
+        excerpt = str(
+            result.evidence_payload.get("evidence_excerpt")
+            or result.evidence_payload.get("observed_value")
+            or ""
+        ).strip()
+        evidence_present = (
+            evidence_present
+            and bool(excerpt)
+            and excerpt.casefold() in result.probe_observation.casefold()
+        )
+        if not evidence_present:
+            return JudgeEvaluation(
+                verdict=EpistemicVerdict.INCONCLUSIVE,
+                confidence_delta=0.0,
+                reason="Evidence payload is not bound to the probe observation.",
+                evidence_valid=False,
+            )
         delta = 0.35 if evidence_present else 0.15
         reason = f"Observable behavioral difference confirmed: {result.difference_description}"
 

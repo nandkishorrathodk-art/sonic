@@ -99,7 +99,7 @@ async def test_unchanged_click_is_unverified_without_refocusing_window():
         "Click button",
     )
     assert agent._consecutive_unchanged_screens == 1
-    assert trace1.status == ActionExecutionStatus.UNVERIFIED
+    assert trace1.status == ActionExecutionStatus.FAILED
     assert trace1.recovery_attempted is False
 
     # Re-observation is safe; the watchdog must not inject focus or key input.
@@ -111,7 +111,7 @@ async def test_unchanged_click_is_unverified_without_refocusing_window():
         "Click button again",
     )
     assert agent._consecutive_unchanged_screens == 2
-    assert trace2.status == ActionExecutionStatus.UNVERIFIED
+    assert trace2.status == ActionExecutionStatus.FAILED
     assert "No recovery input was sent" in trace2.actual_observation
     gui_calls = [call.args[1] for call in provider.gui_action.call_args_list]
     assert len(gui_calls) == 2
@@ -134,7 +134,7 @@ async def test_watchdog_never_injects_application_specific_shortcuts():
         "Click stuck element",
     )
     assert agent._consecutive_unchanged_screens == 3
-    assert trace.status == ActionExecutionStatus.UNVERIFIED
+    assert trace.status == ActionExecutionStatus.FAILED
     assert "No recovery input was sent" in trace.actual_observation
     gui_calls = [call.args[1] for call in provider.gui_action.call_args_list]
     assert len(gui_calls) == 1
@@ -177,7 +177,7 @@ async def test_unchanged_focus_click_does_not_send_escape_before_typing():
         "Focus the visible text field",
     )
 
-    assert click_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert click_trace.status == ActionExecutionStatus.FAILED
     assert click_trace.recovery_attempted is False
     assert provider.gui_action.await_count == 1
     assert provider.gui_action.await_args.args[1].action == GUIActionType.CLICK
@@ -221,7 +221,7 @@ async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
     ("updated_text", "changed_region", "expected_status", "expected_changed"),
     [
         ("Document - Saved", None, ActionExecutionStatus.SUCCESS, True),
-        ("Document - Untitled", None, ActionExecutionStatus.UNVERIFIED, False),
+        ("Document - Untitled", None, ActionExecutionStatus.FAILED, False),
         (
             "Document - Untitled",
             (10, 20, 90, 70),

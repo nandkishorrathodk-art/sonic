@@ -206,8 +206,16 @@ def test_mind_mutations_persist_through_the_constructing_store(tmp_path, monkeyp
     persisted = reopened_store.get_mind(being_id)
     assert persisted.idle_cycles_run == 1
     assert persisted.goals_pursued == 2
-    assert persisted.goals_completed == 1
+    assert persisted.goals_completed == 0
     assert persisted.learned_facts == ["local idle fact", "local mission fact"]
+
+    persisted.record_mission_outcome(
+        "verified mission",
+        success=True,
+        summary="Independent verifier confirmed the expected state.",
+        verification_receipt_id="receipt-verified-1",
+    )
+    assert persisted.goals_completed == 1
 
     assert singleton._db.execute(
         "SELECT COUNT(*) FROM being_minds WHERE being_id = ?", (being_id,)

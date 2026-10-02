@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -104,6 +105,11 @@ def test_lessons_ledger_persistence_and_isolation(temp_ledger_dir):
     # Different agent -> isolated (empty)
     ledger_other_agent = LessonsLedger(tenant_id="tenant-a", agent_id="agent-2")
     assert len(ledger_other_agent.all()) == 0
+
+
+def test_lessons_ledger_uses_collision_safe_file_names(temp_ledger_dir):
+    ledger = LessonsLedger(tenant_id="../outside", agent_id="..\\payload")
+    assert Path(ledger._path()).parent == Path(temp_ledger_dir) / "lessons"
 
 
 def test_lessons_deduplication(temp_ledger_dir):

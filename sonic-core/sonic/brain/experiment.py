@@ -53,6 +53,9 @@ class ExperimentDesigner:
     ) -> Experiment:
         """Designs a controlled probe with expected differential markers."""
         ctx = context or {}
+        target = hypothesis.target_asset or ctx.get("target")
+        if not target:
+            raise ValueError("experiment design requires an explicitly observed target")
         v_class = hypothesis.vulnerability_class.lower()
 
         specialist = "web"
@@ -67,11 +70,11 @@ class ExperimentDesigner:
 
         exp = Experiment(
             hypothesis_id=hypothesis.hypothesis_id,
-            target_asset=hypothesis.target_asset or ctx.get("target", "default-target"),
+            target_asset=str(target),
             specialist_type=specialist,
             action_intent=f"Test hypothesis: {hypothesis.statement}",
             parameters={
-                "target": hypothesis.target_asset or ctx.get("target"),
+                "target": str(target),
                 "vulnerability_class": hypothesis.vulnerability_class,
                 "claim_type": hypothesis.claim_type,
                 **ctx,

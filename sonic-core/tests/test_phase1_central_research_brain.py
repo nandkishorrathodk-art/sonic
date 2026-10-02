@@ -105,7 +105,11 @@ def test_falsifier_confirms_when_behavioral_difference_and_evidence():
         probe_observation="HTTP 200 OK: Leaked tenant B order details",
         behavioral_difference_detected=True,
         difference_description="Swapped X-User-ID returned unauthorized data",
-        evidence_payload={"leaked_order_id": 999, "tenant": "B"},
+        evidence_payload={
+            "leaked_order_id": 999,
+            "tenant": "B",
+            "evidence_excerpt": "Leaked tenant B order details",
+        },
     )
     judge.evaluate(exp, res1)
     assert engine.get(h_primary.hypothesis_id).confidence > 0.5
@@ -118,7 +122,11 @@ def test_falsifier_confirms_when_behavioral_difference_and_evidence():
         probe_observation="HTTP 200 OK: Leaked tenant B order details",
         behavioral_difference_detected=True,
         difference_description="Reproduced in clean session",
-        evidence_payload={"leaked_order_id": 999, "reproduced": True},
+        evidence_payload={
+            "leaked_order_id": 999,
+            "reproduced": True,
+            "evidence_excerpt": "Leaked tenant B order details",
+        },
     )
     eval_res2 = judge.evaluate(exp, res2)
 
@@ -153,6 +161,28 @@ def test_falsifier_does_not_classify_empty_completed_result():
     assert evaluation.verdict == EpistemicVerdict.INCONCLUSIVE
     assert evaluation.evidence_valid is False
     assert engine.get(h_primary.hypothesis_id).confidence == 0.5
+
+
+@pytest.mark.no_live_infra
+def test_falsifier_rejects_result_for_another_experiment():
+    engine = HypothesisEngine()
+    hypothesis, _ = engine.create_hypothesis_pair(
+        statement="behavior changes for a specific request",
+        target_asset="/probe",
+    )
+    experiment = ExperimentDesigner.design_for_hypothesis(hypothesis)
+    result = ExperimentResult(
+        experiment_id="different-experiment",
+        hypothesis_id=hypothesis.hypothesis_id,
+        baseline_observation="baseline",
+        probe_observation="changed",
+        behavioral_difference_detected=True,
+        difference_description="value changed",
+        evidence_payload={"evidence_excerpt": "changed"},
+    )
+    verdict = FalsificationJudge(engine).evaluate(experiment, result)
+    assert verdict.verdict == EpistemicVerdict.INCONCLUSIVE
+    assert engine.get(hypothesis.hypothesis_id).confidence == 0.5
 
 
 @pytest.mark.no_live_infra
@@ -196,6 +226,22 @@ def test_dynamic_world_model_state_transitions():
     assert summary["actors_count"] == 1
     assert summary["resources_count"] == 1
     assert summary["transitions_count"] == 1
+
+
+@pytest.mark.no_live_infra
+def test_world_model_rejects_stale_source_state():
+    model = DynamicWorldModel(target="https://app.local")
+    actor = model.register_actor("user")
+    model.register_resource("item", uri="/item", current_state="pending")
+    with pytest.raises(ValueError, match="Stale transition source state"):
+        model.record_transition(
+            source_state="approved",
+            target_state="shipped",
+            action_taken="ship",
+            actor_id=actor.actor_id,
+            resource_id="item",
+        )
+    assert model.transitions == []
 
 
 @pytest.mark.no_live_infra
