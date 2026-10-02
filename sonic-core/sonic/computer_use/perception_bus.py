@@ -12,6 +12,7 @@ The perception bus provides:
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -85,10 +86,26 @@ def _extract_control_data(control: Any) -> dict[str, Any] | None:
         bbox_format = str(control.get("bbox_format") or "xywh").strip().lower()
         raw_attrs = control.get("attributes")
         attrs: dict[str, Any] = dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
-        for k in ("placeholder", "aria-label", "aria_label", "id", "name", "type", "value", "title", "selector"):
-            if k in control and k not in attrs and control[k]:
-                attrs[k] = str(control[k])
+        for k in (
+            "placeholder",
+            "aria-label",
+            "aria_label",
+            "id",
+            "name",
+            "type",
+            "value",
+            "title",
+            "selector",
+            "editable",
+            "focused",
+            "window",
+            "freshness_ms",
+        ):
+            if k in control and k not in attrs and control[k] is not None:
+                attrs[k] = control[k]
         source = str(control.get("source") or "ui_control")
+        confidence = control.get("confidence")
+        confidence_provided = "confidence" in control
     else:
         visible = getattr(control, "visible", True)
         if visible is False:
@@ -99,11 +116,27 @@ def _extract_control_data(control: Any) -> dict[str, Any] | None:
         bbox_format = str(getattr(control, "bbox_format", "xywh") or "xywh").strip().lower()
         raw_attrs = getattr(control, "attributes", None)
         attrs = dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
-        for k in ("placeholder", "aria-label", "aria_label", "id", "name", "type", "value", "title", "selector"):
+        for k in (
+            "placeholder",
+            "aria-label",
+            "aria_label",
+            "id",
+            "name",
+            "type",
+            "value",
+            "title",
+            "selector",
+            "editable",
+            "focused",
+            "window",
+            "freshness_ms",
+        ):
             val = getattr(control, k, None)
-            if val and k not in attrs:
-                attrs[k] = str(val)
+            if val is not None and k not in attrs:
+                attrs[k] = val
         source = str(getattr(control, "source", None) or type(control).__name__)
+        confidence = getattr(control, "confidence", None)
+        confidence_provided = confidence is not None
 
     if not bbox or len(bbox) < 4:
         return None
@@ -141,6 +174,9 @@ def _extract_control_data(control: Any) -> dict[str, Any] | None:
         "bbox": clean_bbox,
         "attributes": attrs,
         "source": source,
+        "confidence": confidence,
+        "confidence_provided": confidence_provided,
+        "freshness_ms": attrs.get("freshness_ms"),
     }
 
 
@@ -495,23 +531,47 @@ class SemanticTargetIndex:
             version = self._version if state_version is None else state_version
             source = source_override or c_data["source"]
             primary_name = c_data["name"] or c_data["attributes"].get("placeholder") or c_data["attributes"].get("aria-label") or c_data["role"]
+            raw_confidence = c_data["confidence"]
+            if c_data["confidence_provided"]:
+                try:
+                    confidence = float(raw_confidence)
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                if not math.isfinite(confidence) or confidence < 0.0 or confidence > 100.0:
+                    confidence = 0.0
+                elif confidence > 1.0:
+                    confidence /= 100.0
+            else:
+                confidence = 0.0 if source.lower() == "ocr" else 0.98
+            confidence = max(0.0, min(1.0, confidence))
             match = TargetMatch(
                 query=primary_name,
                 source=source,
                 bbox=c_data["bbox"],
-                confidence=0.98,
+                confidence=confidence,
                 state_version=version,
                 observed_at_ns=time.perf_counter_ns(),
                 role=c_data["role"],
                 attributes=c_data["attributes"],
             )
-            self.index_match(
-                match,
-                state_version=version,
-                query=primary_name,
-                role=c_data["role"],
-                attributes=c_data["attributes"],
-            )
+            freshness_ms = c_data["freshness_ms"]
+            try:
+                age = None if freshness_ms is None else float(freshness_ms)
+                is_fresh = age is None or (
+                    math.isfinite(age) and 0.0 <= age <= 250.0
+                )
+            except (TypeError, ValueError):
+                is_fresh = False
+            if confidence >= 0.6 and is_fresh:
+                self.index_match(
+                    match,
+                    state_version=version,
+                    query=primary_name,
+                    role=c_data["role"],
+                    attributes=c_data["attributes"],
+                )
+            else:
+                self._matches.append(match)
             return match
 
     def ingest(

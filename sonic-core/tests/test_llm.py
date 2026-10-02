@@ -338,6 +338,19 @@ async def test_multimodal_model_without_tool_use_uses_text_action_fallback():
             description="Choose one action.",
             parameters={"type": "object", "properties": {"action": {"type": "string"}}},
         )],
+        extra_body={
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "computer_action",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}},
+                        "required": ["action"],
+                    },
+                },
+            }
+        },
     )
     text_request = request.model_copy(deep=True)
     text_request.messages[-1].images = []
@@ -350,6 +363,8 @@ async def test_multimodal_model_without_tool_use_uses_text_action_fallback():
 
     kwargs = create.await_args.kwargs
     assert "tools" not in kwargs
+    assert kwargs["extra_body"]["response_format"]["type"] == "json_schema"
+    assert kwargs["extra_body"]["response_format"]["json_schema"]["name"] == "computer_action"
     assert kwargs["messages"][0]["content"][0]["type"] == "image_url"
     assert response.content == "ACTION: GUI_SCREENSHOT"
 

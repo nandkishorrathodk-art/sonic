@@ -2,6 +2,7 @@
 Tests for visual grounding engine (adapted from open-computer-use).
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,6 +13,45 @@ from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.grounding import draw_action_marker, extract_bbox_midpoint
 from sonic.computer_use.models import ComputerActionType
 from sonic.llm.prompts import grounding_user_prompt
+
+
+def _seed_fresh_gui_observation(agent, computer, active_window="Desktop"):
+    before = ScreenObservation(
+        screenshot_base64="fresh-frame",
+        width=1280,
+        height=800,
+        capture_age_ms=0,
+        controls_age_ms=0,
+        active_window=active_window,
+    )
+    after = ScreenObservation(
+        screenshot_base64="changed-frame",
+        width=1280,
+        height=800,
+        capture_age_ms=0,
+        controls_age_ms=0,
+        active_window=active_window,
+    )
+    computer.status = AsyncMock(
+        return_value=SimpleNamespace(
+            active_application=active_window,
+            active_window=active_window,
+        )
+    )
+    computer.screenshot = AsyncMock(return_value=before)
+    if not isinstance(computer.gui_action, AsyncMock):
+        computer.gui_action = AsyncMock(return_value=after)
+    agent._last_world_observation = SimpleNamespace(
+        screen=before,
+        active_application=active_window,
+        perception_version=0,
+        observation_age_ms=0,
+    )
+    agent._last_gui_state_observation = before
+    agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+    agent._last_screenshot_b64 = before.screenshot_base64
+    agent._screen_width = before.width
+    agent._screen_height = before.height
 
 
 def test_extract_bbox_midpoint_box_tags():
@@ -223,10 +263,8 @@ def test_draw_action_marker_styles():
 @pytest.mark.asyncio
 async def test_agent_visual_grounding_click_dispatch():
     mock_computer = MagicMock()
-    mock_computer.gui_action = AsyncMock(return_value=ScreenObservation(screenshot_base64="", width=1280, height=800))
     agent = ComputerUseAgent(computer_provider=mock_computer)
-    agent._screen_width = 1280
-    agent._screen_height = 800
+    _seed_fresh_gui_observation(agent, mock_computer)
 
     trace = await agent.execute_action(
         workspace_id="test-ws",
@@ -249,6 +287,7 @@ async def test_agent_visual_grounding_click_dispatch():
 async def test_agent_click_blocked_when_unresolved():
     mock_computer = MagicMock()
     agent = ComputerUseAgent(computer_provider=mock_computer)
+    _seed_fresh_gui_observation(agent, mock_computer)
     trace = await agent.execute_action(
         workspace_id="test-ws",
         action_type=ComputerActionType.GUI_CLICK,
@@ -268,7 +307,7 @@ async def test_gui_worker_instructs_replanning_after_unresolved_target(monkeypat
     computer = MagicMock()
     agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
     agent.llm_router = MagicMock()
-    agent._last_screenshot_b64 = "fresh-frame"
+    _seed_fresh_gui_observation(agent, computer)
     agent._last_reasoning_perception = {"image_attached": True}
     monkeypatch.setattr(
         agent_module,
@@ -299,9 +338,17 @@ async def test_agent_uses_explicit_payload_pixels_without_semantic_regrounding(m
         active_application="Desktop",
         active_window="Desktop",
     ))
-    computer.gui_action = AsyncMock(return_value=ScreenObservation(width=1280, height=800))
+    computer.gui_action = AsyncMock(
+        return_value=ScreenObservation(
+            screenshot_base64="changed-frame",
+            width=1280,
+            height=800,
+            capture_age_ms=0,
+            controls_age_ms=0,
+        )
+    )
     agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
-    agent._last_screenshot_b64 = "visible-screen"
+    _seed_fresh_gui_observation(agent, computer)
     grounding = AsyncMock(return_value=None)
     monkeypatch.setattr(
         agent_module,
@@ -327,10 +374,8 @@ async def test_agent_uses_explicit_payload_pixels_without_semantic_regrounding(m
 @pytest.mark.asyncio
 async def test_agent_gui_right_click_dispatch():
     mock_computer = MagicMock()
-    mock_computer.gui_action = AsyncMock(return_value=ScreenObservation(screenshot_base64="", width=1280, height=800))
     agent = ComputerUseAgent(computer_provider=mock_computer)
-    agent._screen_width = 1280
-    agent._screen_height = 800
+    _seed_fresh_gui_observation(agent, mock_computer)
 
     trace = await agent.execute_action(
         workspace_id="test-ws",
@@ -357,7 +402,7 @@ async def test_browser_fallback_does_not_type_when_desktop_target_is_unresolved(
     computer = MagicMock()
     computer.gui_action = AsyncMock(return_value=ScreenObservation(width=1280, height=800))
     agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
-    agent._last_screenshot_b64 = "visible-screen"
+    _seed_fresh_gui_observation(agent, computer)
     monkeypatch.setattr(agent_module, "query_multimodal_grounding", AsyncMock(return_value=None))
 
     trace = await agent.execute_action(
@@ -385,7 +430,7 @@ async def test_browser_fallback_selects_grounded_visible_option(monkeypatch):
         ]
     )
     agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
-    agent._last_screenshot_b64 = "initial-screen"
+    _seed_fresh_gui_observation(agent, computer)
     grounding = AsyncMock(side_effect=[(300, 200), (500, 400)])
     monkeypatch.setattr(agent_module, "query_multimodal_grounding", grounding)
 

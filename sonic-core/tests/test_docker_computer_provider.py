@@ -5,6 +5,7 @@ Unit tests for DockerComputerProvider (Native Workstation Engine).
 import ast
 import base64
 import binascii
+import os
 import shutil
 import struct
 import subprocess
@@ -62,6 +63,39 @@ def _workstation_container_up(container_name: str = "sonic-desktop-workstation")
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
+async def test_vnc_url_uses_selected_container_published_host_port():
+    provider = DockerComputerProvider(container_name="isolated-workstation")
+    provider._container_is_running = AsyncMock(return_value=True)
+    provider._resolve_nsi_frame_url = AsyncMock(
+        return_value="http://127.0.0.1:6081/nsi_frame.json"
+    )
+    provider._docker_exec = AsyncMock(return_value=(0, "0", ""))
+
+    url = await provider.get_vnc_url("isolated-workstation")
+
+    assert url == "http://localhost:6081/vnc.html"
+    provider._docker_exec.assert_awaited_once()
+    assert "/6080" in provider._docker_exec.await_args.args[0]
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_vnc_url_fails_closed_without_selected_container_port_binding():
+    provider = DockerComputerProvider(container_name="unpublished-workstation")
+    provider._container_is_running = AsyncMock(return_value=True)
+    provider._resolve_nsi_frame_url = AsyncMock(return_value=None)
+    provider._docker_exec = AsyncMock(return_value=(0, "0", ""))
+
+    assert await provider.get_vnc_url("unpublished-workstation") is None
+    provider._docker_exec.assert_not_awaited()
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.skipif(
+    os.environ.get("SONIC_RUN_LIVE_WORKSTATION") != "1",
+    reason="Live shared workstation test; set SONIC_RUN_LIVE_WORKSTATION=1 to run",
+)
+@pytest.mark.asyncio
 async def test_docker_computer_provider_lifecycle():
     provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
     ws = await provider.create("tenant-1", "eng-1")
@@ -98,6 +132,10 @@ async def test_docker_computer_provider_lifecycle():
 
 
 @pytest.mark.no_live_infra
+@pytest.mark.skipif(
+    os.environ.get("SONIC_RUN_LIVE_WORKSTATION") != "1",
+    reason="Live shared workstation test; set SONIC_RUN_LIVE_WORKSTATION=1 to run",
+)
 @pytest.mark.asyncio
 async def test_docker_computer_provider_files_and_apps():
     provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
@@ -146,6 +184,7 @@ async def test_docker_screenshot_reports_source_frame_age_from_nsi_timestamp():
             "bbox": [100, 200, 180, 230],
             "bbox_format": "xyxy",
             "source": source,
+            "freshness_ms": 0,
         }
         for source in ("ocr", "atspi", "x11")
     ]
@@ -401,27 +440,46 @@ async def test_docker_gui_action_state_falls_back_when_nsi_version_did_not_advan
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
-async def test_docker_screenshot_keeps_capture_age_unknown_for_invalid_clock_data():
+@pytest.mark.parametrize(
+    "invalid_timestamp_ns",
+    [None, time.time_ns() + 60_000_000_000],
+)
+async def test_docker_screenshot_falls_back_for_invalid_capture_timestamp(
+    invalid_timestamp_ns,
+):
     provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
     encoded = _png_base64()
+    fallback_frame = _png_base64(640, 480)
     provider._nsi_request = AsyncMock(return_value={
         "ok": True,
         "b64": encoded,
-        "capture_timestamp_ns": time.time_ns() + 1_000_000_000,
+        "capture_timestamp_ns": invalid_timestamp_ns,
         "detected_controls": [
             {
                 "name": "Submit",
                 "role": "button",
                 "bbox": (10, 10, 40, 30),
                 "source": "atspi",
+                "freshness_ms": 0,
             }
         ],
     })
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        f"___CAPTURE_TIMESTAMP_NS___\n{time.time_ns()}\n{fallback_frame}"
+        "\n___OCR_TSV___\n"
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+        "___ACTIVE_WINDOW___\nFresh fallback\n___OPEN_WINDOWS___\n",
+        "",
+    ))
 
     observation = await provider.screenshot("ws-1")
 
-    assert observation.capture_timestamp_ns is not None
-    assert observation.capture_age_ms is None
+    assert observation.screenshot_base64 == fallback_frame
+    assert observation.active_window == "Fresh fallback"
+    assert observation.capture_age_ms is not None
+    assert observation.capture_age_ms >= 0
+    provider._docker_exec.assert_awaited_once()
 
 
 @pytest.mark.no_live_infra
@@ -503,7 +561,7 @@ async def test_docker_screenshot_falls_back_to_ocr_when_nsi_has_no_controls(monk
 
 
 @pytest.mark.no_live_infra
-def test_nsi_actionable_controls_require_reliable_ocr_or_atspi():
+def test_nsi_actionable_controls_require_fresh_in_bounds_reliable_controls():
     assert not _has_actionable_nsi_controls([
         {
             "name": "Na)",
@@ -511,24 +569,27 @@ def test_nsi_actionable_controls_require_reliable_ocr_or_atspi():
             "bbox": [184, 167, 231, 180],
             "source": "ocr",
             "confidence": 31.0,
+            "freshness_ms": 0,
         }
-    ])
+    ], width=1280, height=800)
     assert not _has_actionable_nsi_controls([
         {
             "name": "workspace",
             "role": "window",
             "bbox": [0, 30, 650, 540],
             "source": "x11",
+            "freshness_ms": 0,
         }
-    ])
+    ], width=1280, height=800)
     assert _has_actionable_nsi_controls([
         {
             "name": "Submit",
             "role": "button",
             "bbox": [10, 10, 40, 30],
             "source": "atspi",
+            "freshness_ms": 0,
         }
-    ])
+    ], width=1280, height=800)
     assert _has_actionable_nsi_controls([
         {
             "name": "File",
@@ -536,8 +597,35 @@ def test_nsi_actionable_controls_require_reliable_ocr_or_atspi():
             "bbox": [10, 10, 40, 30],
             "source": "ocr",
             "confidence": 82.0,
+            "freshness_ms": 0,
         }
-    ])
+    ], width=1280, height=800)
+    assert not _has_actionable_nsi_controls([
+        {
+            "name": "Stale control",
+            "role": "button",
+            "bbox": [10, 10, 40, 30],
+            "source": "atspi",
+            "freshness_ms": 251,
+        }
+    ], width=1280, height=800)
+    assert not _has_actionable_nsi_controls([
+        {
+            "name": "Offscreen control",
+            "role": "button",
+            "bbox": [1270, 790, 1290, 810],
+            "source": "atspi",
+            "freshness_ms": 0,
+        }
+    ], width=1280, height=800)
+    assert not _has_actionable_nsi_controls([
+        {
+            "name": "Unknown-age control",
+            "role": "button",
+            "bbox": [10, 10, 40, 30],
+            "source": "atspi",
+        }
+    ], width=1280, height=800)
 
 
 @pytest.mark.no_live_infra
@@ -749,7 +837,11 @@ async def test_docker_screenshot_does_not_reuse_stale_pixels_after_capture_failu
     provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
     encoded = _png_base64()
     provider._docker_exec = AsyncMock(side_effect=[
-        (0, encoded, ""),
+        (
+            0,
+            f"___CAPTURE_TIMESTAMP_NS___\n{time.time_ns()}\n{encoded}",
+            "",
+        ),
         (126, "", "display unavailable"),
     ])
 

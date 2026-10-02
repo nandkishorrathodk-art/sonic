@@ -99,6 +99,7 @@ export interface CommandResult {
   command: string;
   exit_code: number;
   output: string;
+  stderr?: string;
   execution_environment?: string;
 }
 

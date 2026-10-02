@@ -41,18 +41,19 @@ export function CommandBlock({
   return (
     <div className="my-1 font-mono text-[11px] select-text">
       {/* Command Pill */}
-      <div
-        onClick={() => hasOutput && setExpanded(!expanded)}
-        className={`flex items-start justify-between gap-2.5 px-2.5 py-1.5 rounded-lg border border-ink-800/90 bg-ink-950 hover:bg-ink-900/60 hover:border-ink-700 transition ${
-          hasOutput ? "cursor-pointer" : "cursor-default"
-        } group`}
-        title={hasOutput ? (expanded ? "Click to collapse output" : "Click to view real sandbox output") : undefined}
-      >
+      <div className="flex items-start justify-between gap-2.5 px-2.5 py-1.5 rounded-lg border border-ink-800/90 bg-ink-950 hover:bg-ink-900/60 hover:border-ink-700 transition group">
         <div className="flex items-start gap-2 min-w-0 flex-1">
           <Terminal className="w-3.5 h-3.5 text-muted-dim mt-0.5 shrink-0 group-hover:text-secondary-400 transition" />
-          <span className="text-slate-300 group-hover:text-white break-all leading-snug font-medium">
+          <button
+            type="button"
+            disabled={!hasOutput}
+            aria-expanded={expanded}
+            onClick={() => setExpanded(!expanded)}
+            className="text-left text-slate-300 group-hover:text-white break-all leading-snug font-medium disabled:cursor-default"
+            title={hasOutput ? (expanded ? "Collapse output" : "View sandbox output") : undefined}
+          >
             {command}
-          </span>
+          </button>
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0 ml-2">
@@ -77,13 +78,19 @@ export function CommandBlock({
           </button>
 
           {hasOutput && (
-            <div className="text-muted-dim group-hover:text-muted transition">
+            <button
+              type="button"
+              aria-label={expanded ? "Collapse command output" : "Expand command output"}
+              aria-expanded={expanded}
+              onClick={() => setExpanded(!expanded)}
+              className="text-muted-dim group-hover:text-muted transition"
+            >
               {expanded ? (
                 <ChevronDown className="w-3 h-3" />
               ) : (
                 <ChevronRight className="w-3 h-3" />
               )}
-            </div>
+            </button>
           )}
         </div>
       </div>

@@ -68,6 +68,7 @@ def test_perception_bus_normalizes_explicit_corner_bboxes_before_centering():
                 "bbox": (100, 200, 180, 230),
                 "bbox_format": "xyxy",
                 "source": source,
+                **({"confidence": 95.0} if source == "ocr" else {}),
             }
             for source in ("ocr", "atspi", "x11")
         ],
@@ -91,6 +92,7 @@ def test_observed_matches_returns_only_controls_from_requested_observation():
                 "bbox": (10, 20, 60, 45),
                 "bbox_format": "xyxy",
                 "source": "ocr",
+                "confidence": 82.0,
             }
         ],
     )
@@ -101,10 +103,47 @@ def test_observed_matches_returns_only_controls_from_requested_observation():
     assert matches[0].query == "File"
     assert matches[0].bbox == (10, 20, 50, 25)
     assert matches[0].source == "ocr"
+    assert matches[0].confidence == 0.82
     assert bus.target_index.observed_matches(state_version=first.version + 1) == ()
 
     second = bus.publish(screenshot_base64="frame-b")
     assert bus.target_index.observed_matches(state_version=second.version) == ()
+
+
+def test_perception_bus_does_not_index_low_confidence_or_stale_ocr():
+    bus = PerceptionBus()
+    bus.publish(
+        screenshot_base64="frame",
+        controls=[
+            {
+                "name": "weak-label",
+                "role": "text",
+                "bbox": (1, 1, 20, 10),
+                "source": "ocr",
+                "confidence": 59.0,
+            },
+            {
+                "name": "stale-label",
+                "role": "text",
+                "bbox": (30, 1, 20, 10),
+                "source": "ocr",
+                "confidence": 95.0,
+                "freshness_ms": 251,
+            },
+            {
+                "name": "missing-score",
+                "role": "text",
+                "bbox": (60, 1, 20, 10),
+                "source": "ocr",
+            },
+        ],
+    )
+
+    assert bus.resolve("weak-label") is None
+    assert bus.resolve("stale-label") is None
+    assert bus.resolve("missing-score") is None
+    matches = bus.target_index.observed_matches(state_version=bus.current().version)
+    assert [match.confidence for match in matches] == [0.59, 0.95, 0.0]
 
 
 def test_perception_bus_rejects_invalid_bbox_format_and_empty_rectangles():

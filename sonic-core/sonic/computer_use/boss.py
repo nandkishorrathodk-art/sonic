@@ -769,7 +769,18 @@ class BossAgent:
                             }:
                                 continue
 
-                            trace_status = str(getattr(trace, "status", "")).upper()
+                            trace_status = getattr(trace, "status", "")
+                            if hasattr(trace_status, "value"):
+                                trace_status = trace_status.value
+                            trace_status = str(trace_status).upper()
+                            if (
+                                self.requested_plane == "gui"
+                                and str(action_type).upper().startswith(
+                                    ("GUI_", "APP_", "BROWSER_")
+                                )
+                                and getattr(trace, "state_changed", None) is not True
+                            ):
+                                continue
                             if trace_status in ("SUCCESS", "COMPLETED", "VERIFIED") or (
                                 getattr(trace, "exit_code", None) == 0
                                 and trace_status not in ("FAILED", "BLOCKED")

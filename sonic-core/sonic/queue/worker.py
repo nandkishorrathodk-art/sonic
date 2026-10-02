@@ -38,11 +38,14 @@ class SonicWorker:
         self._running = False
         self._queue_initialized = False
         self._tools: dict[str, Any] = {}
+        self._tool_registry_error: Exception | None = None
         try:
             from sonic.tools.registry import build_security_tools
             self._tools = build_security_tools(self.provider)
-        except Exception:
+        except Exception as exc:
             self._tools = {}
+            self._tool_registry_error = exc
+            logger.error("security_tool_registry_initialization_failed", error=str(exc))
         self.browser = ContainerizedBrowser(self.provider)
 
     async def execute_job(self, job: Job) -> Job:
@@ -81,7 +84,18 @@ class SonicWorker:
             elif job.job_type == JobType.AGENT_STEP:
                 result_data = await self._run_agent_step(job)
             else:
-                result_data = {"status": "unsupported_job_type"}
+                raise ValueError(f"Unsupported job type: {job.job_type.value}")
+
+            result_status = str(result_data.get("status", "")).lower()
+            if (
+                result_data.get("success") is False
+                or result_status in {"failed", "error", "blocked", "timed_out", "cancelled", "unsupported_job_type"}
+            ):
+                raise RuntimeError(
+                    result_data.get("error")
+                    or result_data.get("error_message")
+                    or "Job handler reported unsuccessful completion"
+                )
 
             job.status = JobStatus.SUCCEEDED
             job.result = result_data
@@ -119,7 +133,22 @@ class SonicWorker:
         return job
 
     async def _run_tool_job(self, job: Job) -> dict:
+        if self._tool_registry_error is not None:
+            raise RuntimeError("Security tool registry is unavailable") from self._tool_registry_error
         tool_name = job.payload.get("tool_name", "").lower()
+        target = str(job.payload.get("target") or "").strip()
+        scope_config = job.payload.get("scope")
+        if not target or not isinstance(scope_config, dict):
+            raise ValueError("Tool job is missing its validated target or engagement scope")
+        from sonic.sandbox.egress import is_target_allowed
+        from sonic.safety.scope import get_scope_checker
+
+        if not get_scope_checker().is_target_in_scope(target, scope_config):
+            raise PermissionError("Tool target is outside the queued engagement scope")
+        allowed, reason = is_target_allowed(target)
+        if not allowed:
+            raise PermissionError(f"Tool target is blocked by egress policy: {reason}")
+
         tool = self._tools.get(tool_name) if self._tools else None
 
         if tool:
@@ -143,6 +172,8 @@ class SonicWorker:
             if res.status == ToolStatus.FAILED:
                 raise RuntimeError(f"Tool execution failed: {res.error_message or res.raw_stderr}")
 
+            if res.error_message:
+                raise RuntimeError(f"Tool execution returned an error: {res.error_message}")
             return {
                 "tool": tool_name,
                 "status": res.status.value,
@@ -153,29 +184,8 @@ class SonicWorker:
                 "evidence_count": len(res.evidence),
             }
 
-        if self._tools and tool_name not in self._tools:
+        if tool is None:
             raise ValueError(f"Unknown security tool '{tool_name}'")
-
-        # Direct execution via sandbox provider terminal
-        target = job.payload.get("target", "")
-        cmd = f"{tool_name} {target}".strip()
-        res = await self.provider.execute(job.workspace_id, cmd, timeout=job.timeout_seconds)
-        if getattr(res, "exit_code", None) == 126:
-            raise RuntimeError(f"Tool execution blocked: {getattr(res, 'stderr', '') or 'exit code 126'}")
-        if getattr(res, "exit_code", None) != 0:
-            raise RuntimeError(
-                f"Tool execution failed with exit code {getattr(res, 'exit_code', None)}: "
-                f"{getattr(res, 'stderr', '')}"
-            )
-        return {
-            "tool": tool_name,
-            "status": "success" if getattr(res, "exit_code", None) == 0 else "failed",
-            "exit_code": getattr(res, "exit_code", None),
-            "findings_count": 0,
-            "parsed_data": [],
-            "metrics": {},
-            "evidence_count": 0,
-        }
 
     async def _run_browser_job(self, job: Job) -> dict:
         raw_actions = job.payload.get("actions", [])
@@ -292,9 +302,14 @@ class SonicWorker:
 
         # Execute the agent
         result = await agent.run(agent_task)
+        if agent.status != "completed":
+            raise RuntimeError(
+                f"Agent step did not complete successfully: {agent.status}"
+            )
 
         # Wrap result in AgentOutput-compatible structure
         return {
+            "success": True,
             "agent_type": agent_type,
             "agent_id": agent.agent_id,
             "task_id": job.task_id,

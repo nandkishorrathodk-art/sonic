@@ -48,16 +48,26 @@ class DummyComputerProvider:
 
     async def screenshot(self, workspace_id):
         return ScreenObservation(
-            screenshot_base64="",
-            active_window="Desktop",
+            screenshot_base64="fresh-frame",
+            active_window="Chromium",
             width=1920,
             height=1080,
             visible_text="Desktop",
+            capture_age_ms=0,
+            controls_age_ms=0,
         )
 
     async def gui_action(self, workspace_id, action):
         self.gui_actions_taken.append(action)
-        return ScreenObservation(visible_text="", width=1920, height=1080)
+        return ScreenObservation(
+            screenshot_base64="after-frame",
+            active_window="Chromium",
+            visible_text="",
+            width=1920,
+            height=1080,
+            capture_age_ms=0,
+            controls_age_ms=0,
+        )
 
     async def status(self, workspace_id):
         return ComputerState(
@@ -93,6 +103,8 @@ class TransientScreenshotProvider(DummyComputerProvider):
                 active_window="Desktop",
                 width=1920,
                 height=1080,
+                capture_age_ms=0,
+                controls_age_ms=0,
             )
         return ScreenObservation(
             screenshot_base64="valid-frame",
@@ -131,6 +143,8 @@ class StateOnlyObservationProvider(DummyComputerProvider):
                     "bbox": (30, 40, 90, 70),
                     "bbox_format": "xyxy",
                     "source": "atspi",
+                    "confidence": 0.95,
+                    "freshness_ms": 0,
                 }
             ],
             desktop_state="STATE_ONLY",
@@ -452,6 +466,7 @@ def test_inject_replan_includes_failed_commands_to_avoid():
 async def test_plane_separation_in_observations():
     provider = DummyComputerProvider()
     agent = ComputerUseAgent(computer_provider=provider)
+    await agent.observe("ws-1")
 
     # 1. GUI Action does NOT write to _last_action_output
     trace_gui = await agent.execute_action(
@@ -561,6 +576,7 @@ async def test_visual_grounding_unresolved_blocks_without_blind_click(monkeypatc
     from unittest.mock import AsyncMock
     provider = DummyComputerProvider()
     agent = ComputerUseAgent(computer_provider=provider)
+    await agent.observe("ws-1")
 
     # Force visual grounding to fail (return None)
     import sonic.computer_use.agent as agent_module

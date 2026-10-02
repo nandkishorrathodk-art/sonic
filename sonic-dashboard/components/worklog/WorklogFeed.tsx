@@ -228,12 +228,16 @@ function ProbeProposalCard({
 
 function SubReportCard({ item }: { item: WorklogItem }) {
   const [expanded, setExpanded] = useState(false);
-  const isSuccess = item.success !== false && !item.content?.toLowerCase().includes("subagent execution failed");
+  const failedText = Boolean(item.content?.toLowerCase().includes("subagent execution failed"));
+  const isSuccess = item.success === true && !failedText;
+  const isFailure = item.success === false || failedText;
   const subNum = item.sub_agent_number ?? item.title?.match(/SubAgent #(\d+)/)?.[1] ?? "";
 
   return (
     <div className="my-2 rounded-xl border border-ink-750 bg-ink-850/80 p-3 text-xs shadow-sm transition hover:border-ink-700">
-      <div
+      <button
+        type="button"
+        aria-expanded={expanded}
         className="flex items-center justify-between cursor-pointer select-none"
         onClick={() => setExpanded(!expanded)}
       >
@@ -246,19 +250,21 @@ function SubReportCard({ item }: { item: WorklogItem }) {
             className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-medium ${
               isSuccess
                 ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                : isFailure
+                  ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                  : "bg-amber-500/10 text-amber-300 border border-amber-500/20"
             }`}
           >
-            {isSuccess ? "SUCCESS" : "FAILED"}
+            {isSuccess ? "SUCCESS" : isFailure ? "FAILED" : "UNVERIFIED"}
           </span>
         </div>
         <div className="flex items-center gap-2 text-muted-dim text-[11px]">
           {item.duration_seconds ? <span>{item.duration_seconds}s</span> : null}
-          <button type="button" className="p-0.5 hover:text-white transition">
+          <span className="p-0.5 hover:text-white transition">
             {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-          </button>
+          </span>
         </div>
-      </div>
+      </button>
 
       {item.goal && (
         <div className="mt-2 text-[11.5px] text-muted-bright bg-ink-900/60 p-2 rounded-lg border border-ink-800/80">

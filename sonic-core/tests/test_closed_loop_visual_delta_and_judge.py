@@ -9,6 +9,7 @@ Covers:
 4. BossAgent not advancing phases on actions_taken > 0 when all actions failed.
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +23,7 @@ from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionType,
     ComputerDecisionTrace,
+    ComputerWorldObservation,
 )
 from sonic.computer_use.models_boss import SubMission, SubMissionResult
 
@@ -41,16 +43,35 @@ def _keep_visual_grounding_offline(monkeypatch):
 def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
     """Mock provider that always returns the exact same screenshot hash."""
     provider = AsyncMock()
+    provider.observe_state = None
+    controls = [
+        {
+            "name": name,
+            "role": "entry",
+            "bbox": (220, 160, 80, 40),
+            "bbox_format": "xywh",
+            "source": "atspi",
+            "confidence": 0.95,
+            "freshness_ms": 0,
+            "editable": True,
+            "focused": True,
+        }
+        for name in ("text field", "search input", "input_box")
+    ]
     screen_obs = ScreenObservation(
         width=1280,
         height=800,
         screenshot_base64=screen_b64,
-        active_window="Desktop",
+        active_window="TextEditor",
+        capture_age_ms=0,
+        controls_age_ms=0,
+        detected_controls=controls,
     )
     provider.screenshot.return_value = screen_obs
     provider.gui_action.return_value = screen_obs
     provider.status.return_value = MagicMock(
         active_application="TextEditor",
+        active_window="TextEditor",
         open_applications=["TextEditor"],
         running_processes=["gedit"],
     )
@@ -67,7 +88,7 @@ def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
 async def test_unchanged_click_is_unverified_without_refocusing_window():
     provider = _mock_static_gui_provider("fixed_screen_hash_123")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    agent._last_screenshot_b64 = "fixed_screen_hash_123"
+    await agent.observe("ws-1")
 
     # An unchanged frame cannot prove whether a click focused a control.
     trace1 = await agent.execute_action(
@@ -101,7 +122,7 @@ async def test_unchanged_click_is_unverified_without_refocusing_window():
 async def test_watchdog_never_injects_application_specific_shortcuts():
     provider = _mock_static_gui_provider("fixed_screen_hash_456")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    agent._last_screenshot_b64 = "fixed_screen_hash_456"
+    await agent.observe("ws-1")
     agent._consecutive_unchanged_screens = 2  # Already at 2
 
     # An unchanged frame in an arbitrary application must not cause Alt+F.
@@ -124,7 +145,6 @@ async def test_watchdog_never_injects_application_specific_shortcuts():
 async def test_watchdog_aborts_run_mission_before_burning_quota():
     provider = _mock_static_gui_provider("perpetually_stuck_pixels")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    agent._last_screenshot_b64 = "perpetually_stuck_pixels"
 
     # Mock choose_action to repeatedly attempt GUI_CLICK
     async def _mock_choose(goal, obs, step):
@@ -147,7 +167,7 @@ async def test_watchdog_aborts_run_mission_before_burning_quota():
 async def test_unchanged_focus_click_does_not_send_escape_before_typing():
     provider = _mock_static_gui_provider("unchanged_dialog_frame")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    agent._last_screenshot_b64 = "unchanged_dialog_frame"
+    await agent.observe("ws-1")
 
     click_trace = await agent.execute_action(
         "ws-1",
@@ -167,7 +187,7 @@ async def test_unchanged_focus_click_does_not_send_escape_before_typing():
 async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
     provider = _mock_static_gui_provider("unchanged_input_frame")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    agent._last_screenshot_b64 = "unchanged_input_frame"
+    await agent.observe("ws-1")
 
     typing_trace = await agent.execute_action(
         "ws-1",
@@ -237,11 +257,17 @@ async def test_state_only_gui_receipt_verifies_delta_without_screenshot(
 
     provider = StateReceiptProvider()
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    agent._last_observed_screen = ScreenObservation(
+    snapshot = agent.perception_bus.publish(
+        width=1280,
+        height=800,
+        active_window="Document",
+        controls=[],
+    )
+    screen = ScreenObservation(
         screenshot_base64="",
         capture_age_ms=20,
         controls_age_ms=15,
-        perception_version=1,
+        perception_version=snapshot.version,
         width=1280,
         height=800,
         active_window="Document",
@@ -249,6 +275,15 @@ async def test_state_only_gui_receipt_verifies_delta_without_screenshot(
         detected_controls=[],
         desktop_state="STATE_ONLY",
     )
+    agent._last_world_observation = ComputerWorldObservation(
+        screen=screen,
+        active_application="Document",
+        perception_version=snapshot.version,
+        observation_age_ms=20,
+    )
+    agent._last_observed_screen = screen
+    agent._last_gui_state_observation = screen
+    agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
 
     trace = await agent.execute_action(
         "ws-1",
@@ -275,6 +310,7 @@ async def test_state_only_gui_receipt_verifies_delta_without_screenshot(
 async def test_typing_verification_rejects_garbage_and_sentinel_text():
     provider = _mock_static_gui_provider("diff_screen_1")
     agent = ComputerUseAgent(computer_provider=provider)
+    await agent.observe("ws-1")
 
     garbage_payloads = [
         {"text": "undefined"},
@@ -294,13 +330,17 @@ async def test_typing_verification_rejects_garbage_and_sentinel_text():
             "Type into input",
         )
         assert trace.status == ActionExecutionStatus.BLOCKED, f"Payload {p} was not fail-closed: {trace.status}"
-        assert "[TYPING VERIFICATION FAILED]" in trace.actual_observation
+        assert (
+            "[TYPING VERIFICATION FAILED]" in trace.actual_observation
+            or "fresh accessibility evidence did not identify" in trace.actual_observation
+        )
 
 
 @pytest.mark.asyncio
 async def test_typing_verification_rejects_wrong_field_targets():
     provider = _mock_static_gui_provider("diff_screen_2")
     agent = ComputerUseAgent(computer_provider=provider)
+    await agent.observe("ws-1")
 
     wrong_targets = [
         "submit button",
@@ -319,14 +359,25 @@ async def test_typing_verification_rejects_wrong_field_targets():
             f"Type into {target}",
         )
         assert trace.status == ActionExecutionStatus.BLOCKED, f"Target {target} was not fail-closed: {trace.status}"
-        assert "[TYPING VERIFICATION FAILED]" in trace.actual_observation
-        assert "wrong field" in trace.actual_observation.lower()
+        assert (
+            "[TYPING VERIFICATION FAILED]" in trace.actual_observation
+            or "fresh accessibility evidence did not identify" in trace.actual_observation
+        )
 
 
 @pytest.mark.asyncio
 async def test_typing_verification_accepts_valid_field_and_text():
     provider = _mock_static_gui_provider("diff_screen_3")
+    screen_obs = provider.screenshot.return_value
+    provider.screenshot.side_effect = [
+        screen_obs,
+        screen_obs,
+        screen_obs.model_copy(
+            update={"screenshot_base64": "diff_screen_3_after_typing"}
+        ),
+    ]
     agent = ComputerUseAgent(computer_provider=provider)
+    await agent.observe("ws-1")
 
     trace = await agent.execute_action(
         "ws-1",

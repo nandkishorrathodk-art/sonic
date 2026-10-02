@@ -412,6 +412,46 @@ async def test_boss_does_not_replan_after_screenshot_only_worker():
 
 
 @pytest.mark.asyncio
+async def test_boss_does_not_replan_after_unverified_gui_action_without_state_change():
+    boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=MagicMock())
+    first_phase = Phase(
+        phase_number=1,
+        name="Create",
+        sub_missions=[
+            SubMission(id="sub-create", goal="create a folder in the GUI", plane="gui")
+        ],
+    )
+    failed_result = SubMissionResult(
+        sub_mission_id="sub-create",
+        goal="create a folder in the GUI",
+        success=False,
+        status="FAILED",
+        actions_taken=1,
+        traces=[
+            _make_trace(
+                action_type=ComputerActionType.GUI_CLICK,
+                target="Location Selector",
+            )
+        ],
+        findings_summary="The proposed click produced no verified desktop change.",
+    )
+
+    with patch.object(boss, "_strategic_decomposition", AsyncMock(return_value=first_phase)), \
+         patch.object(boss, "_dispatch_sub_agent", AsyncMock(return_value=failed_result)), \
+         patch.object(boss, "_aggregate_findings", AsyncMock(return_value="")), \
+         patch.object(boss, "_check_objective_complete", AsyncMock(return_value=(False, ""))), \
+         patch.object(boss, "_plan_next_phase", AsyncMock()) as plan_next:
+        report = await boss.run(
+            workspace_id="ws-1",
+            objective="create a folder in the GUI",
+            requested_plane="gui",
+        )
+
+    assert len(report.phases) == 1
+    plan_next.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_boss_task_graph_orders_forward_dependencies_and_tracks_worker_ids():
     boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=MagicMock())
     inspect = SubMission(

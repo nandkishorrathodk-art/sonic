@@ -174,6 +174,16 @@ acceptance remains the evidence required for stronger claims.
   causes an on-demand visual capture when a live workspace is available.
 - Unresolved visual targets remain blocked rather than falling back to guessed
   landmarks.
+- `GUI_TYPE` requires a current, uniquely resolved AT-SPI editable control;
+  OCR-only labels and coordinates without an editable-control match are not
+  sufficient. Any supplied point must fall inside that control. SONIC clicks
+  the control, obtains a fresh observation that confirms the same control has
+  keyboard focus, and only then types. OCR controls retain their own confidence
+  and freshness metadata; missing/low confidence or stale controls are not
+  indexed as actionable targets.
+- GUI action selection uses a single JSON-schema response contract. It does
+  not simultaneously advertise native function calling to models whose
+  configured capabilities do not declare tool use.
 
 This is a state-feed and conditional image-transfer slice, not a complete
 real-time event subscription. A live multi-application acceptance task has not

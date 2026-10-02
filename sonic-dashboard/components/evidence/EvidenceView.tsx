@@ -18,9 +18,16 @@ export function EvidenceView({ sessionId = "default" }: { sessionId?: string }) 
       ]);
       const missionEvidence = (missionData.evidence || []).map((item: any) => ({
         ...item,
-        title: `${item.tool} · ${item.status}`,
-        target: item.target || "Agent desktop / authorized target",
-        severity: item.verified ? "VERIFIED" : "UNVERIFIED",
+        title:
+          item.title ||
+          `${item.tool || item.source || item.kind || "Mission evidence"} · ${
+            item.status || item.verification_status || "status unavailable"
+          }`,
+        target: item.target || "Target not recorded",
+        severity:
+          item.verified === true || item.verification_status === "verified"
+            ? "VERIFIED"
+            : "UNVERIFIED",
       }));
       setFindings([...(globalData.findings || []), ...missionEvidence]);
     } catch (err: any) {

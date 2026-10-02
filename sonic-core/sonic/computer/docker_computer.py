@@ -17,6 +17,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -162,7 +163,13 @@ def _validated_png_dimensions(encoded: Any) -> tuple[int, int] | None:
     return dimensions
 
 
-def _has_actionable_nsi_controls(controls: list[Any]) -> bool:
+def _has_actionable_nsi_controls(
+    controls: list[Any],
+    *,
+    width: int,
+    height: int,
+    max_age_ms: float = 250.0,
+) -> bool:
     for control in controls:
         if not isinstance(control, dict):
             continue
@@ -174,20 +181,35 @@ def _has_actionable_nsi_controls(controls: list[Any]) -> bool:
             or len(bbox) != 4
         ):
             continue
+        try:
+            x1, y1, x2, y2 = (float(value) for value in bbox)
+            freshness_ms = float(control.get("freshness_ms"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not all(math.isfinite(value) for value in (x1, y1, x2, y2, freshness_ms))
+            or freshness_ms < 0
+            or freshness_ms > max_age_ms
+            or x1 < 0
+            or y1 < 0
+            or x2 > width
+            or y2 > height
+            or x2 <= x1
+            or y2 <= y1
+        ):
+            continue
         if control.get("source") == "atspi":
             return True
         if control.get("source") != "ocr" or control.get("role") == "window":
             continue
         try:
             confidence = float(control.get("confidence", 0))
-            x1, y1, x2, y2 = (float(value) for value in bbox)
         except (TypeError, ValueError):
             continue
         if (
-            confidence >= 60
+            math.isfinite(confidence)
+            and confidence >= 60
             and sum(character.isalpha() for character in name) >= 3
-            and x2 > x1
-            and y2 > y1
         ):
             return True
     return False
@@ -476,16 +498,21 @@ class DockerComputerProvider(ComputerProvider):
 
     async def get_vnc_url(self, workspace_id: str) -> str | None:
         # Fail-closed: a stream URL is only real when the container actually
-        # runs and a VNC/noVNC listener is reachable on the configured port.
+        # runs, its noVNC listener is reachable, and that container's published
+        # port can be resolved without crossing into another desktop session.
         if not await self._container_is_running():
             return None
-        port = os.environ.get("SONIC_WORKSTATION_VNC_PORT", "6080")
+        frame_url = await self._resolve_nsi_frame_url()
+        port_match = re.search(r":(\d+)/nsi_frame\.json$", frame_url or "")
+        if port_match is None:
+            return None
+        published_port = port_match.group(1)
         code, out, _ = await self._docker_exec(
-            f"if (exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null; then echo 0; else echo 1; fi",
+            "if (exec 3<>/dev/tcp/127.0.0.1/6080) 2>/dev/null; then echo 0; else echo 1; fi",
             timeout=8,
         )
         if code == 0 and out.strip() == "0":
-            return f"http://localhost:{port}/vnc.html"
+            return f"http://localhost:{published_port}/vnc.html"
         return None
 
     async def get_stream_url(self, workspace_id: str) -> str | None:
@@ -648,6 +675,8 @@ class _State:
         self.ocr_error = ""
         self.ocr_retry_after = 0.0
         self.ocr_retry_delay = 1.0
+        self.last_ocr_timestamp_ns = 0
+        self.last_atspi_timestamp_ns = 0
         self.last_env_ts = 0.0
         self.last_apps_ts = 0.0
 
@@ -811,7 +840,18 @@ def _atspi_and_cdp():
                             if cp:
                                 rc = cp.get_extents(Atspi.CoordType.SCREEN)
                                 if rc and rc.width > 4 and rc.height > 4 and rc.x >= 0 and rc.y >= 0:
-                                    ctrls.append({"name": nm, "role": rn, "bbox": [int(rc.x), int(rc.y), int(rc.x + rc.width), int(rc.y + rc.height)], "bbox_format": "xyxy", "source": "atspi"})
+                                    states = n.get_state_set()
+                                    editable = states.contains(Atspi.StateType.EDITABLE)
+                                    focused = states.contains(Atspi.StateType.FOCUSED)
+                                    ctrls.append({
+                                        "name": nm,
+                                        "role": rn,
+                                        "bbox": [int(rc.x), int(rc.y), int(rc.x + rc.width), int(rc.y + rc.height)],
+                                        "bbox_format": "xyxy",
+                                        "source": "atspi",
+                                        "editable": bool(editable),
+                                        "focused": bool(focused),
+                                    })
                         for ci in range(min(n.get_child_count(), 16)):
                             ch = n.get_child_at_index(ci)
                             if ch: st.append((ch, dp + 1))
@@ -855,13 +895,31 @@ def _fast_retina_worker():
                 olines = list(S.cached_ocr_lines)
                 actrls = list(getattr(S, "cached_atspi_controls", []))
                 ptxt = getattr(S, "cached_page_txt", "")
+                now_ns = time.time_ns()
+                fresh_controls = []
+                for control in actrls + wctrls + octrls:
+                    control = dict(control)
+                    source = str(control.get("source", "")).casefold()
+                    source_timestamp = (
+                        S.last_ocr_timestamp_ns
+                        if source == "ocr"
+                        else S.last_atspi_timestamp_ns
+                        if source == "atspi"
+                        else now_ns
+                    )
+                    control["freshness_ms"] = (
+                        max(0.0, (now_ns - source_timestamp) / 1_000_000)
+                        if source_timestamp
+                        else None
+                    )
+                    fresh_controls.append(control)
                 vparts = []
                 if aw and aw != "Desktop": vparts.append(f"Active Window: {aw}")
                 if ows: vparts.append(f"Open Windows: {', '.join(ows)}")
                 if ptxt: vparts.append(ptxt)
                 if olines: vparts.append("Screen OCR Text: " + " | ".join(olines))
                 S.visible_text = "\n".join(vparts)
-                S.detected_controls = actrls + wctrls + octrls
+                S.detected_controls = fresh_controls
                 S.controls_timestamp_ns = time.time_ns()
                 S.version += 1
                 width, height = img.size if img is not None else (0, 0)
@@ -948,6 +1006,7 @@ def _ocr_and_semantic_worker():
                         S.ocr_error = ocr_error
                         if ocr_succeeded:
                             S.tile_hashes = nh
+                            S.last_ocr_timestamp_ns = time.time_ns()
                             S.ocr_retry_after = 0.0
                             S.ocr_retry_delay = 1.0
                         else:
@@ -959,6 +1018,7 @@ def _ocr_and_semantic_worker():
             with S.lock:
                 S.cached_atspi_controls = actrls
                 S.cached_page_txt = ptxt
+                S.last_atspi_timestamp_ns = time.time_ns()
             now = time.time()
             if now - S.last_env_ts > 1.5:
                 S.last_env_ts = now
@@ -1285,7 +1345,14 @@ while True:
             if nsi_data and nsi_data.get("ok") and nsi_dimensions is not None
             else []
         )
-        has_actionable_nsi_controls = _has_actionable_nsi_controls(nsi_controls)
+        has_actionable_nsi_controls = bool(
+            nsi_dimensions
+            and _has_actionable_nsi_controls(
+                nsi_controls,
+                width=nsi_dimensions[0],
+                height=nsi_dimensions[1],
+            )
+        )
         if nsi_data and nsi_data.get("ok") and nsi_dimensions is not None:
             nsi_ocr_error = nsi_data.get("ocr_error")
             if nsi_ocr_error:
@@ -1298,29 +1365,31 @@ while True:
             if (
                 not isinstance(capture_timestamp_ns, int)
                 or isinstance(capture_timestamp_ns, bool)
-                or capture_timestamp_ns < 0
+                or capture_timestamp_ns <= 0
             ):
                 capture_timestamp_ns = None
             capture_age_ms = nsi_data.get("capture_age_ms")
-            if isinstance(capture_timestamp_ns, int) and not isinstance(capture_timestamp_ns, bool):
+            if capture_timestamp_ns is not None:
                 age_ns = time.time_ns() - capture_timestamp_ns
                 capture_age_ms = (
-                    max(capture_age_ms, age_ns / 1_000_000)
+                    max(
+                        float(capture_age_ms),
+                        age_ns / 1_000_000,
+                    )
                     if isinstance(capture_age_ms, (int, float))
                     and not isinstance(capture_age_ms, bool)
+                    and math.isfinite(capture_age_ms)
                     and capture_age_ms >= 0
                     and age_ns >= 0
                     else age_ns / 1_000_000 if age_ns >= 0 else None
                 )
-            elif (
-                not isinstance(capture_age_ms, (int, float))
-                or isinstance(capture_age_ms, bool)
-                or capture_age_ms < 0
-            ):
+            else:
                 capture_age_ms = None
             nsi_frame_is_fresh = (
-                capture_age_ms is None
-                or capture_age_ms <= _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+                isinstance(capture_age_ms, (int, float))
+                and not isinstance(capture_age_ms, bool)
+                and math.isfinite(capture_age_ms)
+                and 0 <= capture_age_ms <= _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
             )
             if has_actionable_nsi_controls and nsi_frame_is_fresh:
                 obs = ScreenObservation(
@@ -1528,6 +1597,24 @@ while True:
             age_ns = time.time_ns() - capture_timestamp_ns
             if age_ns >= 0:
                 capture_age_ms = age_ns / 1_000_000
+        if (
+            fallback_dimensions is not None
+            and (
+                capture_age_ms is None
+                or not math.isfinite(capture_age_ms)
+                or capture_age_ms < 0
+                or capture_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+            )
+        ):
+            logger.warning(
+                "desktop_screenshot_capture_timestamp_unusable",
+                capture_timestamp_ns=capture_timestamp_ns,
+                capture_age_ms=capture_age_ms,
+            )
+            b64 = ""
+            detected_controls = []
+            visible_text = "Desktop capture unavailable: frame freshness could not be verified."
+            fallback_dimensions = None
 
         obs = ScreenObservation(
             screenshot_base64=b64,

@@ -446,6 +446,7 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
                 "scope_verified": False,
                 "created_at": "",
             },
+            "last_mission_outcome": None,
             "mission": {
                 "mission_id": "",
                 "objective": "",
@@ -1106,6 +1107,7 @@ async def delete_workstation_session(
                     "scope_verified": False,
                     "created_at": "",
                 },
+                "last_mission_outcome": None,
                 "mission": {
                     "mission_id": "",
                     "objective": "",
@@ -3429,6 +3431,38 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             )
                             report = boss_report
                             summary_msg = report.findings_summary
+                            mission_outcome = {
+                                "status": str(
+                                    getattr(boss_report, "status", "INCOMPLETE")
+                                ).upper(),
+                                "completed_at": _timestamp(),
+                                "objective": clean_prompt,
+                                "summary": str(
+                                    summary_msg
+                                    or "Mission ended without a summary."
+                                ),
+                                "total_phases": int(
+                                    getattr(boss_report, "total_phases", 0) or 0
+                                ),
+                                "total_sub_agents": int(
+                                    getattr(boss_report, "total_sub_agents", 0)
+                                    or 0
+                                ),
+                                "total_actions": int(
+                                    getattr(boss_report, "total_actions", 0) or 0
+                                ),
+                            }
+                            state["last_mission_outcome"] = mission_outcome
+                            mission_state = state.get("mission")
+                            if (
+                                isinstance(mission_state, dict)
+                                and mission_state.get("status") == "RUNNING"
+                                and mission_state.get("objective") == clean_prompt
+                            ):
+                                mission_state.update(mission_outcome)
+                                mission_state["outcome_summary"] = (
+                                    mission_outcome["summary"]
+                                )
 
                             boss_waiting_human = (
                                 getattr(boss_report, "waiting_for_human", False) is True
@@ -3455,7 +3489,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 state["current_action"] = "Agent paused by user."
                             else:
                                 state["status"] = "IDLE"
-                                state["current_action"] = "Ready when you are."
+                                state["current_action"] = (
+                                    f"Mission {mission_outcome['status'].lower()}: "
+                                    f"{mission_outcome['summary'][:240]}"
+                                    if mission_outcome
+                                    else "Ready when you are."
+                                )
+                            _persist_workstation_state()
 
                             try:
                                 boss_success = str(getattr(boss_report, "status", "")).upper() == "COMPLETE"

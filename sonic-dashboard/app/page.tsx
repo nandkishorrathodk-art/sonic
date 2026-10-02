@@ -102,6 +102,7 @@ export default function SonicDevinWorkstation() {
   }, []);
 
   const [sessionList, setSessionList] = useState<SessionItem[]>([]);
+  const [sessionListError, setSessionListError] = useState<string | null>(null);
   const abortPollRef = useRef<boolean>(false);
   const activePromptSessionRef = useRef<string | null>(null);
   const fetchGenerationRef = useRef(0);
@@ -124,6 +125,7 @@ export default function SonicDevinWorkstation() {
         const rawSessions = await api.listSessions();
         const sessions = normalizeSessionList(rawSessions);
         setSessionList(sessions);
+        setSessionListError(null);
         if (
           targetSession === "fresh" &&
           !state?.desktop?.workspace_id
@@ -134,8 +136,8 @@ export default function SonicDevinWorkstation() {
             return;
           }
         }
-      } catch {
-        // keep current list safely on error
+      } catch (err: any) {
+        setSessionListError(err.message || "Could not load sessions.");
       }
     } catch (err: any) {
       setConnectionStatus("OFFLINE");
@@ -294,7 +296,10 @@ export default function SonicDevinWorkstation() {
       try {
         const rawSessions = await api.listSessions();
         setSessionList(normalizeSessionList(rawSessions));
-      } catch {}
+        setSessionListError(null);
+      } catch (err: any) {
+        setSessionListError(err.message || "Could not load sessions.");
+      }
     } catch (err: any) {
       alert(`Execution error: ${err.message}`);
     } finally {
@@ -308,7 +313,12 @@ export default function SonicDevinWorkstation() {
     setCommandLogs((prev) => [...prev, `sonic@workstation:~$ ${cmd}`]);
     try {
       const res = await api.executeCommand(cmd, sessionId);
-      if (res?.output) setCommandLogs((prev) => [...prev, res.output.trim()]);
+      const receipt = [
+        `Exit code: ${res?.exit_code ?? "unknown"}`,
+        res?.output?.trim(),
+        res?.stderr?.trim() ? `stderr:\n${res.stderr.trim()}` : "",
+      ].filter(Boolean).join("\n");
+      setCommandLogs((prev) => [...prev, receipt]);
       await fetchWorkstationData(sessionId);
       return res;
     } catch (err: any) {
@@ -350,6 +360,7 @@ export default function SonicDevinWorkstation() {
           sidebarOpen={sidebarOpen}
           setSidebarOpen={setSidebarOpen}
           sessions={sessionList}
+          sessionsError={sessionListError}
           currentSessionId={sessionId}
           onSelectSession={(id) => {
             abortPollRef.current = true;
