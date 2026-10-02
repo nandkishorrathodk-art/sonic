@@ -1102,6 +1102,8 @@ class TestReasoningPrompt:
         assert payload == {}
         assert expected == "Refresh the visible desktop"
         assert request.tools is None
+        assert request.task_type == "computer_use"
+        assert request.reasoning_effort is None
         assert request.extra_body["response_format"]["type"] == "json_schema"
         assert agent._last_thought == ""
 

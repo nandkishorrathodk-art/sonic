@@ -793,6 +793,60 @@ async def test_docker_screenshot_parses_capture_timestamp_from_fallback_capture(
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
+async def test_slow_fallback_ocr_refreshes_pixels_and_discards_stale_controls():
+    provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
+    initial_frame = _png_base64()
+    refreshed_frame = _png_base64(640, 480)
+    ocr_header = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\t"
+        "width\theight\tconf\ttext\n"
+    )
+    provider._nsi_request = AsyncMock(side_effect=[
+        {
+            "ok": True,
+            "b64": initial_frame,
+            "capture_timestamp_ns": time.time_ns(),
+            "capture_age_ms": 0,
+            "detected_controls": [],
+        },
+        {
+            "ok": True,
+            "b64": refreshed_frame,
+            "capture_timestamp_ns": time.time_ns(),
+            "capture_age_ms": 0,
+            "controls_timestamp_ns": time.time_ns(),
+            "controls_age_ms": 0,
+            "version": 4,
+            "active_window": "Workspace",
+            "detected_controls": [],
+        },
+    ])
+    stale_capture_timestamp_ns = time.time_ns() - 10_000_000_000
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        (
+            f"___CAPTURE_TIMESTAMP_NS___\n{stale_capture_timestamp_ns}\n"
+            f"{initial_frame}\n___OCR_TSV___\n{ocr_header}"
+            "5\t1\t1\t1\t1\t1\t100\t200\t80\t30\t95\tStale\n"
+            "___OCR_EXIT___\n0,0\n"
+            "___ACTIVE_WINDOW___\nOld Window\n___OPEN_WINDOWS___\n"
+        ),
+        "",
+    ))
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.screenshot_base64 == refreshed_frame
+    assert observation.capture_age_ms is not None
+    assert observation.capture_age_ms <= 2_000
+    assert observation.active_window == "Workspace"
+    assert observation.detected_controls == []
+    assert observation.visible_text == ""
+    assert observation.desktop_state == "INTERACTIVE"
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
 async def test_docker_screenshot_merges_tesseract_layout_passes_without_duplicate_controls():
     provider = DockerComputerProvider(container_name="sonic-desktop-workstation")
     encoded = _png_base64()

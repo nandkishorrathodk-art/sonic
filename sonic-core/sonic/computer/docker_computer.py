@@ -1611,6 +1611,107 @@ while True:
                 capture_timestamp_ns=capture_timestamp_ns,
                 capture_age_ms=capture_age_ms,
             )
+            fallback_b64 = b64
+            if code == 0 and fallback_b64:
+                refreshed_nsi = await self._nsi_request(
+                    {"cmd": "frame"},
+                    timeout=2.5,
+                )
+                refreshed_b64 = (
+                    str(refreshed_nsi.get("b64") or "")
+                    if refreshed_nsi and refreshed_nsi.get("ok")
+                    else ""
+                )
+                refreshed_dimensions = _validated_png_dimensions(refreshed_b64)
+                refreshed_timestamp_ns = (
+                    refreshed_nsi.get("capture_timestamp_ns")
+                    if refreshed_nsi
+                    else None
+                )
+                refreshed_age_ms = None
+                if (
+                    isinstance(refreshed_timestamp_ns, int)
+                    and not isinstance(refreshed_timestamp_ns, bool)
+                    and refreshed_timestamp_ns > 0
+                ):
+                    age_ns = time.time_ns() - refreshed_timestamp_ns
+                    reported_age = refreshed_nsi.get("capture_age_ms")
+                    if age_ns >= 0:
+                        measured_age = age_ns / 1_000_000
+                        refreshed_age_ms = (
+                            max(float(reported_age), measured_age)
+                            if isinstance(reported_age, (int, float))
+                            and not isinstance(reported_age, bool)
+                            and math.isfinite(reported_age)
+                            and reported_age >= 0
+                            else measured_age
+                        )
+
+                if (
+                    refreshed_dimensions is not None
+                    and refreshed_age_ms is not None
+                    and refreshed_age_ms <= _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+                ):
+                    refreshed_controls_age_ms = None
+                    controls_timestamp_ns = refreshed_nsi.get(
+                        "controls_timestamp_ns"
+                    )
+                    if (
+                        isinstance(controls_timestamp_ns, int)
+                        and not isinstance(controls_timestamp_ns, bool)
+                        and controls_timestamp_ns > 0
+                    ):
+                        controls_age_ns = time.time_ns() - controls_timestamp_ns
+                        if controls_age_ns >= 0:
+                            refreshed_controls_age_ms = controls_age_ns / 1_000_000
+
+                    same_frame = refreshed_b64 == fallback_b64
+                    if same_frame:
+                        refreshed_controls = detected_controls
+                        refreshed_visible_text = visible_text
+                        refreshed_controls_age_ms = refreshed_age_ms
+                    elif (
+                        refreshed_controls_age_ms is not None
+                        and refreshed_controls_age_ms <= 250
+                    ):
+                        refreshed_controls = list(
+                            refreshed_nsi.get("detected_controls") or []
+                        )
+                        refreshed_visible_text = str(
+                            refreshed_nsi.get("visible_text") or ""
+                        )
+                    else:
+                        refreshed_controls = []
+                        refreshed_visible_text = ""
+
+                    obs = ScreenObservation(
+                        screenshot_base64=refreshed_b64,
+                        capture_timestamp_ns=refreshed_timestamp_ns,
+                        capture_age_ms=refreshed_age_ms,
+                        controls_age_ms=refreshed_controls_age_ms,
+                        perception_version=int(
+                            refreshed_nsi.get("version") or 0
+                        ),
+                        width=refreshed_dimensions[0],
+                        height=refreshed_dimensions[1],
+                        active_window=str(
+                            refreshed_nsi.get("active_window") or "Desktop"
+                        ),
+                        visible_text=refreshed_visible_text,
+                        detected_controls=refreshed_controls,
+                        desktop_state="INTERACTIVE",
+                    )
+                    self._last_screenshot = obs
+                    self._last_screenshot_time = asyncio.get_event_loop().time()
+                    logger.info(
+                        "desktop_screenshot_refreshed_after_slow_ocr",
+                        container=self.container_name,
+                        ocr_controls_reused=same_frame,
+                        controls_age_ms=refreshed_controls_age_ms,
+                        capture_age_ms=round(refreshed_age_ms, 1),
+                    )
+                    return obs
+
             b64 = ""
             detected_controls = []
             visible_text = "Desktop capture unavailable: frame freshness could not be verified."

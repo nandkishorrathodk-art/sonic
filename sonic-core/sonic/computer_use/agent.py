@@ -2899,7 +2899,11 @@ class ComputerUseAgent:
                 Message(role=MessageRole.SYSTEM, content=system_prompt),
                 Message(role=MessageRole.USER, content=user_text, images=images),
             ],
-            task_type="computer_use" if images else "reasoning",
+            task_type=(
+                "computer_use"
+                if images or self._gui_action_contract_active()
+                else "reasoning"
+            ),
             max_tokens=1024 if images else 2048,
             # The configured vision model may not support function calling.
             # GUI decisions use the provider-neutral JSON-schema response
@@ -2907,7 +2911,11 @@ class ComputerUseAgent:
             # tool-call protocol at the same time.
             tools=None,
             # Concise action selection for real-time computer use (< 3s per step).
-            reasoning_effort=None if images else "medium",
+            reasoning_effort=(
+                None
+                if images or self._gui_action_contract_active()
+                else "medium"
+            ),
             extra_body=(
                 {
                     "response_format": {
