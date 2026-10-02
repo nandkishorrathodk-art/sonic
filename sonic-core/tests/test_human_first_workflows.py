@@ -39,6 +39,23 @@ class _WorkflowComputer(_VisibleDesktop):
             return result
         return ExecResult(command=command, exit_code=0, stdout="ready", stderr="")
 
+    async def screenshot(self, workspace_id):
+        screen = await super().screenshot(workspace_id)
+        screen.controls_age_ms = 0
+        screen.detected_controls = [
+            {
+                "name": "title field",
+                "role": "entry",
+                "bbox": (90, 110, 200, 25),
+                "source": "atspi",
+                "confidence": 0.98,
+                "freshness_ms": 0,
+                "editable": True,
+                "focused": self.focused,
+            }
+        ]
+        return screen
+
 
 def _run(coro):
     import asyncio
@@ -85,7 +102,7 @@ def test_gui_workflow_uses_grounded_controls_in_the_shared_desktop():
         "Enter the requested document title",
     ))
 
-    assert typed.status == ActionExecutionStatus.COMPLETED
+    assert typed.status == ActionExecutionStatus.COMPLETED, typed.actual_observation
     assert [action.action.value for action in computer.actions] == ["CLICK", "TYPE"]
     assert computer.actions[0].x == 100
     assert computer.actions[1].text == "Quarterly notes"

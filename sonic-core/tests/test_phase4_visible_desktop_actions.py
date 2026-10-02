@@ -58,20 +58,6 @@ class _VisibleDesktop(ComputerProvider):
             active_window="Generic Desktop Application",
             visible_text="Application content",
             capture_age_ms=0,
-            controls_age_ms=0,
-            detected_controls=[
-                {
-                    "name": "title field",
-                    "role": "entry",
-                    "bbox": (80, 100, 40, 40),
-                    "bbox_format": "xywh",
-                    "source": "atspi",
-                    "confidence": 0.95,
-                    "freshness_ms": 0,
-                    "editable": True,
-                    "focused": self.focused,
-                }
-            ],
         )
 
     async def gui_action(self, workspace_id, action, **kwargs):

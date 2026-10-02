@@ -129,7 +129,6 @@ class SelfCoderCandidateStore:
         import os
         import stat
 
-
         gc.collect()
         if path.exists():
             try:

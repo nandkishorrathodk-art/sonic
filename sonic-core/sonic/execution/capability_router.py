@@ -70,6 +70,7 @@ class CapabilityRouter:
         cls,
         action_type: ComputerActionType | str,
         payload: dict[str, Any] | None = None,
+        requested_plane: str | None = None,
     ) -> ExecutionSubstrate:
         """
         Classifies an action into either COMPUTER (Workstation) or HEADLESS (Operator Toolkit) substrate.
@@ -101,6 +102,10 @@ class CapabilityRouter:
         """
         val = action_type.value if hasattr(action_type, "value") else str(action_type)
         payload = payload or {}
+        plane = (requested_plane or "").strip().lower()
+
+        if plane not in ("", "auto", "gui", "headless"):
+            raise ValueError(f"unsupported requested execution plane: {requested_plane}")
 
         # Graphical desktop actions
         if val.startswith("GUI_"):
@@ -120,6 +125,10 @@ class CapabilityRouter:
 
         # Navigation: headless fetch suffices unless full GUI/interactive is explicitly requested
         if val == "BROWSER_NAVIGATE":
+            if plane == "gui":
+                return ExecutionSubstrate.COMPUTER
+            if plane == "headless":
+                return ExecutionSubstrate.HEADLESS
             if payload.get("headless_only") is True:
                 return ExecutionSubstrate.HEADLESS
             if (

@@ -230,6 +230,22 @@ class TestGUIActionDispatch:
         provider.gui_action.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_terminal_execution_preserves_quotes_and_trailing_semicolon(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        command = "printf '%s\\n' 'two words';"
+
+        await agent.execute_action(
+            "ws-1",
+            ComputerActionType.TERMINAL_EXEC,
+            command,
+            {"command": command},
+            "Print the argument",
+        )
+
+        assert provider.terminal.await_args.args[1] == command
+
+    @pytest.mark.asyncio
     async def test_gui_execution_plane_blocks_terminal_but_keeps_gui_actions_available(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(
@@ -775,6 +791,16 @@ class TestGUIActionDispatch:
         )
         assert trace.status == "SUCCESS"
         assert "Scrolled" in trace.actual_observation
+
+    @pytest.mark.asyncio
+    async def test_gui_scroll_requires_explicit_coordinates_and_delta(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        trace = await agent.execute_action(
+            "ws-1", ComputerActionType.GUI_SCROLL, "screen", {}, "Scroll down"
+        )
+        assert trace.status == "BLOCKED"
+        provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_gui_screenshot_dispatches(self):

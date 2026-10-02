@@ -21,7 +21,12 @@ from sonic.computer.docker_computer import (
     _get_display,
     _has_actionable_nsi_controls,
 )
-from sonic.computer.models import GUIAction, GUIActionType, ScreenObservation
+from sonic.computer.models import (
+    ComputerWorkspaceStatus,
+    GUIAction,
+    GUIActionType,
+    ScreenObservation,
+)
 
 
 def _png_base64(width: int = 1280, height: int = 800) -> str:
@@ -1137,18 +1142,52 @@ async def test_daytona_computer_display_and_launch_quoting(monkeypatch):
     monkeypatch.setenv("DISPLAY", ":1")
     assert provider._get_display("ws-1") == ":1"
 
-    provider.terminal = AsyncMock(return_value=ExecResult(command="", exit_code=0, stdout="", stderr=""))
+    provider.terminal = AsyncMock(
+        side_effect=[
+            ExecResult(command="", exit_code=0, stdout="321\n", stderr=""),
+            ExecResult(command="", exit_code=0, stdout="654\n", stderr=""),
+        ]
+    )
     success = await provider.launch_application("ws-1", "chromium https://target.local")
     assert success is True
     provider.terminal.assert_called_once()
     called_cmd = provider.terminal.call_args[0][1]
-    expected_spawn = "DISPLAY=:1 nohup chromium https://target.local >/dev/null 2>&1 &"
-    assert called_cmd == expected_spawn
+    assert "DISPLAY=:1 nohup chromium https://target.local" in called_cmd
+    assert "kill -0 \"$app_pid\"" in called_cmd
+    assert "printf '%s\\n' \"$app_pid\"" in called_cmd
+    assert provider._active_windows.get("ws-1") is None
 
     # Also test special characters quoting
     provider.terminal.reset_mock()
     success2 = await provider.launch_application("ws-1", "chromium 'https://target.local/search?q=1&v=2'")
     assert success2 is True
     called_cmd2 = provider.terminal.call_args[0][1]
-    expected_spawn2 = "DISPLAY=:1 nohup chromium 'https://target.local/search?q=1&v=2' >/dev/null 2>&1 &"
-    assert called_cmd2 == expected_spawn2
+    assert (
+        "DISPLAY=:1 nohup chromium 'https://target.local/search?q=1&v=2'" in called_cmd2
+    )
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_daytona_destroy_failure_keeps_workspace_tracked(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONIC_WORKSTATION_STATE_PATH", str(tmp_path / "state.json"))
+    provider = DaytonaComputerProvider(api_key="")
+    workspace = SimpleNamespace(
+        id="sandbox-1",
+        tenant_id="tenant-a",
+        status=ComputerWorkspaceStatus.READY,
+    )
+
+    class Sandbox:
+        async def delete(self):
+            raise RuntimeError("delete failed")
+
+    provider.workspaces[workspace.id] = workspace
+    provider._sandboxes[workspace.id] = Sandbox()
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        await provider.destroy(workspace.id)
+
+    assert workspace.status == ComputerWorkspaceStatus.DEGRADED
+    assert provider.workspaces[workspace.id] is workspace
+    assert provider._sandboxes[workspace.id] is not None

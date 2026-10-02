@@ -96,7 +96,6 @@ def test_14_artificial_blocks_removed():
         ("GIT_DIFF", "repo", {}),
         ("GIT_BRANCH", "main", {"branch": "main"}),
         ("GIT_COMMIT", "repo", {"message": "feat: add SONIC README and don't break 'x' support"}),
-        ("GIT_PUSH", "origin", {"remote": "origin", "branch": "main"}),
         ("BROWSER_NAVIGATE", "https://git.sonic.test/signup", {"url": "https://git.sonic.test/signup"}),
         ("BROWSER_NAVIGATE", "https://social.sonic.test/signup", {"url": "https://social.sonic.test/signup"}),
         ("BROWSER_SELECT", "select#month", {"selector": "select#month", "value": "5"}),
@@ -106,6 +105,22 @@ def test_14_artificial_blocks_removed():
     ]:
         verdict = policy.evaluate(action_type, target, payload)
         assert verdict.allowed, f"Expected {action_type} ({target}) to be allowed, got: {verdict.reason}"
+
+    unresolved_push = policy.evaluate(
+        "GIT_PUSH", "origin", {"remote": "origin", "branch": "main"}
+    )
+    assert not unresolved_push.allowed
+    assert "resolvable remote URL" in unresolved_push.reason
+
+    validated_push = policy.evaluate(
+        "GIT_PUSH",
+        "origin",
+        {
+            "remote_url": "https://git.sonic.test/sonic/project.git",
+            "branch": "main",
+        },
+    )
+    assert validated_push.allowed, validated_push.reason
 
     # 2. Normal shell app management and build commands are L0_SAFE
     assert classify_command_risk("pkill -9 x-www-browser") == RiskLevel.L0_SAFE
