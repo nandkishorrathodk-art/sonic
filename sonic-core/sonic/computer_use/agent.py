@@ -3557,7 +3557,7 @@ class ComputerUseAgent:
         elif action_type in (ComputerActionType.GUI_TYPE, ComputerActionType.BROWSER_TYPE):
             payload = {"text": payload_str.strip('"\' ')} if payload_str.strip() not in ("{}", "") else {}
         elif action_type == ComputerActionType.TERMINAL_EXEC:
-            cleaned_cmd = payload_str.strip('"\' ').strip().rstrip(',;').strip()
+            cleaned_cmd = ComputerUseAgent._clean_terminal_command(payload_str)
             payload = {"command": cleaned_cmd} if cleaned_cmd not in ("{}", "") else {}
         elif action_type == ComputerActionType.FILE_WRITE:
             payload = {}
@@ -3605,8 +3605,9 @@ class ComputerUseAgent:
         if target.startswith("{"):
             tgt_dict = _extract_payload_dict(target)
             if "command" in tgt_dict:
-                payload.setdefault("command", str(tgt_dict["command"]).strip().rstrip(',;').strip())
-                target = str(tgt_dict["command"]).strip().rstrip(',;').strip().split()[0]
+                target_command = ComputerUseAgent._clean_terminal_command(tgt_dict["command"])
+                payload.setdefault("command", target_command)
+                target = target_command.split()[0] if target_command.split() else ""
             elif "text" in tgt_dict:
                 payload.setdefault("text", str(tgt_dict["text"]))
                 target = ""
@@ -3691,32 +3692,20 @@ class ComputerUseAgent:
                         # Avoid taking '_EXEC' as a command when action was 'TERMINAL_EXEC'
                         if prefix == "TERMINAL" and act_field.upper().startswith("TERMINAL_EXEC"):
                             continue
-                        tail = act_field[len(prefix):].strip(" :").strip().rstrip(',;').strip()
+                        tail = act_field[len(prefix):].strip(" :").strip()
                         if tail and tail.upper() not in ("_EXEC", "EXEC", "COMMAND", "RUN", "SHELL", "BASH"):
                             raw_cmd = tail
                             break
-            if not raw_cmd or str(raw_cmd).lower() in ("none", "null", "") or str(raw_cmd).strip().upper() in ("_EXEC", "EXEC"):
-                fallback_cmd = target if target and target != default_file and not target.startswith("{") else "echo 'ERROR: Empty command payload' >&2; exit 1"
-                payload["command"] = str(fallback_cmd).strip().rstrip(',;').strip()
-            else:
-                payload["command"] = str(raw_cmd).strip().rstrip(',;').strip()
-            if payload.get("command"):
-                cmd_str = str(payload["command"]).strip().rstrip(',;').strip()
-                cmd_str = re.sub(r'^(?:(?:command|cmd|bash|shell|terminal_exec|terminal|target|target_resource)\s*:\s*)+', '', cmd_str, flags=re.IGNORECASE).strip().rstrip(',;').strip()
-                cmd_str = re.sub(r'^(?:[a-zA-Z0-9_\-\.]+(?:-terminal)?,?\s*)?(?:command|cmd)\s*=\s*', '', cmd_str).strip().rstrip(',;').strip()
-                # Only remove conversational parenthesized comments e.g. "netstat -tuln (or ss)" -> "netstat -tuln",
-                # without destroying parentheses inside quotes, code, or URLs like Wikipedia articles.
-                if not any(k in cmd_str for k in ("http://", "https://", "python", "perl", "awk", "sed", "$(")):
-                    cmd_str = re.sub(r'\s*\((?:or|and|note|comment|alias|e\.g\.)[^)]*\)$', '', cmd_str, flags=re.IGNORECASE).strip().rstrip(',;').strip()
-                # Filter out UI text and navigation elements that are not commands
-                if any(pattern in cmd_str for pattern in ("localhost:12001", "[Missions]", "[Computer]", "[Research]", "[Experiments]", "[Graph Memory]", "[Evidence Board]", "[Agents]", "[Security Lab]", "[Settings]", "LIVE", "FAIL-CLOSED", "SONICA-SEA", "Copy", "Autonomous execution paused")):
-                    cmd_str = "echo 'ERROR: UI navigation text is not an executable command' >&2; exit 1"
-                # Handle conversational placeholders like "Terminal" or "Terminal window"
-                if cmd_str.lower() in ("terminal", "terminal window", "the terminal", "bash", "shell", "console"):
-                    cmd_str = "echo 'ERROR: Shell placeholder name is not an executable command' >&2; exit 1"
-                # Strip trailing " command" or " commands"
-                cmd_str = re.sub(r'\s+commands?$', '', cmd_str, flags=re.IGNORECASE).strip().rstrip(',;').strip()
-                payload["command"] = sanitize_command_payload(cmd_str.strip().rstrip(',;').strip())
+            if not raw_cmd and target and target != default_file and not target.startswith("{"):
+                raw_cmd = target
+            payload["command"] = sanitize_command_payload(
+                ComputerUseAgent._clean_terminal_command(raw_cmd)
+            )
+            if payload["command"].lower() in (
+                "none", "null", "_exec", "exec", "terminal",
+                "terminal window", "the terminal", "bash", "shell", "console",
+            ):
+                payload["command"] = ""
 
         if action_type in (ComputerActionType.GUI_CLICK, ComputerActionType.GUI_DOUBLE_CLICK, ComputerActionType.GUI_RIGHT_CLICK, ComputerActionType.GUI_MOVE):
             if target and "," in target:
@@ -3938,56 +3927,46 @@ class ComputerUseAgent:
 
     @staticmethod
     def _clean_terminal_command(raw: Any) -> str:
-        if raw is None:
-            return "echo OK"
-        s = str(raw).strip().rstrip(',;').strip()
-        if not s or s.lower() in ("none", "null", "echo ok"):
-            return "echo OK"
+        if isinstance(raw, dict):
+            raw = raw.get("command")
+        if not isinstance(raw, str):
+            return ""
+        command = raw.strip()
+        if not command:
+            return ""
 
-        # If model hallucinated placeholder phrases like "diagnostic probe" or "address"
-        if s.lower() in ("diagnostic probe", "diagnostic.sh", "diagnostic probe.", "address"):
-            return "true"
-
-        # 1. Unpack JSON or dict only if payload is formatted as a JSON object
-        if s.startswith("{"):
+        if command.startswith("{"):
             try:
-                p = json.loads(s)
-                if isinstance(p, dict) and "command" in p:
-                    s = str(p["command"]).strip().rstrip(',;').strip()
-            except Exception:
-                try:
-                    import ast
-                    p = ast.literal_eval(s)
-                    if isinstance(p, dict) and "command" in p:
-                        s = str(p["command"]).strip().rstrip(',;').strip()
-                except Exception:
-                    cmd_match = re.search(r'["\']command["\']\s*:\s*["\']((?:\\.|[^"\\])+)["\']', s)
-                    if cmd_match:
-                        s = cmd_match.group(1).replace(r'\"', '"').replace(r"\'", "'").strip().rstrip(',;').strip()
+                parsed = json.loads(command)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict) and "command" in parsed:
+                value = parsed["command"]
+                return value.strip() if isinstance(value, str) else ""
 
-        # 2. Strip bash/terminal wrapper prefixes & markdown fences
-        s = re.sub(r'^(?:[a-zA-Z0-9_\-\.]+(?:-terminal)?,?\s*)?(?:command|cmd)\s*=\s*', '', s)
-        s = re.sub(r'^```(?:bash|sh)?\s*', '', s)
-        s = re.sub(r'\s*```$', '', s)
-        s = s.strip(" \t\n\r`").rstrip(',;').strip()
-        if s == "_EXEC" or s == "EXEC":
-            s = ""
-        elif s.startswith("_EXEC "):
-            s = s[6:].strip().rstrip(',;').strip()
-        elif s.startswith("EXEC "):
-            s = s[5:].strip().rstrip(',;').strip()
+        fence = re.fullmatch(
+            r"```(?:bash|sh|shell)?\s*\r?\n(.*?)\r?\n```",
+            command,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if fence:
+            command = fence.group(1)
 
-        # 3. If it is still a JSON object like {"diagnostic": ...} without command, don't execute raw JSON in bash
-        if s.startswith("{") and s.endswith("}"):
-            return "echo 'ERROR: Unparseable JSON command payload' >&2; exit 1"
+        if command.upper() in {"_EXEC", "EXEC"}:
+            return ""
+        if command.upper().startswith("_EXEC "):
+            command = command[6:]
+        elif command.upper().startswith("EXEC "):
+            command = command[5:]
 
-        # 4. If launching a graphical desktop application directly via DISPLAY=:... in terminal,
-        # ensure it runs in the background (&) so it does not indefinitely block the headless subshell
-        if re.search(r'^\s*DISPLAY=:\d+\s+', s) and not s.rstrip().endswith("&"):
-            s = f"{s.rstrip()} &"
-
-        s = s.strip().rstrip(',;').strip()
-        return s or "echo 'ERROR: Empty command' >&2; exit 1"
+        command = re.sub(
+            r"^(?:TERMINAL_EXEC|TERMINAL|RUN|EXEC|COMMAND|CMD)\s*:\s*",
+            "",
+            command,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        return command.strip()
 
     def _extract_tool_name(
         self,
@@ -4744,18 +4723,7 @@ class ComputerUseAgent:
                 raw_cmd = ""
             if isinstance(raw_cmd, dict):
                 raw_cmd = raw_cmd.get("command", "")
-            cmd = str(raw_cmd).strip().rstrip(',;').strip()
-            cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
-            if cmd.startswith("{") and "command" in cmd:
-                try:
-                    parsed_p = json.loads(cmd)
-                    if isinstance(parsed_p, dict) and "command" in parsed_p:
-                        cmd = str(parsed_p["command"]).strip().rstrip(',;').strip()
-                        cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
-                except Exception:
-                    pass
-            if not cmd.strip(' \t\r\n,;'):
-                cmd = ""
+            cmd = self._clean_terminal_command(raw_cmd)
             if not cmd:
                 res = AgentStepResult(
                     False,
@@ -5436,7 +5404,7 @@ class ComputerUseAgent:
                         actual_obs_str = f"Clicked at ({x}, {y})"
                     if pre_screen_b64 and post_screen_b64 and pre_screen_b64 == post_screen_b64:
                         self._consecutive_unchanged_screens += 1
-                        status = ActionExecutionStatus.UNVERIFIED
+                        status = ActionExecutionStatus.FAILED
                         visual_stall_detected = True
                         actual_obs_str = (
                             f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after click; "
@@ -5475,7 +5443,7 @@ class ComputerUseAgent:
                         actual_obs_str = f"Double-clicked at ({x}, {y})"
                     if pre_screen_b64 and post_screen_b64 and pre_screen_b64 == post_screen_b64:
                         self._consecutive_unchanged_screens += 1
-                        status = ActionExecutionStatus.UNVERIFIED
+                        status = ActionExecutionStatus.FAILED
                         visual_stall_detected = True
                         actual_obs_str = (
                             f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after double-click; "
@@ -5736,20 +5704,33 @@ class ComputerUseAgent:
                     actual_obs_str = f"Dragged from ({x},{y}) to ({x2},{y2})"
 
             elif action_type == ComputerActionType.GUI_SCROLL:
-                def_x = getattr(self, "_screen_width", 1280) // 2
-                def_y = getattr(self, "_screen_height", 800) // 2
-                x = int(payload.get("x") if payload.get("x") is not None else def_x)
-                y = int(payload.get("y") if payload.get("y") is not None else def_y)
-                delta = int(payload.get("delta", -3))
-                obs_scroll = await self._dispatch_gui_action(
-                    workspace_id,
-                    GUIAction(action=GUIActionType.SCROLL, x=x, y=y, scroll_delta=delta),
-                )
-                scroll_b64 = getattr(obs_scroll, "screenshot_base64", "") if obs_scroll else ""
-                if scroll_b64:
-                    self._last_screenshot_b64 = scroll_b64
-                    self._prev_screenshot_hash = hashlib.md5(scroll_b64.encode()).hexdigest()
-                actual_obs_str = f"Scrolled at ({x}, {y}) delta={delta}"
+                coord_err = self._validate_coordinates(action_type, payload)
+                if coord_err is not None:
+                    actual_obs_str = f"GUI_SCROLL failed: explicit valid coordinates required ({coord_err})"
+                    status = ActionExecutionStatus.BLOCKED
+                    action_exit_code = 126
+                else:
+                    x = int(payload["x"])
+                    y = int(payload["y"])
+                    raw_delta = payload.get("delta")
+                    if (
+                        not isinstance(raw_delta, int)
+                        or isinstance(raw_delta, bool)
+                    ):
+                        actual_obs_str = "GUI_SCROLL failed: explicit integer delta required"
+                        status = ActionExecutionStatus.BLOCKED
+                        action_exit_code = 126
+                    else:
+                        delta = raw_delta
+                        obs_scroll = await self._dispatch_gui_action(
+                            workspace_id,
+                            GUIAction(action=GUIActionType.SCROLL, x=x, y=y, scroll_delta=delta),
+                        )
+                        scroll_b64 = getattr(obs_scroll, "screenshot_base64", "") if obs_scroll else ""
+                        if scroll_b64:
+                            self._last_screenshot_b64 = scroll_b64
+                            self._prev_screenshot_hash = hashlib.md5(scroll_b64.encode()).hexdigest()
+                        actual_obs_str = f"Scrolled at ({x}, {y}) delta={delta}"
 
             elif action_type == ComputerActionType.GUI_SCREENSHOT:
                 screen = await self.computer.screenshot(workspace_id)
@@ -6060,18 +6041,7 @@ class ComputerUseAgent:
                     raw_cmd = ""
                 if isinstance(raw_cmd, dict):
                     raw_cmd = raw_cmd.get("command", "")
-                cmd = str(raw_cmd).strip().rstrip(',;').strip()
-                cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
-                if cmd.startswith("{") and "command" in cmd:
-                    try:
-                        parsed_p = json.loads(cmd)
-                        if isinstance(parsed_p, dict) and "command" in parsed_p:
-                            cmd = str(parsed_p["command"]).strip().rstrip(',;').strip()
-                            cmd = re.sub(r'[\s,;]+$', '', cmd).strip()
-                    except Exception:
-                        pass
-                if not cmd.strip(' \t\r\n,;'):
-                    cmd = ""
+                cmd = self._clean_terminal_command(raw_cmd)
                 if not cmd:
                     res = AgentStepResult(
                         False,
@@ -6912,7 +6882,7 @@ class ComputerUseAgent:
             state_changed = state_delta.get("changed")
             if state_changed is False:
                 self._consecutive_unchanged_screens += 1
-                status = ActionExecutionStatus.UNVERIFIED
+                status = ActionExecutionStatus.FAILED
                 visual_stall_detected = True
                 actual_obs_str = (
                     f"{actual_obs_str} | [ACCESSIBILITY VERIFICATION]: Fresh state "

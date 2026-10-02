@@ -680,7 +680,7 @@ def test_parse_llm_action_rejects_markdown_code_block():
     act_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "README.md")
     assert act_type == ComputerActionType.TERMINAL_EXEC
     assert payload.get("command") != "hostname && df -h"
-    assert "Empty command payload" in payload.get("command", "")
+    assert payload.get("command") == ""
 
 
 def test_parse_llm_action_robust_json_with_trailing_commentary():

@@ -22,6 +22,7 @@ logger = get_logger(__name__)
 
 from sonic.config import get_settings
 from sonic.memory.schemas import (
+    ALL_TENANTS,
     SCHEMA_INIT_QUERIES,
     AgentNode,
     AssetNode,
@@ -32,6 +33,10 @@ from sonic.memory.schemas import (
     RelationshipType,
     TechniqueNode,
 )
+
+
+def _tenant_scope(tenant_id: str | None) -> str | None:
+    return None if tenant_id == ALL_TENANTS else (tenant_id or "default")
 
 
 class GraphMemory:
@@ -126,6 +131,9 @@ class GraphMemory:
         """Create a node and return its uid."""
         if not self._driver:
             return None
+        props = dict(props)
+        if not props.get("tenant_id"):
+            props["tenant_id"] = "default"
 
         async with self._driver.session() as session:
             query = f"CREATE (n:{label} $props) RETURN n.uid AS uid"
@@ -143,13 +151,14 @@ class GraphMemory:
             return None
 
         async with self._driver.session() as session:
-            if tenant_id:
+            scope = _tenant_scope(tenant_id)
+            if scope is not None:
                 query = (
                     f"MATCH (n:{label} {{uid: $uid}}) "
                     "WHERE n.tenant_id = $tenant_id "
                     "RETURN properties(n) AS props"
                 )
-                result = await session.run(query, uid=uid, tenant_id=tenant_id)
+                result = await session.run(query, uid=uid, tenant_id=scope)
             else:
                 query = f"MATCH (n:{label} {{uid: $uid}}) RETURN properties(n) AS props"
                 result = await session.run(query, uid=uid)
@@ -158,41 +167,42 @@ class GraphMemory:
 
     async def _update_node(self, label: str, uid: str, updates: dict[str, Any], tenant_id: str | None = None) -> bool:
         """Update a node's properties, optionally scoped by tenant_id."""
-        if not self._driver:
+        if not self._driver or _tenant_scope(tenant_id) is None or not updates:
+            return False
+        if "tenant_id" in updates:
             return False
 
         async with self._driver.session() as session:
             set_clauses = ", ".join(f"n.{k} = ${k}" for k in updates)
-            params: dict[str, Any] = {"uid": uid, **updates}
-            if tenant_id:
-                query = (
-                    f"MATCH (n:{label} {{uid: $uid}}) "
-                    "WHERE n.tenant_id = $tenant_id "
-                    f"SET {set_clauses} RETURN n"
-                )
-                params["tenant_id"] = tenant_id
-            else:
-                query = f"MATCH (n:{label} {{uid: $uid}}) SET {set_clauses} RETURN n"
+            params: dict[str, Any] = {
+                "uid": uid,
+                "tenant_id": _tenant_scope(tenant_id),
+                **updates,
+            }
+            query = (
+                f"MATCH (n:{label} {{uid: $uid}}) "
+                "WHERE n.tenant_id = $tenant_id "
+                f"SET {set_clauses} RETURN n"
+            )
             result = await session.run(query, params)
             return await result.single() is not None
 
     async def _delete_node(self, label: str, uid: str, tenant_id: str | None = None) -> bool:
         """Delete a node and its relationships, optionally scoped by tenant_id."""
-        if not self._driver:
+        if not self._driver or _tenant_scope(tenant_id) is None:
             return False
 
         async with self._driver.session() as session:
-            if tenant_id:
-                query = (
-                    f"MATCH (n:{label} {{uid: $uid}}) "
-                    "WHERE n.tenant_id = $tenant_id "
-                    "DETACH DELETE n"
-                )
-                await session.run(query, uid=uid, tenant_id=tenant_id)
-            else:
-                query = f"MATCH (n:{label} {{uid: $uid}}) DETACH DELETE n"
-                await session.run(query, uid=uid)
-            return True
+            query = (
+                f"MATCH (n:{label} {{uid: $uid}}) "
+                "WHERE n.tenant_id = $tenant_id "
+                "DETACH DELETE n"
+            )
+            result = await session.run(
+                query, uid=uid, tenant_id=_tenant_scope(tenant_id)
+            )
+            summary = await result.consume()
+            return summary.counters.nodes_deleted > 0
 
     async def create_relationship(
         self,
@@ -205,23 +215,30 @@ class GraphMemory:
         tenant_id: str | None = None,
     ) -> bool:
         """Create a relationship between two nodes."""
-        if not self._driver:
+        scope = _tenant_scope(tenant_id)
+        if not self._driver or scope is None:
             return False
 
         async with self._driver.session() as session:
             query = (
                 f"MATCH (a:{from_label} {{uid: $from_uid}}) "
                 f"MATCH (b:{to_label} {{uid: $to_uid}}) "
+                "WHERE a.tenant_id = $tenant_id AND b.tenant_id = $tenant_id "
                 f"MERGE (a)-[r:{rel_type}]->(b) "
             )
             rel_props = dict(props or {})
-            if tenant_id:
-                rel_props["tenant_id"] = tenant_id
+            if "tenant_id" in rel_props and rel_props["tenant_id"] != scope:
+                return False
+            rel_props["tenant_id"] = scope
             if rel_props:
                 query += "SET r += $props "
             query += "RETURN r"
 
-            params: dict[str, Any] = {"from_uid": from_uid, "to_uid": to_uid}
+            params: dict[str, Any] = {
+                "from_uid": from_uid,
+                "to_uid": to_uid,
+                "tenant_id": scope,
+            }
             if rel_props:
                 params["props"] = rel_props
 
@@ -250,9 +267,10 @@ class GraphMemory:
             if status:
                 conditions.append("n.status = $status")
                 params["status"] = status
-            if tenant_id:
+            scope = _tenant_scope(tenant_id)
+            if scope is not None:
                 conditions.append("n.tenant_id = $tenant_id")
-                params["tenant_id"] = tenant_id
+                params["tenant_id"] = scope
             where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
             query = f"MATCH (n:Engagement){where} RETURN properties(n) AS props ORDER BY n.created_at DESC"
             result = await session.run(query, params)
@@ -268,7 +286,7 @@ class GraphMemory:
         if uid and asset.engagement_id:
             await self.create_relationship(
                 "Asset", uid, "Engagement", asset.engagement_id,
-                RelationshipType.PART_OF,
+                RelationshipType.PART_OF, tenant_id=asset.tenant_id,
             )
         return uid
 
@@ -286,9 +304,10 @@ class GraphMemory:
             if asset_type:
                 conditions.append("a.asset_type = $atype")
                 params["atype"] = asset_type
-            if tenant_id:
+            scope = _tenant_scope(tenant_id)
+            if scope is not None:
                 conditions.append("a.tenant_id = $tenant_id")
-                params["tenant_id"] = tenant_id
+                params["tenant_id"] = scope
             where = " AND ".join(conditions)
             query = f"MATCH (a:Asset) WHERE {where} RETURN properties(a) AS props"
             result = await session.run(query, params)
@@ -300,7 +319,7 @@ class GraphMemory:
             return ""
         async with self._driver.session() as session:
             query = (
-                "MERGE (a:Asset {value: $value, asset_type: $atype, engagement_id: $eid}) "
+                "MERGE (a:Asset {value: $value, asset_type: $atype, engagement_id: $eid, tenant_id: $tenant_id}) "
                 "ON CREATE SET a += $props "
                 "ON MATCH SET a.metadata = $metadata "
                 "RETURN a.uid AS uid"
@@ -309,6 +328,7 @@ class GraphMemory:
                 value=asset.value,
                 atype=asset.asset_type,
                 eid=asset.engagement_id,
+                tenant_id=asset.tenant_id or "default",
                 props=asset.model_dump(),
                 metadata=asset.metadata,
             )
@@ -326,13 +346,13 @@ class GraphMemory:
             if finding.engagement_id:
                 await self.create_relationship(
                     "Finding", uid, "Engagement", finding.engagement_id,
-                    RelationshipType.PART_OF,
+                    RelationshipType.PART_OF, tenant_id=finding.tenant_id,
                 )
             # Link to target asset
             if finding.target_asset:
                 await self.create_relationship(
                     "Finding", uid, "Asset", finding.target_asset,
-                    RelationshipType.DISCOVERED_ON,
+                    RelationshipType.DISCOVERED_ON, tenant_id=finding.tenant_id,
                 )
         return uid
 
@@ -365,9 +385,10 @@ class GraphMemory:
             if min_confidence > 0:
                 conditions.append("f.confidence_score >= $min_conf")
                 params["min_conf"] = min_confidence
-            if tenant_id:
+            scope = _tenant_scope(tenant_id)
+            if scope is not None:
                 conditions.append("f.tenant_id = $tenant_id")
-                params["tenant_id"] = tenant_id
+                params["tenant_id"] = scope
 
             where = " AND ".join(conditions)
             query = (
@@ -396,9 +417,10 @@ class GraphMemory:
             if status:
                 conditions.append("h.status = $status")
                 params["status"] = status
-            if tenant_id:
+            scope = _tenant_scope(tenant_id)
+            if scope is not None:
                 conditions.append("h.tenant_id = $tenant_id")
-                params["tenant_id"] = tenant_id
+                params["tenant_id"] = scope
             where = " AND ".join(conditions)
             query = f"MATCH (h:Hypothesis) WHERE {where} RETURN properties(h) AS props ORDER BY h.priority DESC"
             result = await session.run(query, params)
@@ -413,7 +435,7 @@ class GraphMemory:
         if uid and evidence.finding_id:
             await self.create_relationship(
                 "Finding", evidence.finding_id, "Evidence", uid,
-                RelationshipType.HAS_EVIDENCE,
+                RelationshipType.HAS_EVIDENCE, tenant_id=evidence.tenant_id,
             )
         return uid
 
@@ -422,12 +444,17 @@ class GraphMemory:
         if not self._driver:
             return []
         async with self._driver.session() as session:
-            tenant_filter = " AND e.tenant_id = $tenant_id" if tenant_id else ""
+            scope = _tenant_scope(tenant_id)
+            tenant_filter = (
+                " WHERE f.tenant_id = $tenant_id AND e.tenant_id = $tenant_id "
+                "AND r.tenant_id = $tenant_id"
+                if scope is not None else ""
+            )
             params: dict[str, Any] = {"fid": finding_id}
-            if tenant_id:
-                params["tenant_id"] = tenant_id
+            if scope is not None:
+                params["tenant_id"] = scope
             query = (
-                f"MATCH (:Finding {{uid: $fid}})-[:HAS_EVIDENCE]->(e:Evidence)"
+                f"MATCH (f:Finding {{uid: $fid}})-[r:HAS_EVIDENCE]->(e:Evidence)"
                 f"{tenant_filter} RETURN properties(e) AS props ORDER BY e.created_at"
             )
             result = await session.run(query, params)
@@ -444,8 +471,9 @@ class GraphMemory:
     # ============================================
 
     async def query(self, cypher: str, params: dict[str, Any] | None = None, tenant_id: str | None = None) -> list[dict]:
-        """Run a raw Cypher query. If tenant_id is provided, it is NOT auto-injected —
-        the caller is responsible for including tenant_id filtering in their Cypher."""
+        """Run raw Cypher only for callers explicitly granted all-tenant access."""
+        if tenant_id != ALL_TENANTS:
+            raise PermissionError("raw Cypher is restricted to explicitly authorized all-tenant callers")
         if not self._driver:
             return []
         async with self._driver.session() as session:
@@ -453,11 +481,12 @@ class GraphMemory:
             return await result.data()
 
     async def search_findings(self, search_text: str, limit: int = 20, tenant_id: str | None = None) -> list[dict]:
-        """Full-text search across findings, optionally scoped by tenant_id."""
+        """Full-text search within one tenant; ALL_TENANTS is reserved for admins."""
         if not self._driver:
             return []
         async with self._driver.session() as session:
-            if tenant_id:
+            scope = _tenant_scope(tenant_id)
+            if scope is not None:
                 query = (
                     "CALL db.index.fulltext.queryNodes('findingSearch', $search) "
                     "YIELD node, score "
@@ -465,7 +494,7 @@ class GraphMemory:
                     "RETURN properties(node) AS props, score "
                     "ORDER BY score DESC LIMIT $limit"
                 )
-                result = await session.run(query, search=search_text, limit=limit, tenant_id=tenant_id)
+                result = await session.run(query, search=search_text, limit=limit, tenant_id=scope)
             else:
                 query = (
                     "CALL db.index.fulltext.queryNodes('findingSearch', $search) "
@@ -481,15 +510,16 @@ class GraphMemory:
         if not self._driver:
             return {}
         async with self._driver.session() as session:
-            tenant_filter = " AND e.tenant_id = $tenant_id" if tenant_id else ""
+            scope = _tenant_scope(tenant_id)
+            tenant_filter = " AND e.tenant_id = $tenant_id" if scope is not None else ""
             params: dict[str, Any] = {"eid": engagement_id}
-            if tenant_id:
-                params["tenant_id"] = tenant_id
+            if scope is not None:
+                params["tenant_id"] = scope
             query = f"""
             MATCH (e:Engagement {{uid: $eid}}){tenant_filter}
-            OPTIONAL MATCH (a:Asset {{engagement_id: $eid}})
-            OPTIONAL MATCH (f:Finding {{engagement_id: $eid}})
-            OPTIONAL MATCH (h:Hypothesis {{engagement_id: $eid}})
+            OPTIONAL MATCH (a:Asset {{engagement_id: $eid}}){" WHERE a.tenant_id = $tenant_id" if scope is not None else ""}
+            OPTIONAL MATCH (f:Finding {{engagement_id: $eid}}){" WHERE f.tenant_id = $tenant_id" if scope is not None else ""}
+            OPTIONAL MATCH (h:Hypothesis {{engagement_id: $eid}}){" WHERE h.tenant_id = $tenant_id" if scope is not None else ""}
             RETURN
                 properties(e) AS engagement,
                 count(DISTINCT a) AS asset_count,
@@ -512,16 +542,17 @@ class GraphMemory:
         if not self._driver:
             return {}
         async with self._driver.session() as session:
-            tenant_filter = " AND f.tenant_id = $tenant_id" if tenant_id else ""
+            scope = _tenant_scope(tenant_id)
+            tenant_filter = " AND f.tenant_id = $tenant_id" if scope is not None else ""
             params: dict[str, Any] = {"uid": finding_uid}
-            if tenant_id:
-                params["tenant_id"] = tenant_id
+            if scope is not None:
+                params["tenant_id"] = scope
             query = f"""
             MATCH (f:Finding {{uid: $uid}}){tenant_filter}
-            OPTIONAL MATCH (f)-[:DISCOVERED_ON]->(a:Asset)
-            OPTIONAL MATCH (f)-[:HAS_EVIDENCE]->(e:Evidence)
-            OPTIONAL MATCH (f)-[:FOUND_BY]->(ag:Agent)
-            OPTIONAL MATCH (f)-[:TESTED_WITH]->(t:Technique)
+            OPTIONAL MATCH (f)-[:DISCOVERED_ON]->(a:Asset){" WHERE a.tenant_id = $tenant_id" if scope is not None else ""}
+            OPTIONAL MATCH (f)-[:HAS_EVIDENCE]->(e:Evidence){" WHERE e.tenant_id = $tenant_id" if scope is not None else ""}
+            OPTIONAL MATCH (f)-[:FOUND_BY]->(ag:Agent){" WHERE ag.tenant_id = $tenant_id" if scope is not None else ""}
+            OPTIONAL MATCH (f)-[:TESTED_WITH]->(t:Technique){" WHERE t.tenant_id = $tenant_id" if scope is not None else ""}
             RETURN
                 properties(f) AS finding,
                 collect(DISTINCT properties(a)) AS assets,
@@ -546,7 +577,8 @@ class GraphMemory:
         if not self._driver:
             return {"connected": False}
         async with self._driver.session() as session:
-            if tenant_id:
+            scope = _tenant_scope(tenant_id)
+            if scope is not None:
                 query = """
                 OPTIONAL MATCH (e:Engagement {tenant_id: $tenant_id}) WITH count(e) AS engagements
                 OPTIONAL MATCH (a:Asset {tenant_id: $tenant_id}) WITH engagements, count(a) AS assets
@@ -554,7 +586,7 @@ class GraphMemory:
                 OPTIONAL MATCH (h:Hypothesis {tenant_id: $tenant_id}) WITH engagements, assets, findings, count(h) AS hypotheses
                 RETURN engagements, assets, findings, hypotheses
                 """
-                result = await session.run(query, tenant_id=tenant_id)
+                result = await session.run(query, tenant_id=scope)
             else:
                 query = """
                 OPTIONAL MATCH (e:Engagement) WITH count(e) AS engagements

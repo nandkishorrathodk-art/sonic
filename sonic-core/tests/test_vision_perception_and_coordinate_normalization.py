@@ -147,7 +147,7 @@ async def test_fresh_accessibility_state_avoids_image_transfer():
                 "bbox_format": "xyxy",
                 "source": "atspi",
                 "confidence": 0.95,
-                "freshness_ms": 0,
+                "freshness_ms": 10,
             }
         ],
     )
@@ -184,7 +184,7 @@ async def test_fresh_accessibility_state_avoids_image_transfer():
                     "bbox_format": "xyxy",
                     "source": "atspi",
                     "confidence": 0.95,
-                    "freshness_ms": 0,
+                    "freshness_ms": 10,
                 }
             ],
         ),

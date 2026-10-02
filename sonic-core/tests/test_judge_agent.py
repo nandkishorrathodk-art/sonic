@@ -104,7 +104,7 @@ async def test_judge_confirms_valid_execution():
 
 
 @pytest.mark.asyncio
-async def test_judge_reruns_security_poc_with_computer():
+async def test_judge_does_not_execute_worker_supplied_security_poc():
     mock_computer = MagicMock()
     mock_computer.terminal = AsyncMock(return_value=ExecResult(
         command="curl -s http://127.0.0.1:8080/api/users",
@@ -138,9 +138,9 @@ async def test_judge_reruns_security_poc_with_computer():
         worker_agent_id="sub-agent-4",
     )
 
-    assert evaluation.verdict == JudgeVerdict.CONFIRMED
-    assert evaluation.reproduction_exit_code == 0
-    mock_computer.terminal.assert_awaited_once()
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
+    assert evaluation.self_attestation_rejected is True
+    mock_computer.terminal.assert_not_awaited()
 
 
 @pytest.mark.asyncio

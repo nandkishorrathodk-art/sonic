@@ -11,6 +11,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sonic.auth.middleware import require_auth, require_super_admin
 from sonic.auth.models import User, UserRole
 from sonic.memory.router import get_memory_sync
+from sonic.memory.schemas import ALL_TENANTS
+
+
+def _graph_scope(user: User) -> str:
+    return ALL_TENANTS if user.role == UserRole.SUPER_ADMIN else user.tenant_id
 
 router = APIRouter()
 
@@ -20,7 +25,7 @@ async def graph_stats(user: User = Depends(require_auth)):
     """Get graph-wide statistics scoped to caller's tenant."""
     memory = get_memory_sync()
     if hasattr(memory, "get_stats"):
-        return await memory.get_stats(tenant_id=user.tenant_id if user.role != UserRole.SUPER_ADMIN else None)
+        return await memory.get_stats(tenant_id=_graph_scope(user))
     return {"connected": True, "total_nodes": 0}
 
 
@@ -36,7 +41,7 @@ async def search_findings(
         results = await memory.search_findings(
             q,
             limit=limit,
-            tenant_id=user.tenant_id if user.role != UserRole.SUPER_ADMIN else None,
+            tenant_id=_graph_scope(user),
         )
         return {"query": q, "results": results, "count": len(results), "tenant_id": user.tenant_id}
     return {"query": q, "results": [], "count": 0}
@@ -50,7 +55,7 @@ async def run_cypher(
     """Run a raw Cypher query (SUPER_ADMIN ONLY)."""
     memory = get_memory_sync()
     if hasattr(memory, "query"):
-        results = await memory.query(cypher)
+        results = await memory.query(cypher, tenant_id=ALL_TENANTS)
         return {"results": results, "count": len(results)}
     return {"results": [], "count": 0}
 
@@ -65,7 +70,7 @@ async def engagement_graph_summary(
     if hasattr(memory, "get_engagement_summary"):
         summary = await memory.get_engagement_summary(
             engagement_id,
-            tenant_id=user.tenant_id if user.role != UserRole.SUPER_ADMIN else None,
+            tenant_id=_graph_scope(user),
         )
         if not summary.get("engagement"):
             raise HTTPException(
@@ -86,7 +91,7 @@ async def finding_graph(
     if hasattr(memory, "get_finding"):
         finding = await memory.get_finding(
             finding_uid,
-            tenant_id=user.tenant_id if user.role != UserRole.SUPER_ADMIN else None,
+            tenant_id=_graph_scope(user),
         )
         if not finding:
             raise HTTPException(

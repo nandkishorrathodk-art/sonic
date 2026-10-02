@@ -33,6 +33,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+ALL_TENANTS = "__sonic_all_tenants__"
+
 # ============================================
 # Enums
 # ============================================
