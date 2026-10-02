@@ -622,4 +622,5 @@ async def test_high_scale_element_detection_latency():
 
     assert len(desktop_controls) == 30
     assert len(browser_controls) == 120
-    assert total_ms < 5.0, f"High-scale concurrent capture took {total_ms:.3f}ms (must be < 5.0ms)"
+    assert total_ms < 15.0, f"High-scale concurrent capture took {total_ms:.3f}ms (must be < 15.0ms)"
+

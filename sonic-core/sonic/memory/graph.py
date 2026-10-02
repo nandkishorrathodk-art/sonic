@@ -202,6 +202,7 @@ class GraphMemory:
         to_uid: str,
         rel_type: str,
         props: dict[str, Any] | None = None,
+        tenant_id: str | None = None,
     ) -> bool:
         """Create a relationship between two nodes."""
         if not self._driver:
@@ -213,13 +214,16 @@ class GraphMemory:
                 f"MATCH (b:{to_label} {{uid: $to_uid}}) "
                 f"MERGE (a)-[r:{rel_type}]->(b) "
             )
-            if props:
+            rel_props = dict(props or {})
+            if tenant_id:
+                rel_props["tenant_id"] = tenant_id
+            if rel_props:
                 query += "SET r += $props "
             query += "RETURN r"
 
             params: dict[str, Any] = {"from_uid": from_uid, "to_uid": to_uid}
-            if props:
-                params["props"] = props
+            if rel_props:
+                params["props"] = rel_props
 
             result = await session.run(query, params)
             return await result.single() is not None

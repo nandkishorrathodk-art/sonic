@@ -224,6 +224,7 @@ routing_rules:
     model: meta/llama-3.2-11b-vision-instruct
     fallback: [groq/qwen/qwen3.8-27b, openrouter/openai/gpt-4o]
 
+
 # ---- Global Fallback Chain ----
 # If the preferred provider for a task fails, try these in order
 global_fallback_chain:

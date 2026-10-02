@@ -14,6 +14,8 @@ persistent SQLite backend.
 
 from __future__ import annotations
 
+import os
+
 from sonic.logger import get_logger
 from sonic.memory.graph import GraphMemory
 from sonic.memory.inmemory import InMemoryGraph
@@ -43,6 +45,14 @@ async def get_smart_memory() -> MemoryBackend:
     """
     global _active_memory
     if _active_memory is not None and not isinstance(_active_memory, InMemoryGraph):
+        return _active_memory
+
+    # If explicitly forced to SQLite via environment or an explicit SQLite DB path is provided
+    if os.environ.get("SONIC_FORCE_SQLITE_MEMORY") == "1" or os.environ.get("SONIC_MEMORY_DB_PATH"):
+        sqlite_mem = SqliteGraph()
+        await sqlite_mem.connect()
+        _active_memory = sqlite_mem
+        logger.info("memory_backend_selected", backend="sqlite_persistent (configured)")
         return _active_memory
 
     # Try Neo4j

@@ -30,6 +30,7 @@ def test_computer_use_system_prompt_has_general_workstation_framing():
 
 def test_computer_use_system_prompt_compact_preserves_workstation_framing():
     assert "general-purpose Autonomous AI-Human Digital Being" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
+
     assert "graphical desktop" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
     assert "headless terminal" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
     assert "Prove every milestone with empirical receipts" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT

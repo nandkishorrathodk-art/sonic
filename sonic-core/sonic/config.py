@@ -51,7 +51,7 @@ class DatabaseSettings(BaseSettings):
 
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = ""
+    neo4j_password: str = "sonic-reda-dev"
     redis_url: str = "redis://localhost:6379/0"
 
 
@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     # -- Database --
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = ""
+    neo4j_password: str = "sonic-reda-dev"
     redis_url: str = "redis://localhost:6379/0"
 
     # -- App --
