@@ -173,6 +173,7 @@ def test_offline_fallback_is_generic_diagnostic_not_script():
     """Without an LLM, the agent probes (reads) — never writes a vuln-specific patch."""
     comp = _StubComputer()
     agent = ComputerUseAgent(computer_provider=comp)
+    agent.llm_router = None
     obs = _run(agent.observe(comp.workspace_id))
     action_type, target, payload, expected = _run(agent.choose_action("Fix JWT bug", obs, 1))
     from sonic.computer_use.models import ComputerActionType
@@ -227,12 +228,12 @@ def test_reasoning_contract_exposes_full_live_action_surface():
         "FILE_WRITE",
         "GIT_COMMIT",
         "APP_INSTALL",
-        "BROWSER_DOWNLOAD",
         "TOOL_AUTHOR",
         "METHOD_INVENT",
         "GOAL_COMPLETE",
     ):
         assert action in prompt
+    assert "BROWSER_DOWNLOAD" not in prompt
 
 
 # ---------------------------------------------------------------------------

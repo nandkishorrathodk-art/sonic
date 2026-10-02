@@ -207,7 +207,7 @@ async def test_judge_falsifies_gui_mission_without_window_or_gui_action():
         worker_agent_id="sub-agent-gui",
     )
     assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
-    assert "no GUI interaction receipts" in evaluation.notes
+    assert "no successful GUI interaction receipts" in evaluation.notes
 
 
 @pytest.mark.asyncio
@@ -216,8 +216,9 @@ async def test_judge_confirms_gui_mission_with_real_window():
     mock_computer.screenshot = AsyncMock(return_value=type(
         "Screen", (), {
             "screenshot_base64": "c2NyZWVu",
-            "desktop_state": "READY",
+            "desktop_state": "INTERACTIVE",
             "active_window": "Terminal",
+            "capture_age_ms": 0,
         }
     )())
     mock_computer.terminal = AsyncMock(return_value=ExecResult(

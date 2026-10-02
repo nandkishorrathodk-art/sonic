@@ -2,10 +2,10 @@
 
 Verifies with real execution receipts (zero fake success):
 1. Live Auth Login & Multi-Tenant Workstation/Being/Vault API access.
-2. Dual-Plane Live Observation (`DISPLAY=:99` GUI Desktop + Terminal/Workspace/Git state).
+2. Plane-aware live observation (this test uses a headless provider for workspace state).
 3. Dynamic Parallel Subagent Teamwork (`DEFINE_SUBAGENT`, `INVOKE_SUBAGENT`, `SEND_MESSAGE`, `MANAGE_SUBAGENTS`).
 4. Separate Branch Workspace per Subagent (`workspace_mode="branch"` default) protecting uncommitted parent files.
-5. Full Dual-Plane Agency per Subagent (`observe_desktop=True`, `execution_plane="gui"`, `gui_only=False`) + `DisplayLeaseManager`.
+5. Plane-appropriate subagent execution; GUI acceptance is covered by desktop-backed tests.
 6. Empirical `JudgeAgent` Forcing Function & Self-Correction Loop (rejects failed tests/claims, wakes subagent via `SEND_MESSAGE`, merges only on `CONFIRMED`).
 7. Sealed Safety Policy (`ActionPolicy`) blocking path traversal, destructive commands (`rm -rf`), and cloud metadata egress.
 8. Human-in-the-Loop Pause (`WAIT_FOR_HUMAN` on CAPTCHA/OTP/approval) & `/workstation/resume` continuation.
@@ -27,7 +27,7 @@ from sonic.being.vault import BeingVault
 from sonic.computer.headless import HeadlessComputeProvider
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
-from sonic.computer_use.teamwork import DisplayLeaseManager, SubagentTeamworkManager
+from sonic.computer_use.teamwork import SubagentTeamworkManager
 from sonic.llm.router import LLMResponse
 from sonic.safety.action_policy import ActionPolicy
 
@@ -178,15 +178,15 @@ async def test_pillar_2_to_7_senior_engineer_full_workflow_observation_subagents
         max_actions_per_minute=300,
     )
 
-    # 1. Dual-Plane Observation (GUI Desktop + Terminal)
+    # 1. Headless observation (workspace + terminal); this provider has no desktop.
     llm_obs = _SequencedLLM([])
     parent_agent = ComputerUseAgent(
         computer_provider=provider,
         llm_router=llm_obs,
         safety=policy,
         tenant_id="t-senior",
-        observe_desktop=True,
-        execution_plane="gui",
+        observe_desktop=False,
+        execution_plane="headless",
         gui_only=False,
     )
     obs = await parent_agent.observe(ws_id)
@@ -229,7 +229,7 @@ async def test_pillar_2_to_7_senior_engineer_full_workflow_observation_subagents
             'PAYLOAD: {"summary": "Implemented initial health_service.py"}\n'
             "EXPECTED: goal complete"
         ),
-        # Attempt 2 (After JudgeAgent FALSIFIED + SEND_MESSAGE wakes the subagent to fix the bug AND open GUI window)
+        # Attempt 2 (After JudgeAgent falsifies + SEND_MESSAGE wakes the subagent to fix the bug)
         (
             "THOUGHT: Judge verification caught the bug! I will fix health_service.py so check_health() returns 'healthy'.\n"
             "ACTION: FILE_WRITE\n"
@@ -238,11 +238,11 @@ async def test_pillar_2_to_7_senior_engineer_full_workflow_observation_subagents
             "EXPECTED: fixed health_service.py"
         ),
         (
-            "THOUGHT: Also launch desktop viewer on DISPLAY=:99 to verify GUI plane.\n"
-            "ACTION: APP_LAUNCH\n"
-            "TARGET: x-www-browser\n"
-            'PAYLOAD: {"app_name": "x-www-browser"}\n'
-            "EXPECTED: GUI app launched"
+            "THOUGHT: The health check is fixed and independently verified.\n"
+            "ACTION: GOAL_COMPLETE\n"
+            "TARGET: health_service.py\n"
+            '{"summary": "Implemented and verified the health check"}\n'
+            "EXPECTED: goal complete"
         ),
     ])
 
@@ -261,10 +261,11 @@ async def test_pillar_2_to_7_senior_engineer_full_workflow_observation_subagents
         [
             {
                 "type_name": "self",
-                "role": "Senior Backend & GUI Subagent",
+                "role": "Senior Backend Subagent",
                 "prompt": "Implement health_service.py with check_health() == 'healthy' and verify.",
                 # Note: workspace_mode omitted -> defaults to "branch" (separate workspace)
                 "verification_command": "python -c \"import health_service; assert health_service.check_health() == 'healthy'\"",
+                "execution_plane": "headless",
                 "max_steps": 2,
                 "max_correction_rounds": 2,
             }
@@ -276,9 +277,9 @@ async def test_pillar_2_to_7_senior_engineer_full_workflow_observation_subagents
     # Separate workspace verified
     assert conv.workspace_mode == "branch"
     assert conv.effective_workspace_id != ws_id
-    # Dual-Plane verified
-    assert conv.agent_instance.observe_desktop is True
-    assert conv.agent_instance.execution_plane == "gui"
+    # Headless provider receives a headless-only execution contract.
+    assert conv.agent_instance.observe_desktop is False
+    assert conv.agent_instance.execution_plane == "headless"
     assert conv.agent_instance.gui_only is False
     # Self-correction & Empirical Judge verified
     assert conv.correction_rounds_used == 1, (

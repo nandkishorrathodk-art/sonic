@@ -121,6 +121,7 @@ class SubagentTaskSpec:
     acceptance_criteria: list[str] = field(default_factory=list)
     verification_command: str = ""
     workspace_mode: str = "branch"   # "branch" (default isolated) | "inherit" | "share"
+    execution_plane: str = "dual"
     model_tier: str = "inherit"      # "inherit" | "flash" | "pro"
     max_steps: int = 12
     max_correction_rounds: int = 2
@@ -250,6 +251,7 @@ class SubagentTeamworkManager:
                         acceptance_criteria=list(raw.get("acceptance_criteria") or []),
                         verification_command=str(raw.get("verification_command") or ""),
                         workspace_mode=str(raw.get("workspace_mode") or raw.get("Workspace") or "branch").lower().strip(),
+                        execution_plane=str(raw.get("execution_plane") or raw.get("plane") or "dual").lower().strip(),
                         model_tier=str(raw.get("model_tier") or raw.get("Model") or "inherit").lower().strip(),
                         max_steps=int(str(raw.get("max_steps") or 12)),
                         max_correction_rounds=int(str(raw.get("max_correction_rounds") if raw.get("max_correction_rounds") is not None else 2)),
@@ -338,6 +340,7 @@ class SubagentTeamworkManager:
             acceptance_criteria=list(acceptance_criteria or []),
             verification_command=verification_command,
             workspace_mode=conv.workspace_mode,
+            execution_plane=conv.agent_instance.execution_plane,
             employee_id=conv.employee_id,
             employee_context=dict(conv.employee_context),
             max_steps=max_steps,
@@ -430,6 +433,13 @@ class SubagentTeamworkManager:
             )
         if spec.verification_command:
             parts.append(f"\n## Programmatic Verification Forcing Function\nCommand that must exit 0: `{spec.verification_command}`")
+        execution_plane = str(spec.execution_plane or "dual").lower().strip()
+        if execution_plane not in {"gui", "headless", "dual"}:
+            execution_plane = "dual"
+        parts.append(
+            f"\n## Execution Plane\nAssigned plane: `{execution_plane}`. "
+            "Use the visible desktop and/or direct execution only as permitted by this assignment."
+        )
 
         return "\n".join(parts)
 
@@ -673,6 +683,10 @@ class SubagentTeamworkManager:
                 sub_tools = {"DEFINE_SUBAGENT", "INVOKE_SUBAGENT"}
                 safety_clone.allowed_types = frozenset(t for t in safety_clone.allowed_types if t not in sub_tools)
 
+        execution_plane = str(spec.execution_plane or "dual").lower().strip()
+        if execution_plane not in {"gui", "headless", "dual"}:
+            execution_plane = "dual"
+
         # Reuse existing ComputerUseAgent on continuation (`send_message`) so full history is preserved!
         if conv.agent_instance is None:
             scoped_ctx: dict[str, Any] = {
@@ -705,8 +719,8 @@ class SubagentTeamworkManager:
                 toolsmith=getattr(self.parent, "toolsmith", None),
                 method_lab=getattr(self.parent, "method_lab", None),
                 lessons_ledger=getattr(self.parent, "lessons_ledger", None),
-                observe_desktop=True,
-                execution_plane="gui",
+                observe_desktop=execution_plane in ("gui", "dual"),
+                execution_plane=execution_plane,
                 initial_context=scoped_ctx,
             )
 
@@ -804,6 +818,11 @@ class SubagentTeamworkManager:
             goal=spec.prompt or conv.role,
             role=conv.role,
             max_steps=spec.max_steps,
+            plane=(
+                spec.execution_plane
+                if spec.execution_plane in {"gui", "headless", "dual"}
+                else "dual"
+            ),
         )
         has_ok_trace = any(
             str(getattr(t, "status", "") if not isinstance(t, dict) else t.get("status", "")).upper()
