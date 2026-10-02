@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Cloud,
   Maximize2,
@@ -54,6 +54,7 @@ export function ComputerSurface({
   const [screenshotBase64, setScreenshotBase64] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [loadingScreen, setLoadingScreen] = useState(false);
+  const [desktopError, setDesktopError] = useState("");
   const [isInteractive, setIsInteractive] = useState(false);
   const [inputText, setInputText] = useState("");
   const [sendingInput, setSendingInput] = useState(false);
@@ -69,7 +70,9 @@ export function ComputerSurface({
   const imgRef = useRef<HTMLImageElement>(null);
   const cmdLogRef = useRef<HTMLDivElement>(null);
   const followCommandTailRef = useRef(true);
-  const isFetchingScreenshot = useRef(false);
+  const screenshotRequestId = useRef(0);
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
   const isWaitingForHuman = Boolean(waitingForHuman || (status || "").toUpperCase() === "WAITING_FOR_HUMAN");
 
@@ -88,35 +91,45 @@ export function ComputerSurface({
 
   const streamUrl = desktopState?.novnc_url || (desktopState as any)?.vnc_url || "";
 
-  const fetchScreenshot = async () => {
-    if (isFetchingScreenshot.current) return;
-    isFetchingScreenshot.current = true;
+  const fetchScreenshot = useCallback(async (targetSession = sessionId) => {
+    const requestId = ++screenshotRequestId.current;
     try {
       setLoadingScreen(true);
-      const data = await api.getDesktopScreenshot(sessionId);
-      if (data?.image_base64) {
-        setScreenshotBase64(data.image_base64);
-      } else if (data?.screenshot_base64) {
-        setScreenshotBase64(data.screenshot_base64);
+      const data = await api.getDesktopScreenshot(targetSession);
+      if (requestId !== screenshotRequestId.current || targetSession !== sessionIdRef.current) return;
+      const image = data?.image_base64 || data?.screenshot_base64;
+      if (image) {
+        setScreenshotBase64(image);
+        setDesktopError("");
+      } else {
+        setScreenshotBase64(null);
+        setDesktopError("No current desktop frame is available.");
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      if (requestId === screenshotRequestId.current && targetSession === sessionIdRef.current) {
+        setScreenshotBase64(null);
+        setDesktopError(`Desktop refresh failed: ${String(err)}`);
+      }
     } finally {
-      setLoadingScreen(false);
-      isFetchingScreenshot.current = false;
+      if (requestId === screenshotRequestId.current) setLoadingScreen(false);
     }
-  };
+  }, [sessionId]);
 
   useEffect(() => {
-    // Always fetch a baseline screenshot on session change or mount so the desktop renders immediately
-    fetchScreenshot();
-  }, [sessionId]);
+    setScreenshotBase64(null);
+    setDesktopError("");
+    setIsInteractive(false);
+    void fetchScreenshot(sessionId);
+    return () => {
+      screenshotRequestId.current += 1;
+    };
+  }, [fetchScreenshot, sessionId]);
 
   useEffect(() => {
     if (!useStream) {
       fetchScreenshot();
     }
-  }, [useStream]);
+  }, [fetchScreenshot, useStream]);
 
   // Follow new command output only while the operator is at the tail.
   useEffect(() => {
@@ -187,12 +200,12 @@ export function ComputerSurface({
     try {
       const obs = await api.postGUIAction(sessionId, { action: "CLICK", x, y });
       if (obs?.screenshot_base64) {
-        setScreenshotBase64(obs.screenshot_base64);
+        if (sessionIdRef.current === sessionId) setScreenshotBase64(obs.screenshot_base64);
       } else if (obs?.image_base64) {
-        setScreenshotBase64(obs.image_base64);
+        if (sessionIdRef.current === sessionId) setScreenshotBase64(obs.image_base64);
       }
     } catch (err) {
-      console.error("Failed to dispatch GUI click:", err);
+      if (sessionIdRef.current === sessionId) setDesktopError(`GUI click failed: ${String(err)}`);
     }
   };
 
@@ -203,19 +216,19 @@ export function ComputerSurface({
     try {
       const obsType = await api.postGUIAction(sessionId, { action: "TYPE", text: inputText });
       if (obsType?.screenshot_base64) {
-        setScreenshotBase64(obsType.screenshot_base64);
+        if (sessionIdRef.current === sessionId) setScreenshotBase64(obsType.screenshot_base64);
       } else if (obsType?.image_base64) {
-        setScreenshotBase64(obsType.image_base64);
+        if (sessionIdRef.current === sessionId) setScreenshotBase64(obsType.image_base64);
       }
       const obs = await api.postGUIAction(sessionId, { action: "KEYPRESS", key: "Return" });
       if (obs?.screenshot_base64) {
-        setScreenshotBase64(obs.screenshot_base64);
+        if (sessionIdRef.current === sessionId) setScreenshotBase64(obs.screenshot_base64);
       } else if (obs?.image_base64) {
-        setScreenshotBase64(obs.image_base64);
+        if (sessionIdRef.current === sessionId) setScreenshotBase64(obs.image_base64);
       }
       setInputText("");
     } catch (err) {
-      console.error("Failed to type text:", err);
+      if (sessionIdRef.current === sessionId) setDesktopError(`Text input failed: ${String(err)}`);
     } finally {
       setSendingInput(false);
     }
@@ -225,24 +238,28 @@ export function ComputerSurface({
     try {
       const obs = await api.postGUIAction(sessionId, { action: "KEYPRESS", key });
       if (obs?.screenshot_base64) {
-        setScreenshotBase64(obs.screenshot_base64);
+        if (sessionIdRef.current === sessionId) setScreenshotBase64(obs.screenshot_base64);
       } else if (obs?.image_base64) {
-        setScreenshotBase64(obs.image_base64);
+        if (sessionIdRef.current === sessionId) setScreenshotBase64(obs.image_base64);
       }
     } catch (err) {
-      console.error("Failed to press key:", err);
+      if (sessionIdRef.current === sessionId) setDesktopError(`Keypress failed: ${String(err)}`);
     }
   };
 
   const handleToggleTakeover = async () => {
     const nextState = !isInteractive;
+    if (nextState && !onInterrupt) {
+      setDesktopError("Takeover is unavailable because the agent interrupt control is not connected.");
+      return;
+    }
     if (nextState && onInterrupt) {
       setTakeoverPending(true);
       try {
         await onInterrupt();
         setIsInteractive(true);
       } catch (err) {
-        console.error("Failed to trigger onInterrupt during human takeover:", err);
+        setDesktopError(`Could not pause the agent for takeover: ${String(err)}`);
         setIsInteractive(false);
       } finally {
         setTakeoverPending(false);
@@ -254,7 +271,7 @@ export function ComputerSurface({
 
   const hasScreenshot = Boolean(screenshotBase64 && screenshotBase64.length > 100);
   const isDesktopOnline = ["LIVE", "RUNNING", "READY"].includes(desktopState?.status || "");
-  const isLive = Boolean(hasScreenshot || (isDesktopOnline && streamUrl));
+  const isConnected = Boolean(isDesktopOnline && streamUrl);
   const resolution = desktopState?.resolution;
   const displayLabel = [
     desktopState?.display,
@@ -277,10 +294,10 @@ export function ComputerSurface({
             <span>SONIC Cyber Workstation</span>
             {displayLabel && <span className="text-[10px] text-muted-dim font-normal">({displayLabel})</span>}
           </span>
-          {isLive ? (
+          {isConnected ? (
             <span className="chip border border-success/40 bg-success/10 text-success">
               <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
-              <span>AGENT CONTROLLED</span>
+              <span>{isInteractive ? "HUMAN CONTROL ACTIVE" : "CONNECTED"}</span>
             </span>
           ) : (
             <span className="chip border border-ink-700 bg-ink-800 text-muted">
@@ -374,11 +391,16 @@ export function ComputerSurface({
       )}
 
       {/* Surface body */}
+      {desktopError && (
+        <div role="alert" className="border-b border-rose-500/50 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+          {desktopError}
+        </div>
+      )}
       <div
         className="flex-1 bg-ink-950 relative flex flex-col items-center justify-center overflow-hidden select-none"
         style={{ minHeight: 0 }}
       >
-        {useStream && isLive && streamUrl ? (
+        {useStream && isConnected && streamUrl ? (
           <div className="w-full h-full flex flex-col items-center justify-center p-2 relative">
             <div
               className="w-full h-full max-w-[1280px] max-h-[800px] aspect-[16/10] rounded border border-ink-700 bg-black relative shadow-2xl overflow-hidden flex items-center justify-center"
@@ -387,6 +409,7 @@ export function ComputerSurface({
                 src={streamUrl}
                 title="SONIC Cyber Workstation VNC Stream"
                 className="w-full h-full border-0"
+                style={{ pointerEvents: isInteractive ? "auto" : "none" }}
                 allow="clipboard-read; clipboard-write; fullscreen"
               />
               <div className="absolute top-2.5 left-2.5 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-black/80 border border-success/40 text-[11px] font-mono text-success shadow-lg backdrop-blur-sm pointer-events-none">
@@ -467,7 +490,7 @@ export function ComputerSurface({
               </div>
             )}
           </div>
-        ) : isLive ? (
+        ) : isDesktopOnline ? (
           <div className="w-full h-full max-w-[1280px] max-h-[800px] aspect-[16/10] rounded border border-ink-700 bg-ink-900 flex flex-col items-center justify-center p-6 text-center space-y-3 m-3">
             <div className="w-12 h-12 rounded-full bg-ink-850 border border-success/40 flex items-center justify-center text-success">
               <RefreshCw className="w-6 h-6 animate-spin" />

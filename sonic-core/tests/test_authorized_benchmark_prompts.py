@@ -58,6 +58,14 @@ def test_default_prompts_preserve_safety_and_anti_bypass_invariants():
         assert "Universal Anti-Bypass Invariant" in prompt
 
 
+def test_computer_use_prompts_request_brief_rationale_not_private_reasoning():
+    for prompt in (COMPUTER_USE_SYSTEM_PROMPT, COMPUTER_USE_SYSTEM_PROMPT_COMPACT):
+        prompt_lower = prompt.lower()
+        assert "brief action rationale" in prompt_lower
+        assert "do not provide hidden chain-of-thought" in prompt_lower
+        assert "autonomous chain-of-thought analyzing" not in prompt_lower
+
+
 def test_core_identity_and_prompt_do_not_center_a_specific_application_type():
     assert "browser" not in CORE_NORTH_STAR_GOAL.lower()
     for prompt in (COMPUTER_USE_SYSTEM_PROMPT, COMPUTER_USE_SYSTEM_PROMPT_COMPACT):

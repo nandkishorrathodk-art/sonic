@@ -99,12 +99,8 @@ export const api = {
     apiClient<any>(`/workstation/state?session_id=${encodeURIComponent(sessionId)}`, { timeout: 30000 }),
 
   listSessions: async (): Promise<SessionItem[]> => {
-    try {
-      const data = await apiClient<any>("/workstation/sessions");
-      return normalizeSessionList(data);
-    } catch {
-      return [];
-    }
+    const data = await apiClient<any>("/workstation/sessions");
+    return normalizeSessionList(data);
   },
 
   deleteSession: (sessionId: string) =>

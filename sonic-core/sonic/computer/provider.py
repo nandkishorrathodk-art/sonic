@@ -77,10 +77,32 @@ class ComputerProvider(ABC):
         """Capture authenticated screen observation."""
         pass
 
+    async def observe_state(self, workspace_id: str) -> ScreenObservation | None:
+        """Return a fresh structured desktop state without requiring image pixels.
+
+        Providers without a continuously maintained state feed may return None;
+        callers should then use screenshot() for the visual observation path.
+        """
+        return None
+
     @abstractmethod
     async def gui_action(self, workspace_id: str, action: GUIAction, actor: str = "operator") -> ScreenObservation:
         """Execute a desktop GUI action and capture updated screen."""
         pass
+
+    async def gui_action_state(
+        self,
+        workspace_id: str,
+        action: GUIAction,
+        actor: str = "operator",
+    ) -> ScreenObservation:
+        """Execute a GUI action and return its updated state when supported.
+
+        The compatibility implementation keeps existing providers' visual
+        post-action capture behavior. Providers with a fresh structured state
+        feed may override this and return a state-only observation.
+        """
+        return await self.gui_action(workspace_id, action, actor=actor)
 
     @abstractmethod
     async def terminal(self, workspace_id: str, command: str, timeout: int = 60, actor: str = "operator") -> ExecResult:

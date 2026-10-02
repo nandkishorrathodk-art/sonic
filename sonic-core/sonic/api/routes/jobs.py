@@ -15,6 +15,8 @@ from sonic.auth.middleware import require_auth, require_operator
 from sonic.auth.models import User, UserRole
 from sonic.queue.job_queue import get_job_queue
 from sonic.queue.models import Job, JobPriority, JobType
+from sonic.sandbox.egress import is_target_allowed
+from sonic.safety.scope import get_scope_checker
 
 router = APIRouter()
 
@@ -24,7 +26,7 @@ class SubmitJobRequest(BaseModel):
     job_type: JobType = JobType.TOOL_EXECUTION
     priority: JobPriority = JobPriority.MEDIUM
     payload: dict[str, Any]
-    workspace_id: str = "sonic-sandbox"
+    workspace_id: str = ""
     timeout_seconds: int = 180
 
 
@@ -41,18 +43,49 @@ async def submit_job(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="An explicitly provisioned tenant-owned workspace is required",
         )
-    if workspace_id == "sonic-sandbox":
-        # Preserve the legacy request shape without attaching the job to a
-        # shared container.  The logical ID is tenant-derived and will fail
-        # closed in workers until a matching dedicated workspace is provisioned.
-        import hashlib
-        workspace_id = f"tenant-{hashlib.sha256(user.tenant_id.encode()).hexdigest()[:12]}-sandbox"
-        queue.register_workspace(workspace_id, user.tenant_id)
-    elif not queue.workspace_owned_by(workspace_id, user.tenant_id):
+    if not queue.workspace_owned_by(workspace_id, user.tenant_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Workspace is not owned by the submitting tenant",
         )
+    payload = dict(request.payload)
+    if request.job_type == JobType.TOOL_EXECUTION:
+        target = str(payload.get("target") or "").strip()
+        if not target:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tool jobs require a target",
+            )
+        from sonic.api.routes.engagements import get_engagement_manager
+
+        engagement = await get_engagement_manager().get_engagement_status(
+            request.engagement_id,
+            tenant_id=user.tenant_id,
+        )
+        if (
+            not engagement
+            or "error" in engagement
+            or engagement.get("tenant_id") != user.tenant_id
+            or not isinstance(engagement.get("scope"), dict)
+            or not engagement["scope"]
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Tool job requires an active tenant-owned engagement with scope",
+            )
+        scope = engagement["scope"]
+        if not get_scope_checker().is_target_in_scope(target, scope):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Tool target is outside the engagement's registered scope",
+            )
+        allowed, reason = is_target_allowed(target)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Tool target is blocked by egress policy: {reason}",
+            )
+        payload["scope"] = scope
     job = Job(
         tenant_id=user.tenant_id,
         owner_id=user.email,
@@ -60,7 +93,7 @@ async def submit_job(
         agent_id=user.email,
         job_type=request.job_type,
         priority=request.priority,
-        payload=request.payload,
+        payload=payload,
         workspace_id=workspace_id,
         timeout_seconds=request.timeout_seconds,
     )
@@ -75,7 +108,11 @@ async def list_jobs(
 ):
     """List jobs for the caller's tenant."""
     queue = get_job_queue()
-    jobs = await queue.list_jobs(tenant_id=user.tenant_id, limit=limit)
+    jobs = await queue.list_jobs(
+        tenant_id=user.tenant_id,
+        owner_id=None if user.role == UserRole.SUPER_ADMIN else user.email,
+        limit=limit,
+    )
     return {"jobs": [j.model_dump() for j in jobs], "count": len(jobs)}
 
 

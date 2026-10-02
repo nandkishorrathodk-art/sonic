@@ -14,6 +14,7 @@ export function MissionView({ workstationState, sessionId = "default" }: Mission
   const [busy, setBusy] = useState(false);
   const [objective, setObjective] = useState("");
   const [mission, setMission] = useState<MissionSummary | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -26,11 +27,11 @@ export function MissionView({ workstationState, sessionId = "default" }: Mission
         if (!cancelled) {
           setTargetSandbox(targetState);
           setMission(workstation?.mission || null);
+          setRefreshError(null);
         }
-      } catch {
+      } catch (err: any) {
         if (!cancelled) {
-          setTargetSandbox(null);
-          setMission(null);
+          setRefreshError(err.message || "Mission state could not be refreshed.");
         }
       }
     };
@@ -95,7 +96,7 @@ export function MissionView({ workstationState, sessionId = "default" }: Mission
     { label: "Mission Name", value: workstationState?.mission_name || "Awaiting Objective", accent: "text-white" },
     { label: "Lifecycle Status", value: workstationState?.status || "IDLE", accent: "text-success" },
     { label: "Target Repository", value: workstationState?.target_repo || "Local Workspace", accent: "text-secondary-400" },
-    { label: "Security Guard", value: "FAIL-CLOSED", accent: "text-success" },
+    { label: "Safety Status", value: "Not verified", accent: "text-muted" },
   ];
 
   return (
@@ -109,6 +110,12 @@ export function MissionView({ workstationState, sessionId = "default" }: Mission
           </span>
         </div>
       </div>
+
+      {refreshError && (
+        <div role="alert" className="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+          Mission status refresh failed: {refreshError}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {stats.map((s) => (

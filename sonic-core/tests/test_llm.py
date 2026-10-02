@@ -4,14 +4,19 @@ Unit tests for Custom LLM Provider & Model Router.
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from pathlib import Path
 
 import pytest
+from sonic.health import HealthChecker, HealthStatus
 from sonic.llm.providers.custom import CustomLLMProvider
 from sonic.llm.router import ModelRouter
 from sonic.llm.schemas import (
+    ImageContent,
     LLMRequest,
+    LLMResponse,
     Message,
     MessageRole,
+    ProviderName,
     ToolDefinition,
 )
 
@@ -268,3 +273,220 @@ async def test_vision_request_does_not_fall_back_to_global_text_provider(monkeyp
             task_type="vision",
         )
     text_fallback.complete_with_timing.assert_not_awaited()
+
+
+def test_vision_routes_configure_distinct_multimodal_fallbacks():
+    from_config = Path(__file__).resolve().parents[2] / "configs" / "models.yaml"
+    router = ModelRouter.from_config(from_config, env_vars={})
+
+    assert router.routing_rules["vision"]["fallback"] == [
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/openai/gpt-4o",
+    ]
+    assert router.routing_rules["computer_use"]["fallback"] == [
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/openai/gpt-4o",
+    ]
+    nvidia = router.providers["nvidia"]
+    assert "vision" in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
+    assert "tool_use" not in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
+    assert "tool_use" in nvidia.model_capabilities["nvidia/nemotron-3-super-120b-a12b"]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_model_without_tool_use_uses_text_action_fallback():
+    model = "meta/llama-3.2-11b-vision-instruct"
+    provider = CustomLLMProvider(
+        name="nvidia",
+        base_url="https://example.invalid/v1",
+        api_key="",
+        default_model=model,
+        capabilities=["vision", "computer_use", "multimodal"],
+        model_capabilities={
+            model: ["vision", "computer_use", "multimodal"],
+        },
+        max_retries=0,
+    )
+    create = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(
+                content="ACTION: GUI_SCREENSHOT",
+                reasoning_content=None,
+                tool_calls=None,
+            ),
+            finish_reason="stop",
+        )],
+        usage=None,
+    ))
+    provider._openai_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create),
+        ),
+    )
+    request = LLMRequest(
+        model=model,
+        messages=[
+            Message(role=MessageRole.SYSTEM, content="Choose one GUI action."),
+            Message(
+                role=MessageRole.USER,
+                content="Describe this frame and choose an action.",
+                images=[ImageContent(base64="synthetic-image", media_type="image/png")],
+            ),
+        ],
+        tools=[ToolDefinition(
+            name="computer_action",
+            description="Choose one action.",
+            parameters={"type": "object", "properties": {"action": {"type": "string"}}},
+        )],
+        extra_body={
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "computer_action",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}},
+                        "required": ["action"],
+                    },
+                },
+            }
+        },
+    )
+    text_request = request.model_copy(deep=True)
+    text_request.messages[-1].images = []
+    assert provider._tools_for_request(text_request, model) is not None
+    provider.model_capabilities[model] = frozenset({"vision", "multimodal", "tool_use"})
+    assert provider._tools_for_request(request, model) is not None
+    provider.model_capabilities[model] = frozenset({"vision", "computer_use", "multimodal"})
+
+    response = await provider._complete_openai(request)
+
+    kwargs = create.await_args.kwargs
+    assert "tools" not in kwargs
+    assert kwargs["extra_body"]["response_format"]["type"] == "json_schema"
+    assert kwargs["extra_body"]["response_format"]["json_schema"]["name"] == "computer_action"
+    assert kwargs["messages"][0]["content"][0]["type"] == "image_url"
+    assert response.content == "ACTION: GUI_SCREENSHOT"
+
+
+@pytest.mark.asyncio
+async def test_vision_fallback_preserves_image_and_reports_provider_status():
+    router = ModelRouter()
+    primary = CustomLLMProvider(
+        name="nvidia",
+        base_url="https://example.invalid/v1",
+        api_key="vision-key",
+        default_model="vision-model",
+    )
+    fallback = CustomLLMProvider(
+        name="groq",
+        base_url="https://example.invalid/v1",
+        api_key="fallback-key",
+        default_model="qwen/qwen3.8-27b",
+    )
+    primary_error = RuntimeError("private provider response must not be exposed")
+    primary_error.status_code = 503
+    primary.complete_with_timing = AsyncMock(side_effect=primary_error)
+    fallback.complete_with_timing = AsyncMock(return_value=LLMResponse(
+        content="READY",
+        model="qwen/qwen3.8-27b",
+        provider=ProviderName.GROQ,
+    ))
+    router.add_provider(primary)
+    router.add_provider(fallback)
+    router.routing_rules["vision"] = {
+        "provider": "nvidia",
+        "model": "vision-model",
+        "fallback": ["groq/qwen/qwen3.8-27b"],
+    }
+    request = LLMRequest(
+        messages=[Message(
+            role=MessageRole.USER,
+            content="Describe the image.",
+            images=[ImageContent(base64="synthetic-image")],
+        )],
+        task_type="computer_use",
+    )
+
+    response = await router.complete(request)
+
+    assert response.content == "READY"
+    fallback_request = fallback.complete_with_timing.await_args.args[0]
+    assert fallback_request.model == "qwen/qwen3.8-27b"
+    assert fallback_request.messages[0].images[0].base64 == "synthetic-image"
+
+
+@pytest.mark.asyncio
+async def test_vision_failure_summary_exposes_status_not_response_body():
+    router = ModelRouter()
+    primary_error = RuntimeError("sensitive provider response")
+    primary_error.status_code = 401
+
+    with pytest.raises(RuntimeError) as error:
+        await router._try_fallbacks(
+            LLMRequest(messages=[Message(
+                role=MessageRole.USER,
+                content="Describe the image.",
+            )], model="vision-model"),
+            failed_provider="nvidia",
+            task_type="vision",
+            primary_error=primary_error,
+        )
+
+    assert "HTTP 401" in str(error.value)
+    assert "sensitive provider response" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_llm_health_degrades_when_only_non_vision_provider_is_ready(monkeypatch):
+    from types import SimpleNamespace
+
+    router = SimpleNamespace(
+        providers={"nvidia": object(), "deepseek": object()},
+        routing_rules={
+            "vision": {
+                "provider": "nvidia",
+                "fallback": ["groq/qwen/qwen3.8-27b"],
+            },
+        },
+        _is_provider_ready=lambda name: name == "deepseek",
+    )
+    monkeypatch.setattr(
+        ModelRouter,
+        "from_config",
+        classmethod(lambda cls: router),
+    )
+
+    health = await HealthChecker.check_llm()
+
+    assert health.status == HealthStatus.DEGRADED
+    assert "No configured vision provider credentials" in health.message
+    assert "deepseek" in health.message
+
+
+@pytest.mark.asyncio
+async def test_llm_health_reports_ready_vision_route(monkeypatch):
+    from types import SimpleNamespace
+
+    router = SimpleNamespace(
+        providers={"nvidia": object(), "groq": object()},
+        routing_rules={
+            "vision": {
+                "provider": "nvidia",
+                "fallback": ["groq/qwen/qwen3.8-27b"],
+            },
+        },
+        _is_provider_ready=lambda name: name in {"nvidia", "groq"},
+    )
+    monkeypatch.setattr(
+        ModelRouter,
+        "from_config",
+        classmethod(lambda cls: router),
+    )
+
+    health = await HealthChecker.check_llm()
+
+    assert health.status == HealthStatus.HEALTHY
+    assert health.message == (
+        "Configured vision providers: groq, nvidia; remote reachability is not probed."
+    )

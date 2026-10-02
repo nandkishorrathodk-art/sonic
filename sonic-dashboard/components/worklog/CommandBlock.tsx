@@ -8,6 +8,8 @@ interface CommandBlockProps {
   output?: string;
   durationSeconds?: number;
   exitCode?: number;
+  agentName?: string;
+  agentId?: string;
   initiallyExpanded?: boolean;
 }
 
@@ -16,6 +18,8 @@ export function CommandBlock({
   output,
   durationSeconds,
   exitCode,
+  agentName,
+  agentId,
   initiallyExpanded = false,
 }: CommandBlockProps) {
   const [expanded, setExpanded] = useState(initiallyExpanded);
@@ -37,21 +41,27 @@ export function CommandBlock({
   return (
     <div className="my-1 font-mono text-[11px] select-text">
       {/* Command Pill */}
-      <div
-        onClick={() => hasOutput && setExpanded(!expanded)}
-        className={`flex items-start justify-between gap-2.5 px-2.5 py-1.5 rounded-lg border border-ink-800/90 bg-ink-950 hover:bg-ink-900/60 hover:border-ink-700 transition ${
-          hasOutput ? "cursor-pointer" : "cursor-default"
-        } group`}
-        title={hasOutput ? (expanded ? "Click to collapse output" : "Click to view real sandbox output") : undefined}
-      >
+      <div className="flex items-start justify-between gap-2.5 px-2.5 py-1.5 rounded-lg border border-ink-800/90 bg-ink-950 hover:bg-ink-900/60 hover:border-ink-700 transition group">
         <div className="flex items-start gap-2 min-w-0 flex-1">
           <Terminal className="w-3.5 h-3.5 text-muted-dim mt-0.5 shrink-0 group-hover:text-secondary-400 transition" />
-          <span className="text-slate-300 group-hover:text-white break-all leading-snug font-medium">
+          <button
+            type="button"
+            disabled={!hasOutput}
+            aria-expanded={expanded}
+            onClick={() => setExpanded(!expanded)}
+            className="text-left text-slate-300 group-hover:text-white break-all leading-snug font-medium disabled:cursor-default"
+            title={hasOutput ? (expanded ? "Collapse output" : "View sandbox output") : undefined}
+          >
             {command}
-          </span>
+          </button>
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0 ml-2">
+          {agentName && agentId && (
+            <span className="text-[9px] text-secondary-300 px-1.5 py-0.5 rounded bg-secondary-500/10 border border-secondary-500/25 whitespace-nowrap">
+              {agentName} · {agentId}
+            </span>
+          )}
           {durationSeconds !== undefined && durationSeconds > 0 && (
             <span className="text-[10px] text-muted-dim px-1.5 py-0.2 rounded bg-ink-900 border border-ink-800">
               {Math.max(0.1, Math.round(durationSeconds * 10) / 10)}s
@@ -68,13 +78,19 @@ export function CommandBlock({
           </button>
 
           {hasOutput && (
-            <div className="text-muted-dim group-hover:text-muted transition">
+            <button
+              type="button"
+              aria-label={expanded ? "Collapse command output" : "Expand command output"}
+              aria-expanded={expanded}
+              onClick={() => setExpanded(!expanded)}
+              className="text-muted-dim group-hover:text-muted transition"
+            >
               {expanded ? (
                 <ChevronDown className="w-3 h-3" />
               ) : (
                 <ChevronRight className="w-3 h-3" />
               )}
-            </div>
+            </button>
           )}
         </div>
       </div>

@@ -21,7 +21,7 @@ import uuid
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
 
 from sonic.auth.middleware import require_auth, verify_ws_token
-from sonic.auth.models import User
+from sonic.auth.models import User, UserRole
 from sonic.logger import get_logger
 from sonic.safety.runtime_stop import get_runtime_stop_state
 
@@ -151,6 +151,18 @@ async def terminal_websocket(
         await websocket.send_json({
             "type": "error",
             "data": "\x1b[1;31m[AUTH ERROR] Authentication required. Please provide a valid JWT token.\x1b[0m\r\n"
+        })
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    if user.role == UserRole.AUDITOR:
+        logger.warning(
+            "read_only_terminal_ws_attempt",
+            user=user.email,
+            tenant_id=user.tenant_id,
+        )
+        await websocket.send_json({
+            "type": "error",
+            "data": "\x1b[1;31m[AUTH ERROR] Operator role is required for terminal access.\x1b[0m\r\n",
         })
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return

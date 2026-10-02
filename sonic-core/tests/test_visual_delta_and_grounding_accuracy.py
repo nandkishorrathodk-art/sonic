@@ -9,7 +9,7 @@ from sonic.computer_use.grounding import (
     resolve_ui_target,
 )
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ComputerActionType
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
 from sonic.computer.models import ScreenObservation
 
 
@@ -86,9 +86,11 @@ async def test_visual_verification_detects_unchanged_screen():
     trace = await agent.execute_action(
         workspace_id="ws-test",
         action_type=ComputerActionType.GUI_CLICK,
-        target_resource="search button",
+        target_resource="500,300",
         payload={"x": 500, "y": 300},
         predicted_outcome="search bar clicked",
     )
 
     assert "[VISUAL VERIFICATION]: Screen state unchanged" in trace.actual_observation
+    assert trace.status == ActionExecutionStatus.UNVERIFIED
+    assert trace.recovery_attempted is False

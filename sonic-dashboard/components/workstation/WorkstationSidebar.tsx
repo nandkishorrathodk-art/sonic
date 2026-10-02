@@ -28,6 +28,7 @@ interface WorkstationSidebarProps {
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
   sessions: SessionItem[];
+  sessionsError?: string | null;
   currentSessionId: string;
   onSelectSession: (sessionId: string) => void;
   onNewSession: () => void;
@@ -46,6 +47,7 @@ export function WorkstationSidebar({
   sidebarOpen,
   setSidebarOpen,
   sessions,
+  sessionsError,
   currentSessionId,
   onSelectSession,
   onNewSession,
@@ -109,7 +111,11 @@ export function WorkstationSidebar({
 
             {/* Session list */}
             <div className="px-2 flex-1 overflow-y-auto space-y-1.5 font-sans text-xs pt-1">
-              {safeSessions.length === 0 ? (
+              {sessionsError ? (
+                <div role="alert" className="p-3 text-center text-rose-300 font-mono text-[11px]">
+                  {sessionsError}
+                </div>
+              ) : safeSessions.length === 0 ? (
                 <div className="p-3 text-center text-muted-dim font-mono text-[11px]">
                   No active sessions.
                 </div>
@@ -123,6 +129,14 @@ export function WorkstationSidebar({
                     <div
                       key={sessId}
                       onClick={() => onSelectSession(sessId)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onSelectSession(sessId);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
                       className={`group p-2.5 rounded-lg border cursor-pointer transition relative flex flex-col gap-1 ${
                         isActive
                           ? "bg-ink-800 border-primary-500/50 shadow-glow text-white"

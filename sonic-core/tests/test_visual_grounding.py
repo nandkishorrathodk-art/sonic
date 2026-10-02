@@ -2,6 +2,7 @@
 Tests for visual grounding engine (adapted from open-computer-use).
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,6 +13,45 @@ from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.grounding import draw_action_marker, extract_bbox_midpoint
 from sonic.computer_use.models import ComputerActionType
 from sonic.llm.prompts import grounding_user_prompt
+
+
+def _seed_fresh_gui_observation(agent, computer, active_window="Desktop"):
+    before = ScreenObservation(
+        screenshot_base64="fresh-frame",
+        width=1280,
+        height=800,
+        capture_age_ms=0,
+        controls_age_ms=0,
+        active_window=active_window,
+    )
+    after = ScreenObservation(
+        screenshot_base64="changed-frame",
+        width=1280,
+        height=800,
+        capture_age_ms=0,
+        controls_age_ms=0,
+        active_window=active_window,
+    )
+    computer.status = AsyncMock(
+        return_value=SimpleNamespace(
+            active_application=active_window,
+            active_window=active_window,
+        )
+    )
+    computer.screenshot = AsyncMock(return_value=before)
+    if not isinstance(computer.gui_action, AsyncMock):
+        computer.gui_action = AsyncMock(return_value=after)
+    agent._last_world_observation = SimpleNamespace(
+        screen=before,
+        active_application=active_window,
+        perception_version=0,
+        observation_age_ms=0,
+    )
+    agent._last_gui_state_observation = before
+    agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+    agent._last_screenshot_b64 = before.screenshot_base64
+    agent._screen_width = before.width
+    agent._screen_height = before.height
 
 
 def test_extract_bbox_midpoint_box_tags():
@@ -35,7 +75,8 @@ def test_grounding_prompt_declares_normalized_coordinate_space():
     prompt = grounding_user_prompt("visible button", 1280, 800)
 
     assert "normalized 0-1000 screen space" in prompt
-    assert "[x, y] (both values normalized from 0 to 1000)" in prompt
+    assert 'Return exactly one JSON object: {"x": <integer>, "y": <integer>}' in prompt
+    assert '{"not_found": true}' in prompt
 
 
 @pytest.mark.asyncio
@@ -58,6 +99,90 @@ async def test_multimodal_grounding_json_point_uses_normalized_screen_space():
     )
 
     assert coords == (640, 400)
+    request = router.complete.await_args.args[0]
+    assert request.extra_body == {"response_format": {"type": "json_object"}}
+
+
+@pytest.mark.asyncio
+async def test_multimodal_grounding_rejects_prose_coordinates():
+    from sonic.computer_use.grounding import query_multimodal_grounding
+
+    router = SimpleNamespace(
+        complete=AsyncMock(
+            return_value=SimpleNamespace(
+                content="The center of the menu is at (0.5, 0.5) normalized coordinates."
+            )
+        )
+    )
+    screenshot = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    coords = await query_multimodal_grounding(
+        router,
+        "Applications menu",
+        screenshot,
+        width=1280,
+        height=800,
+    )
+
+    assert coords is None
+
+
+@pytest.mark.asyncio
+async def test_multimodal_grounding_accepts_strict_normalized_box():
+    from sonic.computer_use.grounding import query_multimodal_grounding
+
+    router = SimpleNamespace(
+        complete=AsyncMock(
+            return_value=SimpleNamespace(
+                content="<|box_start|>(10, 20, 30, 40)<|box_end|>"
+            )
+        )
+    )
+    screenshot = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    coords = await query_multimodal_grounding(
+        router,
+        "Applications menu",
+        screenshot,
+        width=1280,
+        height=800,
+    )
+
+    assert coords == (26, 24)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        ('{"x": 1000, "y": 500}', None),
+        ('{"x": true, "y": 500}', None),
+        ('{"not_found": true}', None),
+        ('{"x": 0, "y": 0}', (0, 0)),
+    ],
+)
+async def test_multimodal_grounding_rejects_invalid_or_offscreen_points(response, expected):
+    from sonic.computer_use.grounding import query_multimodal_grounding
+
+    router = SimpleNamespace(
+        complete=AsyncMock(return_value=SimpleNamespace(content=response))
+    )
+    screenshot = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    coords = await query_multimodal_grounding(
+        router,
+        "visible control",
+        screenshot,
+        width=1280,
+        height=800,
+    )
+
+    assert coords == expected
 
 
 def test_draw_action_marker_fallback():
@@ -138,10 +263,8 @@ def test_draw_action_marker_styles():
 @pytest.mark.asyncio
 async def test_agent_visual_grounding_click_dispatch():
     mock_computer = MagicMock()
-    mock_computer.gui_action = AsyncMock(return_value=ScreenObservation(screenshot_base64="", width=1280, height=800))
     agent = ComputerUseAgent(computer_provider=mock_computer)
-    agent._screen_width = 1280
-    agent._screen_height = 800
+    _seed_fresh_gui_observation(agent, mock_computer)
 
     trace = await agent.execute_action(
         workspace_id="test-ws",
@@ -164,6 +287,7 @@ async def test_agent_visual_grounding_click_dispatch():
 async def test_agent_click_blocked_when_unresolved():
     mock_computer = MagicMock()
     agent = ComputerUseAgent(computer_provider=mock_computer)
+    _seed_fresh_gui_observation(agent, mock_computer)
     trace = await agent.execute_action(
         workspace_id="test-ws",
         action_type=ComputerActionType.GUI_CLICK,
@@ -172,17 +296,86 @@ async def test_agent_click_blocked_when_unresolved():
         predicted_outcome="Open application menu",
     )
     assert trace.status == "BLOCKED"
-    assert "could not be resolved" in trace.actual_observation
+    assert "could not be resolved from visual grounding" in trace.actual_observation
     assert not mock_computer.gui_action.called
+
+
+@pytest.mark.asyncio
+async def test_gui_worker_instructs_replanning_after_unresolved_target(monkeypatch):
+    import sonic.computer_use.agent as agent_module
+
+    computer = MagicMock()
+    agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
+    agent.llm_router = MagicMock()
+    _seed_fresh_gui_observation(agent, computer)
+    agent._last_reasoning_perception = {"image_attached": True}
+    monkeypatch.setattr(
+        agent_module,
+        "query_multimodal_grounding",
+        AsyncMock(return_value=None),
+    )
+
+    trace = await agent.execute_action(
+        "test-ws",
+        ComputerActionType.GUI_CLICK,
+        "File System",
+        {},
+        "Open the observed location",
+    )
+
+    assert trace.status == "BLOCKED"
+    assert "Do not repeat that target" in agent._pending_gui_contract_feedback
+    assert "keyboard navigation" in agent._pending_gui_contract_feedback
+    assert not computer.gui_action.called
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_explicit_payload_pixels_without_semantic_regrounding(monkeypatch):
+    import sonic.computer_use.agent as agent_module
+
+    computer = MagicMock()
+    computer.status = AsyncMock(return_value=SimpleNamespace(
+        active_application="Desktop",
+        active_window="Desktop",
+    ))
+    computer.gui_action = AsyncMock(
+        return_value=ScreenObservation(
+            screenshot_base64="changed-frame",
+            width=1280,
+            height=800,
+            capture_age_ms=0,
+            controls_age_ms=0,
+        )
+    )
+    agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
+    _seed_fresh_gui_observation(agent, computer)
+    grounding = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        agent_module,
+        "query_multimodal_grounding",
+        grounding,
+    )
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.GUI_CLICK,
+        "maximize button",
+        {"x": 640, "y": 400},
+        "Maximize the window",
+    )
+
+    assert trace.status == "COMPLETED"
+    grounding.assert_not_awaited()
+    computer.gui_action.assert_awaited_once()
+    gui_action = computer.gui_action.await_args.args[1]
+    assert (gui_action.x, gui_action.y) == (640, 400)
 
 
 @pytest.mark.asyncio
 async def test_agent_gui_right_click_dispatch():
     mock_computer = MagicMock()
-    mock_computer.gui_action = AsyncMock(return_value=ScreenObservation(screenshot_base64="", width=1280, height=800))
     agent = ComputerUseAgent(computer_provider=mock_computer)
-    agent._screen_width = 1280
-    agent._screen_height = 800
+    _seed_fresh_gui_observation(agent, mock_computer)
 
     trace = await agent.execute_action(
         workspace_id="test-ws",
@@ -209,7 +402,7 @@ async def test_browser_fallback_does_not_type_when_desktop_target_is_unresolved(
     computer = MagicMock()
     computer.gui_action = AsyncMock(return_value=ScreenObservation(width=1280, height=800))
     agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
-    agent._last_screenshot_b64 = "visible-screen"
+    _seed_fresh_gui_observation(agent, computer)
     monkeypatch.setattr(agent_module, "query_multimodal_grounding", AsyncMock(return_value=None))
 
     trace = await agent.execute_action(
@@ -237,7 +430,7 @@ async def test_browser_fallback_selects_grounded_visible_option(monkeypatch):
         ]
     )
     agent = ComputerUseAgent(computer_provider=computer, llm_router=object())
-    agent._last_screenshot_b64 = "initial-screen"
+    _seed_fresh_gui_observation(agent, computer)
     grounding = AsyncMock(side_effect=[(300, 200), (500, 400)])
     monkeypatch.setattr(agent_module, "query_multimodal_grounding", grounding)
 
