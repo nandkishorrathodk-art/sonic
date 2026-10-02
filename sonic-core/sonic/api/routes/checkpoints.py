@@ -138,10 +138,14 @@ async def rollback_checkpoint(
         # identity fields.
         session["checkpoint_state"] = dict(state)
 
+    def read_checkpoint_state() -> dict[str, Any]:
+        return dict(session.get("checkpoint_state", {}))
+
     receipt = await manager.rollback(
         checkpoint_id,
         current_state=current_state,
         apply_state=apply_checkpoint_state,
+        read_state=read_checkpoint_state,
     )
     if receipt.status.value not in {"SUCCEEDED", "SUCCESS", "COMPLETED", "VERIFIED"}:
         # Preserve the truthful receipt rather than turning a blocked rollback

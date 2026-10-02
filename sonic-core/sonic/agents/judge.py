@@ -473,37 +473,17 @@ class JudgeAgent:
         vuln_markers = ("sqli", "sql injection", "xss", "rce", "cve-", "idor", "open port", "flag{", "bypass", "vulnerability")
         combined_findings = (result.findings_summary + " " + " ".join(result.key_discoveries)).lower()
         if any(m in combined_findings for m in vuln_markers):
-            valid_terminal_cmds = [
-                str(_t_val(t, "target_resource") or _t_val(t, "target") or "")
-                for t in traces
-                if str(_t_val(t, "action_type", "")).upper() in ("TERMINAL_EXEC", "TERMINAL", "EXEC")
-                and _t_val(t, "exit_code", 1) == 0
-            ]
-            if valid_terminal_cmds and self.computer and hasattr(self.computer, "terminal"):
-                try:
-                    reprod_cmd = valid_terminal_cmds[-1]
-                    re_exec = await self.computer.terminal(workspace_id, reprod_cmd)
-                    re_exit = getattr(re_exec, "exit_code", 1)
-                    re_obs = str(getattr(re_exec, "stdout", "") or getattr(re_exec, "stderr", ""))
-                    if re_exit == 0:
-                        return JudgeEvaluation(
-                            verdict=JudgeVerdict.CONFIRMED,
-                            confidence=0.95,
-                            notes=f"Re-execution of PoC '{reprod_cmd[:60]}' confirmed exit 0.",
-                            reproduction_exit_code=0,
-                            reproduced_output=re_obs[:300],
-                            evidence_items=[reprod_cmd],
-                        )
-                    else:
-                        return JudgeEvaluation(
-                            verdict=JudgeVerdict.FALSIFIED,
-                            confidence=0.85,
-                            notes=f"Independent re-execution of PoC failed (exit {re_exit}).",
-                            reproduction_exit_code=re_exit,
-                            reproduced_output=re_obs[:300],
-                        )
-                except Exception as ex:
-                    logger.warning("judge_poc_reproduction_error", error=str(ex))
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.INCONCLUSIVE,
+                confidence=0.0,
+                notes=(
+                    "A worker-supplied command is not an independent reproduction plan. "
+                    "Vulnerability claims remain inconclusive until a scoped isolated "
+                    "reproduction produces its own evidence."
+                ),
+                self_attestation_rejected=True,
+                evidence_items=evidence_items,
+            )
 
         # 4. Independent File Artifact Verification
         # For file-writing/editor goals, verify the file actually exists and is non-empty on disk before confirming.

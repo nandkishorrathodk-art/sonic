@@ -147,7 +147,7 @@ class ResearchBrain:
                 experiment=None,
                 specialist_type="none",
                 rationale="Mission budget exhausted; terminating experiment generation.",
-                goal_satisfied=True,
+                goal_satisfied=False,
                 stopping_reason="budget_exhausted",
             )
 

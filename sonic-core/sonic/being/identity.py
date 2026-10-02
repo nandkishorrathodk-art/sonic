@@ -256,10 +256,19 @@ class BeingMind:
         success: bool,
         summary: str = "",
         facts: list[str] | None = None,
+        verification_receipt_id: str = "",
     ) -> BeingMind:
         """Record an operator or autonomous mission outcome on this BeingMind."""
+        verified_success = bool(
+            success
+            and str(verification_receipt_id).strip()
+            and (
+                (summary and str(summary).strip())
+                or any(str(item or "").strip() for item in (facts or []))
+            )
+        )
         self.goals_pursued += 1
-        if success:
+        if verified_success:
             self.goals_completed += 1
         candidate_facts: list[str] = []
         if facts:
@@ -270,14 +279,14 @@ class BeingMind:
         elif summary and str(summary).strip():
             candidate_facts.append(str(summary).strip()[:240])
         elif goal and str(goal).strip():
-            prefix = "completed" if success else "attempted"
+            prefix = "completed" if verified_success else "attempted"
             candidate_facts.append(f"{prefix}: {str(goal).strip()[:200]}")
 
         for fact_str in candidate_facts:
             if fact_str not in self.learned_facts:
                 self.learned_facts.append(fact_str)
 
-        if success:
+        if verified_success:
             self.satiety = min(1.0, self.satiety + 0.08)
             self.focus = min(1.0, self.focus + 0.05)
             self.curiosity_drive = min(1.0, self.curiosity_drive + 0.04)

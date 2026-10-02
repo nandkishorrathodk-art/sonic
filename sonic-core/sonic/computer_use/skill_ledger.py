@@ -8,7 +8,8 @@ records remain candidates until a replay produces runtime evidence.
 from __future__ import annotations
 
 import json
-import re
+import hashlib
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,10 +58,14 @@ class ComputerSkillLedger:
     """Persist application capabilities learned from real workstation traces."""
 
     def __init__(self, tenant_id: str, root: str | None = None) -> None:
-        safe_tenant = re.sub(r"[^A-Za-z0-9_.-]", "_", tenant_id or "default")
+        if not isinstance(tenant_id, str) or not tenant_id.strip() or tenant_id != tenant_id.strip():
+            raise ValueError("tenant_id must be a non-empty canonical tenant identifier")
+        self.tenant_id = tenant_id
+        safe_tenant = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
         base = Path(root or "sonic_data/skills")
         self.path = base / f"{safe_tenant}.json"
         self._data: dict[str, Any] = {
+            "tenant_id": tenant_id,
             "applications": {},
             "actions": [],
             "verified_skills": [],
@@ -74,6 +79,10 @@ class ComputerSkillLedger:
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return
         if isinstance(raw, dict):
+            if raw.get("tenant_id") not in (None, self.tenant_id):
+                raise ValueError("skill ledger tenant identity does not match its filename")
+            if raw.get("tenant_id") is None and any(raw.get(key) for key in ("applications", "actions", "verified_skills", "workflows")):
+                return
             self._data.update(raw)
 
     def _save(self) -> None:
@@ -198,6 +207,10 @@ class ComputerSkillLedger:
         self,
         workflow_id: str,
         replay: dict[str, Any],
+        *,
+        independent_verifier: Callable[
+            [str, tuple[dict[str, Any], ...], dict[str, Any]], bool
+        ] | None = None,
     ) -> WorkflowRecord | None:
         """Record one replay, accepting success only with empirical evidence."""
         identifier = str(workflow_id or "").strip()
@@ -215,7 +228,10 @@ class ComputerSkillLedger:
         successful = (
             status in {"SUCCESS", "SUCCEEDED", "COMPLETED", "VERIFIED"}
             and bool(evidence)
+            and replay.get("exit_code") == 0
             and bool(str(metadata.get("replay_id") or metadata.get("trace_id") or "").strip())
+            and callable(independent_verifier)
+            and independent_verifier(identifier, tuple(record.get("steps", [])), replay) is True
         )
         record["replay_attempts"] = int(record.get("replay_attempts", 0)) + 1
         if successful:

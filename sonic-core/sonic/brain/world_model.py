@@ -273,6 +273,12 @@ class DynamicWorldModel:
             raise ValueError(f"Unknown actor '{actor_id}' cannot record a transition.")
         if resource_id not in self.resources:
             raise ValueError(f"Unknown resource '{resource_id}' cannot record a transition.")
+        current_state = self.resources[resource_id].current_state
+        if source_state != current_state:
+            raise ValueError(
+                f"Stale transition source state for resource '{resource_id}': "
+                f"expected {current_state!r}, received {source_state!r}"
+            )
 
         t = StateTransition(
             source_state=source_state,
@@ -498,8 +504,6 @@ class WorldTwin:
         native_steps: list[dict[str, Any]] = []
         for action in actions:
             candidates = [t for t in self._edges_from(cur) if t.action == action]
-            if not candidates:
-                candidates = self._edges_from(cur)
             if candidates:
                 trans = max(candidates, key=lambda t: t.info_gain)
                 native_steps.append({
@@ -515,7 +519,6 @@ class WorldTwin:
                     "expected_info_gain": 0.0,
                     "cost": 1.0,
                 })
-                cur = f"unknown-{action!r}"
             projected.append(cur)
 
         total_gain, total_cost = self._native_aggregate(native_steps)

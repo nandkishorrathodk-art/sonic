@@ -26,6 +26,7 @@ def test_checkpoint_restores_explicit_artifacts_and_state_delta(tmp_path):
         checkpoint.id,
         current_state={"branch": "feature", "dirty": True},
         apply_state=lambda state: applied.update(state),
+        read_state=lambda: applied,
     ))
 
     assert receipt.status.value == "SUCCEEDED"
@@ -34,6 +35,65 @@ def test_checkpoint_restores_explicit_artifacts_and_state_delta(tmp_path):
     assert run(store.read_file("notes.txt")) == b"before"
     assert applied == {"branch": "main", "dirty": False}
     assert "restored checkpoint" in receipt.evidence
+
+
+def test_checkpoint_requires_and_verifies_state_readback(tmp_path):
+    store = LocalWorkspaceFileStore(tmp_path)
+    manager = CheckpointManager(store)
+    checkpoint = run(manager.create("saved", state={"phase": "before"}))
+
+    missing_verifier = run(manager.rollback(
+        checkpoint.id,
+        current_state={"phase": "after"},
+        apply_state=lambda state: None,
+    ))
+    assert missing_verifier.status.value == "FAILED"
+    assert "readable state mapping" in missing_verifier.evidence
+
+    state = {"phase": "after"}
+    mismatch = run(manager.rollback(
+        checkpoint.id,
+        current_state={"phase": "after"},
+        apply_state=lambda _state: None,
+        read_state=lambda: state,
+    ))
+    assert mismatch.status.value == "FAILED"
+    assert "state read-back did not match" in mismatch.evidence
+
+
+def test_checkpoint_partial_failure_compensates_previously_written_artifacts(tmp_path):
+    class FailingSecondWriteStore(LocalWorkspaceFileStore):
+        def __init__(self, root):
+            super().__init__(root)
+            self.write_count = 0
+            self.fail_second_write = False
+
+        async def write_file(self, path, content):
+            self.write_count += 1
+            if path == "second.txt" and self.fail_second_write:
+                self.fail_second_write = False
+                raise OSError("injected write failure")
+            return await super().write_file(path, content)
+
+    store = FailingSecondWriteStore(tmp_path)
+    run(store.write_file("first.txt", "first-before"))
+    run(store.write_file("second.txt", "second-before"))
+    manager = CheckpointManager(store)
+    checkpoint = run(manager.create(
+        "before",
+        state={},
+        artifacts={"first.txt": "first-checkpoint", "second.txt": "second-checkpoint"},
+    ))
+    run(store.write_file("first.txt", "first-after"))
+    run(store.write_file("second.txt", "second-after"))
+    store.fail_second_write = True
+
+    receipt = run(manager.rollback(checkpoint.id, current_state={}))
+
+    assert receipt.status.value == "FAILED"
+    assert "original state restored" in receipt.evidence
+    assert run(store.read_file("first.txt")) == b"first-after"
+    assert run(store.read_file("second.txt")) == b"second-after"
 
 
 def test_missing_or_tampered_checkpoint_fails_closed(tmp_path):

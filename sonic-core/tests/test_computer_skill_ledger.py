@@ -149,9 +149,16 @@ def test_workflow_is_observed_then_replayed_before_promotion(tmp_path: Path):
         "open-and-submit",
         {
             "status": "SUCCESS",
+            "exit_code": 0,
             "evidence": "confirmation was visible after replay",
             "metadata": {"replay_id": "replay-1", "postcondition": "confirmation-visible"},
         },
+        independent_verifier=lambda workflow_id, steps, replay: (
+            workflow_id == "open-and-submit"
+            and len(steps) == 2
+            and replay.get("exit_code") == 0
+            and replay.get("metadata", {}).get("postcondition") == "confirmation-visible"
+        ),
     )
     assert verified is not None
     assert verified.replay_attempts == 1
@@ -194,3 +201,21 @@ def test_workflow_rejects_empty_or_unobserved_steps(tmp_path: Path):
         "missing-observation", [{"action_type": "GUI_CLICK", "target": "control"}]
     ) is None
     assert ledger.workflows() == []
+
+
+def test_skill_ledger_tenant_paths_do_not_collide(tmp_path: Path):
+    left = ComputerSkillLedger("a/b", root=str(tmp_path))
+    right = ComputerSkillLedger("a_b", root=str(tmp_path))
+    left.observe_applications(["left-only"])
+    right.observe_applications(["right-only"])
+
+    assert left.path != right.path
+    assert "left-only" in ComputerSkillLedger("a/b", root=str(tmp_path)).context()
+    assert "left-only" not in right.context()
+
+
+def test_skill_ledger_requires_canonical_tenant_id(tmp_path: Path):
+    with pytest.raises(ValueError, match="tenant_id"):
+        ComputerSkillLedger("  ", root=str(tmp_path))
+    with pytest.raises(ValueError, match="tenant_id"):
+        ComputerSkillLedger("tenant ", root=str(tmp_path))

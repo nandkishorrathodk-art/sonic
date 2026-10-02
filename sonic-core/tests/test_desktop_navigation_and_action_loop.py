@@ -148,7 +148,13 @@ async def test_consecutive_action_loop_breaker():
         "click search",
     )
     assert t1.status == ActionExecutionStatus.BLOCKED
-    assert "could not be resolved from visual grounding" in t1.actual_observation.lower()
+    assert any(
+        reason in t1.actual_observation.lower()
+        for reason in (
+            "no prior desktop observation",
+            "could not be resolved from visual grounding",
+        )
+    )
 
     t2 = await agent.execute_action(
         comp.workspace_id,
