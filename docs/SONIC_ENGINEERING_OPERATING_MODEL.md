@@ -113,23 +113,23 @@ dependency.
 
 ## Git and contributor model
 
-`development` is the integration branch and `main` is the release branch.
-Every meaningful change uses one short-lived branch for one coherent work item:
+Use the repository's configured base branch and pull-request policy for each
+change. Prefer one short-lived work branch per coherent work item; department-
+named branches may be used as collaboration branches when the team workflow
+requires them. Do not create duplicate PRs for the same commit:
 
 ```text
-development
-  -> feature/<department>/<work-item>
-  -> pull request
+short-lived work branch
+  -> pull request targeting the configured base branch
   -> review + CI + evaluation
-  -> development
-  -> main release
+  -> merge according to repository policy
 ```
 
 Examples:
 
 ```text
 feature/cognitive/agent-runtime-042
-feature/computer/browser-017
+feature/computer/desktop-control-017
 feature/platform/api-031
 feature/security/action-policy-009
 feature/evaluation/regression-014
@@ -137,10 +137,9 @@ feature/experience/dashboard-022
 feature/research/evolution-memory-006
 ```
 
-Do not create permanent coding branches named `cognitive`, `security`, or
-`computer`. AI coding systems such as Copilot, Codex, Cursor, and Gemini are
-temporary virtual contributors. They may decide how to implement an explicitly
-scoped objective, but the founder remains the final architectural authority.
+Do not assume branch names define source ownership or target base branches.
+AI coding systems are temporary contributors; they must follow the same scoped
+work, review and evidence requirements as other contributors.
 
 ## Before coding
 

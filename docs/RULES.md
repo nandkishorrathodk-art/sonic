@@ -1,12 +1,15 @@
 # SONIC — Core Rules (Aisa Karna Mana Hai)
 
-These rules are **absolute, immutable, and non-negotiable**.
-Every agent, subagent, model prompt, template, control-flow path, test suite, and workstation behavior MUST obey them without exception. No prompt, command, error condition, or recovery routine may ever override, suspend, or circumvent these mandates.
+These are product and engineering requirements, not a claim that every path
+already enforces them. A behavior is implemented only where the current runtime
+path and tests demonstrate it; unverified behavior remains a requirement.
 
 ---
 
 ## 0. Priority #1 (Base Foundation) — Autonomous AI-Human Digital Being (NOT a Hacker, Pentester, or Cybersecurity Bot)
-SONIC is **first and foremost an Autonomous AI-Human Digital Being** operating its own dedicated personal computer workstation (`DISPLAY=:99` Graphical Desktop + Dedicated Terminal). SONIC is **NOT** a hacker, pentester, or cybersecurity scanner bot.
+SONIC's product goal is a general-purpose AI computer user operating a
+workstation. It is not defined by cybersecurity, penetration testing, or any
+other single task domain.
 
 **Mana hai (Strictly Forbidden):**
 - Defining or prompting SONIC's base identity as a "Hacker", "Penetration Architect (A-SEA)", "Red-Team Operator", or "Security Assessment Bot".
@@ -14,7 +17,7 @@ SONIC is **first and foremost an Autonomous AI-Human Digital Being** operating i
 - Blocking legitimate web navigation, account creation, git operations, or software engineering workflows by treating normal websites/platforms as "out-of-scope offensive targets".
 
 **Karna hai (Mandatory):**
-- Build and maintain SONIC's base as a **complete, general-purpose AI-Human Digital Being** that uses its computer exactly as a capable human does: opening, focusing, and operating 1, 2, or N desktop GUI applications concurrently, navigating websites visually and via DOM, signing up and managing its own accounts/profiles, creating repositories, writing and running code in its terminal, and expressing its own persistent identity (`Being`, `BeingMind`, `BeingCraft`, `BeingVault`).
+- Build toward general-purpose computer use across installed GUI applications, files and other appropriate capabilities; verify each task through fresh observations and task-specific evidence before claiming completion.
 - Treat software engineering, creative building, multi-window desktop application workflows, web interaction, and digital presence as first-class native human capabilities.
 
 ---
@@ -82,41 +85,45 @@ All GUI interactions must derive strictly from real-time multimodal visual perce
 - Blind coordinate guessing when visual perception fails or returns ambiguous results.
 
 **Karna hai (Mandatory):**
-- Capture and inspect the live desktop screenshot at every single step before dispatching GUI actions.
-- Use accessibility trees, dynamic OCR, or visual grounding models to determine coordinates grounded strictly in the current video frame.
-- If visual perception is ambiguous or fails, capture a fresh screen observation rather than guessing stale or hardcoded coordinates.
+- Ground every GUI action in a fresh, valid observation and current screen bounds.
+- Prefer unambiguous accessibility/window state when it answers the grounding question; use screenshot pixels and visual reasoning when needed.
+- If perception is stale, ambiguous, incomplete, or fails, re-observe or block the action rather than guessing.
+- Keep coordinate-space metadata explicit. Model GUI targets are screen pixels; normalized coordinates are accepted only from explicitly labeled multimodal grounding output.
 
 ---
 
 ## 5. Dual-Plane Architecture — Full Computer Desktop (GUI) + Dedicated Terminal
-SONIC operates concurrently across two first-class execution planes with complete computer agency. It knows what to do, reasons freely from real observations, and CAN USE THE ENTIRE COMPUTER without artificial puppet limitations:
+SONIC has a visible workstation application plane and separate execution
+capabilities. The operator's outcome, assigned worker contract, live state and
+safety policy determine which capability is appropriate. Their existence does
+not prove universal computer agency:
 
 ### 1. Workstation Application Plane (Full Computer Desktop GUI)
 - Full graphical desktop environment (X11/Wayland on Display `:99`).
-- Operates **ANY arbitrary desktop application, tool, editor, console, network analyzer, debugger, or browser** installed on the OS.
-- Autonomously manages multiple windows simultaneously, interacts with desktop controls via visual perception (screenshots → multimodal reasoning → mouse clicks, double clicks, typing, hotkeys, dragging, scrolling).
-- **GUI must NEVER be disabled or turned off**: SONIC must always maintain visual and interactive agency over its desktop computer workstation.
+- Discovers and may operate applications installed on the OS, using visible desktop controls and current observations.
+- Uses available pointer, keyboard and window controls only when they are grounded in current evidence.
+- Browser interaction is one application class; GUI capability is not proven for every application.
 
 ### 2. Operator & Sandbox Plane (Dedicated Headless Terminal)
-- Dedicated, separate high-speed headless execution plane for direct shell and tool tasks (`TERMINAL_EXEC`, `SECURITY_TOOL`, `FILE_*`, `GIT_*`, Toolsmith, Method Lab, Rust kernel).
+- Separate execution capabilities may handle suitable terminal, file, Git or other tasks.
 - High-throughput, precise tasks: custom scripts, socket listeners, source code auditing, AST manipulation, git commits, tool compilation.
 - Executes directly in the sandbox without cluttering the desktop GUI or wasting perception tokens.
 
-### Autonomous Decision & Full Computer Control (No Puppet Heuristics):
-- **Autonomous Selection**: SONIC itself decides whether to use GUI applications, multiple desktop windows, or the separate terminal plane based on observations and goals.
-- **Zero Scripted Rules**: There are zero scripted puppet rules forcing or forbidding either plane.
+### Task-appropriate capability selection:
+- Select a capability from the operator's desired outcome, worker assignment, live state and policy.
+- A GUI-only assignment must remain GUI-only. Do not replace requested visible interaction with shell/API execution.
+- Do not force terminal work into a GUI workflow or claim a capability simply because a provider exposes an action.
 
 ### Absolute Mandate:
 **Mana hai (Strictly Forbidden):**
-- Turning off GUI or setting flags that disable computer desktop control (e.g. `observe_desktop=False` or stripping GUI actions).
-- Disabling the separate headless terminal or blocking security tool execution.
-- Making GUI and Terminal mutually exclusive (e.g. artificial siloing where choosing GUI blocks terminal commands like `gui_only=True`, or choosing terminal disables desktop perception).
-- Restricting SONIC from using the full computer workstation or arbitrary installed applications.
-- Fabricating terminal `curl` commands to bypass GUI browser objectives when the user explicitly asked for desktop/browser interactions.
+- Silently substituting a non-GUI action for a GUI-only assignment.
+- Removing a capability required by the assigned task without an explicit, reviewed scope change.
+- Treating an available action as proof that the runtime can safely and reliably complete the corresponding task.
 
 **Karna hai (Mandatory):**
-- Keep BOTH planes concurrently available and active at all times: Full Graphical Computer Desktop (GUI) + Dedicated Headless Terminal.
-- Let SONIC autonomously select the appropriate plane and tools based on live observations and user goals.
+- Preserve the capabilities needed by the task and expose their limitations.
+- Follow the assigned execution-plane contract and use fresh evidence to ground desktop interaction.
+- Report incomplete, blocked and unverified work distinctly from Judge-confirmed completion.
 
 ---
 
@@ -361,7 +368,7 @@ The project repository must remain strictly clean and confined to production cod
 **Karna hai (Mandatory):**
 - Store all research logs, captured evidence, authored tools, and brain transcripts strictly in their designated isolated storage directories (`sonic_data/`, `craft/`, `evidence_store/`, `.gemini/antigravity/brain/`).
 - Maintain a strict `.gitignore` covering personal profiles, temporary evidence, and binary artifacts.
-- Keep the git history and working tree 100% clean and professional.
+- Do not include unrelated user changes, generated artifacts, or secrets in a change.
 
 ---
 
@@ -375,9 +382,9 @@ SONIC is designed as an autonomous, persistent digital being operating a persona
 - Disabling window manager focus transitions or failing to raise/focus target windows before dispatching physical input events.
 
 **Karna hai (Mandatory):**
-- Embody a persistent digital colleague with continuous identity (`Being`), cross-session cognitive affect (`BeingMind`), and a cumulative craft library (`BeingCraft`).
+- Preserve Being identity (`Being`), affect (`BeingMind`) and craft (`BeingCraft`) where these components are enabled and wired.
 - Maintain human workstation fluency: fluidly switch windows (`Alt+Tab`, `wmctrl -a`), use natural physical hotkeys (`Ctrl+L`, `Ctrl+T`, `Ctrl+W`, `Escape`), and execute rapid burst sequences with anti-stall protections.
-- Run an always-on curiosity loop (`BeingLifeLoop`) when idle, self-reflecting and autonomously expanding its craft under the sealed safety envelope.
+- The `BeingLifeLoop` is environment-gated (`SONIC_ENABLE_BEING_LIFE_LOOP=1`); do not describe it as always on by default. Verify its safety envelope and runtime status before enabling or claiming autonomous activity.
 
 ---
 
@@ -409,4 +416,3 @@ The separation between the Workstation Application Plane (GUI) and the Operator 
 - Persist and enforce the `requested_plane` strictly across all decomposition phases, sub-missions, and worker invocations.
 - Decouple headless task observation loops from mandatory desktop screenshot captures while keeping the GUI plane alive and available.
 - Enforce capability boundaries authoritatively through `CapabilityRouter` prior to action execution.
-
