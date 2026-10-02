@@ -8,11 +8,11 @@ Configuration is managed via `sonic-core/sonic/config.py` (`Settings`) and envir
 |---|---|---|
 | `APP_ENV` | `production` | Runtime environment (`development` \| `staging` \| `production`) |
 | `JWT_SECRET` | *(required)* | Secret key for signing bearer tokens |
-| `SONIC_MEMORY_DB_PATH` | `./sonic_data.db` | Persistent SQLite store for Graph, Vector, and Evolution memory |
+| `SONIC_MEMORY_DB_PATH` | `./sonic_data.db` | Persistent SQLite path used by graph, vector, and selected Being stores |
 | `SONIC_BEING_DB_PATH` | `./sonic_data.db` | Persistent SQLite store for `Being`, `BeingMind`, and `BeingVault` |
 | `SONIC_BEING_VAULT_KEY` | *(required to use the vault)* | URL-safe base64 encoding of 32 random bytes; encrypts credentials, tokens, profile URLs, and saved session state |
 | `SONIC_WORKSTATION_STATE_PATH` | `sonic_data/workstations.json` | Persistent workspace attachment index |
-| `SONIC_ENABLE_BEING_LIFE_LOOP` | `0` | Enable always-on autonomous `BeingLifeLoop` (`1` to enable) |
+| `SONIC_ENABLE_BEING_LIFE_LOOP` | `0` | Enable the optional background `BeingLifeLoop` (`1` to enable; off by default) |
 | `SONIC_SELF_CODER_ENABLED` | `true` | Enable the independent periodic self-coder loop; disabling it stops automatic code improvement |
 | `SONIC_SELF_CODER_INTERVAL_SECONDS` | `3600` | Seconds between background self-coder runs (`60`–`86400`) |
 | `SONIC_SELF_CODER_TENANT` | `SONIC_BEING_TENANT` or `default` | Tenant namespace for background candidate reports |

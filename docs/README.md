@@ -1,29 +1,40 @@
-# 📚 SONIC-REDA Documentation Directory
+# SONIC documentation
 
-Welcome to the central documentation index for **SONIC-REDA (A-SEA)**.
+SONIC's product goal is a general-purpose AI computer user. These documents
+describe intended behavior, current implementation, and evidence boundaries;
+architecture diagrams and component tests must not be read as proof of
+universal or live desktop-task capability.
 
-This directory contains the master architectural blueprints, core system invariants, developer orientation guides, and licensing terms.
+## Start here
 
----
+- [Product goal and GUI acceptance contract](SONIC_COMPUTER_USER_GOAL.md) —
+  authoritative outcome, perception, grounding and verification requirements.
+- [Getting started](GETTING_STARTED.md) — local development setup.
+- [Architecture](ARCHITECTURE.md) — current components and their boundaries.
+- [Deployment](DEPLOYMENT.md) — local and production configuration cautions.
+- [Configuration reference](CONFIGURATION.md) — environment variables and settings.
 
-## 📑 Documentation Index
+## Engineering and organization
 
-| Document | File Path | Summary |
-| :--- | :--- | :--- |
-| **System Architecture** | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Six-layer architecture, cognitive loop, epistemic reasoning, and data flow. |
-| **Computer-User Product Goal** | [`SONIC_COMPUTER_USER_GOAL.md`](SONIC_COMPUTER_USER_GOAL.md) | Product behavior, real-time perception direction, safety contract, and multi-app acceptance criteria. |
-| **Master Blueprint** | [`BLUEPRINT.md`](BLUEPRINT.md) | High-level system design, terminology glossary, and subsystem interactions. |
-| **AI Agent Guide** | [`AI_AGENT_GUIDE.md`](AI_AGENT_GUIDE.md) | Onboarding guide, 60-second mental model, and orientation for autonomous agents. |
-| **Core Invariants & Rules** | [`RULES.md`](RULES.md) | Mandatory invariants (*Aisa Karna Mana Hai*), anti-puppet rules, and prohibitions. |
-| **Engineering Operating Model** | [`SONIC_ENGINEERING_OPERATING_MODEL.md`](SONIC_ENGINEERING_OPERATING_MODEL.md) | Department ownership, scoped AI contributors, audit workflow, Git strategy, and release gates. |
-| **Proprietary License** | [`LICENSE`](LICENSE) | Official proprietary terms of use, reservation of rights, and copyright notice. |
+- [Engineering operating model](SONIC_ENGINEERING_OPERATING_MODEL.md) —
+  ownership, contribution and review principles.
+- [Employee and department architecture](EMPLOYEE_ARCHITECTURE.md) —
+  registered ownership versus proposed staffing.
+- [AI agent guide](AI_AGENT_GUIDE.md) — repository development and validation.
+- [Rules and invariants](RULES.md) — safety, perception, execution and evidence rules.
+- [Blueprint](BLUEPRINT.md) — product direction and implementation priorities.
+- [License](LICENSE) — repository terms.
+- [Historical architecture notes](ARCHITECTURE.md#historical-notes) — dated
+  material is explicitly distinguished from current runtime guarantees.
 
----
+## Visual assets
 
-## 🎯 Core Principles at a Glance
+- [`assets/architecture.svg`](../assets/architecture.svg) — component overview;
+  an architecture summary, not an end-to-end acceptance result.
+- [`assets/sonic_cyber_workstation.png`](../assets/sonic_cyber_workstation.png) —
+  historical interface snapshot with legacy cyber branding; not proof of task completion.
+- [`assets/sonic_cognitive_memory_graph.png`](../assets/sonic_cognitive_memory_graph.png) —
+  interface snapshot; not evidence that a particular live task was completed.
 
-1. **Dual-Plane Operation**: Full X11 desktop computer agency (GUI) + direct sandbox bash execution (Headless).
-2. **Fail-Closed Safety**: Cryptographically sealed action policy (`SealedActionPolicy`, SHA-256). Any violation triggers an immediate `DENY`.
-3. **Zero Puppet Scripts**: Dynamic perception and adaptive reasoning from first principles; no rigid keyword trees or canned checklists.
-4. **Empirical Falsification**: Zero success-by-decree. Every vulnerability finding is backed by real execution receipts inside the isolated sandbox.
-5. **Persistent Being**: Affective state, vector memories, property graph, and durable craft survive reboots without amnesia.
+The copies under [`docs/assets/`](assets/) are kept in sync for documentation
+and external references.
