@@ -856,7 +856,7 @@ ARCHITECTURAL ROLES:
 
 Respond in EXACTLY this format (no markdown fences):
 THOUGHT: <brief action rationale grounded in the live observation>
-ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_HOTKEY|GUI_SCROLL|GUI_SCREENSHOT|GUI_WAIT|GUI_DRAG|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_STATUS|GIT_DIFF|GIT_BRANCH|GIT_COMMIT|GIT_PUSH|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_MAXIMIZE|WINDOW_MAXIMIZE|WINDOW_TILE|APP_INSTALL|WAIT_FOR_HUMAN|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|GOAL_COMPLETE>
+ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_RIGHT_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_HOTKEY|GUI_MOVE|GUI_SCROLL|GUI_SCREENSHOT|GUI_WAIT|GUI_DRAG|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_STATUS|GIT_DIFF|GIT_BRANCH|GIT_COMMIT|GIT_PUSH|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_MAXIMIZE|WINDOW_MAXIMIZE|WINDOW_TILE|APP_INSTALL|WAIT_FOR_HUMAN|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|GOAL_COMPLETE>
 TARGET: <path, application/window name, operator-supplied destination, coordinates "<x>,<y>", or visible UI element query>
 PAYLOAD: <json dict, e.g. {{"app_name": "..."}}, {{"text": "..."}}, {{"key": "..."}}, or {{"command": "..."}}>
 EXPECTED: <predicted outcome>
@@ -868,6 +868,7 @@ KEY RULES:
 - APP_MAXIMIZE: TARGET is window title/id or omit/":ACTIVE:" to maximize window for full visibility
 - WINDOW_TILE: Tiles open application windows side-by-side across the desktop
 - GUI_CLICK: TARGET is "<x>,<y>" coordinates grounded from the screenshot or a visible UI element query
+- GUI_MOVE: Moves the visible mouse pointer without clicking; TARGET is "<x>,<y>" coordinates grounded from the current screenshot
 - GUI_TYPE: TARGET/PAYLOAD must include grounded input coordinates
   {{"x": <integer>, "y": <integer>, "text": "..."}}
   Existing text is preserved; add {{"clear_field": true}} only to explicitly replace it.

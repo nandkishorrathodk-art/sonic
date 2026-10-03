@@ -927,6 +927,48 @@ async def test_stale_actionable_nsi_frame_uses_fallback_frame_and_controls():
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "controls",
+    [
+        [],
+        [{
+            "name": "Old Submit",
+            "role": "button",
+            "bbox": [10, 10, 90, 40],
+            "source": "ocr",
+            "confidence": 95,
+            "freshness_ms": 1_500,
+        }],
+    ],
+    ids=["no-controls", "stale-controls"],
+)
+async def test_fresh_nsi_pixels_do_not_require_fresh_controls(controls):
+    provider = DockerComputerProvider()
+    nsi_frame = _png_base64()
+    provider._nsi_request = AsyncMock(return_value={
+        "ok": True,
+        "b64": nsi_frame,
+        "capture_timestamp_ns": time.time_ns(),
+        "capture_age_ms": 25,
+        "active_window": "Current Window",
+        "visible_text": "Current screen",
+        "detected_controls": controls,
+    })
+    provider._docker_exec = AsyncMock()
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.desktop_state == "INTERACTIVE"
+    assert observation.screenshot_base64 == nsi_frame
+    assert observation.capture_age_ms < 2_000
+    assert observation.active_window == "Current Window"
+    assert observation.visible_text == "Current screen"
+    assert observation.detected_controls == []
+    provider._docker_exec.assert_not_awaited()
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
 async def test_stale_nsi_capture_age_value_forces_refresh_even_with_recent_timestamp():
     provider = DockerComputerProvider()
     fallback_frame = _png_base64(640, 480)
