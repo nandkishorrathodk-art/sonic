@@ -590,8 +590,8 @@ async def test_boss_phase_callback_streams_events():
         "thinking": "Two quick tasks.",
         "phase_name": "Quick Tasks",
         "sub_missions": [
-            {"name": "First Worker", "goal": "Task 1", "max_steps": 2, "priority": 2},
-            {"name": "Second Worker", "goal": "Task 2", "max_steps": 2, "priority": 1},
+            {"name": "First Worker", "goal": "Task 1", "role": "computer_operator", "plane": "gui", "max_steps": 2, "priority": 2},
+            {"name": "Second Worker", "goal": "Task 2", "role": "software_builder", "plane": "headless", "max_steps": 2, "priority": 1},
         ],
     })
     llm = _make_llm_mock([
@@ -625,8 +625,12 @@ async def test_boss_phase_callback_streams_events():
         first_report = next(data for data in reports if data["agent_name"] == "First Worker")
         assert first_dispatch["agent_id"] == "sub-agent-1"
         assert first_dispatch["status"] == "RUNNING"
+        assert first_dispatch["role"] == "computer_operator"
+        assert first_dispatch["plane"] == "gui"
         assert first_report["agent_id"] == "sub-agent-1"
         assert first_report["status"] == "SUCCESS"
+        assert first_report["role"] == "computer_operator"
+        assert first_report["plane"] == "gui"
         assert "phase_complete" in event_types
         assert "boss_report" in event_types
 

@@ -3014,10 +3014,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             config_path = CONFIGS_DIR / "models.yaml"
 
                         # Use environment variables for agent configuration
-                        agent_api_key = os.environ.get("SONIC_AGENT_API_KEY") or os.environ.get("NVIDIA_API_KEY", "")
-                        agent_base_url = os.environ.get("SONIC_AGENT_BASE_URL") or os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-                        agent_provider_name = os.environ.get("SONIC_AGENT_PROVIDER", "nvidia")
-                        model_to_use = os.environ.get("SONIC_AGENT_MODEL", "meta/llama-3.2-90b-vision-instruct")
+                        agent_api_key = os.environ.get("SONIC_AGENT_API_KEY") or os.environ.get("GROQ_API_KEY", "")
+                        agent_base_url = os.environ.get("SONIC_AGENT_BASE_URL") or os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+                        agent_provider_name = os.environ.get("SONIC_AGENT_PROVIDER", "groq")
+                        model_to_use = os.environ.get("SONIC_AGENT_MODEL", "qwen/qwen3.8-27b")
 
                         if config_path.exists():
                             try:
@@ -3094,6 +3094,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 payload = trace.get("payload", "")
                                 sub_agent_id = str(trace.get("sub_agent_id") or "")
                                 sub_agent_name = str(trace.get("sub_agent_name") or "")
+                                sub_mission_id = str(trace.get("sub_mission_id") or "")
+                                worker_role = str(trace.get("worker_role") or "")
+                                execution_plane = str(trace.get("execution_plane") or "")
                                 perception_source = str(trace.get("perception_source", "unknown"))
                                 perception_version = trace.get("perception_version", 0)
                                 screen_age_ms = trace.get("screen_age_ms")
@@ -3126,12 +3129,26 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
 
                                 sub_agent_id = ""
                                 sub_agent_name = ""
+                                sub_mission_id = ""
+                                worker_role = ""
+                                execution_plane = ""
                             worker_metadata = (
-                                {"sub_agent_id": sub_agent_id, "sub_agent_name": sub_agent_name}
+                                {
+                                    "sub_agent_id": sub_agent_id,
+                                    "sub_agent_name": sub_agent_name,
+                                    "sub_mission_id": sub_mission_id,
+                                    "worker_role": worker_role,
+                                    "execution_plane": execution_plane,
+                                }
                                 if sub_agent_id or sub_agent_name
                                 else {}
                             )
                             step_type = "action" if trace_status in ("COMPLETED", "SUCCESS", "RECOVERED", "VERIFIED") else "error"
+                            step_metadata = {
+                                "step_index": step_index,
+                                "action_type": action_val,
+                                "action_status": trace_status,
+                            }
                             worker_label = f"{sub_agent_name} ({sub_agent_id}): " if worker_metadata else ""
                             state["current_action"] = f"{worker_label}Step {step_index}: {action_val} on {target_resource}"
                             perception_summary = ""
@@ -3196,6 +3213,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     command=cmd, output=actual_observation,
                                     duration_seconds=duration_seconds,
                                     exit_code=exit_code,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
                             elif action_val == "FILE_READ":
@@ -3203,6 +3221,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     state, "read", f"Read {target_resource}", actual_observation,
                                     file=target_resource,
                                     duration_seconds=duration_seconds,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
                             elif action_val == "FILE_WRITE":
@@ -3210,6 +3229,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     state, "write", f"Write {target_resource}", actual_observation,
                                     file=target_resource,
                                     duration_seconds=duration_seconds,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
                             elif action_val in ("SCREENSHOT", "BROWSER_SCREENSHOT"):
@@ -3217,6 +3237,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     state, "screenshot", "Desktop Screenshot", actual_observation or "Captured desktop screenshot",
                                     image=actual_observation if (actual_observation and actual_observation.startswith("data:image")) else None,
                                     duration_seconds=duration_seconds,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
                             else:
@@ -3228,6 +3249,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         f"Status: {trace_status}{perception_summary}"
                                     ),
                                     duration_seconds=duration_seconds,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
 
@@ -3359,18 +3381,24 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         "action",
                                         title,
                                         f"Status: {data.get('status', 'RUNNING')}\nGoal: {data.get('goal')}\nMax Steps: {data.get('max_steps')}",
+                                        orchestration_event="sub_dispatch",
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
                                         agent_id=agent_id,
                                         agent_name=agent_name,
                                         status=data.get("status", "RUNNING"),
                                         goal=data.get("goal"),
+                                        worker_role=data.get("role", "subagent"),
+                                        execution_plane=data.get("plane", "gui"),
                                         max_steps=data.get("max_steps"),
                                     )
                                 elif event_type == "sub_step":
                                     trace_data = data.get("trace", {})
                                     trace_data["sub_agent_id"] = data.get("agent_id", "")
                                     trace_data["sub_agent_name"] = data.get("agent_name", "")
+                                    trace_data["sub_mission_id"] = data.get("sub_mission_id", "")
+                                    trace_data["worker_role"] = data.get("role", "")
+                                    trace_data["execution_plane"] = data.get("plane", "")
                                     await _record_step_trace(trace_data)
                                 elif event_type == "sub_report":
                                     sub_num = data.get("sub_agent_number")
@@ -3389,12 +3417,15 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         "info",
                                         title,
                                         data.get("findings_summary", ""),
+                                        orchestration_event="sub_report",
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
                                         agent_id=agent_id,
                                         agent_name=agent_name,
                                         status=worker_status,
                                         goal=data.get("goal"),
+                                        worker_role=data.get("role", "subagent"),
+                                        execution_plane=data.get("plane", "gui"),
                                         success=data.get("success"),
                                         findings_summary=data.get("findings_summary"),
                                         key_discoveries=data.get("key_discoveries"),

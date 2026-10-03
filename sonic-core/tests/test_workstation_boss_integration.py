@@ -160,6 +160,8 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
                     "agent_name": "Endpoint Scout",
                     "status": "RUNNING",
                     "goal": "Discover endpoints",
+                    "role": "terminal_auditor",
+                    "plane": "headless",
                     "max_steps": 5,
                 })
                 await phase_callback("sub_step", {"trace": {
@@ -170,13 +172,19 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
                     "observation": "host-name",
                     "status": "SUCCESS",
                     "exit_code": None,
-                }, "agent_id": "sub-agent-1", "agent_name": "Endpoint Scout"})
+                }, "agent_id": "sub-agent-1", "agent_name": "Endpoint Scout",
+                    "sub_mission_id": "sub-discover-endpoints",
+                    "role": "terminal_auditor", "plane": "headless"})
                 await phase_callback("sub_report", {
                     "sub_agent_number": 1,
                     "sub_mission_id": "sub-discover-endpoints",
                     "agent_id": "sub-agent-1",
                     "agent_name": "Endpoint Scout",
                     "status": "SUCCESS",
+                    "success": True,
+                    "goal": "Discover endpoints",
+                    "role": "terminal_auditor",
+                    "plane": "headless",
                     "findings_summary": "Found 12 endpoints",
                 })
                 await phase_callback("phase_complete", {"phase_number": 1, "name": "Recon", "results_count": 1, "success_count": 1})
@@ -201,11 +209,21 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
         assert any("Endpoint Scout (sub-agent-1) Report — SUCCESS" in t for t in titles)
         dispatch = next(w for w in state["worklog"] if "Dispatching Endpoint Scout" in w.get("title", ""))
         assert dispatch["status"] == "RUNNING"
+        assert dispatch["orchestration_event"] == "sub_dispatch"
+        assert dispatch["worker_role"] == "terminal_auditor"
+        assert dispatch["execution_plane"] == "headless"
         report = next(w for w in state["worklog"] if "Endpoint Scout (sub-agent-1) Report" in w.get("title", ""))
         assert report["sub_mission_id"] == "sub-discover-endpoints"
+        assert report["orchestration_event"] == "sub_report"
+        assert report["success"] is True
+        assert report["worker_role"] == "terminal_auditor"
         command = next(w for w in state["worklog"] if w.get("type") == "command")
         assert command["sub_agent_id"] == "sub-agent-1"
         assert command["sub_agent_name"] == "Endpoint Scout"
+        assert command["sub_mission_id"] == "sub-discover-endpoints"
+        assert command["worker_role"] == "terminal_auditor"
+        assert command["execution_plane"] == "headless"
+        assert command["action_status"] == "SUCCESS"
         assert any("Phase 1 Complete" in t for t in titles)
         assert any("SONIC Boss Report" in t for t in titles)
 

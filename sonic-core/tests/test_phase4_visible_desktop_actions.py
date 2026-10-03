@@ -180,6 +180,15 @@ async def test_legacy_keyboard_alias_dispatches_and_unresolved_scroll_fails_clos
     assert key_trace.status == ActionExecutionStatus.COMPLETED
     assert scroll_trace.status == ActionExecutionStatus.COMPLETED
     assert [action.action.value for action in computer.actions] == ["KEYPRESS", "SCROLL"]
+    unresolved_scroll = await agent.execute_action(
+        "ws-desktop",
+        ComputerActionType.BROWSER_SCROLL,
+        "",
+        {"delta_y": 500},
+        "Scroll the focused application",
+    )
+    assert unresolved_scroll.status == ActionExecutionStatus.BLOCKED
+    assert [action.action.value for action in computer.actions] == ["KEYPRESS", "SCROLL"]
 
 
 async def test_wait_refreshes_gui_but_does_not_claim_selector_verified():

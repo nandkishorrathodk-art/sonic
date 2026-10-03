@@ -574,6 +574,8 @@ class BossAgent:
                         "agent_id": agent_id,
                         "agent_name": _sub_mission_display_name(sub_m, agent_num),
                         "goal": sub_m.goal,
+                        "role": sub_m.role,
+                        "plane": sub_m.plane,
                         "max_steps": sub_m.max_steps,
                         "sub_agent_number": agent_num,
                         "status": "RUNNING",
@@ -647,6 +649,8 @@ class BossAgent:
                         "agent_name": res.agent_name,
                         "sub_agent_number": agent_num,
                         "goal": sub_m.goal,
+                        "role": res.role,
+                        "plane": sub_m.plane,
                         "success": res.success,
                         "status": res.status,
                         "findings_summary": res.findings_summary,
@@ -895,6 +899,7 @@ Respond with EXACTLY this JSON format (no extra text):
     {{
       "id": "sub-1",
       "name": "Short, distinct worker name",
+      "role": "Specific responsibility such as desktop operator, software builder, or verifier",
       "goal": "Clear, focused goal for this worker agent with concrete inputs and expected observations.",
       "plane": "gui",
       "max_steps": 15,
@@ -907,6 +912,7 @@ Respond with EXACTLY this JSON format (no extra text):
 Rules:
 - Each sub_mission goal must be FOCUSED and SPECIFIC
 - Give each sub_mission a short, distinct human-readable name.
+- Assign a concise role that describes the worker's responsibility; use different roles when the tasks need different expertise.
 - plane: "gui" for tasks requiring visible desktop interaction; "headless" ONLY for strictly non-visual CLI-only tasks
 - GUI workers must stay within visible desktop applications and controls. Do not substitute shell, file, or backend actions when a GUI operation fails; report the limitation or replan through another observed GUI path.
 - Keep multi-application desktop GUI tasks (launching, focusing, and switching between 1, 2, or more desktop GUI windows) inside a SINGLE unified sub_mission with plane="gui" and max_steps=30 so window state and visual grounding remain continuous
@@ -979,8 +985,7 @@ Rules:
             if plane not in ("headless", "gui"):
                 plane = self.requested_plane if self.requested_plane in ("headless", "gui") else "gui"
 
-            raw_role = str(sm.get("role") or "subagent").lower().strip()
-            role = raw_role if raw_role in ("worker", "subagent") else "subagent"
+            role = " ".join(str(sm.get("role") or "").split())[:60] or "subagent"
 
             sub_missions.append(SubMission(
                 id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
@@ -1183,6 +1188,8 @@ Rules:
                         "sub_mission_id": sub_mission.id,
                         "agent_id": f"sub-agent-{sub_agent_num}",
                         "agent_name": _sub_mission_display_name(sub_mission, sub_agent_num),
+                        "role": sub_mission.role,
+                        "plane": sub_mission.plane,
                         "sub_agent_number": sub_agent_num,
                         "trace": {
                                 "step_index": _trace_value(trace, "step_index", 0),
@@ -1738,8 +1745,7 @@ If the objective is complete or no more work is needed, return:
             raw_deps = sm.get("depends_on", [])
             depends_on = [str(x).strip() for x in raw_deps if str(x).strip()] if isinstance(raw_deps, list) else []
             sub_id = str(sm.get("id") or "").strip()
-            raw_role = str(sm.get("role") or "").lower().strip()
-            role = raw_role if raw_role in ("worker", "subagent") else "subagent"
+            role = " ".join(str(sm.get("role") or "").split())[:60] or "subagent"
             sub_missions.append(SubMission(
                 id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
                 name=str(sm.get("name") or "").strip(),

@@ -71,8 +71,50 @@ class _ReceiptComputer(ComputerProvider):
         )
 
 
+class _StateRevalidatingComputer(_ReceiptComputer):
+    async def observe_state(self, workspace_id):
+        return ScreenObservation(
+            screenshot_base64="",
+            width=1280,
+            height=800,
+            active_window="Desktop",
+            desktop_state="STATE_ONLY",
+            capture_age_ms=0,
+            controls_age_ms=0,
+            visible_text="same desktop",
+            perception_version=2,
+        )
+
+
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _execute_gui_move_from_stale_observation(computer, screen, perception_version=0):
+    agent = ComputerUseAgent(computer_provider=computer)
+
+    async def run():
+        agent._last_world_observation = ComputerWorldObservation(
+            screen=screen,
+            active_application="Desktop",
+            perception_version=perception_version,
+            observation_age_ms=3_000,
+        )
+        agent._last_screen_observation_received_at = (
+            asyncio.get_running_loop().time() - 3
+        )
+        agent._last_screenshot_b64 = screen.screenshot_base64
+        agent._screen_width = screen.width
+        agent._screen_height = screen.height
+        return await agent.execute_action(
+            "workspace",
+            ComputerActionType.GUI_MOVE,
+            "visible desktop",
+            {"x": 640, "y": 400},
+            "cursor reaches requested position",
+        )
+
+    return _run(run())
 
 
 def test_terminal_trace_exposes_receipt_with_exit_code_and_delta():
@@ -146,6 +188,80 @@ def test_gui_trace_receipt_uses_observed_screen_transition():
     assert trace.action_receipt.before["screen_hash"] == "before-screen"
     assert trace.action_receipt.after["screen_hash"] == "after-screen"
     assert "screen_hash" in trace.action_receipt.state_delta.changed
+
+
+def test_slow_gui_reasoning_revalidates_unchanged_screenshot_before_dispatch():
+    computer = _ReceiptComputer()
+    screen = ScreenObservation(
+        screenshot_base64="before-screen",
+        width=1280,
+        height=800,
+        active_window="Desktop",
+        desktop_state="INTERACTIVE",
+        capture_age_ms=0,
+        controls_age_ms=0,
+    )
+
+    trace = _execute_gui_move_from_stale_observation(computer, screen)
+
+    assert trace.status != ActionExecutionStatus.BLOCKED, trace.actual_observation
+    assert computer.gui_calls == 1
+
+
+def test_slow_gui_reasoning_fails_closed_when_screenshot_changed():
+    class ChangedScreenComputer(_ReceiptComputer):
+        async def screenshot(self, workspace_id):
+            return ScreenObservation(
+                screenshot_base64="changed-screen",
+                width=1280,
+                height=800,
+                active_window="Desktop",
+                desktop_state="INTERACTIVE",
+                capture_age_ms=0,
+                controls_age_ms=0,
+            )
+
+    computer = ChangedScreenComputer()
+    screen = ScreenObservation(
+        screenshot_base64="before-screen",
+        width=1280,
+        height=800,
+        active_window="Desktop",
+        desktop_state="INTERACTIVE",
+        capture_age_ms=0,
+        controls_age_ms=0,
+    )
+
+    trace = _execute_gui_move_from_stale_observation(computer, screen)
+
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert "desktop screenshot changed" in trace.actual_observation
+    assert computer.gui_calls == 0
+
+
+def test_slow_gui_reasoning_revalidates_fresh_nsi_state_before_dispatch():
+    computer = _StateRevalidatingComputer()
+    del computer.observe_state
+    screen = ScreenObservation(
+        screenshot_base64="",
+        width=1280,
+        height=800,
+        active_window="Desktop",
+        desktop_state="STATE_ONLY",
+        capture_age_ms=0,
+        controls_age_ms=0,
+        visible_text="same desktop",
+        perception_version=1,
+    )
+
+    trace = _execute_gui_move_from_stale_observation(
+        computer,
+        screen,
+        perception_version=1,
+    )
+
+    assert trace.status != ActionExecutionStatus.BLOCKED, trace.actual_observation
+    assert computer.gui_calls == 1
 
 
 def test_file_write_trace_exposes_receipt_without_fabricating_exit_code():

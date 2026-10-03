@@ -10,6 +10,7 @@ import shutil
 import struct
 import subprocess
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 import zlib
@@ -46,6 +47,24 @@ def _png_base64(width: int = 1280, height: int = 800) -> str:
         + chunk(b"IEND", b"")
     )
     return base64.b64encode(image).decode("ascii")
+
+
+@pytest.mark.no_live_infra
+def test_workstation_entrypoint_allows_missing_optional_ocr():
+    docker_dir = Path(__file__).resolve().parents[2] / "docker"
+    entrypoint = (docker_dir / "entrypoint-workstation.sh").read_text(
+        encoding="utf-8"
+    )
+    dockerfile = (docker_dir / "Dockerfile.workstation").read_text(
+        encoding="utf-8"
+    )
+    preflight = entrypoint.split("# Remove any stale X locks", maxsplit=1)[0]
+
+    assert "tesseract-ocr is unavailable" in preflight
+    assert "exit 1" not in preflight
+    assert "python3-gi" in dockerfile
+    assert "gir1.2-atspi-2.0" in dockerfile
+    assert "at-spi2-core" in dockerfile
 
 
 def _workstation_container_up(container_name: str = "sonic-desktop-workstation") -> bool:
@@ -1016,6 +1035,63 @@ async def test_gui_pointer_coordinates_require_fresh_screen_and_in_bounds():
         "ws-1", GUIAction(action=GUIActionType.CLICK, x=79, y=59)
     )
     assert "sonic_cursor.py move 79 59" in provider._docker_exec.await_args.args[0]
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_gui_move_requires_cursor_to_reach_requested_coordinates():
+    provider = DockerComputerProvider()
+    provider._nsi_request = AsyncMock(return_value=None)
+    provider._docker_exec = AsyncMock(return_value=(0, "X=40\nY=30\nSCREEN=0\n", ""))
+    observation = ScreenObservation(
+        screenshot_base64=_png_base64(80, 60),
+        width=80,
+        height=60,
+        desktop_state="INTERACTIVE",
+    )
+    provider.screenshot = AsyncMock(return_value=observation)
+    provider._last_screenshot = observation
+    provider._last_screenshot_time = time.monotonic()
+
+    await provider.gui_action(
+        "ws-1",
+        GUIAction(action=GUIActionType.MOVE, x=40, y=30),
+    )
+
+    command = provider._docker_exec.await_args.args[0]
+    assert "sonic_cursor.py move 40 30" in command
+    assert "xdotool getmouselocation --shell" in command
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.parametrize(
+    "cursor_output",
+    [
+        "X=39\nY=30\n",
+        "X=40\n",
+        "",
+    ],
+)
+@pytest.mark.asyncio
+async def test_docker_gui_move_fails_when_cursor_position_is_unverified(cursor_output):
+    provider = DockerComputerProvider()
+    provider._nsi_request = AsyncMock(return_value=None)
+    provider._docker_exec = AsyncMock(return_value=(0, cursor_output, ""))
+    observation = ScreenObservation(
+        screenshot_base64=_png_base64(80, 60),
+        width=80,
+        height=60,
+        desktop_state="INTERACTIVE",
+    )
+    provider.screenshot = AsyncMock(return_value=observation)
+    provider._last_screenshot = observation
+    provider._last_screenshot_time = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="Cursor move verification failed"):
+        await provider.gui_action(
+            "ws-1",
+            GUIAction(action=GUIActionType.MOVE, x=40, y=30),
+        )
 
 
 @pytest.mark.no_live_infra

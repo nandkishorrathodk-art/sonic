@@ -1686,15 +1686,17 @@ while True:
             atype = action.action
             disp = self._get_display(workspace_id)
 
-            async def exec_gui(command: str) -> None:
+            async def exec_gui(command: str) -> str:
                 nsi_res = await self._nsi_request({"cmd": "x11", "shell": command, "timeout": 3.0}, timeout=3.5)
                 if nsi_res is not None and "exit_code" in nsi_res:
                     code = int(nsi_res.get("exit_code", 1))
+                    stdout = str(nsi_res.get("stdout", ""))
                     err = str(nsi_res.get("stderr", ""))
                 else:
-                    code, _, err = await self._docker_exec(command)
+                    code, stdout, err = await self._docker_exec(command)
                 if code != 0:
                     raise RuntimeError(f"GUI action failed with exit code {code}: {err.strip()}")
+                return stdout
 
             async def _validate_pointer_coords(
                 *points: tuple[int | None, int | None],
@@ -1811,7 +1813,23 @@ while True:
 
             elif atype == GUIActionType.MOVE:
                 move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
-                await exec_gui(f"export DISPLAY={disp}; {move_cmd}")
+                output = await exec_gui(
+                    f"export DISPLAY={disp}; {move_cmd} && xdotool getmouselocation --shell"
+                )
+                actual = {}
+                for line in output.splitlines():
+                    key, separator, value = line.partition("=")
+                    if separator and key in {"X", "Y"}:
+                        try:
+                            actual[key] = int(value)
+                        except ValueError:
+                            actual[key] = None
+                if actual.get("X") != action.x or actual.get("Y") != action.y:
+                    raise RuntimeError(
+                        "Cursor move verification failed: "
+                        f"requested ({action.x}, {action.y}), "
+                        f"observed ({actual.get('X')}, {actual.get('Y')})"
+                    )
 
             elif atype == GUIActionType.DRAG:
                 sx, sy = action.x, action.y

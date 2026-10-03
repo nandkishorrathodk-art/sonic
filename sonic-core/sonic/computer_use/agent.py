@@ -4426,6 +4426,12 @@ class ComputerUseAgent:
                 previous_state = str(getattr(previous_screen, "desktop_state", "") or "")
                 previous_age = getattr(previous_screen, "capture_age_ms", None)
                 previous_age_limit = 2_000
+                observation_elapsed_s = max(
+                    0.0,
+                    asyncio.get_event_loop().time()
+                    - getattr(self, "_last_screen_observation_received_at", 0.0),
+                )
+                previous_controls_are_stale = False
                 if previous_state == "STATE_ONLY":
                     previous_age_limit = 250
                     controls_age = getattr(previous_screen, "controls_age_ms", None)
@@ -4434,24 +4440,23 @@ class ComputerUseAgent:
                         or isinstance(controls_age, bool)
                         or not math.isfinite(controls_age)
                         or controls_age < 0
-                        or controls_age > 250
                     ):
-                        raise RuntimeError("observed controls are stale or have unknown age")
+                        raise RuntimeError("observed controls have unknown age")
+                    previous_controls_are_stale = (
+                        controls_age + observation_elapsed_s * 1000 > 250
+                    )
                 if (
                     not isinstance(previous_age, (int, float))
                     or isinstance(previous_age, bool)
                     or not math.isfinite(previous_age)
                     or previous_age < 0
-                    or previous_age
-                    + max(
-                        0.0,
-                        asyncio.get_event_loop().time()
-                        - getattr(self, "_last_screen_observation_received_at", 0.0),
-                    )
-                    * 1000
-                    > previous_age_limit
                 ):
-                    raise RuntimeError("desktop evidence is stale or has unknown capture age")
+                    raise RuntimeError("desktop evidence has unknown capture age")
+                previous_age_ms = previous_age + observation_elapsed_s * 1000
+                previous_evidence_is_stale = (
+                    previous_age_ms > previous_age_limit
+                    or previous_controls_are_stale
+                )
                 previous_window = str(
                     getattr(previous_screen, "active_window", "") or ""
                 ).strip()
@@ -4461,22 +4466,66 @@ class ComputerUseAgent:
                     )
                 observe_state = getattr(self.computer, "observe_state", None)
                 observe_state_impl = getattr(type(self.computer), "observe_state", None)
-                if (
+                state_revalidation_available = (
                     callable(observe_state)
                     and observe_state_impl is not ComputerProvider.observe_state
                     and previous_observation is not None
                     and getattr(previous_observation, "perception_version", 0) > 0
-                ):
+                    and previous_state == "STATE_ONLY"
+                )
+                if state_revalidation_available:
                     fresh_state = await observe_state(workspace_id)
+                    fresh_capture_age = getattr(fresh_state, "capture_age_ms", None)
+                    fresh_controls_age = getattr(fresh_state, "controls_age_ms", None)
+                    fresh_version = getattr(fresh_state, "perception_version", 0)
+                    previous_version = getattr(previous_observation, "perception_version", 0)
                     if (
                         fresh_state is None
                         or getattr(fresh_state, "desktop_state", "") != "STATE_ONLY"
-                        or getattr(fresh_state, "capture_age_ms", None) is None
-                        or getattr(fresh_state, "controls_age_ms", None) is None
+                        or not isinstance(fresh_capture_age, (int, float))
+                        or isinstance(fresh_capture_age, bool)
+                        or not math.isfinite(fresh_capture_age)
+                        or not 0 <= fresh_capture_age <= 250
+                        or not isinstance(fresh_controls_age, (int, float))
+                        or isinstance(fresh_controls_age, bool)
+                        or not math.isfinite(fresh_controls_age)
+                        or not 0 <= fresh_controls_age <= 250
+                        or not isinstance(fresh_version, int)
+                        or fresh_version <= previous_version
                     ):
                         raise RuntimeError("current desktop state could not be verified")
                     if self._screen_state_signature(fresh_state) != self._screen_state_signature(previous_screen):
                         raise RuntimeError("desktop state changed since the action was reasoned")
+                elif previous_evidence_is_stale:
+                    if previous_state == "STATE_ONLY":
+                        raise RuntimeError("stale accessibility state cannot be refreshed")
+                    fresh_screen = await self.computer.screenshot(workspace_id)
+                    fresh_capture_age = getattr(fresh_screen, "capture_age_ms", None)
+                    previous_pixels = (
+                        getattr(previous_screen, "screenshot_base64", "")
+                        or getattr(self, "_last_screenshot_b64", "")
+                    )
+                    fresh_pixels = getattr(fresh_screen, "screenshot_base64", "")
+                    if (
+                        getattr(fresh_screen, "desktop_state", "") != "INTERACTIVE"
+                        or not isinstance(fresh_capture_age, (int, float))
+                        or isinstance(fresh_capture_age, bool)
+                        or not math.isfinite(fresh_capture_age)
+                        or not 0 <= fresh_capture_age <= 2_000
+                        or not previous_pixels
+                        or not fresh_pixels
+                        or getattr(fresh_screen, "width", 0)
+                        != getattr(previous_screen, "width", 0)
+                        or getattr(fresh_screen, "height", 0)
+                        != getattr(previous_screen, "height", 0)
+                    ):
+                        raise RuntimeError("fresh screenshot evidence could not be verified")
+                    if (
+                        self._screen_state_signature(fresh_screen)
+                        != self._screen_state_signature(previous_screen)
+                        or fresh_pixels != previous_pixels
+                    ):
+                        raise RuntimeError("desktop screenshot changed since the action was reasoned")
                 if requested_window:
                     if active_window.casefold() != str(requested_window).strip().casefold():
                         focus_result = await self._dispatch_gui_action(
