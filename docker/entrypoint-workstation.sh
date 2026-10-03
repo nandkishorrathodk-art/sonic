@@ -2,8 +2,7 @@
 set -e
 
 if ! command -v tesseract >/dev/null 2>&1; then
-    echo "[!] tesseract-ocr is required for workstation NSI perception." >&2
-    exit 1
+    echo "[!] tesseract-ocr is unavailable; OCR controls will be omitted while other workstation perception continues." >&2
 fi
 
 # Remove any stale X locks
@@ -109,6 +108,31 @@ ln -sfn /workspace /home/sonic/workspace
 echo "[*] Starting XFCE4 desktop session..."
 startxfce4 &
 sleep 2
+
+# Keep browser rendering in a dedicated unprivileged account.
+echo "[*] Starting Firefox ESR..."
+xhost +SI:localuser:sonic-browser
+HOME=/home/sonic-browser su -p -s /bin/sh sonic-browser -c \
+    'firefox-esr --no-remote --new-instance about:blank' \
+    >/tmp/sonic-firefox.log 2>&1 &
+FIREFOX_LAUNCH_PID=$!
+for _ in $(seq 1 20); do
+    if xdotool search --onlyvisible --class firefox >/dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 "$FIREFOX_LAUNCH_PID" 2>/dev/null; then
+        cat /tmp/sonic-firefox.log >&2
+        echo "[!] Firefox ESR exited before opening a desktop window." >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+if ! xdotool search --onlyvisible --class firefox >/dev/null 2>&1; then
+    cat /tmp/sonic-firefox.log >&2
+    echo "[!] Firefox ESR did not open a visible desktop window." >&2
+    exit 1
+fi
+xdg-settings set default-web-browser firefox-esr.desktop
 
 # Start x11vnc server on port 5900.  Passwordless VNC is never acceptable:
 # the compose stack must provide a secret explicitly.

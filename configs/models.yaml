@@ -214,15 +214,15 @@ routing_rules:
 
   vision:
     description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [groq/qwen/qwen3.8-27b, openrouter/openai/gpt-4o]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [openrouter/openai/gpt-4o]
 
   computer_use:
     description: 'Autonomous computer vision and desktop interaction'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [groq/qwen/qwen3.8-27b, openrouter/openai/gpt-4o]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [openrouter/openai/gpt-4o]
 
 
 # ---- Global Fallback Chain ----

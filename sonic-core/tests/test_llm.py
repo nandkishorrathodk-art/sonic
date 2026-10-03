@@ -277,16 +277,27 @@ async def test_vision_request_does_not_fall_back_to_global_text_provider(monkeyp
 
 def test_vision_routes_configure_distinct_multimodal_fallbacks():
     from_config = Path(__file__).resolve().parents[2] / "configs" / "models.yaml"
-    router = ModelRouter.from_config(from_config, env_vars={})
+    router = ModelRouter.from_config(
+        from_config,
+        env_vars={"GROQ_API_KEY": "groq-test-key"},
+    )
 
     assert router.routing_rules["vision"]["fallback"] == [
-        "groq/qwen/qwen3.8-27b",
         "openrouter/openai/gpt-4o",
     ]
     assert router.routing_rules["computer_use"]["fallback"] == [
-        "groq/qwen/qwen3.8-27b",
         "openrouter/openai/gpt-4o",
     ]
+    vision_provider, vision_model = router._resolve_provider(task_type="vision")
+    computer_use_provider, computer_use_model = router._resolve_provider(
+        task_type="computer_use"
+    )
+    assert vision_provider.name == "groq"
+    assert vision_model == "qwen/qwen3.8-27b"
+    assert computer_use_provider.name == "groq"
+    assert computer_use_model == "qwen/qwen3.8-27b"
+    assert "vision" in vision_provider.model_capabilities[vision_model]
+    assert "computer_use" in computer_use_provider.model_capabilities[computer_use_model]
     nvidia = router.providers["nvidia"]
     assert "vision" in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
     assert "tool_use" not in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
