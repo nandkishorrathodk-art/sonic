@@ -1,406 +1,359 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
-  Monitor,
-  Terminal as TerminalIcon,
-  ShieldCheck,
-  Cpu,
-  Cloud,
+  ArrowDown,
   ArrowRight,
-  Lock,
-  Dna,
-  FileCheck2,
-  Share2,
-  Crosshair,
-  ChevronRight,
+  ArrowUpRight,
   Bot,
+  Check,
+  ChevronRight,
+  CircleDot,
+  Code2,
+  Command,
+  Eye,
+  FileCheck2,
+  Fingerprint,
+  Layers3,
+  LockKeyhole,
+  Menu,
+  Monitor,
   Network,
-  Activity,
-  Database,
-  GitBranch,
+  Orbit,
+  Play,
   Radio,
-  ScanLine,
+  ShieldCheck,
+  Sparkles,
+  Terminal,
   Workflow,
+  X,
 } from "lucide-react";
 import { API_BASE } from "../../lib/api";
 import { BrandMark } from "../../components/common/BrandMark";
 
-const SCAN_LINES = [
-  { tag: "workstation", text: "Synchronizing DISPLAY=:99 graphical desktop & headless terminal plane", status: "ok" },
-  { tag: "perception", text: "AT-SPI accessibility tree + multimodal visual grounding locked on active window", status: "ok" },
-  { tag: "laya-s1", text: "Laya System-1 intuition engine evaluated action contract & substrate triage", status: "ok" },
-  { tag: "sandbox", text: "Executing full-stack build & verification inside isolated workstation container", status: "hit" },
-  { tag: "verifier", text: "Empirical receipt verified — zero success-by-decree enforcement active", status: "ok" },
-  { tag: "being", text: "Persisting learned craft & cross-session cognitive affect to SQLite/Neo4j", status: "ok" },
+const HeroScene = dynamic(
+  () => import("../../components/landing/HeroScene").then((module) => module.HeroScene),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="sonic-hero-scene" aria-hidden="true">
+        <div className="sonic-hero-scene-fallback" />
+      </div>
+    ),
+  },
+);
+
+const WORKFLOW = [
+  {
+    number: "01",
+    icon: Eye,
+    title: "See the whole task",
+    description: "SONIC observes the workspace and the live desktop before choosing what to do next.",
+    detail: "Observe · establish state",
+  },
+  {
+    number: "02",
+    icon: Workflow,
+    title: "Put the right agents to work",
+    description: "A coordinating agent can divide a goal into focused work across GUI and terminal.",
+    detail: "Delegate · work in parallel",
+  },
+  {
+    number: "03",
+    icon: FileCheck2,
+    title: "Verify before reporting",
+    description: "Actions and outcomes are checked against their results—not just declared complete.",
+    detail: "Verify · show the evidence",
+  },
 ];
 
-const AGENTS = [
-  { name: "Desktop Computer-Use", icon: Monitor, color: "secondary", role: "Multi-window GUI & browser fluency" },
-  { name: "Terminal & Sandbox", icon: TerminalIcon, color: "accent", role: "High-speed code, git & CLI execution" },
-  { name: "Boss Orchestrator", icon: Workflow, color: "primary", role: "State-first multi-phase decomposition" },
-  { name: "Laya System-1", icon: Cpu, color: "warning", role: "Sub-10ms cognitive triage & safety intuition" },
-  { name: "Empirical Judge", icon: FileCheck2, color: "success", role: "Independent receipt & reproduction gate" },
-  { name: "Toolsmith & Craft", icon: GitBranch, color: "secondary", role: "Self-authored utilities & persistent memory" },
+const CAPABILITIES = [
+  {
+    icon: Monitor,
+    label: "COMPUTER",
+    title: "A real desktop, not a mock",
+    description: "Use a graphical Linux workstation with a visible browser, windows, and human takeover.",
+    accent: "mint",
+  },
+  {
+    icon: Terminal,
+    label: "ENGINEERING",
+    title: "GUI and terminal, together",
+    description: "Move between visual computer work and focused command-line execution as the task needs.",
+    accent: "violet",
+  },
+  {
+    icon: Network,
+    label: "ORCHESTRATION",
+    title: "Parallel work with clear roles",
+    description: "Delegate distinct responsibilities, follow worker progress, and bring findings back together.",
+    accent: "coral",
+  },
 ];
 
-const PIPELINE = [
-  { label: "OBSERVE", desc: "Live desktop & terminal state", icon: Monitor },
-  { label: "INTUIT", desc: "Laya System-1 fast triage", icon: Cpu },
-  { label: "ACT", desc: "Dual-plane GUI + CLI execution", icon: Bot },
-  { label: "PROVE", desc: "Judge verifies empirical receipt", icon: FileCheck2 },
-  { label: "EVOLVE", desc: "BeingMind & Craft persistence", icon: Dna },
+const PRINCIPLES = [
+  { icon: ShieldCheck, title: "Safety before speed", text: "Actions stay within an explicit policy boundary." },
+  { icon: Fingerprint, title: "Scoped by design", text: "Authentication and tenant context belong to the operator." },
+  { icon: Check, title: "Evidence over claims", text: "A completed task should have observable results." },
 ];
 
 export default function LandingPage() {
-  const [systemHealth, setSystemHealth] = useState<any>(null);
-  const [activeScanLine, setActiveScanLine] = useState(0);
+  const [systemStatus, setSystemStatus] = useState<"checking" | "online" | "unavailable">("checking");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
     fetch(`${API_BASE}/health`, { signal: controller.signal })
-      .then((res) => res.json())
-      .then((data) => setSystemHealth(data))
-      .catch(() => {});
+      .then((response) => {
+        if (!response.ok) throw new Error(`Health check returned ${response.status}`);
+        return response.json();
+      })
+      .then((data) => {
+        const isAvailable =
+          data?.overall_status === "healthy" ||
+          data?.overall_status === "degraded" ||
+          data?.components?.control_plane_api?.status === "healthy";
+        setSystemStatus(isAvailable ? "online" : "unavailable");
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          console.warn("SONIC landing page could not verify API health.", error);
+          setSystemStatus("unavailable");
+        }
+      });
     return () => controller.abort();
   }, []);
 
-  useEffect(() => {
-    const t = setInterval(() => {
-      setActiveScanLine((p) => (p + 1) % SCAN_LINES.length);
-    }, 1800);
-    return () => clearInterval(t);
-  }, []);
-
-  const isHealthy =
-    systemHealth?.overall_status === "healthy" ||
-    systemHealth?.overall_status === "degraded" ||
-    systemHealth?.components?.control_plane_api?.status === "healthy";
-
-  const stats = [
-    { label: "Autonomous Agents", value: "6", icon: Bot },
-    { label: "Evidence-Secured Findings", value: "0", icon: FileCheck2 },
-    { label: "Sandbox Isolation", value: "3", icon: Cloud, sub: "Docker · Kali · Local" },
-    { label: "LLM Providers", value: "5", icon: Cpu, sub: "Multi-failover router" },
-  ];
+  const statusLabel = {
+    checking: "CHECKING SYSTEM",
+    online: "CONTROL PLANE ONLINE",
+    unavailable: "STATUS UNVERIFIED",
+  }[systemStatus];
 
   return (
-    <div className="min-h-screen bg-ink-950 text-slate-200 flex flex-col font-sans relative overflow-x-hidden">
-      {/* Ambient background */}
-      <div className="fixed inset-0 bg-grid-glow pointer-events-none" />
-      <div className="absolute top-[-15%] left-[20%] w-[600px] h-[600px] bg-primary-600/10 rounded-full blur-[140px] pointer-events-none" />
-      <div className="absolute top-[30%] right-[-10%] w-[500px] h-[500px] bg-secondary-600/10 rounded-full blur-[130px] pointer-events-none" />
-      <div className="absolute bottom-[10%] left-[-5%] w-[400px] h-[400px] bg-accent-600/8 rounded-full blur-[120px] pointer-events-none" />
+    <main className="sonic-landing min-h-screen overflow-hidden bg-[#080b10] text-white">
+      <div className="sonic-page-glow" aria-hidden="true" />
+      <header className="sonic-nav">
+        <div className="mx-auto flex h-[76px] max-w-[1320px] items-center justify-between px-5 sm:px-8">
+          <BrandMark withWordmark href="/" />
 
-      {/* Top Navbar */}
-      <header className="h-16 border-b border-ink-800/80 backdrop-blur-xl bg-ink-950/70 px-6 md:px-12 flex items-center justify-between sticky top-0 z-50">
-        <BrandMark withWordmark href="/landing" />
-        <div className="flex items-center gap-3 text-xs font-mono">
-          <Link href="/about" className="btn-ghost hidden sm:inline-flex">About</Link>
-          <Link href="/graph" className="btn-ghost hidden md:inline-flex">Graph Memory</Link>
-          <Link href="/evidence" className="btn-ghost hidden md:inline-flex">Evidence Board</Link>
-          <Link href="/login" className="btn-secondary !px-4 !py-2 text-xs">
-            <Lock className="w-3.5 h-3.5" />
-            <span>Sign In</span>
-          </Link>
-          <Link href="/" className="btn-primary !px-4 !py-2 text-xs">
-            <span>Launch</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
+          <nav className="hidden items-center gap-8 md:flex" aria-label="Main navigation">
+            <a href="#capabilities" className="sonic-nav-link">Capabilities</a>
+            <a href="#how-it-works" className="sonic-nav-link">How it works</a>
+            <Link href="/about" className="sonic-nav-link">About SONIC</Link>
+          </nav>
+
+          <div className="hidden items-center gap-3 md:flex">
+            <Link href="/login" className="sonic-login-link">Sign in</Link>
+            <Link href="/login" className="sonic-button sonic-button-small">
+              Open SONIC <ArrowUpRight size={15} />
+            </Link>
+          </div>
+
+          <button
+            type="button"
+            className="sonic-mobile-toggle md:hidden"
+            aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"}
+            aria-expanded={mobileMenuOpen}
+            onClick={() => setMobileMenuOpen((open) => !open)}
+          >
+            {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
+          </button>
         </div>
+        {mobileMenuOpen && (
+          <nav className="sonic-mobile-menu md:hidden" aria-label="Mobile navigation">
+            <a href="#capabilities" onClick={() => setMobileMenuOpen(false)}>Capabilities</a>
+            <a href="#how-it-works" onClick={() => setMobileMenuOpen(false)}>How it works</a>
+            <Link href="/about" onClick={() => setMobileMenuOpen(false)}>About SONIC</Link>
+            <Link href="/login" className="sonic-mobile-cta" onClick={() => setMobileMenuOpen(false)}>
+              Sign in to SONIC <ArrowRight size={16} />
+            </Link>
+          </nav>
+        )}
       </header>
 
-      {/* Hero with split layout */}
-      <section className="relative px-6 md:px-12 pt-20 pb-12 max-w-7xl mx-auto z-10 w-full">
-        <div className="grid lg:grid-cols-[1.1fr_0.9fr] gap-12 items-center">
-          {/* Left: headline */}
-          <div className="flex flex-col items-start space-y-7 animate-fade-in-up">
-            <div className="chip border bg-ink-850/80 border-ink-700 text-muted-bright">
-              <span className={`w-2 h-2 rounded-full ${isHealthy ? "bg-success animate-pulse" : "bg-muted-dim"}`} />
-              <span>{isHealthy ? "CONTROL PLANE ONLINE" : "CONTROL PLANE STATUS UNKNOWN"}</span>
-            </div>
-
-            <h1 className="text-4xl sm:text-5xl md:text-6xl font-extrabold tracking-tight text-white leading-[1.05]">
-              The Autonomous
-              <br />
-              <span className="text-gradient">AI-Human Being</span> Workstation
-            </h1>
-
-            <p className="text-base text-muted max-w-xl font-mono leading-relaxed">
-              A persistent autonomous AI-Human Digital Being operating its dedicated personal computer
-              workstation — backed by concurrent dual-plane Linux GUI & terminal agency, cognitive graph memory, and empirical execution receipts.
-            </p>
-
-            <div className="flex flex-wrap items-center gap-4 pt-1">
-              <Link href="/" className="btn-primary !px-7 !py-3.5 text-sm hover:scale-[1.02]">
-                <span>Open Workstation</span>
-                <ArrowRight className="w-4 h-4" />
-              </Link>
-              <Link href="/terminal" className="btn-ghost !px-5 !py-3.5 text-sm border border-ink-700 hover:border-ink-600 font-mono">
-                <TerminalIcon className="w-4 h-4 text-secondary-400" />
-                <span>Interactive Shell</span>
-              </Link>
-              <Link href="/about" className="btn-ghost !px-5 !py-3.5 text-sm font-mono text-muted-bright">
-                <span>Learn how it works</span>
-                <ChevronRight className="w-4 h-4" />
-              </Link>
-            </div>
+      <section className="sonic-hero relative mx-auto grid max-w-[1320px] items-center gap-5 px-5 pb-16 pt-12 sm:px-8 md:min-h-[690px] md:grid-cols-[1.02fr_0.98fr] md:pb-20 md:pt-16">
+        <div className="sonic-hero-copy relative z-10">
+          <div className="sonic-status-pill">
+            <span className={`sonic-status-dot sonic-status-${systemStatus}`} />
+            <span>{statusLabel}</span>
+            <span className="sonic-status-divider" />
+            <span>AI WORKSTATION</span>
           </div>
 
-          {/* Right: live scan terminal */}
-          <div className="animate-fade-in-up" style={{ animationDelay: "120ms" }}>
-            <div className="glass-card rounded-2xl overflow-hidden shadow-2xl">
-              <div className="flex items-center justify-between px-4 py-2.5 border-b border-ink-800 bg-ink-900/60">
-                <div className="flex items-center gap-2">
-                  <div className="flex gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-full bg-danger/80" />
-                    <span className="w-2.5 h-2.5 rounded-full bg-warning/80" />
-                    <span className="w-2.5 h-2.5 rounded-full bg-success/80" />
-                  </div>
-                  <span className="text-[10px] font-mono text-muted-dim ml-2">sonic-swarm — live engagement</span>
-                </div>
-                <div className="flex items-center gap-1.5 text-[10px] font-mono text-success">
-                  <Activity className="w-3 h-3" />
-                  <span>ACTIVE</span>
-                </div>
-              </div>
-              <div className="p-4 font-mono text-[11px] space-y-2 min-h-[260px]">
-                {SCAN_LINES.map((line, i) => {
-                  const isActive = i === activeScanLine;
-                  const isPast = i < activeScanLine;
-                  return (
-                    <div
-                      key={i}
-                      className={`flex items-start gap-2.5 transition-all duration-300 ${
-                        isActive ? "opacity-100" : isPast ? "opacity-50" : "opacity-25"
-                      }`}
-                    >
-                      <span
-                        className={`mt-0.5 shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
-                          line.status === "hit"
-                            ? "bg-danger/20 text-danger border border-danger/40"
-                            : isPast || isActive
-                              ? "bg-secondary-600/15 text-secondary-400 border border-secondary-500/30"
-                              : "bg-ink-800 text-muted-dim border border-ink-700"
-                        }`}
-                      >
-                        {line.tag}
-                      </span>
-                      <span className={`leading-relaxed ${isActive ? "text-white" : isPast ? "text-muted" : "text-muted-dim"}`}>
-                        {line.text}
-                        {isActive && <span className="animate-blink text-secondary-400">▋</span>}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="px-4 py-2 border-t border-ink-800 bg-ink-900/60 flex items-center justify-between text-[10px] font-mono text-muted-dim">
-                <span className="flex items-center gap-1.5">
-                  <Workflow className="w-3 h-3" />
-                  Director → task-graph dispatch
-                </span>
-                <span className="text-success">evidence-secured ✓</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Stats row */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-14 animate-fade-in-up" style={{ animationDelay: "200ms" }}>
-          {stats.map((s) => (
-            <div key={s.label} className="panel p-4 space-y-1.5">
-              <div className="flex items-center justify-between">
-                <s.icon className="w-4 h-4 text-secondary-400" />
-                <span className="text-2xl font-extrabold text-white font-mono">{s.value}</span>
-              </div>
-              <div className="text-[11px] text-muted font-mono">{s.label}</div>
-              {s.sub && <div className="text-[10px] text-muted-dim font-mono">{s.sub}</div>}
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Agent Swarm Registry */}
-      <section className="relative px-6 md:px-12 py-16 max-w-7xl mx-auto z-10 w-full">
-        <div className="text-center space-y-2 mb-12 animate-fade-in-up">
-          <div className="chip border border-primary-500/30 bg-primary-600/10 text-primary-400 mx-auto">
-            <Network className="w-3 h-3" />
-            <span>SWARM ARCHITECTURE</span>
-          </div>
-          <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-white">
-            Six cognitive capabilities. One autonomous Digital Being.
-          </h2>
-          <p className="text-xs text-muted font-mono max-w-2xl mx-auto">
-            Each subsystem powers the Being across dual planes (GUI & Terminal). BossAgent orchestrates the task-graph;
-            every action requires verified execution receipts before milestone completion.
+          <h1 className="sonic-headline mt-8 max-w-[720px] text-[clamp(3.2rem,7.6vw,6.65rem)] font-semibold leading-[0.98] tracking-[-0.075em]">
+            Give AI a task.
+            <br />
+            <span className="sonic-headline-accent">It gets to work.</span>
+          </h1>
+          <p className="mt-7 max-w-[570px] text-base leading-7 text-[#a7b0bd] sm:text-lg sm:leading-8">
+            SONIC is an AI teammate with its own computer. It can see the desktop, use the terminal,
+            coordinate specialist agents, and verify what actually happened.
           </p>
+
+          <div className="mt-9 flex flex-col gap-3 sm:flex-row sm:items-center">
+            <Link href="/login" className="sonic-button sonic-button-primary">
+              Sign in and get started <ArrowRight size={17} />
+            </Link>
+            <a href="#how-it-works" className="sonic-button sonic-button-quiet">
+              <Play size={15} /> See how it works
+            </a>
+          </div>
+
+          <div className="mt-9 flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] font-medium tracking-wide text-[#77818e]">
+            <span className="inline-flex items-center gap-2"><CircleDot size={13} className="text-[#75dfd1]" /> GUI + terminal</span>
+            <span className="sonic-proof-separator" />
+            <span className="inline-flex items-center gap-2"><Layers3 size={13} className="text-[#ae9cff]" /> Parallel agents</span>
+            <span className="sonic-proof-separator" />
+            <span className="inline-flex items-center gap-2"><ShieldCheck size={13} className="text-[#ff9d85]" /> Evidence-led</span>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {AGENTS.map((a, i) => (
-            <div
-              key={a.name}
-              className="glass-card rounded-2xl p-5 space-y-3 hover:-translate-y-1 transition group animate-fade-in-up"
-              style={{ animationDelay: `${i * 60}ms` }}
-            >
-              <div className="flex items-center justify-between">
-                <div
-                  className={`grid place-items-center w-10 h-10 rounded-xl border ${
-                    a.color === "primary"
-                      ? "bg-primary-600/15 border-primary-500/40 text-primary-400"
-                      : a.color === "secondary"
-                        ? "bg-secondary-600/15 border-secondary-500/40 text-secondary-400"
-                        : a.color === "accent"
-                          ? "bg-accent-600/15 border-accent-500/40 text-accent-400"
-                          : a.color === "warning"
-                            ? "bg-warning/15 border-warning/40 text-warning"
-                            : "bg-success/15 border-success/40 text-success"
-                  }`}
-                >
-                  <a.icon className="w-5 h-5" />
-                </div>
-                <span className="text-[10px] font-mono text-muted-dim">
-                  {String(i + 1).padStart(2, "0")}
-                </span>
-              </div>
-              <h3 className="text-sm font-bold text-white">{a.name}</h3>
-              <p className="text-xs text-muted font-mono leading-relaxed">{a.role}</p>
+        <div className="sonic-hero-art relative mx-auto h-[390px] w-full max-w-[620px] sm:h-[490px] md:h-[590px]" role="img" aria-label="Animated visualization of SONIC observing, coordinating agents, and verifying outcomes">
+          <div className="sonic-art-grid" aria-hidden="true" />
+          <div className="sonic-art-glow" aria-hidden="true" />
+          <HeroScene />
+          <div className="sonic-orbit-label sonic-orbit-label-top">
+            <span className="sonic-orbit-label-icon sonic-mint"><Eye size={14} /></span>
+            <span><strong>OBSERVE</strong><small>desktop + context</small></span>
+          </div>
+          <div className="sonic-orbit-label sonic-orbit-label-right">
+            <span className="sonic-orbit-label-icon sonic-violet"><Workflow size={14} /></span>
+            <span><strong>COORDINATE</strong><small>focused agents</small></span>
+          </div>
+          <div className="sonic-orbit-label sonic-orbit-label-bottom">
+            <span className="sonic-orbit-label-icon sonic-coral"><FileCheck2 size={14} /></span>
+            <span><strong>VERIFY</strong><small>observable results</small></span>
+          </div>
+          <div className="sonic-core-caption">
+            <span className="sonic-caption-pulse" />
+            <span>ONE GOAL · MANY CAPABILITIES</span>
+          </div>
+          <div className="sonic-floating-note">
+            <span className="sonic-note-icon"><Command size={14} /></span>
+            <span><strong>Computer-native AI</strong><small>Not just chat. Real work.</small></span>
+          </div>
+        </div>
+
+        <a href="#capabilities" className="sonic-scroll-cue" aria-label="Scroll to capabilities">
+          <ArrowDown size={15} /> EXPLORE SONIC
+        </a>
+      </section>
+
+      <section className="sonic-trust-strip" aria-label="SONIC principles">
+        <div className="mx-auto grid max-w-[1320px] gap-5 px-5 py-6 sm:grid-cols-3 sm:px-8 sm:py-7">
+          {PRINCIPLES.map(({ icon: Icon, title, text }) => (
+            <div className="sonic-trust-item" key={title}>
+              <span className="sonic-trust-icon"><Icon size={17} /></span>
+              <span><strong>{title}</strong><small>{text}</small></span>
             </div>
           ))}
         </div>
       </section>
 
-      {/* Cognitive Convergence pipeline */}
-      <section className="relative px-6 md:px-12 py-16 max-w-7xl mx-auto z-10 w-full">
-        <div className="glass-card rounded-2xl p-8 animate-fade-in-up">
-          <div className="text-center space-y-2 mb-10">
-            <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
-              State-First Cognitive Loop (HDCE)
-            </h2>
-            <p className="text-xs text-muted font-mono">
-              Observe → Reason → Act → Verify → Evolve. Zero success-by-decree; every action verified with receipts.
-            </p>
+      <section id="capabilities" className="sonic-section mx-auto max-w-[1320px] px-5 py-24 sm:px-8 md:py-32">
+        <div className="sonic-section-heading">
+          <span className="sonic-eyebrow"><Sparkles size={13} /> BEYOND THE CHAT WINDOW</span>
+          <h2>AI that can work<br className="sm:hidden" /> <span className="sonic-muted-heading">where the work is.</span></h2>
+          <p>SONIC connects perception, action, and verification in one computer-native workspace.</p>
+        </div>
+
+        <div className="mt-12 grid gap-4 md:grid-cols-3">
+          {CAPABILITIES.map(({ icon: Icon, label, title, description, accent }, index) => (
+            <article className={`sonic-capability-card sonic-card-${accent}`} key={title} style={{ animationDelay: `${index * 100}ms` }}>
+              <div className="sonic-card-topline"><span>{label}</span><span>0{index + 1}</span></div>
+              <div className="sonic-capability-icon"><Icon size={21} strokeWidth={1.8} /></div>
+              <h3>{title}</h3>
+              <p>{description}</p>
+              <span className="sonic-card-arrow" aria-hidden="true"><ArrowUpRight size={17} /></span>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section id="how-it-works" className="sonic-how-section">
+        <div className="sonic-section mx-auto max-w-[1320px] px-5 py-24 sm:px-8 md:py-32">
+          <div className="sonic-how-heading">
+            <div>
+              <span className="sonic-eyebrow"><Orbit size={13} /> A CLOSED-LOOP WORKFLOW</span>
+              <h2>From instruction<br />to <span className="sonic-muted-heading">verified outcome.</span></h2>
+            </div>
+            <p>SONIC observes, acts, checks the result, and adapts when reality differs from the plan.</p>
           </div>
-          <div className="flex flex-col md:flex-row items-stretch gap-3">
-            {PIPELINE.map((step, i) => (
-              <React.Fragment key={step.label}>
-                <div className="flex-1 panel p-4 space-y-2 text-center min-w-0">
-                  <div className="grid place-items-center w-9 h-9 mx-auto rounded-lg bg-ink-900 border border-ink-700">
-                    <step.icon className="w-4 h-4 text-secondary-400" />
-                  </div>
-                  <div className="text-xs font-bold text-white font-mono tracking-wider">{step.label}</div>
-                  <div className="text-[10px] text-muted-dim font-mono">{step.desc}</div>
+          <div className="sonic-workflow-grid">
+            {WORKFLOW.map(({ number, icon: Icon, title, description, detail }, index) => (
+              <article className="sonic-workflow-card" key={number}>
+                <div className="sonic-workflow-card-head">
+                  <span className="sonic-workflow-number">{number}</span>
+                  <span className="sonic-workflow-icon"><Icon size={18} /></span>
+                  {index < WORKFLOW.length - 1 && <span className="sonic-workflow-connector" aria-hidden="true"><ChevronRight size={17} /></span>}
                 </div>
-                {i < PIPELINE.length - 1 && (
-                  <div className="hidden md:flex items-center justify-center">
-                    <ChevronRight className="w-5 h-5 text-ink-500" />
-                  </div>
-                )}
-              </React.Fragment>
+                <h3>{title}</h3>
+                <p>{description}</p>
+                <div className="sonic-workflow-detail"><span />{detail}</div>
+              </article>
             ))}
           </div>
-        </div>
-      </section>
 
-      {/* Feature grid */}
-      <section className="relative px-6 md:px-12 py-16 max-w-7xl mx-auto z-10 w-full">
-        <div className="text-center space-y-2 mb-12 animate-fade-in-up">
-          <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-white">
-            Architecture & Engineering
-          </h2>
-          <p className="text-xs text-muted font-mono">
-            Engineered for high-assurance autonomous mission execution and live verification.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {[
-            {
-              icon: <Monitor className="w-5 h-5" />,
-              accent: "secondary",
-              title: "Native Cyber Workstation",
-              desc: "A real interactive Linux GUI powered by Xvfb, XFCE, and x11vnc — streamed live via noVNC directly into the dashboard, with full mouse & keyboard takeover.",
-              tag: "Port 6080 WebSocket Stream",
-            },
-            {
-              icon: <Cpu className="w-5 h-5" />,
-              accent: "success",
-              title: "Multi-Model Reasoning Core",
-              desc: "Direct integration with NVIDIA NIM and OpenAI-compatible endpoints, executing Meta Llama 3.2 Vision, 90B reasoning, and DeepSeek-Coder for autonomous plan formulation.",
-              tag: "Universal OpenAI-Compatible Router",
-            },
-            {
-              icon: <ShieldCheck className="w-5 h-5" />,
-              accent: "accent",
-              title: "Fail-Closed Tenant Isolation",
-              desc: "Path-traversal proof filesystem, cryptographically signed JWT auth, and zero host command execution guarantee absolute workload isolation per tenant.",
-              tag: "Security Invariant Enforced",
-            },
-          ].map((f) => (
-            <div
-              key={f.title}
-              className="glass-card rounded-2xl p-6 space-y-4 hover:-translate-y-1 transition group animate-fade-in-up"
-            >
-              <div
-                className={`grid place-items-center w-11 h-11 rounded-xl border ${
-                  f.accent === "secondary"
-                    ? "bg-secondary-600/15 border-secondary-500/40 text-secondary-400"
-                    : f.accent === "success"
-                    ? "bg-success/15 border-success/40 text-success"
-                    : "bg-accent-600/15 border-accent-500/40 text-accent-400"
-                }`}
-              >
-                {f.icon}
-              </div>
-              <h3 className="text-base font-bold text-white">{f.title}</h3>
-              <p className="text-xs text-muted font-mono leading-relaxed">{f.desc}</p>
-              <div
-                className={`text-[11px] font-mono flex items-center gap-1 ${
-                  f.accent === "secondary"
-                    ? "text-secondary-400"
-                    : f.accent === "success"
-                    ? "text-success"
-                    : "text-accent-400"
-                }`}
-              >
-                <span>{f.tag}</span>
-                <ChevronRight className="w-3 h-3 group-hover:translate-x-0.5 transition" />
-              </div>
+          <div className="sonic-parallel-panel">
+            <div className="sonic-parallel-copy">
+              <span className="sonic-eyebrow"><Radio size={13} /> BUILT FOR PARALLEL WORK</span>
+              <h3>Different agents.<br />One coordinated effort.</h3>
+              <p>When a task benefits from parallel work, SONIC can assign distinct roles and show what each worker is doing—on the desktop or in code.</p>
+              <Link href="/about" className="sonic-inline-link">Explore the architecture <ArrowRight size={15} /></Link>
             </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Principle strip */}
-      <section className="relative px-6 md:px-12 pb-16 max-w-7xl mx-auto z-10 w-full">
-        <div className="glass-card rounded-2xl p-8 grid grid-cols-1 md:grid-cols-3 gap-6 text-center">
-          {[
-            { icon: <FileCheck2 className="w-5 h-5 text-success" />, t: "Evidence > Claims", d: "No finding ships without real request + response proof." },
-            { icon: <Crosshair className="w-5 h-5 text-primary-400" />, t: "Sonic, never reckless", d: "Speed under an immutable, default-deny safety layer." },
-            { icon: <Dna className="w-5 h-5 text-accent-400" />, t: "Measured self-evolution", d: "Agents improve only through verified canary experiments." },
-          ].map((p) => (
-            <div key={p.t} className="space-y-2">
-              <div className="grid place-items-center w-10 h-10 mx-auto rounded-xl bg-ink-900 border border-ink-700">
-                {p.icon}
+            <div className="sonic-worker-stack" aria-label="Illustrative parallel worker roles">
+              <div className="sonic-worker-card">
+                <span className="sonic-worker-avatar sonic-worker-mint"><Monitor size={16} /></span>
+                <span className="sonic-worker-meta"><strong>Desktop operator</strong><small>GUI · Browser interaction</small></span>
+                <span className="sonic-worker-state"><span /> COMPUTER</span>
               </div>
-              <h4 className="text-sm font-bold text-white">{p.t}</h4>
-              <p className="text-xs text-muted font-mono">{p.d}</p>
+              <div className="sonic-worker-card sonic-worker-offset">
+                <span className="sonic-worker-avatar sonic-worker-violet"><Code2 size={16} /></span>
+                <span className="sonic-worker-meta"><strong>Software builder</strong><small>Terminal · Code changes</small></span>
+                <span className="sonic-worker-state"><span /> CODE</span>
+              </div>
+              <div className="sonic-worker-card sonic-worker-offset-more">
+                <span className="sonic-worker-avatar sonic-worker-coral"><FileCheck2 size={16} /></span>
+                <span className="sonic-worker-meta"><strong>Independent verifier</strong><small>Checks · Evidence</small></span>
+                <span className="sonic-worker-state"><span /> VERIFY</span>
+              </div>
+              <div className="sonic-worker-caption"><Bot size={14} /> EXAMPLE ROLES · ASSIGNED PER TASK</div>
             </div>
-          ))}
+          </div>
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="relative mt-auto border-t border-ink-800/80 px-6 md:px-12 py-6 flex flex-col sm:flex-row items-center justify-between text-xs font-mono text-muted-dim gap-3 z-10">
-        <div>SONIC Autonomous AI-Human Workstation Core v1.3.0</div>
-        <div className="flex items-center gap-4">
-          <Link href="/about" className="hover:text-slate-300 transition">About</Link>
-          <Link href="/login" className="hover:text-slate-300 transition">Login</Link>
-          <Link href="/" className="hover:text-slate-300 transition">Workstation</Link>
-          <Link href="/settings" className="hover:text-slate-300 transition">Settings</Link>
+      <section className="sonic-cta-section mx-auto max-w-[1320px] px-5 py-24 sm:px-8 md:py-32">
+        <div className="sonic-cta-panel">
+          <div className="sonic-cta-orb" aria-hidden="true" />
+          <span className="sonic-eyebrow"><Sparkles size={13} /> YOUR WORKSPACE IS READY</span>
+          <h2>Give the work<br />a place to happen.</h2>
+          <p>Sign in to meet SONIC at its workstation.</p>
+          <Link href="/login" className="sonic-button sonic-button-primary">
+            Continue to sign in <ArrowRight size={17} />
+          </Link>
+          <div className="sonic-cta-footnote"><LockKeyhole size={12} /> Secure access · Dedicated workstation</div>
+        </div>
+      </section>
+
+      <footer className="sonic-footer">
+        <div className="mx-auto flex max-w-[1320px] flex-col gap-5 px-5 py-7 sm:px-8 md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-3">
+            <BrandMark withWordmark href="/" />
+            <span className="sonic-footer-divider" />
+            <span className="sonic-footer-caption">A computer-native AI teammate.</span>
+          </div>
+          <nav className="flex flex-wrap items-center gap-x-6 gap-y-2" aria-label="Footer navigation">
+            <Link href="/about">About</Link>
+            <Link href="/login">Sign in</Link>
+            <Link href="/workstation">Workstation</Link>
+          </nav>
+          <span className="sonic-footer-caption">© {new Date().getFullYear()} SONIC</span>
         </div>
       </footer>
-    </div>
+    </main>
   );
 }

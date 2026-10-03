@@ -23,8 +23,18 @@ export interface WorklogItem {
   sub_agent_id?: string;
   sub_agent_name?: string;
   sub_mission_id?: string;
+  agent_id?: string;
+  agent_name?: string;
+  orchestration_event?: "sub_dispatch" | "sub_report";
+  worker_role?: string;
+  execution_plane?: "gui" | "headless" | string;
+  action_type?: string;
+  action_status?: string;
+  step_index?: number;
+  status?: string;
   goal?: string;
   success?: boolean;
+  actions_taken?: number;
   findings_summary?: string;
   key_discoveries?: string[];
 }

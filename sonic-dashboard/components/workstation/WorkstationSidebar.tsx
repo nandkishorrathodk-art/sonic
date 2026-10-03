@@ -57,7 +57,7 @@ export function WorkstationSidebar({
 
   return (
     <aside
-      className={`${
+      className={`sonic-workstation-sidebar ${
         sidebarOpen ? "w-[260px]" : "w-0"
       } transition-all duration-200 ease-in-out border-r border-ink-800 bg-ink-900 flex flex-col flex-shrink-0 z-30 overflow-hidden`}
     >
@@ -75,7 +75,7 @@ export function WorkstationSidebar({
 
       {/* Primary Nav */}
       <nav className="p-2 space-y-0.5 text-xs font-medium border-b border-ink-800/60">
-        <Link href="/" className="nav-link nav-link-active">
+        <Link href="/workstation" className="nav-link nav-link-active">
           <MessageSquare className="w-4 h-4 text-secondary-400" />
           <span>Workstation</span>
         </Link>
@@ -96,8 +96,8 @@ export function WorkstationSidebar({
         return (
           <>
             <div className="px-3 pt-3 pb-1 flex items-center justify-between text-xs text-muted">
-              <span className="font-semibold text-[11px] uppercase tracking-wider text-muted-dim font-mono">
-                Missions ({safeSessions.length})
+              <span className="font-medium text-[10px] uppercase tracking-[0.12em] text-muted-dim">
+                Recent sessions ({safeSessions.length})
               </span>
               <button
                 onClick={onNewSession}

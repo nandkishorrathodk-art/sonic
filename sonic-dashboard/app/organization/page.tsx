@@ -76,10 +76,10 @@ export default function OrganizationPage() {
     }
   }
 
-  if (!org) return <div className="p-6 text-sm text-muted">{error || "Loading organization..."}</div>;
+  if (!org) return <main className="sonic-direct-page p-6 text-sm text-muted">{error || "Loading organization..."}</main>;
 
   return (
-    <div className="min-h-screen bg-ink-950 text-slate-200 p-6 space-y-6">
+    <main className="sonic-direct-page min-h-screen text-slate-200 p-4 sm:p-6 space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-white">SONIC Organization</h1>
         <p className="text-sm text-muted mt-1">Department → Team → Employee → Subsystem → Project → Work Item → Evaluation.</p>
@@ -97,7 +97,7 @@ export default function OrganizationPage() {
                 <div className="text-[11px] text-muted">{org.teams.filter((team) => team.department_id === id).map((team) => label(team.id)).join(" · ")}</div>
               </div>
             ))}
-          </div>
+        </div>
         </section>
 
         <section className="panel p-4">
@@ -221,6 +221,6 @@ export default function OrganizationPage() {
           ))}
         </div>
       </section>
-    </div>
+    </main>
   );
 }

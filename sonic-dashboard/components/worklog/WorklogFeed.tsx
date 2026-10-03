@@ -30,16 +30,255 @@ import {
   X,
   Loader2,
   ShieldAlert,
+  Users,
+  Code2,
 } from "lucide-react";
 import { WorklogItem } from "../../types/workstation";
 import { api } from "../../lib/api";
 import { MarkdownText } from "./MarkdownText";
-import { ThinkingBlock } from "./ThinkingBlock";
 import { CommandBlock } from "./CommandBlock";
 import { FileActionBlock } from "./FileActionBlock";
 
 type Mode = "Normal" | "Autonomous" | "Pair-Program";
 const MODES: Mode[] = ["Normal", "Autonomous", "Pair-Program"];
+
+interface WorkerActivity {
+  key: string;
+  agentId?: string;
+  subMissionId?: string;
+  number?: number;
+  name: string;
+  role?: string;
+  plane?: string;
+  goal: string;
+  status: string;
+  success?: boolean;
+  latestAction?: string;
+  latestActionStatus?: string;
+  findings?: string;
+  keyDiscoveries?: string[];
+  actionsTaken?: number;
+  durationSeconds?: number;
+}
+
+function isWorkerDispatch(item: WorklogItem): boolean {
+  return (
+    item.orchestration_event === "sub_dispatch" ||
+    item.title?.startsWith("Dispatching SubAgent") === true ||
+    (item.title?.startsWith("Dispatching ") === true &&
+      Boolean(item.agent_id || item.sub_mission_id))
+  );
+}
+
+function isWorkerReport(item: WorklogItem): boolean {
+  return (
+    item.orchestration_event === "sub_report" ||
+    (item.title?.includes("Report") === true &&
+      Boolean(item.agent_id || item.sub_agent_id || item.sub_mission_id))
+  );
+}
+
+function workerKey(item: WorklogItem): string | undefined {
+  if (item.agent_id || item.sub_agent_id) {
+    return `agent:${item.agent_id || item.sub_agent_id}`;
+  }
+  if (item.sub_mission_id) return `mission:${item.sub_mission_id}`;
+  if (item.sub_agent_number !== undefined) return `number:${item.sub_agent_number}`;
+  return undefined;
+}
+
+function summarizeWorkerAction(item: WorklogItem): string {
+  const action = item.action_type || item.type || "Action";
+  const target =
+    item.file ||
+    item.command ||
+    item.content?.match(/Target:\s*([^\n]+)/)?.[1]?.trim() ||
+    "";
+  const label = action.replaceAll("_", " ").toLowerCase();
+  return target ? `${label} · ${target}` : label;
+}
+
+function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
+  const workers = new Map<string, WorkerActivity>();
+
+  for (const item of worklog) {
+    if (isWorkerDispatch(item)) {
+      const key = workerKey(item);
+      if (!key) continue;
+      workers.set(key, {
+        key,
+        agentId: item.agent_id || item.sub_agent_id,
+        subMissionId: item.sub_mission_id,
+        number: item.sub_agent_number,
+        name:
+          item.agent_name ||
+          item.sub_agent_name ||
+          (item.sub_agent_number !== undefined
+            ? `Worker ${item.sub_agent_number}`
+            : "Worker"),
+        role: item.worker_role,
+        plane: item.execution_plane,
+        goal:
+          item.goal ||
+          item.content?.match(/Goal:\s*([^\n]+)/)?.[1]?.trim() ||
+          "Task details unavailable",
+        status: item.status || "RUNNING",
+      });
+      continue;
+    }
+
+    if (isWorkerReport(item)) {
+      const key = workerKey(item);
+      const worker = key ? workers.get(key) : undefined;
+      if (!worker) continue;
+      worker.status =
+        item.status ||
+        (item.success === true ? "COMPLETED" : item.success === false ? "FAILED" : "UNVERIFIED");
+      worker.success = item.success;
+      worker.findings = item.findings_summary || item.content || "";
+      worker.keyDiscoveries = item.key_discoveries || [];
+      worker.actionsTaken = item.actions_taken;
+      worker.durationSeconds = item.duration_seconds;
+      continue;
+    }
+
+    if (!item.sub_agent_id || item.type === "thought") continue;
+    const worker = workers.get(`agent:${item.sub_agent_id}`);
+    if (!worker) continue;
+    worker.latestAction = summarizeWorkerAction(item);
+    worker.latestActionStatus = item.action_status || (item.type === "error" ? "FAILED" : undefined);
+  }
+
+  return Array.from(workers.values());
+}
+
+function WorkerBoard({
+  workers,
+  missionRunning,
+}: {
+  workers: WorkerActivity[];
+  missionRunning: boolean;
+}) {
+  if (workers.length === 0) return null;
+  const runningCount = workers.filter((worker) =>
+    ["RUNNING", "PENDING"].includes(worker.status.toUpperCase()),
+  ).length;
+
+  return (
+    <section
+      aria-label="Delegated worker progress"
+      className="my-2.5 rounded-xl border border-ink-750 bg-ink-850/70 p-3"
+    >
+      <div className="mb-2.5 flex items-center gap-2">
+        <Users className="h-4 w-4 shrink-0 text-secondary-400" />
+        <h2 className="text-[12px] font-semibold text-slate-100">Parallel work</h2>
+        <span className="text-[10px] text-muted-dim">
+          {runningCount > 0 ? `${runningCount} active · ` : ""}
+          {workers.length} {workers.length === 1 ? "worker" : "workers"}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+        {workers.map((worker) => {
+          const normalizedStatus = worker.status.toUpperCase();
+          const unreported = missionRunning && ["RUNNING", "PENDING"].includes(normalizedStatus);
+          const statusLabel = unreported
+            ? "RUNNING"
+            : normalizedStatus === "RUNNING" || normalizedStatus === "PENDING"
+              ? "UNCONFIRMED"
+              : normalizedStatus === "WAITING_FOR_HUMAN"
+                ? "WAITING FOR HUMAN"
+              : worker.success === true
+                ? "COMPLETED"
+                : worker.success === false
+                  ? normalizedStatus === "BLOCKED" || normalizedStatus === "TIMED_OUT"
+                    ? normalizedStatus
+                    : "FAILED"
+                  : normalizedStatus;
+          const statusClass =
+            statusLabel === "COMPLETED" || statusLabel === "SUCCESS"
+              ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
+              : statusLabel === "RUNNING"
+                ? "border-secondary-500/25 bg-secondary-500/10 text-secondary-300"
+                : statusLabel === "WAITING FOR HUMAN"
+                  ? "border-amber-500/25 bg-amber-500/10 text-amber-300"
+                : statusLabel === "FAILED" || statusLabel === "BLOCKED" || statusLabel === "TIMED_OUT"
+                  ? "border-rose-500/25 bg-rose-500/10 text-rose-400"
+                  : "border-amber-500/25 bg-amber-500/10 text-amber-300";
+          const PlaneIcon = worker.plane?.toLowerCase() === "headless" ? Code2 : Monitor;
+
+          return (
+            <article
+              key={worker.key}
+              className="min-w-0 rounded-lg border border-ink-750 bg-ink-900/80 p-2.5"
+            >
+              <div className="flex items-start gap-2">
+                <PlaneIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-bright" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="truncate text-[11.5px] font-semibold text-slate-100">
+                      {worker.name}
+                    </span>
+                    {worker.role && worker.role.toLowerCase() !== "subagent" && (
+                      <span className="rounded border border-ink-700 bg-ink-850 px-1.5 py-0.5 text-[9px] text-muted-bright">
+                        {worker.role}
+                      </span>
+                    )}
+                    {worker.plane && (
+                      <span className="rounded border border-ink-700 bg-ink-850 px-1.5 py-0.5 text-[9px] uppercase text-muted-dim">
+                        {worker.plane === "headless" ? "Terminal / Code" : "Computer / GUI"}
+                      </span>
+                    )}
+                    <span className={`ml-auto rounded border px-1.5 py-0.5 text-[9px] font-medium ${statusClass}`}>
+                      {statusLabel}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-[10.5px] leading-relaxed text-muted-bright">
+                    {worker.goal}
+                  </p>
+                  {worker.latestAction && (
+                    <p className="mt-1 truncate text-[10px] text-muted-dim">
+                      Latest: {worker.latestAction}
+                      {worker.latestActionStatus &&
+                        ` · ${worker.latestActionStatus.toLowerCase()}`}
+                    </p>
+                  )}
+                  {worker.findings && (
+                    <p className="mt-1 line-clamp-2 text-[10px] text-slate-300">
+                      {worker.findings}
+                    </p>
+                  )}
+                  {worker.keyDiscoveries && worker.keyDiscoveries.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {worker.keyDiscoveries.slice(0, 3).map((discovery, index) => (
+                        <span
+                          key={`${worker.key}-${index}`}
+                          className="max-w-full truncate rounded border border-ink-700 bg-ink-850 px-1.5 py-0.5 text-[9px] text-secondary-300"
+                        >
+                          {discovery}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {worker.actionsTaken !== undefined && (
+                    <p className="mt-1 text-[9px] text-muted-dim">
+                      {worker.actionsTaken} recorded {worker.actionsTaken === 1 ? "action" : "actions"}
+                    </p>
+                  )}
+                  {worker.durationSeconds !== undefined && worker.durationSeconds > 0 && (
+                    <p className="mt-1 text-[9px] text-muted-dim">
+                      Finished in {Math.max(1, Math.round(worker.durationSeconds))}s
+                    </p>
+                  )}
+                </div>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
 
 interface WorklogFeedProps {
   worklog: WorklogItem[];
@@ -226,94 +465,6 @@ function ProbeProposalCard({
   );
 }
 
-function SubReportCard({ item }: { item: WorklogItem }) {
-  const [expanded, setExpanded] = useState(false);
-  const failedText = Boolean(item.content?.toLowerCase().includes("subagent execution failed"));
-  const isSuccess = item.success === true && !failedText;
-  const isFailure = item.success === false || failedText;
-  const subNum = item.sub_agent_number ?? item.title?.match(/SubAgent #(\d+)/)?.[1] ?? "";
-
-  return (
-    <div className="my-2 rounded-xl border border-ink-750 bg-ink-850/80 p-3 text-xs shadow-sm transition hover:border-ink-700">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        className="flex items-center justify-between cursor-pointer select-none"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <div className="flex items-center gap-2">
-          <span className="px-2 py-0.5 rounded-md bg-secondary-500/10 border border-secondary-500/30 text-secondary-300 font-mono font-semibold text-[11px]">
-            SubAgent {subNum ? `#${subNum}` : ""}
-          </span>
-          <span className="font-semibold text-slate-200 text-[12px]">{item.title}</span>
-          <span
-            className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-medium ${
-              isSuccess
-                ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                : isFailure
-                  ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-                  : "bg-amber-500/10 text-amber-300 border border-amber-500/20"
-            }`}
-          >
-            {isSuccess ? "SUCCESS" : isFailure ? "FAILED" : "UNVERIFIED"}
-          </span>
-        </div>
-        <div className="flex items-center gap-2 text-muted-dim text-[11px]">
-          {item.duration_seconds ? <span>{item.duration_seconds}s</span> : null}
-          <span className="p-0.5 hover:text-white transition">
-            {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-          </span>
-        </div>
-      </button>
-
-      {item.goal && (
-        <div className="mt-2 text-[11.5px] text-muted-bright bg-ink-900/60 p-2 rounded-lg border border-ink-800/80">
-          <span className="text-secondary-400 font-mono text-[10.5px] block font-medium mb-0.5">Objective:</span>
-          {item.goal}
-        </div>
-      )}
-
-      {expanded && (
-        <div className="mt-2.5 pt-2.5 border-t border-ink-800 space-y-2 text-[11.5px] text-slate-300">
-          <div>
-            <span className="text-secondary-400 font-mono text-[10.5px] block font-medium mb-1">Findings Summary:</span>
-            <div className="bg-ink-900/80 p-2.5 rounded-lg border border-ink-800 whitespace-pre-wrap font-sans leading-relaxed">
-              {item.findings_summary || item.content || "No summary recorded."}
-            </div>
-          </div>
-          {item.key_discoveries && item.key_discoveries.length > 0 && (
-            <div>
-              <span className="text-secondary-400 font-mono text-[10.5px] block font-medium mb-1">Key Discoveries:</span>
-              <div className="flex flex-wrap gap-1.5">
-                {item.key_discoveries.map((disc: string, dIdx: number) => (
-                  <span key={dIdx} className="px-2 py-0.5 rounded bg-ink-900 text-secondary-300 border border-secondary-900/60 font-mono text-[10.5px]">
-                    {disc}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SubDispatchPill({ item }: { item: WorklogItem }) {
-  const subNum = item.sub_agent_number ?? item.title?.match(/SubAgent #(\d+)/)?.[1] ?? "";
-  return (
-    <div className="my-1.5 flex items-center gap-2 rounded-lg bg-secondary-950/40 border border-secondary-500/20 px-2.5 py-1.5 text-xs text-secondary-200">
-      <Zap className="w-3.5 h-3.5 text-secondary-400 animate-pulse shrink-0" />
-      <span className="font-mono font-semibold text-[11px] text-secondary-300">
-        Dispatching SubAgent {subNum ? `#${subNum}` : ""}
-      </span>
-      <span className="text-muted-bright text-[11px] truncate max-w-md">
-        {item.goal || item.content?.replace(/^Goal:\s*/, "").split("\n")[0] || ""}
-      </span>
-    </div>
-  );
-}
-
 function PhaseCompleteBanner({ item }: { item: WorklogItem }) {
   return (
     <div className="my-3 flex items-center gap-2 rounded-xl bg-ink-850 border border-secondary-500/30 px-3 py-2 text-xs">
@@ -353,6 +504,16 @@ export function WorklogFeed({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const displayItems: WorklogItem[] = worklog || [];
+  let latestObjectiveIndex = -1;
+  for (let index = displayItems.length - 1; index >= 0; index -= 1) {
+    if (displayItems[index].title === "Objective Received") {
+      latestObjectiveIndex = index;
+      break;
+    }
+  }
+  const currentRunItems =
+    latestObjectiveIndex >= 0 ? displayItems.slice(latestObjectiveIndex) : displayItems;
+  const workerActivities = buildWorkerActivities(currentRunItems);
 
   const normalizedStatus = (status || "").toUpperCase();
   const isWaitingForHuman = Boolean(waitingForHuman || normalizedStatus === "WAITING_FOR_HUMAN");
@@ -508,8 +669,12 @@ export function WorklogFeed({
             </p>
           </div>
         ) : (
-          displayItems.map((item, idx) => {
+          <>
+            <WorkerBoard workers={workerActivities} missionRunning={!isFinished} />
+            {displayItems.map((item, idx) => {
             const itemId = item.id || `item-${idx}`;
+
+            if (isWorkerDispatch(item) || isWorkerReport(item)) return null;
 
             // 0. Operator Gate / Active Probe Approval Proposals
             const isApprovalProposal =
@@ -529,18 +694,9 @@ export function WorklogFeed({
               );
             }
 
-            // 1. Thinking / Thought Block (matching Devin's Thought for Xs & v Thinking)
+            // Keep internal reasoning out of the activity feed.
             if (item.type === "thought" || item.title === "Thinking") {
-              const thoughtContent = item.content || item.title;
-              const isLatestThought = idx === displayItems.length - 1;
-              return (
-                <ThinkingBlock
-                  key={itemId}
-                  content={thoughtContent}
-                  durationSeconds={item.duration_seconds}
-                  initiallyExpanded={isLatestThought}
-                />
-              );
+              return null;
             }
 
             // 2. Terminal Shell Command (matching Devin's code pill)
@@ -757,20 +913,7 @@ export function WorklogFeed({
               );
             }
 
-            // 7. SubAgent Reports
-            const isSubReport =
-              (item.title?.includes("SubAgent") && item.title?.includes("Report")) ||
-              (item.type === "info" && item.title?.startsWith("SubAgent #"));
-            if (isSubReport) {
-              return <SubReportCard key={itemId} item={item} />;
-            }
-
-            // 8. SubAgent Dispatches
-            if (item.title?.startsWith("Dispatching SubAgent")) {
-              return <SubDispatchPill key={itemId} item={item} />;
-            }
-
-            // 9. Phase Completion
+            // 7. Phase Completion
             if (item.title?.startsWith("Phase ") && item.title?.includes("Complete")) {
               return <PhaseCompleteBanner key={itemId} item={item} />;
             }
@@ -783,7 +926,8 @@ export function WorklogFeed({
                 {item.content && <span className="text-muted-dim truncate max-w-sm">({item.content})</span>}
               </div>
             );
-          })
+            })}
+          </>
         )}
 
         {/* Real-time active thinking / action indicator */}

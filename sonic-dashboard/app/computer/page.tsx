@@ -73,7 +73,7 @@ export default function ComputerWorkspacePage() {
   };
 
   return (
-    <div className="min-h-screen bg-ink-950 bg-grid-glow max-w-7xl mx-auto p-6 space-y-6 flex flex-col h-[calc(100vh-0px)]">
+    <main className="sonic-direct-page min-h-screen max-w-7xl mx-auto p-4 sm:p-6 space-y-6 flex flex-col h-[calc(100vh-0px)]">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 glass-card rounded-2xl p-4 flex-shrink-0">
         <div className="flex items-center gap-4">
           <div className="grid place-items-center w-10 h-10 rounded-xl bg-gradient-to-tr from-primary-600 to-secondary-600 p-0.5 shadow-glow">
@@ -121,6 +121,6 @@ export default function ComputerWorkspacePage() {
           <ComputerSurface desktopState={desktopState} onRunCommand={handleRunCommand} commandLogs={commandLogs} onProvision={provisionDesktop} />
         </div>
       )}
-    </div>
+    </main>
   );
 }

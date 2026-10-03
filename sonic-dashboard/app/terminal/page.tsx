@@ -98,7 +98,7 @@ export default function TerminalPage() {
   }, [buffer]);
 
   return (
-    <div className={`min-h-screen bg-ink-950 bg-grid-glow ${fullscreen ? "fixed inset-0 z-50 p-4" : "p-6"} space-y-4 max-w-7xl mx-auto`}>
+    <main className={`sonic-direct-page min-h-screen ${fullscreen ? "fixed inset-0 z-50 p-4" : "p-4 sm:p-6"} space-y-4 max-w-7xl mx-auto`}>
       <div className="flex items-center justify-between pb-4 border-b border-ink-800">
         <div className="flex items-center gap-2">
           <TerminalIcon className="w-5 h-5 text-success" />
@@ -166,6 +166,6 @@ export default function TerminalPage() {
           </div>
         </div>
       </div>
-    </div>
+    </main>
   );
 }

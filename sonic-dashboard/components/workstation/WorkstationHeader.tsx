@@ -21,7 +21,7 @@ export function WorkstationHeader({
   connectionStatus,
 }: WorkstationHeaderProps) {
   return (
-    <header className="h-11 border-b border-ink-800 bg-ink-900/80 backdrop-blur-sm px-3 flex items-center justify-between text-xs z-10">
+    <header className="sonic-workstation-header h-12 border-b border-ink-800 bg-ink-900/90 px-3 sm:px-4 flex items-center justify-between text-xs z-10">
       <div className="flex items-center gap-2.5 min-w-0">
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -31,7 +31,7 @@ export function WorkstationHeader({
         >
           {sidebarOpen ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeft className="w-4 h-4" />}
         </button>
-        <span className="font-semibold text-white truncate max-w-xs">{sessionName}</span>
+        <span className="font-medium text-white truncate max-w-[10rem] sm:max-w-xs">{sessionName}</span>
 
         {(gitBranch || latestCommit) && (
           <span className="chip border border-ink-700 bg-ink-850 text-success">
@@ -44,12 +44,14 @@ export function WorkstationHeader({
         <StatusBadge status={connectionStatus} />
       </div>
 
-      <div className="flex items-center gap-3">
-        <div className="chip border border-ink-700 bg-ink-850 text-success">
+      <div className="flex items-center gap-2 sm:gap-3">
+        <div className="chip hidden sm:inline-flex border border-ink-700 bg-ink-850 text-success">
           <ShieldCheck className="w-3 h-3 text-success" />
           <span>FAIL-CLOSED</span>
         </div>
-        <MoreHorizontal className="w-4 h-4 text-muted hover:text-white cursor-pointer" />
+        <button type="button" className="rounded-md p-1.5 text-muted hover:bg-ink-800 hover:text-white transition" aria-label="More workstation options">
+          <MoreHorizontal className="w-4 h-4" />
+        </button>
       </div>
     </header>
   );
