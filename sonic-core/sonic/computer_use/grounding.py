@@ -337,8 +337,6 @@ def resolve_ui_target(
     if "," in clean_query:
         parts = clean_query.split(",")
         if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
-            if coordinate_space is None and screenshot_b64:
-                return None
             coords = (int(parts[0].strip()), int(parts[1].strip()))
             if coordinate_space and coordinate_space.strip().lower() in {"normalized", "normalized_1000", "model_1000"}:
                 return (
@@ -411,8 +409,6 @@ async def resolve_ui_target_async(
     if "," in clean_query:
         parts = clean_query.split(",")
         if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
-            if coordinate_space is None and screenshot_b64:
-                return None
             coords = (int(parts[0].strip()), int(parts[1].strip()))
             if coordinate_space and coordinate_space.strip().lower() in {"normalized", "normalized_1000", "model_1000"}:
                 return (

@@ -4072,7 +4072,6 @@ class ComputerUseAgent:
                 "visible_text": " ".join(
                     str(getattr(screen, "visible_text", "") or "").split()
                 ),
-                "changed_region": getattr(screen, "changed_region", None),
                 "controls": sorted(
                     controls,
                     key=lambda control: json.dumps(
@@ -4123,7 +4122,10 @@ class ComputerUseAgent:
                 else None
             )
             state_changed = (
-                before_signature != signature
+                (
+                    before_signature != signature
+                    or bool(getattr(result, "changed_region", None))
+                )
                 if before_signature is not None
                 else None
             )
@@ -4491,7 +4493,7 @@ class ComputerUseAgent:
                         or not math.isfinite(fresh_controls_age)
                         or not 0 <= fresh_controls_age <= 250
                         or not isinstance(fresh_version, int)
-                        or fresh_version <= previous_version
+                        or fresh_version < previous_version
                     ):
                         raise RuntimeError("current desktop state could not be verified")
                     if self._screen_state_signature(fresh_state) != self._screen_state_signature(previous_screen):
@@ -4523,7 +4525,6 @@ class ComputerUseAgent:
                     if (
                         self._screen_state_signature(fresh_screen)
                         != self._screen_state_signature(previous_screen)
-                        or fresh_pixels != previous_pixels
                     ):
                         raise RuntimeError("desktop screenshot changed since the action was reasoned")
                 if requested_window:

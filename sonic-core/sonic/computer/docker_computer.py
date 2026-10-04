@@ -1773,6 +1773,8 @@ while True:
                     raise RuntimeError("Pointer action blocked: no current captured screen bounds")
                 width, height = dimensions
                 for cx, cy in points:
+                    if cx is None or cy is None:
+                        raise ValueError(f"GUI coordinates cannot be None: ({cx}, {cy})")
                     if cx < 0 or cy < 0 or cx >= width or cy >= height:
                         raise ValueError(
                             f"GUI coordinates ({cx}, {cy}) outside captured screen bounds "
@@ -1789,6 +1791,15 @@ while True:
             ):
                 pointer_points = ((action.x, action.y),)
             elif atype == GUIActionType.DRAG:
+                if (
+                    action.x is None
+                    or action.y is None
+                    or action.x2 is None
+                    or action.y2 is None
+                ):
+                    raise ValueError(
+                        "GUIActionType.DRAG requires start (x, y) and destination (x2, y2) coordinates"
+                    )
                 pointer_points = (
                     (action.x, action.y),
                     (action.x2, action.y2),
@@ -1829,7 +1840,8 @@ while True:
                     != (action.x, action.y)
                 ):
                     raise RuntimeError(
-                        "GUI cursor move could not be verified at the requested coordinates"
+                        f"Cursor move verification failed: requested ({action.x}, {action.y}), "
+                        f"observed ({actual_x.group(1) if actual_x else 'None'}, {actual_y.group(1) if actual_y else 'None'})"
                     )
 
             elif atype == GUIActionType.DRAG:

@@ -36,10 +36,13 @@ fi
 
 # Ensure smooth human-like mouse cursor glide helper exists for visible VNC cursor movement
 cat << 'EOF' > /usr/local/bin/sonic_cursor.py
-import sys, subprocess, time, math
+import sys, os, subprocess, time, math
+
+DISPLAY = os.environ.get('DISPLAY', ':99')
+ENV = {**os.environ, 'DISPLAY': DISPLAY}
 
 def get_mouse():
-    out = subprocess.check_output(['xdotool', 'getmouselocation'], env={'DISPLAY': ':99'}).decode()
+    out = subprocess.check_output(['xdotool', 'getmouselocation'], env=ENV).decode()
     parts = dict(p.split(':') for p in out.strip().split() if ':' in p)
     return int(parts['x']), int(parts['y'])
 
@@ -51,11 +54,11 @@ def smooth_move(tx, ty, steps=25, duration=0.25):
         ease = 0.5 - 0.5 * math.cos(t * math.pi)
         cx = int(sx + (tx - sx) * ease)
         cy = int(sy + (ty - sy) * ease)
-        subprocess.run(['xdotool', 'mousemove', str(cx), str(cy)], env={'DISPLAY': ':99'}, check=True)
+        subprocess.run(['xdotool', 'mousemove', str(cx), str(cy)], env=ENV, check=True)
         time.sleep(dt)
 
 def click(button=1, repeat=1):
-    subprocess.run(['xdotool', 'click', '--repeat', str(repeat), str(button)], env={'DISPLAY': ':99'}, check=True)
+    subprocess.run(['xdotool', 'click', '--repeat', str(repeat), str(button)], env=ENV, check=True)
 
 def move_and_click(tx, ty, button=1, repeat=1, steps=25, duration=0.25):
     smooth_move(tx, ty, steps, duration)
@@ -64,17 +67,17 @@ def move_and_click(tx, ty, button=1, repeat=1, steps=25, duration=0.25):
 
 def drag(sx, sy, tx, ty):
     smooth_move(sx, sy)
-    subprocess.run(['xdotool', 'mousedown', '1'], env={'DISPLAY': ':99'}, check=True)
+    subprocess.run(['xdotool', 'mousedown', '1'], env=ENV, check=True)
     try:
         smooth_move(tx, ty)
     finally:
-        subprocess.run(['xdotool', 'mouseup', '1'], env={'DISPLAY': ':99'}, check=True)
+        subprocess.run(['xdotool', 'mouseup', '1'], env=ENV, check=True)
 
 def type_text(text, delay=40):
-    subprocess.run(['xdotool', 'type', '--delay', str(delay), text], env={'DISPLAY': ':99'}, check=True)
+    subprocess.run(['xdotool', 'type', '--delay', str(delay), text], env=ENV, check=True)
 
 def key(k):
-    subprocess.run(['xdotool', 'key', k], env={'DISPLAY': ':99'}, check=True)
+    subprocess.run(['xdotool', 'key', k], env=ENV, check=True)
 
 if __name__ == '__main__':
     cmd = sys.argv[1] if len(sys.argv) > 1 else 'help'

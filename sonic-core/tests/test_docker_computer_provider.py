@@ -97,7 +97,10 @@ async def test_vnc_url_uses_selected_container_published_host_port():
 
     url = await provider.get_vnc_url("isolated-workstation")
 
-    assert url == "http://localhost:6081/vnc.html"
+    assert url == (
+        "http://localhost:6081/vnc.html"
+        "?autoconnect=true&resize=scale&show_dot=true&cursor=true"
+    )
     provider._docker_exec.assert_awaited_once()
     assert "/6080" in provider._docker_exec.await_args.args[0]
 
