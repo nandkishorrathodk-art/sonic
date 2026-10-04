@@ -313,6 +313,7 @@ class ComputerUseAgent:
         observe_desktop: bool = True,
         gui_only: bool = False,
         initial_context: dict[str, Any] | None = None,
+        system_prompt_overlay: str | None = None,
         **kwargs: Any,
     ):
         self.computer = computer_provider
@@ -336,6 +337,13 @@ class ComputerUseAgent:
         # Context supplied by the caller is advisory evidence, never a
         # replacement for the immutable operator objective.
         self.initial_context = dict(initial_context or {})
+        self.system_prompt_overlay = str(system_prompt_overlay or kwargs.get("system_prompt_overlay") or "").strip()
+        self.is_subagent_worker = bool(
+            kwargs.get("is_subagent_worker")
+            or self.initial_context.get("silent_background")
+            or self.initial_context.get("subagent_role")
+        )
+        self.suppress_goal_decomposition = bool(kwargs.get("suppress_goal_decomposition"))
         # Shared versioned perception state keeps semantic targets and
         # sub-agents on one live snapshot without repeatedly decoding pixels.
         self.perception_bus = PerceptionBus()
@@ -731,14 +739,34 @@ class ComputerUseAgent:
 
     async def decompose_goal(self, goal: str) -> SubGoalChecklist:
         """Decompose a top-level mission into sequential, verifiable sub-goals."""
+        init_ctx = getattr(self, "initial_context", None) or {}
+        if (
+            init_ctx.get("silent_background")
+            or init_ctx.get("subagent_role")
+            or getattr(self, "is_subagent_worker", False)
+            or getattr(self, "suppress_goal_decomposition", False)
+        ):
+            return SubGoalChecklist(
+                top_level_goal=goal,
+                sub_goals=[SubGoal(description=f"Pursue objective: {goal}")],
+                active_index=0,
+            )
+
         sub_goals: list[SubGoal] = []
 
         # 1. Check for explicit numbered/bulleted steps in user prompt
         lines = [line.strip() for line in goal.splitlines() if line.strip()]
         if len(lines) <= 1:
             lines = [line.strip() for line in re.split(r'(?<=\w\w)\.\s+(?=[0-9]\.|\b[A-Z])', goal) if line.strip()]
+        rubric_bullet_pattern = re.compile(
+            r'^(?:-|\*|\d+[\.\)])?\s*(?:-\s*)?(?:\*\*R\d+[:\*]*|\[[\s xX]\]|\*\*Requirement\s*\d+|R\d+:)',
+            flags=re.IGNORECASE,
+        )
         numbered_items = []
         for l in lines:
+            # Do not treat rubric bullets as procedural steps
+            if rubric_bullet_pattern.match(l):
+                continue
             m = re.match(r'^(?:\d+[\.\)]|\-|\*)\s*(.*)', l)
             if m and len(m.group(1).strip()) > 3:
                 numbered_items.append(m.group(1).strip())
@@ -755,7 +783,15 @@ class ComputerUseAgent:
                 return llm_checklist
 
         # 3. Dynamic clause extraction from user's explicit multi-part goal (supports Hinglish/English)
-        parts = [p.strip() for p in re.split(r'\b(?:and then|then|and|aur|phir|uske baad|baad me)\b|[;\n]', goal, flags=re.IGNORECASE) if len(p.strip()) > 3]
+        raw_parts = [
+            p.strip()
+            for p in re.split(r'\b(?:and then|then|and|aur|phir|uske baad|baad me)\b|[;\n]', goal, flags=re.IGNORECASE)
+            if len(p.strip()) > 3
+        ]
+        parts = [
+            p for p in raw_parts
+            if not rubric_bullet_pattern.match(p) and not p.startswith(("- [ ]", "* [ ]", "- [x]", "* [x]", "- **R", "* **R"))
+        ]
         if len(parts) >= 2:
             sub_goals = [SubGoal(description=part) for part in parts[:5]]
             return SubGoalChecklist(top_level_goal=goal, sub_goals=sub_goals, active_index=0)
@@ -2558,13 +2594,23 @@ class ComputerUseAgent:
                 "================================\n\n"
             )
         if getattr(self, "initial_context", None):
-            obs_summary = (
-                "=== ADVISORY INITIAL CONTEXT (UNVERIFIED) ===\n"
-                f"{json.dumps(getattr(self, 'initial_context', {}), ensure_ascii=True)[:1200]}\n"
-                "Validate these hints against live observations before acting.\n"
-                "==============================================\n\n"
-                + obs_summary
-            )
+            init_ctx = getattr(self, "initial_context", {}) or {}
+            if init_ctx.get("silent_background") or init_ctx.get("subagent_role"):
+                role_label = str(init_ctx.get("subagent_role") or "Subagent Worker")
+                obs_summary = (
+                    f"=== ASSIGNED SUBAGENT ROLE & WORKSPACE: {role_label} ===\n"
+                    f"{json.dumps(init_ctx, ensure_ascii=True)[:1200]}\n"
+                    "===========================================================\n\n"
+                    + obs_summary
+                )
+            else:
+                obs_summary = (
+                    "=== ADVISORY INITIAL CONTEXT (UNVERIFIED) ===\n"
+                    f"{json.dumps(init_ctx, ensure_ascii=True)[:1200]}\n"
+                    "Validate these hints against live observations before acting.\n"
+                    "==============================================\n\n"
+                    + obs_summary
+                )
         obs_summary = target_header + obs_summary
         # Select system prompt based on model capability
         if compact:
@@ -2575,6 +2621,8 @@ class ComputerUseAgent:
                 system_prompt = COMPUTER_USE_SYSTEM_PROMPT
         else:
             system_prompt = COMPUTER_USE_SYSTEM_PROMPT
+        if getattr(self, "system_prompt_overlay", None) and self.system_prompt_overlay.strip():
+            system_prompt = f"{self.system_prompt_overlay.strip()}\n\n{system_prompt}"
         return system_prompt, obs_summary
 
     _MAX_HISTORY_STEPS: int = 25
@@ -3531,19 +3579,47 @@ class ComputerUseAgent:
             if not raw:
                 return {}
             raw = raw.strip()
-            if not raw.startswith("{"):
-                return {}
+            # If wrapped in markdown code fence, extract inner block
+            if "```" in raw:
+                m_fence = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', raw)
+                if m_fence:
+                    raw = m_fence.group(1).strip()
+            # Check for JSON array e.g. [{"TypeName": "...", ...}]
+            if (raw.startswith("[") and raw.endswith("]")) or (raw.startswith("[") and "]" in raw):
+                try:
+                    p_arr = json.loads(raw)
+                    if isinstance(p_arr, list):
+                        return {"subagents": p_arr}
+                except Exception:
+                    pass
+            # Try direct JSON loads
             try:
                 p = json.loads(raw)
                 if isinstance(p, dict):
                     return p
+                elif isinstance(p, list):
+                    return {"subagents": p}
             except Exception:
                 pass
+            # Search for embedded JSON object bounds {...}
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = raw[start : end + 1]
+                try:
+                    p = json.loads(candidate)
+                    if isinstance(p, dict):
+                        return p
+                except Exception:
+                    pass
+            # Try ast literal eval
             try:
                 import ast
                 p = ast.literal_eval(raw)
                 if isinstance(p, dict):
                     return p
+                elif isinstance(p, list):
+                    return {"subagents": p}
             except Exception:
                 pass
             m_cmd = re.search(r'["\']command["\']\s*:\s*["\']([^"\']+)["\']', raw)
@@ -3601,9 +3677,12 @@ class ComputerUseAgent:
         else:
             payload = {}
 
-        # If target itself was formatted as JSON e.g. {"command": "hostname"} or {"text": "..."}
-        if target.startswith("{"):
+        # If target itself was formatted as JSON e.g. {"command": "hostname"} or {"text": "..."} or array
+        if target.startswith("{") or target.startswith("["):
             tgt_dict = _extract_payload_dict(target)
+            if tgt_dict:
+                for k, v in tgt_dict.items():
+                    payload.setdefault(k, v)
             if "command" in tgt_dict:
                 target_command = ComputerUseAgent._clean_terminal_command(tgt_dict["command"])
                 payload.setdefault("command", target_command)
@@ -6823,30 +6902,91 @@ class ComputerUseAgent:
                         safety=self.safety,
                         tenant_id=self.tenant_id,
                     )
-                subagents_arg = payload.get("subagents") or payload.get("Subagents")
-                if not subagents_arg:
-                    subagents_arg = [
+                def _norm_str_list(v: Any) -> list[str]:
+                    if not v:
+                        return []
+                    if isinstance(v, str):
+                        lines = [ln.strip() for ln in v.splitlines() if ln.strip()]
+                        return lines if lines else [v.strip()]
+                    if isinstance(v, (list, tuple, set)):
+                        return [str(it).strip() for it in v if it is not None and str(it).strip()]
+                    return [str(v).strip()]
+
+                raw_subagents = payload.get("subagents") or payload.get("Subagents")
+                if not raw_subagents:
+                    raw_subagents = [payload] if (isinstance(payload, dict) and any(
+                        k in payload for k in ("prompt", "Prompt", "goal", "role", "Role", "type_name", "requirements", "acceptance_criteria")
+                    )) else [
                         {
                             "type_name": str(payload.get("type_name") or payload.get("TypeName") or "self"),
                             "role": str(payload.get("role") or payload.get("Role") or target_resource or "Autonomous Subagent"),
                             "prompt": str(payload.get("prompt") or payload.get("Prompt") or payload.get("goal") or target_resource or ""),
-                            "requirements": list(payload.get("requirements") or payload.get("Requirements") or []),
-                            "acceptance_criteria": list(payload.get("acceptance_criteria") or payload.get("AcceptanceCriteria") or []),
+                            "requirements": _norm_str_list(payload.get("requirements") or payload.get("Requirements")),
+                            "acceptance_criteria": _norm_str_list(payload.get("acceptance_criteria") or payload.get("AcceptanceCriteria")),
                             "verification_command": str(payload.get("verification_command") or payload.get("VerificationCommand") or ""),
                             "workspace_mode": str(payload.get("workspace_mode") or payload.get("Workspace") or payload.get("workspace") or "branch"),
+                            "execution_plane": str(payload.get("execution_plane") or payload.get("ExecutionPlane") or payload.get("plane") or "dual"),
                             "model_tier": str(payload.get("model_tier") or payload.get("Model") or "inherit"),
                             "max_steps": int(payload.get("max_steps") or payload.get("MaxSteps") or 12),
                             "max_correction_rounds": int(payload.get("max_correction_rounds") if payload.get("max_correction_rounds") is not None else 2),
                         }
                     ]
-                convs = await self._teamwork_manager.invoke_subagents(workspace_id, subagents_arg)
-                summaries = [
-                    f"[{c.conversation_id} | {c.role} | mode={c.workspace_mode} | judge={c.judge_verdict} | rounds={c.correction_rounds_used}]: {c.last_summary}"
-                    for c in convs
-                ]
-                all_verified = all(c.verified for c in convs) if convs else False
-                actual_obs_str = "Subagent Teamwork Results:\n" + "\n".join(summaries)
-                status = ActionExecutionStatus.VERIFIED if all_verified else ActionExecutionStatus.COMPLETED
+                elif isinstance(raw_subagents, dict):
+                    raw_subagents = [raw_subagents]
+                elif not isinstance(raw_subagents, list):
+                    raw_subagents = [raw_subagents]
+
+                subagents_arg: list[dict[str, Any]] = []
+                for entry in raw_subagents:
+                    if not isinstance(entry, dict):
+                        continue
+                    p = str(
+                        entry.get("prompt")
+                        or entry.get("Prompt")
+                        or entry.get("goal")
+                        or (target_resource if not (payload.get("subagents") or payload.get("Subagents")) else "")
+                        or ""
+                    ).strip()
+                    if not p:
+                        # Prevent launching empty/blank subagents
+                        continue
+                    plane = str(entry.get("execution_plane") or entry.get("ExecutionPlane") or entry.get("plane") or "dual").lower().strip()
+                    if plane not in ("gui", "headless", "dual"):
+                        plane = "dual"
+                    tier = str(entry.get("model_tier") or entry.get("Model") or entry.get("model") or "inherit").lower().strip()
+                    if tier not in ("inherit", "flash", "pro"):
+                        tier = "inherit"
+                    mode = str(entry.get("workspace_mode") or entry.get("Workspace") or entry.get("workspace") or "branch").lower().strip()
+                    if mode not in ("inherit", "branch", "share"):
+                        mode = "branch"
+
+                    subagents_arg.append({
+                        "type_name": str(entry.get("type_name") or entry.get("TypeName") or "self"),
+                        "role": str(entry.get("role") or entry.get("Role") or "Autonomous Subagent"),
+                        "prompt": p,
+                        "requirements": _norm_str_list(entry.get("requirements") or entry.get("Requirements")),
+                        "acceptance_criteria": _norm_str_list(entry.get("acceptance_criteria") or entry.get("AcceptanceCriteria")),
+                        "verification_command": str(entry.get("verification_command") or entry.get("VerificationCommand") or ""),
+                        "workspace_mode": mode,
+                        "execution_plane": plane,
+                        "model_tier": tier,
+                        "max_steps": int(entry.get("max_steps") or entry.get("MaxSteps") or 12),
+                        "max_correction_rounds": int(entry.get("max_correction_rounds") if entry.get("max_correction_rounds") is not None else 2),
+                        "employee_id": str(entry.get("employee_id") or "").strip() or None,
+                    })
+
+                if not subagents_arg:
+                    actual_obs_str = "Error: Cannot invoke subagents with empty prompt. Each subagent must specify a non-empty prompt/objective."
+                    status = ActionExecutionStatus.FAILED
+                else:
+                    convs = await self._teamwork_manager.invoke_subagents(workspace_id, subagents_arg)
+                    summaries = [
+                        f"[{c.conversation_id} | {c.role} | mode={c.workspace_mode} | judge={c.judge_verdict} | rounds={c.correction_rounds_used}]: {c.last_summary}"
+                        for c in convs
+                    ]
+                    all_verified = all(c.verified for c in convs) if convs else False
+                    actual_obs_str = "Subagent Teamwork Results:\n" + "\n".join(summaries)
+                    status = ActionExecutionStatus.VERIFIED if all_verified else ActionExecutionStatus.COMPLETED
 
             elif action_type == ComputerActionType.SEND_MESSAGE:
                 from sonic.computer_use.teamwork import SubagentTeamworkManager
@@ -6859,9 +6999,23 @@ class ComputerUseAgent:
                         safety=self.safety,
                         tenant_id=self.tenant_id,
                     )
-                recipient = str(payload.get("recipient") or payload.get("Recipient") or target_resource or "").strip()
-                msg_text = str(payload.get("message") or payload.get("Message") or "")
-                ac = list(payload.get("acceptance_criteria") or payload.get("AcceptanceCriteria") or [])
+                recipient = str(
+                    payload.get("conversation_id")
+                    or payload.get("conversationId")
+                    or payload.get("recipient")
+                    or payload.get("Recipient")
+                    or target_resource
+                    or ""
+                ).strip()
+                msg_text = str(
+                    payload.get("message")
+                    or payload.get("Message")
+                    or payload.get("text")
+                    or payload.get("prompt")
+                    or ""
+                )
+                raw_ac = payload.get("acceptance_criteria") or payload.get("AcceptanceCriteria")
+                ac = _norm_str_list(raw_ac) if raw_ac is not None else None
                 vc = str(payload.get("verification_command") or payload.get("VerificationCommand") or "")
                 max_s = int(payload.get("max_steps") or payload.get("MaxSteps") or 8)
                 conv = await self._teamwork_manager.send_message(
@@ -6887,8 +7041,16 @@ class ComputerUseAgent:
                         safety=self.safety,
                         tenant_id=self.tenant_id,
                     )
-                m_action = str(payload.get("action") or payload.get("Action") or "list")
+                m_action = str(
+                    payload.get("action")
+                    or payload.get("Action")
+                    or (target_resource if target_resource in ("list", "kill", "kill_all") else "list")
+                ).strip().lower()
                 c_ids = list(payload.get("conversation_ids") or payload.get("ConversationIds") or [])
+                if not c_ids and target_resource and target_resource not in ("list", "kill", "kill_all"):
+                    c_ids = [target_resource]
+                if not c_ids and (payload.get("conversation_id") or payload.get("conversationId")):
+                    c_ids = [str(payload.get("conversation_id") or payload.get("conversationId"))]
                 listing = self._teamwork_manager.manage_subagents(action=m_action, conversation_ids=c_ids)
                 actual_obs_str = json.dumps(listing, separators=(",", ":"))
                 status = ActionExecutionStatus.COMPLETED
