@@ -234,35 +234,43 @@ async def _run_prompt_reasoning_with_timeout(
 ) -> None:
     """Bound one-shot reasoning so a provider outage cannot strand a session."""
     state = _get_or_create_session(tenant_id, session_id)
+    task_key = (tenant_id, session_id)
     try:
         # Actionable computer tasks run through Boss planning, worker execution,
-        # and verification; reserve the longer mission budget for that path.
+        # and verification; allow the configured worker budget plus orchestration
+        # time to finish before cancelling the entire mission.
         timeout_sec = (
-            900
+            1800
             if _is_action_prompt(prompt) and not _is_observation_only_prompt(prompt)
             else 300
         )
         await asyncio.wait_for(
-            _run_prompt_reasoning(tenant_id, session_id, prompt),
+            _run_foreground_operator_task(
+                _run_prompt_reasoning(tenant_id, session_id, prompt)
+            ),
             timeout=timeout_sec,
         )
     except TimeoutError:
+        if _background_tasks.get(task_key) is not asyncio.current_task():
+            return
         state["status"] = "ERROR"
-        state["current_action"] = "Reasoning timed out; no desktop action was completed."
+        state["current_action"] = "Mission timed out; inspect the worklog and desktop before retrying."
         message = (
-            "The reasoning provider timed out. The workstation was not given another "
-            "action, and no target or result was invented."
+            "The mission exceeded its execution deadline. Earlier actions may have "
+            "completed; review the worklog and current desktop before retrying."
         )
         state["thought_summary"] = message
         _append_worklog(state, "error", "Reasoning Timeout", message)
         _persist_workstation_state()
     except Exception as exc:
+        if _background_tasks.get(task_key) is not asyncio.current_task():
+            return
         import traceback
         tb_str = traceback.format_exc()
         logger.error("workstation_reasoning_failed", exc=str(exc), traceback=tb_str)
         state["status"] = "ERROR"
-        state["current_action"] = "Reasoning failed; no desktop action was completed."
-        message = f"Reasoning failed before completion: {exc}"
+        state["current_action"] = "Reasoning failed; inspect the worklog and desktop before retrying."
+        message = f"Reasoning failed before completion: {exc}. Earlier actions may have completed."
         state["thought_summary"] = message
         _append_worklog(state, "error", "Reasoning Error", f"{message}\n\n{tb_str}")
         _persist_workstation_state()
@@ -931,12 +939,13 @@ async def get_workstation_state(
     state = _get_or_create_session(tenant_id, session_id)
     workspace_id = _session_workspace_id(user, session_id)
 
-    # 10.0s cache key per tenant and session to avoid overwhelming sandbox execution with rapid polls
+    # Cache expensive sandbox telemetry briefly, but refresh it during long missions too.
     cache_key = f"{tenant_id}:{session_id}"
     now = time.time()
+    telemetry_cache_ttl = 5.0
     cached = _workstation_state_cache.get(cache_key)
 
-    if cached and (now - cached[0] < 10.0):
+    if cached and (now - cached[0] < telemetry_cache_ttl):
         # Merge cached container telemetry into state
         cached_data = cached[1]
         state["git_branch"] = cached_data.get("git_branch", state.get("git_branch", ""))
@@ -944,7 +953,7 @@ async def get_workstation_state(
         return state
 
     # Avoid blocking on slow container calls during active runs if cached telemetry exists
-    if state.get("status") == "RUNNING" and cached:
+    if state.get("status") == "RUNNING" and cached and (now - cached[0] < telemetry_cache_ttl):
         cached_data = cached[1]
         state["git_branch"] = cached_data.get("git_branch", state.get("git_branch", ""))
         state["desktop"].update(cached_data.get("desktop", {}))
@@ -974,6 +983,7 @@ async def get_workstation_state(
             desktop_state = cstate.status.value if hasattr(cstate.status, "value") else str(cstate.status)
             desktop_telemetry = {
                 "status": desktop_state,
+                "perception_status": "UNAVAILABLE",
                 "active_window": cstate.active_window or "",
                 "running_apps": [p.name if hasattr(p, "name") else str(p) for p in (cstate.running_processes or [])],
                 "vnc_url": "",
@@ -985,13 +995,56 @@ async def get_workstation_state(
                     desktop_telemetry["vnc_url"] = vnc_url
                     desktop_telemetry["novnc_url"] = vnc_url
                     desktop_telemetry["status"] = "LIVE"
+                    try:
+                        observation = await comp.screenshot(target_id)
+                        age_ms = observation.capture_age_ms
+                        if age_ms is None and observation.capture_timestamp_ns:
+                            age_ms = (time.time_ns() - observation.capture_timestamp_ns) / 1_000_000
+                        fresh = (
+                            bool(observation.screenshot_base64)
+                            and observation.desktop_state != "NO_DISPLAY"
+                            and age_ms is not None
+                            and 0 <= age_ms <= 2000
+                        )
+                        desktop_telemetry.update({
+                            "perception_status": "FRESH" if fresh else "UNAVAILABLE",
+                            "capture_age_ms": age_ms if fresh else None,
+                            "capture_timestamp_ns": observation.capture_timestamp_ns,
+                            "perception_version": observation.perception_version,
+                            "perception_message": "" if fresh else "No fresh desktop observation is available.",
+                        })
+                    except Exception as exc:
+                        logger.warning(
+                            "workstation_desktop_perception_probe_failed",
+                            session_id=session_id,
+                            error=str(exc),
+                        )
+                        desktop_telemetry["perception_message"] = "No fresh desktop observation is available."
                 else:
                     desktop_telemetry["status"] = "ACTIVE_NO_DISPLAY"
             state["desktop"].update(desktop_telemetry)
             telemetry["desktop"] = desktop_telemetry
         elif not target_id:
-            state["desktop"]["status"] = "NO_ACTIVE_WORKSPACE"
-            telemetry["desktop"]["status"] = "NO_ACTIVE_WORKSPACE"
+            state["desktop"].update({
+                "status": "NO_ACTIVE_WORKSPACE",
+                "perception_status": "UNAVAILABLE",
+                "capture_age_ms": None,
+                "capture_timestamp_ns": None,
+                "perception_version": None,
+                "perception_message": "No workstation is attached to this session.",
+                "vnc_url": "",
+                "novnc_url": "",
+            })
+            telemetry["desktop"].update({
+                "status": "NO_ACTIVE_WORKSPACE",
+                "perception_status": "UNAVAILABLE",
+                "capture_age_ms": None,
+                "capture_timestamp_ns": None,
+                "perception_version": None,
+                "perception_message": "No workstation is attached to this session.",
+                "vnc_url": "",
+                "novnc_url": "",
+            })
     except Exception:
         pass
 
@@ -1393,10 +1446,19 @@ async def interrupt_workstation_session(
     state["status"] = "PAUSED"
     if not state.get("paused_objective"):
         state["paused_objective"] = state.get("last_objective") or state.get("mission_name") or ""
+    task = _background_tasks.get((tenant_id, session_id))
+    if task and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    mission = state.get("mission", {})
+    if mission.get("status") in {"QUEUED", "RUNNING"}:
+        mission["status"] = "PAUSED"
+        mission["completed_at"] = _timestamp()
+        _mission_event(state, "mission", "Mission interrupted", "Execution was stopped at the operator's request.")
     state["current_action"] = "Paused by user (Takeover active)."
     _append_worklog(state, "response", "Agent Paused", "Autonomous execution paused by user. Direct control active.")
     _persist_workstation_state()
-    return {"status": "ok", "message": "Interrupt signal sent to agent."}
+    return {"status": "ok", "message": "Execution stopped; human control may proceed."}
 
 
 @router.get("/workstation/desktop/status")
@@ -1421,6 +1483,10 @@ async def get_desktop_status(
     desktop["status"] = "NO_ACTIVE_WORKSPACE"
     desktop["vnc_url"] = None
     desktop["novnc_url"] = None
+    desktop["perception_status"] = "UNAVAILABLE"
+    desktop["capture_age_ms"] = None
+    desktop["capture_timestamp_ns"] = None
+    desktop["perception_version"] = None
 
     if target_id:
         try:
@@ -1439,8 +1505,36 @@ async def get_desktop_status(
                     desktop["status"] = "LIVE"
                 else:
                     desktop["status"] = "ACTIVE_NO_DISPLAY"
+            if desktop.get("vnc_url"):
+                try:
+                    observation = await comp.screenshot(target_id)
+                    age_ms = observation.capture_age_ms
+                    if age_ms is None and observation.capture_timestamp_ns:
+                        age_ms = (time.time_ns() - observation.capture_timestamp_ns) / 1_000_000
+                    fresh = (
+                        bool(observation.screenshot_base64)
+                        and observation.desktop_state != "NO_DISPLAY"
+                        and age_ms is not None
+                        and 0 <= age_ms <= 2000
+                    )
+                    desktop["perception_status"] = "FRESH" if fresh else "UNAVAILABLE"
+                    desktop["capture_age_ms"] = age_ms if fresh else None
+                    desktop["capture_timestamp_ns"] = observation.capture_timestamp_ns
+                    desktop["perception_version"] = observation.perception_version
+                    if not fresh:
+                        desktop["perception_message"] = "No fresh desktop observation is available."
+                except Exception as exc:
+                    logger.warning(
+                        "workstation_desktop_perception_probe_failed",
+                        session_id=session_id,
+                        error=str(exc),
+                    )
+                    desktop["perception_status"] = "UNAVAILABLE"
+                    desktop["capture_age_ms"] = None
+                    desktop["perception_message"] = "No fresh desktop observation is available."
         except Exception:
             desktop["status"] = "ERROR_PROBING_COMPUTER"
+            desktop["perception_status"] = "UNAVAILABLE"
 
     return desktop
 
@@ -1471,11 +1565,21 @@ async def execute_desktop_action(
                 },
             }
         screen = await get_daytona_computer().screenshot(workspace_id=workspace_id)
+        observation = screen.model_dump()
+        capture_age_ms = screen.capture_age_ms
+        if capture_age_ms is None and screen.capture_timestamp_ns:
+            capture_age_ms = (time.time_ns() - screen.capture_timestamp_ns) / 1_000_000
+        has_fresh_pixels = bool(
+            screen.screenshot_base64
+            and screen.desktop_state != "NO_DISPLAY"
+            and capture_age_ms is not None
+            and 0 <= capture_age_ms <= 2000
+        )
         return {
-            "status": "success",
+            "status": "success" if has_fresh_pixels else "BLOCKED",
             "action": req.action,
             "active_window": screen.active_window or "None",
-            "observation": screen.model_dump(),
+            "observation": observation,
         }
     try:
         action_type = GUIActionType(req.action.strip().upper())
@@ -2907,6 +3011,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
     observation_only = _is_observation_only_prompt(prompt)
     execution_prompt = action_prompt and not observation_only
     desktop_prompt = _requires_desktop_observation(prompt)
+    pipeline_failed = False
     program_profile = _infer_program_profile(prompt, state)
     state["program_profile"] = program_profile
     try:
@@ -3922,30 +4027,37 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                 state["thought_summary"] = fallback_response
                 _append_worklog(state, "info", "LLM Response Unavailable", fallback_response)
     except Exception as general_err:
+        pipeline_failed = True
         logger.warning("workstation_reasoning_pipeline_error", error=str(general_err))
         err_msg = f"Reasoning pipeline error: {general_err}"
         state["thought_summary"] = err_msg
         _append_worklog(state, "error", "Execution Failed", err_msg)
     finally:
-        if state.get("interrupted"):
-            state["status"] = "PAUSED"
-            state["current_action"] = "Agent paused by user."
-        elif action_blocked:
-            state["status"] = "BLOCKED"
-            if (
-                not state.get("current_action")
-                or state["current_action"].startswith("Idle")
-                or "Thinking" in state["current_action"]
-                or "Reasoning" in state["current_action"]
-            ):
-                state["current_action"] = "Execution blocked — check workstation logs"
-        elif state.get("waiting_for_human") or state.get("status") == "WAITING_FOR_HUMAN":
-            state["status"] = "WAITING_FOR_HUMAN"
-            state["current_action"] = f"Paused for human assistance: {state.get('waiting_for_human_reason', 'Verification required')}"
-        else:
-            state["status"] = "IDLE"
-            state["current_action"] = "Ready when you are."
-        _persist_workstation_state()
+        current_task = asyncio.current_task()
+        tracked_task = _background_tasks.get((tenant_id, session_id))
+        if tracked_task is None or tracked_task is current_task:
+            if state.get("interrupted"):
+                state["status"] = "PAUSED"
+                state["current_action"] = "Agent paused by user."
+            elif action_blocked:
+                state["status"] = "BLOCKED"
+                if (
+                    not state.get("current_action")
+                    or state["current_action"].startswith("Idle")
+                    or "Thinking" in state["current_action"]
+                    or "Reasoning" in state["current_action"]
+                ):
+                    state["current_action"] = "Execution blocked — check workstation logs"
+            elif state.get("waiting_for_human") or state.get("status") == "WAITING_FOR_HUMAN":
+                state["status"] = "WAITING_FOR_HUMAN"
+                state["current_action"] = f"Paused for human assistance: {state.get('waiting_for_human_reason', 'Verification required')}"
+            elif pipeline_failed:
+                state["status"] = "ERROR"
+                state["current_action"] = "Reasoning failed; inspect the worklog before retrying."
+            else:
+                state["status"] = "IDLE"
+                state["current_action"] = "Ready when you are."
+            _persist_workstation_state()
 
 
 @router.post("/workstation/prompt")
@@ -4003,9 +4115,11 @@ async def send_workstation_prompt(
 
     # Never hold the HTTP request open on an external LLM.  The dashboard can
     # refresh workstation state while this task records the real result.
-    _track_background_task(tenant_id, session_id, asyncio.create_task(_run_foreground_operator_task(
-        _run_prompt_reasoning_with_timeout(tenant_id, session_id, prompt_text)
-    )))
+    _track_background_task(
+        tenant_id,
+        session_id,
+        asyncio.create_task(_run_prompt_reasoning_with_timeout(tenant_id, session_id, prompt_text)),
+    )
     return {
         "status": "accepted",
         "reasoning": "thinking",
@@ -4223,9 +4337,7 @@ async def resume_workstation_after_human(
             tenant_id,
             session_id,
             asyncio.create_task(
-                _run_foreground_operator_task(
-                    _run_prompt_reasoning_with_timeout(tenant_id, session_id, resume_prompt)
-                )
+                _run_prompt_reasoning_with_timeout(tenant_id, session_id, resume_prompt)
             ),
         )
     else:

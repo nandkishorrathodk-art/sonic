@@ -8,7 +8,9 @@ Proves:
     4. Safe File Access: Paths outside repository root are strictly forbidden (403).
 """
 
-from unittest.mock import patch
+import base64
+import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +19,7 @@ from sonic.api.main import app
 from sonic.api.routes import workstation
 from sonic.auth.google_auth import create_jwt_token
 from sonic.auth.models import User, UserRole
+from sonic.computer.models import ScreenObservation
 
 
 @pytest.fixture
@@ -201,8 +204,8 @@ def test_workstation_screenshot_no_workspace_returns_no_display(client, auth_hea
     assert data["screenshot_base64"] == ""
 
 
-def test_workstation_desktop_action_no_workspace_degrades(client, auth_headers):
-    """Desktop action with no provisioned workstation returns success with a NO_DISPLAY observation."""
+def test_workstation_desktop_action_no_workspace_is_blocked(client, auth_headers):
+    """Desktop action with no provisioned workstation cannot report screenshot success."""
     res = client.post(
         "/workstation/desktop/action",
         headers=auth_headers,
@@ -212,3 +215,37 @@ def test_workstation_desktop_action_no_workspace_degrades(client, auth_headers):
     data = res.json()
     assert data["status"] == "BLOCKED"
     assert data["observation"]["desktop_state"] == "NO_DISPLAY"
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        ScreenObservation(
+            screenshot_base64=base64.b64encode(b"x" * 128).decode(),
+            capture_timestamp_ns=time.time_ns() - 5_000_000_000,
+            desktop_state="INTERACTIVE",
+        ),
+        ScreenObservation(
+            screenshot_base64="",
+            desktop_state="NO_DISPLAY",
+        ),
+    ],
+)
+def test_workstation_screenshot_action_blocks_missing_or_stale_pixels(
+    client, auth_headers, monkeypatch, observation
+):
+    """A screenshot action only reports success when it returns fresh pixels."""
+    monkeypatch.setattr(workstation, "_session_workspace_id", lambda _user, _session: "test-workspace")
+    monkeypatch.setattr(workstation, "_assert_runtime_execution_enabled", lambda _tenant: None)
+    computer = type("Computer", (), {})()
+    computer.screenshot = AsyncMock(return_value=observation)
+    monkeypatch.setattr(workstation, "get_daytona_computer", lambda: computer)
+
+    response = client.post(
+        "/workstation/desktop/action",
+        headers=auth_headers,
+        json={"action": "screenshot"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "BLOCKED"

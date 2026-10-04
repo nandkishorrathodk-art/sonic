@@ -49,6 +49,11 @@ export interface DesktopState {
   os_name: string;
   display: string;
   status: string;
+  perception_status?: "FRESH" | "UNAVAILABLE" | string;
+  capture_age_ms?: number | null;
+  capture_timestamp_ns?: number | null;
+  perception_version?: number | null;
+  perception_message?: string;
   active_window?: string;
   running_apps: DesktopApp[];
   vnc_url?: string;

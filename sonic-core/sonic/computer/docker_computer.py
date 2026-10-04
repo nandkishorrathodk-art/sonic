@@ -512,7 +512,10 @@ class DockerComputerProvider(ComputerProvider):
             timeout=8,
         )
         if code == 0 and out.strip() == "0":
-            return f"http://localhost:{published_port}/vnc.html"
+            return (
+                f"http://localhost:{published_port}/vnc.html"
+                "?autoconnect=true&resize=scale&show_dot=true&cursor=true"
+            )
         return None
 
     async def get_stream_url(self, workspace_id: str) -> str | None:
@@ -1176,9 +1179,8 @@ while True:
                 error=str(exc),
             )
 
-        # If daemon isn't running yet inside container, start it once in background
+        # Retry startup on later observations when the first daemon boot fails.
         if not getattr(self, "_nsi_booted", False):
-            self._nsi_booted = True
             try:
                 import base64
                 b64_script = base64.b64encode(self._NSI_DAEMON_SCRIPT.encode("utf-8")).decode("ascii")
@@ -1204,6 +1206,7 @@ while True:
                         error=boot_err[:300],
                     )
                     return None
+                self._nsi_booted = True
                 nsi_url = (
                     await self._resolve_nsi_state_url()
                     if command == "state"

@@ -772,10 +772,52 @@ async def test_nsi_daemon_boot_does_not_kill_its_own_shell():
     result = await provider._nsi_request({"cmd": "frame"})
 
     assert result == frame
+    assert provider._nsi_booted is True
     boot_command = provider.boot_command
     assert "nohup python3 /tmp/sonic_nsi_daemon.py" in boot_command
     assert "pkill -f" not in boot_command
     assert "/tmp/sonic_nsi_daemon.pid" in boot_command
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_nsi_daemon_boot_retries_after_initial_failure():
+    class TestProvider(DockerComputerProvider):
+        boot_attempts = 0
+
+        async def _docker_exec(self, cmd, timeout=60):
+            self.boot_attempts += 1
+            if self.boot_attempts == 1:
+                return 1, "", "startup failed"
+            return 0, "", ""
+
+    endpoint = "http://127.0.0.1:6092/nsi_frame.json"
+    frame = {
+        "ok": True,
+        "b64": base64.b64encode(b"fresh-frame").decode(),
+        "detected_controls": [],
+    }
+
+    class NsiHttp:
+        calls = 0
+
+        async def get(self, _url):
+            self.calls += 1
+            if self.calls <= 2:
+                return SimpleNamespace(status_code=503, json=lambda: {})
+            return SimpleNamespace(status_code=200, json=lambda: frame)
+
+    provider = TestProvider(container_name="isolated-workstation")
+    provider._nsi_http = NsiHttp()
+    provider._nsi_booted = False
+    provider._resolve_nsi_frame_url = AsyncMock(return_value=endpoint)
+
+    assert await provider._nsi_request({"cmd": "frame"}) is None
+    assert provider._nsi_booted is False
+
+    assert await provider._nsi_request({"cmd": "frame"}) == frame
+    assert provider.boot_attempts == 2
+    assert provider._nsi_booted is True
 
 
 @pytest.mark.no_live_infra

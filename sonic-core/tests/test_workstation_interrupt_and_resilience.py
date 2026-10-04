@@ -234,7 +234,7 @@ def test_workstation_interrupt_operator_role_accepted(test_client):
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "ok"
-    assert "Interrupt signal sent" in data["message"]
+    assert "Execution stopped" in data["message"]
 
     # Verify session state reflects interrupted status
     state_res = test_client.get("/workstation/state?session_id=ops-session-1", headers=headers)
