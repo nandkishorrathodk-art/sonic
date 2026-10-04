@@ -51,6 +51,7 @@ class DisplayLeaseManager:
 
     _locks: dict[str, asyncio.Lock] = {}
     _lock_metadata: dict[str, dict[str, Any]] = {}
+    WATCHDOG_TTL_SECONDS: float = 60.0
 
     @classmethod
     def get_lock(cls, workspace_id: str, display: str | None = None) -> asyncio.Lock:
@@ -65,6 +66,29 @@ class DisplayLeaseManager:
         return cls._locks[key]
 
     @classmethod
+    def _break_stale_lock_if_needed(cls, key: str, lock: asyncio.Lock) -> None:
+        """Watchdog TTL: break stale locks held longer than 60s to prevent deadlocks."""
+        metadata = cls._lock_metadata.setdefault(key, {})
+        acquired_at = metadata.get("acquired_at")
+        if lock.locked():
+            if acquired_at is None:
+                metadata["acquired_at"] = time.time()
+            elif time.time() - acquired_at > cls.WATCHDOG_TTL_SECONDS:
+                logger.warning(
+                    "display_lease_watchdog_ttl_expired",
+                    key=key,
+                    owner=metadata.get("owner"),
+                    elapsed=time.time() - acquired_at,
+                )
+                try:
+                    lock.release()
+                except RuntimeError:
+                    pass
+                cls._locks[key] = asyncio.Lock()
+                metadata.pop("owner", None)
+                metadata.pop("acquired_at", None)
+
+    @classmethod
     async def acquire(
         cls,
         workspace_id: str,
@@ -73,10 +97,31 @@ class DisplayLeaseManager:
         timeout: float = 30.0,
         owner: str | None = None,
     ) -> asyncio.Lock:
-        """Acquire a physical-display lease without waiting forever."""
-        lock = cls.get_lock(workspace_id, display=display)
-        await asyncio.wait_for(lock.acquire(), timeout=timeout)
+        """Acquire a physical-display lease with 60-second watchdog TTL to avoid deadlocks."""
         key = f"display:{display or os.environ.get('DISPLAY') or ':99'}"
+        lock = cls.get_lock(workspace_id, display=display)
+        cls._break_stale_lock_if_needed(key, lock)
+        lock = cls._locks[key]
+
+        start_time = time.time()
+        while True:
+            cls._break_stale_lock_if_needed(key, lock)
+            lock = cls._locks[key]
+            elapsed = time.time() - start_time
+            remaining = max(0.1, timeout - elapsed)
+            try:
+                chunk = min(remaining, 5.0)
+                await asyncio.wait_for(lock.acquire(), timeout=chunk)
+                break
+            except asyncio.TimeoutError:
+                if time.time() - start_time >= timeout:
+                    cls._break_stale_lock_if_needed(key, lock)
+                    lock = cls._locks[key]
+                    if not lock.locked():
+                        await asyncio.wait_for(lock.acquire(), timeout=1.0)
+                        break
+                    raise
+
         cls._lock_metadata[key].update(
             {"owner": owner or workspace_id, "acquired_at": time.time()}
         )
@@ -91,7 +136,10 @@ class DisplayLeaseManager:
             metadata.pop("owner", None)
             metadata.pop("acquired_at", None)
         if lock.locked():
-            lock.release()
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +156,19 @@ class DefinedSubagentType:
     enable_write_tools: bool = True
     enable_subagent_tools: bool = False
     created_at: float = field(default_factory=time.time)
+
+
+def _norm_str_list(v: Any) -> list[str]:
+    """Normalize string, list, or None into a clean list of non-empty strings.
+    Prevents Python's list(str) from splitting string character-by-character."""
+    if not v:
+        return []
+    if isinstance(v, str):
+        lines = [ln.strip() for ln in v.splitlines() if ln.strip()]
+        return lines if lines else [v.strip()]
+    if isinstance(v, (list, tuple, set)):
+        return [str(it).strip() for it in v if it is not None and str(it).strip()]
+    return [str(v).strip()]
 
 
 @dataclass
@@ -127,6 +188,10 @@ class SubagentTaskSpec:
     max_correction_rounds: int = 2
     employee_id: str | None = None
     employee_context: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.requirements = _norm_str_list(self.requirements)
+        self.acceptance_criteria = _norm_str_list(self.acceptance_criteria)
 
 
 @dataclass
@@ -154,6 +219,8 @@ class SubagentConversation:
     judge_notes: str = ""
     correction_rounds_used: int = 0
     merged_files: list[str] = field(default_factory=list)
+    current_task: Any = None
+    last_spec: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -240,15 +307,19 @@ class SubagentTeamworkManager:
         specs: list[SubagentTaskSpec] = []
         for raw in subagents:
             if isinstance(raw, SubagentTaskSpec):
-                specs.append(raw)
+                if raw.prompt.strip():
+                    specs.append(raw)
             elif isinstance(raw, dict):
+                p = str(raw.get("prompt") or raw.get("Prompt") or raw.get("goal") or "").strip()
+                if not p:
+                    continue
                 specs.append(
                     SubagentTaskSpec(
                         type_name=str(raw.get("type_name") or raw.get("TypeName") or "self"),
                         role=str(raw.get("role") or raw.get("Role") or "Autonomous Subagent"),
-                        prompt=str(raw.get("prompt") or raw.get("Prompt") or raw.get("goal") or ""),
-                        requirements=list(raw.get("requirements") or []),
-                        acceptance_criteria=list(raw.get("acceptance_criteria") or []),
+                        prompt=p,
+                        requirements=_norm_str_list(raw.get("requirements") or raw.get("Requirements")),
+                        acceptance_criteria=_norm_str_list(raw.get("acceptance_criteria") or raw.get("AcceptanceCriteria")),
                         verification_command=str(raw.get("verification_command") or ""),
                         workspace_mode=str(raw.get("workspace_mode") or raw.get("Workspace") or "branch").lower().strip(),
                         execution_plane=str(raw.get("execution_plane") or raw.get("plane") or "dual").lower().strip(),
@@ -291,6 +362,7 @@ class SubagentTeamworkManager:
                 git_branch=f"subagent/{conv_id}" if w_mode in ("branch", "share") else None,
                 state="running",
                 state_detail=f"Executing: {spec.role}",
+                last_spec=spec,
             )
             self.conversations[conv_id] = conv
 
@@ -333,20 +405,36 @@ class SubagentTeamworkManager:
         conv.state_detail = f"Continuing conversation: {message[:80]}"
         conv.messages.append({"role": "user", "content": message})
 
+        prev_spec = getattr(conv, "last_spec", None)
+        effective_criteria = (
+            _norm_str_list(acceptance_criteria)
+            if acceptance_criteria
+            else (list(prev_spec.acceptance_criteria) if prev_spec else [])
+        )
+        effective_command = (
+            verification_command.strip()
+            if verification_command and verification_command.strip()
+            else (prev_spec.verification_command if prev_spec else "")
+        )
+        effective_requirements = list(prev_spec.requirements) if prev_spec else []
+
         continuation_spec = SubagentTaskSpec(
             type_name=conv.type_name,
             role=conv.role,
             prompt=message,
-            acceptance_criteria=list(acceptance_criteria or []),
-            verification_command=verification_command,
+            requirements=effective_requirements,
+            acceptance_criteria=effective_criteria,
+            verification_command=effective_command,
             workspace_mode=conv.workspace_mode,
-            execution_plane=conv.agent_instance.execution_plane,
+            execution_plane=getattr(conv.agent_instance, "execution_plane", "dual") if conv.agent_instance else "dual",
             employee_id=conv.employee_id,
             employee_context=dict(conv.employee_context),
             max_steps=max_steps,
             max_correction_rounds=1,
         )
-        await self._execute_and_verify_loop(conv, continuation_spec, message)
+        conv.last_spec = continuation_spec
+        formatted_message = self._format_teamwork_prompt(continuation_spec, conv.isolated_dir)
+        await self._execute_and_verify_loop(conv, continuation_spec, formatted_message)
         return conv
 
     # ------------------------------------------------------------------
@@ -358,17 +446,32 @@ class SubagentTeamworkManager:
         action: str = "list",
         conversation_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        def _terminate_conversation(c: SubagentConversation, detail: str) -> None:
+            c.state = "canceled"
+            c.state_detail = detail
+            cur = getattr(c, "current_task", None)
+            if cur is not None and cur is not asyncio.current_task():
+                try:
+                    if not cur.done():
+                        cur.cancel()
+                except Exception:
+                    pass
+            if getattr(c, "agent_instance", None) is not None:
+                try:
+                    if hasattr(c.agent_instance, "interrupt"):
+                        c.agent_instance.interrupt()
+                except Exception:
+                    pass
+
         act = (action or "list").strip().lower()
         if act == "kill_all":
             for c in self.conversations.values():
                 if c.state in ("running", "verifying"):
-                    c.state = "canceled"
-                    c.state_detail = "Terminated via kill_all"
+                    _terminate_conversation(c, "Terminated via kill_all")
         elif act == "kill" and conversation_ids:
             for cid in conversation_ids:
                 if cid in self.conversations:
-                    self.conversations[cid].state = "canceled"
-                    self.conversations[cid].state_detail = "Terminated via kill"
+                    _terminate_conversation(self.conversations[cid], "Terminated via kill")
 
         return [
             {
@@ -394,54 +497,121 @@ class SubagentTeamworkManager:
     # ------------------------------------------------------------------
 
     def _format_teamwork_prompt(self, spec: SubagentTaskSpec, isolated_dir: Path | None) -> str:
-        """Apply `/teamwork-preview` core principles:
-        1. Specify What, Not How (requirements + acceptance criteria, zero puppet steps).
-        2. Objective Verification Forcing Function.
+        """Apply Antigravity `/teamwork-preview` structured envelope principles:
+        1. Role Mandate & Specialization
+        2. Employee Ownership Context (if specified)
+        3. Primary Objective (Specify What, Not How)
+        4. Operational Execution Plane (gui, headless, dual) with clear capability rules
+        5. Isolated Workspace mode (branch, share, inherit)
+        6. Functional Requirements (- **R1**: ...)
+        7. Objective Acceptance Criteria (Independent Judge Rubric, - [ ] ...)
+        8. Programmatic Verification Forcing Function (Command that must exit 0)
+        9. Operational Invariants & Guidelines
         """
         type_def = self.defined_types.get(spec.type_name.lower())
-        parts: list[str] = []
-        if type_def and type_def.system_prompt:
-            parts.append(f"[ROLE MANDATE ({spec.role})]: {type_def.system_prompt}")
-        else:
-            parts.append(f"[ROLE]: {spec.role}")
+        sections: list[str] = ["=== SUBAGENT TASK ENVELOPE ==="]
 
+        # 1. Role Mandate & Specialization
+        role_mandate_text = type_def.system_prompt if (type_def and type_def.system_prompt) else spec.role
+        sections.append(
+            f"## Role Mandate & Specialization\n"
+            f"[ROLE MANDATE ({spec.role})]: {role_mandate_text}\n"
+            f"- Assigned Role: {spec.role}\n"
+            f"- Subagent Type: {spec.type_name}"
+        )
+
+        # 2. Employee Ownership Context (if specified)
         if spec.employee_id:
             ctx = spec.employee_context
-            parts.append(
-                "\n## Employee Ownership Context\n"
+            sections.append(
+                "## Employee Ownership Context\n"
                 f"- Employee: {ctx.get('name', spec.employee_id)} ({spec.employee_id})\n"
                 f"- Role: {ctx.get('role', spec.role)}\n"
                 f"- Department: {ctx.get('department_id', 'unknown')}\n"
                 f"- Team: {ctx.get('team_id', 'unknown')}\n"
-                f"- Owned subsystems: {', '.join(ctx.get('subsystem_ids', []))}\n"
+                f"- Owned subsystems: {', '.join(ctx.get('subsystem_ids', []))}"
             )
-        parts.append(f"\n## Objective (Specify What, Not How)\n{spec.prompt.strip()}")
 
-        if isolated_dir is not None:
-            parts.append(f"\nWorking directory (isolated {spec.workspace_mode} workspace): `{isolated_dir.as_posix()}`")
+        # 3. Primary Objective (Specify What, Not How)
+        sections.append(
+            f"## Primary Objective (Specify What, Not How)\n"
+            f"{spec.prompt.strip()}"
+        )
 
-        if spec.requirements:
-            req_lines = "\n".join(f"- **R{i+1}**: {r}" for i, r in enumerate(spec.requirements))
-            parts.append(f"\n## Requirements\n{req_lines}")
-
-        if spec.acceptance_criteria:
-            ac_lines = "\n".join(f"- [ ] {ac}" for ac in spec.acceptance_criteria)
-            parts.append(
-                "\n## Objective Acceptance Criteria (Independent Judge Rubric)\n"
-                "Your work will be verified by an independent Judge against these exact criteria:\n"
-                f"{ac_lines}"
-            )
-        if spec.verification_command:
-            parts.append(f"\n## Programmatic Verification Forcing Function\nCommand that must exit 0: `{spec.verification_command}`")
+        # 4. Operational Execution Plane
         execution_plane = str(spec.execution_plane or "dual").lower().strip()
         if execution_plane not in {"gui", "headless", "dual"}:
             execution_plane = "dual"
-        parts.append(
-            f"\n## Execution Plane\nAssigned plane: `{execution_plane}`. "
-            "Use the visible desktop and/or direct execution only as permitted by this assignment."
+        if execution_plane == "gui":
+            plane_rules = "Operates strictly on visible desktop (DISPLAY=:99). Must interact with graphical applications, windows, and UI controls."
+        elif execution_plane == "headless":
+            plane_rules = "Direct headless execution plane (TERMINAL_EXEC, files, git). Do not poll screenshots or attempt desktop GUI actions."
+        else:
+            plane_rules = "Full dual-plane workstation agency. Freely operate graphical desktop applications (:99) and direct headless terminal/file actions as appropriate."
+        sections.append(
+            f"## Operational Execution Plane\n"
+            f"- Assigned Plane: `{execution_plane}`\n"
+            f"- Capability Rules: {plane_rules}"
         )
 
-        return "\n".join(parts)
+        # 5. Isolated Workspace mode
+        ws_mode = spec.workspace_mode.lower().strip() if spec.workspace_mode else "branch"
+        if ws_mode not in ("inherit", "branch", "share"):
+            ws_mode = "branch"
+        iso_info = f"`{isolated_dir.as_posix()}`" if isolated_dir is not None else "(shared workspace)"
+        if ws_mode == "branch":
+            mode_desc = "Isolated branch copy. Verified changes will be cleanly merged back to parent upon passing independent verification."
+        elif ws_mode == "share":
+            mode_desc = "Shared git worktree. Operates on a dedicated branch with zero collision."
+        else:
+            mode_desc = "Directly inherits parent workspace root."
+        sections.append(
+            f"## Isolated Workspace Mode\n"
+            f"- Mode: `{ws_mode}`\n"
+            f"- Working Directory: {iso_info}\n"
+            f"- Isolation Policy: {mode_desc}"
+        )
+
+        # 6. Functional Requirements
+        if spec.requirements:
+            req_lines = "\n".join(f"- **R{i+1}**: {r}" for i, r in enumerate(spec.requirements))
+        else:
+            req_lines = f"- **R1**: Deliver complete outcome satisfying: {spec.prompt.strip()}"
+        sections.append(f"## Functional Requirements\n{req_lines}")
+
+        # 7. Objective Acceptance Criteria (Independent Judge Rubric)
+        if spec.acceptance_criteria:
+            ac_lines = "\n".join(f"- [ ] {ac}" for ac in spec.acceptance_criteria)
+        else:
+            ac_lines = f"- [ ] Tangible output/artifact created for: {spec.prompt.strip()}"
+        sections.append(
+            f"## Objective Acceptance Criteria (Independent Judge Rubric)\n"
+            f"Your work will be verified by an independent Judge against these exact criteria:\n"
+            f"{ac_lines}"
+        )
+
+        # 8. Programmatic Verification Forcing Function
+        if spec.verification_command and spec.verification_command.strip():
+            sections.append(
+                f"## Programmatic Verification Forcing Function\n"
+                f"Command that must exit 0: `{spec.verification_command.strip()}`"
+            )
+        else:
+            sections.append(
+                "## Programmatic Verification Forcing Function\n"
+                "None specified. Verification relies on Independent Judge rubric evaluation."
+            )
+
+        # 9. Operational Invariants & Guidelines
+        sections.append(
+            "## Operational Invariants & Guidelines\n"
+            "- Pursue the entire objective holistically; do not stop until all requirements and criteria are satisfied.\n"
+            "- Ground every action in live observation receipts rather than assuming state.\n"
+            "- Zero self-attestation: Do NOT declare GOAL_COMPLETE without concrete verifiable files or traces.\n"
+            "- All executions, scripts, and commands must terminate cleanly with exit code 0."
+        )
+
+        return "\n\n".join(sections)
 
     @staticmethod
     def _snapshot_dir(dir_path: Path | None) -> dict[str, tuple[int, str]]:
@@ -546,10 +716,18 @@ class SubagentTeamworkManager:
                     pass
             return eff_ws_id, iso_root
 
-        # Inside remote Linux/Docker container: create isolated directory under /tmp or workspace
+        # Inside remote Linux/Docker container: create isolated directory under /tmp or workspace and copy files
         try:
             iso_remote = f"/tmp/sonic_subagents/{conversation_id}"
-            await self.computer.terminal(parent_workspace_id, f"mkdir -p {iso_remote}")
+            copy_cmd = (
+                f"mkdir -p '{iso_remote}' && "
+                f"if [ -d '/home/sonic/workspace' ] && [ '/home/sonic/workspace' != '{iso_remote}' ]; then "
+                f"  cp -a /home/sonic/workspace/. '{iso_remote}/'; "
+                f"elif [ -d '.' ] && [ \"$(pwd)\" != '{iso_remote}' ]; then "
+                f"  cp -a ./. '{iso_remote}/'; "
+                f"fi"
+            )
+            await self.computer.terminal(parent_workspace_id, copy_cmd)
             return eff_ws_id, Path(iso_remote)
         except Exception:
             return eff_ws_id, None
@@ -629,12 +807,19 @@ class SubagentTeamworkManager:
         elif parent_dir is None and hasattr(self.computer, "terminal"):
             try:
                 iso_remote = str(conv.isolated_dir).replace("\\", "/")
-                merge_cmd = f"if [ -d '{iso_remote}' ]; then cp -r -u '{iso_remote}'/. . 2>&1 && ls -1 '{iso_remote}'; fi"
+                merge_cmd = (
+                    f"if [ -d '{iso_remote}' ]; then "
+                    f"  DEST='.'; "
+                    f"  if [ -d '/home/sonic/workspace' ]; then DEST='/home/sonic/workspace'; fi; "
+                    f"  cp -r -u '{iso_remote}'/. \"$DEST\"/ && "
+                    f"  (cd '{iso_remote}' && find . -maxdepth 2 -type f | sed 's|^\\./||'); "
+                    f"fi"
+                )
                 res = await self.computer.terminal(conv.parent_workspace_id, merge_cmd)
                 out = getattr(res, "stdout", "") or ""
                 for line in out.splitlines():
                     cleaned = line.strip()
-                    if cleaned and not cleaned.startswith("cp:"):
+                    if cleaned and not cleaned.startswith("cp:") and not cleaned.startswith("find:") and not cleaned.startswith("sed:"):
                         merged.append(cleaned)
             except Exception:
                 pass
@@ -655,127 +840,138 @@ class SubagentTeamworkManager:
         from sonic.computer_use.models import ComputerAutonomyLevel, EngineeringMissionMode
         from sonic.safety.action_policy import ActionPolicy
 
-        type_def = self.defined_types.get(spec.type_name.lower())
-        safety_clone = (
-            self.safety.clone_for_agent(conv.conversation_id)
-            if isinstance(self.safety, ActionPolicy)
-            else self.safety
-        )
-        if isinstance(safety_clone, ActionPolicy):
-            if conv.isolated_dir is not None:
-                safety_clone.workspace_root = conv.isolated_dir.resolve()
-            if conv.employee_context.get("read_only"):
-                read_only_types = {
-                    "FILE_READ", "GIT_STATUS", "GIT_DIFF",
-                    "GUI_SCREENSHOT", "GUI_WAIT",
-                    "BROWSER_NAVIGATE", "BROWSER_SCREENSHOT", "BROWSER_WAIT",
-                    "WAIT_FOR_HUMAN", "GOAL_COMPLETE",
+        conv.current_task = asyncio.current_task()
+        try:
+            type_def = self.defined_types.get(spec.type_name.lower())
+            safety_clone = (
+                self.safety.clone_for_agent(conv.conversation_id)
+                if isinstance(self.safety, ActionPolicy)
+                else self.safety
+            )
+            if isinstance(safety_clone, ActionPolicy):
+                if conv.isolated_dir is not None:
+                    safety_clone.workspace_root = conv.isolated_dir.resolve()
+                if conv.employee_context.get("read_only"):
+                    read_only_types = {
+                        "FILE_READ", "GIT_STATUS", "GIT_DIFF",
+                        "GUI_SCREENSHOT", "GUI_WAIT",
+                        "BROWSER_NAVIGATE", "BROWSER_SCREENSHOT", "BROWSER_WAIT",
+                        "WAIT_FOR_HUMAN", "GOAL_COMPLETE",
+                    }
+                    safety_clone.allowed_types = frozenset(
+                        t for t in safety_clone.allowed_types if t in read_only_types
+                    )
+                elif type_def and not type_def.enable_write_tools:
+                    write_tools = {"FILE_WRITE", "GIT_COMMIT", "GIT_PUSH", "TOOL_AUTHOR"}
+                    safety_clone.allowed_types = frozenset(
+                        t for t in safety_clone.allowed_types if t not in write_tools
+                    )
+                if type_def and not type_def.enable_subagent_tools:
+                    sub_tools = {"DEFINE_SUBAGENT", "INVOKE_SUBAGENT", "SEND_MESSAGE", "MANAGE_SUBAGENTS"}
+                    safety_clone.allowed_types = frozenset(t for t in safety_clone.allowed_types if t not in sub_tools)
+
+            execution_plane = str(spec.execution_plane or "dual").lower().strip()
+            if execution_plane not in {"gui", "headless", "dual"}:
+                execution_plane = "dual"
+
+            # Reuse existing ComputerUseAgent on continuation (`send_message`) so full history is preserved!
+            if conv.agent_instance is None:
+                scoped_ctx: dict[str, Any] = {
+                    "subagent_conversation_id": conv.conversation_id,
+                    "subagent_role": conv.role,
+                    "workspace_mode": conv.workspace_mode,
+                    "silent_background": True,
+                    "employee_id": conv.employee_id or "",
+                    "employee_department": conv.employee_context.get("department_id", ""),
+                    "employee_team": conv.employee_context.get("team_id", ""),
+                    "employee_subsystems": list(conv.employee_context.get("subsystem_ids", [])),
                 }
-                safety_clone.allowed_types = frozenset(
-                    t for t in safety_clone.allowed_types if t in read_only_types
+                if conv.isolated_dir is not None:
+                    scoped_ctx["isolated_working_dir"] = conv.isolated_dir.as_posix()
+
+                compact_mode = True if spec.model_tier == "flash" else (False if spec.model_tier == "pro" else None)
+                overlay = type_def.system_prompt if (type_def and type_def.system_prompt) else ""
+
+                conv.agent_instance = ComputerUseAgent(
+                    computer_provider=self.computer,
+                    autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
+                    mode=EngineeringMissionMode.GENERAL_ENGINEERING_MODE,
+                    max_actions=max(1, min(int(spec.max_steps), 30)),
+                    llm_router=self.llm_router,
+                    security_tools=getattr(self.parent, "security_tools", {}),
+                    safety=safety_clone,
+                    self_host=bool(safety_clone),
+                    tenant_id=self.tenant_id,
+                    agent_id=conv.conversation_id,
+                    being=getattr(self.parent, "being", None),
+                    being_mind=getattr(self.parent, "being_mind", None),
+                    enable_llm_decomposition=False,
+                    compact_mode=compact_mode,
+                    system_prompt_overlay=overlay,
+                    is_subagent_worker=True,
+                    toolsmith=getattr(self.parent, "toolsmith", None),
+                    method_lab=getattr(self.parent, "method_lab", None),
+                    lessons_ledger=getattr(self.parent, "lessons_ledger", None),
+                    observe_desktop=execution_plane in ("gui", "dual"),
+                    execution_plane=execution_plane,
+                    initial_context=scoped_ctx,
                 )
-            elif type_def and not type_def.enable_write_tools:
-                write_tools = {"FILE_WRITE", "GIT_COMMIT", "GIT_PUSH", "TOOL_AUTHOR"}
-                safety_clone.allowed_types = frozenset(
-                    t for t in safety_clone.allowed_types if t not in write_tools
+
+            agent = conv.agent_instance
+            current_goal = initial_goal
+            max_rounds = max(0, int(spec.max_correction_rounds))
+
+            for round_idx in range(max_rounds + 1):
+                conv.state = "running"
+                conv.state_detail = f"Round {round_idx + 1}/{max_rounds + 1}"
+
+                # Replenish action budget for this round
+                agent.max_actions = getattr(agent, "action_counter", 0) + max(1, min(int(spec.max_steps), 30))
+
+                # Silent background execution: step_callback=None so main UI is never spammed!
+                traces = await agent.run_mission(
+                    workspace_id=conv.effective_workspace_id,
+                    goal=current_goal,
+                    steps=max(1, min(int(spec.max_steps), 30)),
+                    step_callback=None,
                 )
-            if type_def and not type_def.enable_subagent_tools:
-                sub_tools = {"DEFINE_SUBAGENT", "INVOKE_SUBAGENT"}
-                safety_clone.allowed_types = frozenset(t for t in safety_clone.allowed_types if t not in sub_tools)
+                conv.traces.extend(traces or [])
+                summary = getattr(agent, "mission_summary", "") or self._summarize_traces(traces)
+                conv.last_summary = summary
+                conv.messages.append({"role": "assistant", "content": summary})
 
-        execution_plane = str(spec.execution_plane or "dual").lower().strip()
-        if execution_plane not in {"gui", "headless", "dual"}:
-            execution_plane = "dual"
+                # Independent Forcing Function Verification
+                conv.state = "verifying"
+                passed, verdict_str, notes = await self._verify_with_independent_judge(conv, spec, traces, summary)
+                conv.judge_verdict = verdict_str
+                conv.judge_notes = notes
+                conv.verified = passed
 
-        # Reuse existing ComputerUseAgent on continuation (`send_message`) so full history is preserved!
-        if conv.agent_instance is None:
-            scoped_ctx: dict[str, Any] = {
-                "subagent_conversation_id": conv.conversation_id,
-                "subagent_role": conv.role,
-                "workspace_mode": conv.workspace_mode,
-                "silent_background": True,
-                "employee_id": conv.employee_id or "",
-                "employee_department": conv.employee_context.get("department_id", ""),
-                "employee_team": conv.employee_context.get("team_id", ""),
-                "employee_subsystems": list(conv.employee_context.get("subsystem_ids", [])),
-            }
-            if conv.isolated_dir is not None:
-                scoped_ctx["isolated_working_dir"] = conv.isolated_dir.as_posix()
+                if passed:
+                    if conv.workspace_mode in ("branch", "share"):
+                        conv.merged_files = await self._merge_isolated_workspace(conv)
+                    conv.state = "idle"
+                    conv.state_detail = "Verified & Ready"
+                    return
 
-            conv.agent_instance = ComputerUseAgent(
-                computer_provider=self.computer,
-                autonomy_level=ComputerAutonomyLevel.L3_AUTONOMOUS,
-                mode=EngineeringMissionMode.GENERAL_ENGINEERING_MODE,
-                max_actions=max(1, min(int(spec.max_steps), 30)),
-                llm_router=self.llm_router,
-                security_tools=getattr(self.parent, "security_tools", {}),
-                safety=safety_clone,
-                self_host=bool(safety_clone),
-                tenant_id=self.tenant_id,
-                agent_id=conv.conversation_id,
-                being=getattr(self.parent, "being", None),
-                being_mind=getattr(self.parent, "being_mind", None),
-                enable_llm_decomposition=False,
-                toolsmith=getattr(self.parent, "toolsmith", None),
-                method_lab=getattr(self.parent, "method_lab", None),
-                lessons_ledger=getattr(self.parent, "lessons_ledger", None),
-                observe_desktop=execution_plane in ("gui", "dual"),
-                execution_plane=execution_plane,
-                initial_context=scoped_ctx,
-            )
-
-        agent = conv.agent_instance
-        current_goal = initial_goal
-        max_rounds = max(0, int(spec.max_correction_rounds))
-
-        for round_idx in range(max_rounds + 1):
-            conv.state = "running"
-            conv.state_detail = f"Round {round_idx + 1}/{max_rounds + 1}"
-
-            # Replenish action budget for this round
-            agent.max_actions = getattr(agent, "action_counter", 0) + max(1, min(int(spec.max_steps), 30))
-
-            # Silent background execution: step_callback=None so main UI is never spammed!
-            traces = await agent.run_mission(
-                workspace_id=conv.effective_workspace_id,
-                goal=current_goal,
-                steps=max(1, min(int(spec.max_steps), 30)),
-                step_callback=None,
-            )
-            conv.traces.extend(traces or [])
-            summary = getattr(agent, "mission_summary", "") or self._summarize_traces(traces)
-            conv.last_summary = summary
-            conv.messages.append({"role": "assistant", "content": summary})
-
-            # Independent Forcing Function Verification
-            conv.state = "verifying"
-            passed, verdict_str, notes = await self._verify_with_independent_judge(conv, spec, traces, summary)
-            conv.judge_verdict = verdict_str
-            conv.judge_notes = notes
-            conv.verified = passed
-
-            if passed:
-                if conv.workspace_mode in ("branch", "share"):
-                    conv.merged_files = await self._merge_isolated_workspace(conv)
-                conv.state = "idle"
-                conv.state_detail = "Verified & Ready"
-                return
-
-            # Verification failed — if we have correction rounds left, feed Judge feedback back to the same subagent!
-            if round_idx < max_rounds:
-                conv.correction_rounds_used += 1
-                feedback_prompt = (
-                    f"[INDEPENDENT JUDGE REJECTION — SELF-CORRECTION ROUND {round_idx + 1}]\n"
-                    f"Verdict: {verdict_str}\n"
-                    f"Reason: {notes}\n\n"
-                    "Do NOT self-certify. Inspect the actual workspace state, fix the root cause so that "
-                    "every Acceptance Criterion and Verification Command genuinely passes, then declare GOAL_COMPLETE."
-                )
-                conv.messages.append({"role": "user", "content": feedback_prompt})
-                current_goal = feedback_prompt
-            else:
-                conv.state = "errored"
-                conv.state_detail = f"Verification failed after {round_idx + 1} rounds: {notes[:120]}"
+                # Verification failed — if we have correction rounds left, feed Judge feedback back to the same subagent!
+                if round_idx < max_rounds:
+                    conv.correction_rounds_used += 1
+                    feedback_prompt = (
+                        f"{initial_goal}\n\n"
+                        f"=== INDEPENDENT JUDGE REJECTION — SELF-CORRECTION ROUND {round_idx + 1} ===\n"
+                        f"Verdict: {verdict_str}\n"
+                        f"Reason: {notes}\n\n"
+                        "Do NOT self-certify. Inspect the actual workspace state, fix the root cause so that "
+                        "every Acceptance Criterion and Verification Command genuinely passes, then declare GOAL_COMPLETE."
+                    )
+                    conv.messages.append({"role": "user", "content": feedback_prompt})
+                    current_goal = feedback_prompt
+                else:
+                    conv.state = "errored"
+                    conv.state_detail = f"Verification failed after {round_idx + 1} rounds: {notes[:120]}"
+        finally:
+            conv.current_task = None
 
     async def _verify_with_independent_judge(
         self,
@@ -813,16 +1009,36 @@ class SubagentTeamworkManager:
                 return False, JudgeVerdict.FALSIFIED.value, f"Programmatic verification error: {e}"
 
         # 2. Independent JudgeAgent Evaluation
+        has_file_or_terminal = any(
+            str(getattr(t, "action_type", "") if not isinstance(t, dict) else t.get("action_type", "")).upper()
+            in (
+                "FILE_WRITE", "FILE_EDIT", "FILE_CREATE", "FILE_READ",
+                "TERMINAL_EXEC", "GIT_COMMIT", "GIT_PUSH", "GIT_BRANCH",
+            )
+            for t in (traces or [])
+        )
+        has_gui = any(
+            str(getattr(t, "action_type", "") if not isinstance(t, dict) else t.get("action_type", "")).upper().startswith("GUI_")
+            or str(getattr(t, "action_type", "") if not isinstance(t, dict) else t.get("action_type", "")).upper() in ("APP_LAUNCH", "APP_FOCUS", "APP_CLOSE")
+            or str(getattr(t, "action_type", "") if not isinstance(t, dict) else t.get("action_type", "")).upper().startswith("BROWSER_")
+            for t in (traces or [])
+        )
+
+        if spec.execution_plane == "gui":
+            eval_plane = "gui"
+        elif spec.execution_plane == "headless":
+            eval_plane = "headless"
+        else:
+            # "dual" mode: if file/terminal artifacts were produced, verify headless receipts;
+            # if only GUI actions were taken, verify GUI receipts.
+            eval_plane = "gui" if (has_gui and not has_file_or_terminal) else "headless"
+
         sub_m = SubMission(
             id=conv.conversation_id,
             goal=spec.prompt or conv.role,
             role=conv.role,
             max_steps=spec.max_steps,
-            plane=(
-                spec.execution_plane
-                if spec.execution_plane in {"gui", "headless", "dual"}
-                else "dual"
-            ),
+            plane=eval_plane,
         )
         has_ok_trace = any(
             str(getattr(t, "status", "") if not isinstance(t, dict) else t.get("status", "")).upper()
@@ -838,6 +1054,8 @@ class SubagentTeamworkManager:
             success=has_ok_trace,
             actions_taken=len(traces or []),
         )
+        if self.judge.llm_router is None and self.llm_router is not None:
+            self.judge.llm_router = self.llm_router
         eval_res = await self.judge.evaluate_sub_mission(
             workspace_id=conv.effective_workspace_id,
             sub_mission=sub_m,
@@ -848,6 +1066,9 @@ class SubagentTeamworkManager:
         # 3. Acceptance Criteria Rubric Check (if explicit criteria provided)
         if eval_res.verdict == JudgeVerdict.FALSIFIED:
             return False, eval_res.verdict.value, eval_res.notes
+
+        if eval_res.verdict == JudgeVerdict.INCONCLUSIVE:
+            return False, eval_res.verdict.value, eval_res.notes or "Judge evaluation was inconclusive; failing closed."
 
         if spec.acceptance_criteria and self.llm_router is not None:
             try:
@@ -882,13 +1103,13 @@ class SubagentTeamworkManager:
                 resp = await asyncio.wait_for(self.llm_router.complete(req), timeout=30.0)
                 raw = (resp.content or "").strip()
                 m = json.loads(raw[raw.find("{"): raw.rfind("}") + 1]) if "{" in raw and "}" in raw else {}
-                if m.get("passed") is False:
+                if not m.get("passed", False):
                     return False, JudgeVerdict.FALSIFIED.value, str(m.get("notes") or "Acceptance criteria not met.")
             except Exception as judge_err:
                 logger.warning("judge_acceptance_criteria_eval_failed", error=str(judge_err))
                 return False, JudgeVerdict.FALSIFIED.value, f"Acceptance criteria verification error: {judge_err}"
 
-        if has_ok_trace:
+        if eval_res.verdict == JudgeVerdict.CONFIRMED and has_ok_trace:
             return True, JudgeVerdict.CONFIRMED.value, eval_res.notes or "All acceptance criteria verified."
         return False, eval_res.verdict.value, eval_res.notes or "No successful execution evidence recorded."
 

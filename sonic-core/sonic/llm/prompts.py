@@ -856,7 +856,7 @@ ARCHITECTURAL ROLES:
 
 Respond in EXACTLY this format (no markdown fences):
 THOUGHT: <brief action rationale grounded in the live observation>
-ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_RIGHT_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_HOTKEY|GUI_MOVE|GUI_SCROLL|GUI_SCREENSHOT|GUI_WAIT|GUI_DRAG|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_STATUS|GIT_DIFF|GIT_BRANCH|GIT_COMMIT|GIT_PUSH|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_MAXIMIZE|WINDOW_MAXIMIZE|WINDOW_TILE|APP_INSTALL|WAIT_FOR_HUMAN|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|GOAL_COMPLETE>
+ACTION: <GUI_CLICK|GUI_DOUBLE_CLICK|GUI_RIGHT_CLICK|GUI_TYPE|GUI_KEYPRESS|GUI_HOTKEY|GUI_MOVE|GUI_SCROLL|GUI_SCREENSHOT|GUI_WAIT|GUI_DRAG|FILE_READ|FILE_WRITE|TERMINAL_EXEC|GIT_STATUS|GIT_DIFF|GIT_BRANCH|GIT_COMMIT|GIT_PUSH|APP_LAUNCH|APP_CLOSE|APP_FOCUS|APP_MAXIMIZE|WINDOW_MAXIMIZE|WINDOW_TILE|APP_INSTALL|WAIT_FOR_HUMAN|SECURITY_TOOL|TOOL_AUTHOR|TOOL_RUN|DEFINE_SUBAGENT|INVOKE_SUBAGENT|SEND_MESSAGE|MANAGE_SUBAGENTS|GOAL_COMPLETE>
 TARGET: <path, application/window name, operator-supplied destination, coordinates "<x>,<y>", or visible UI element query>
 PAYLOAD: <json dict, e.g. {{"app_name": "..."}}, {{"text": "..."}}, {{"key": "..."}}, or {{"command": "..."}}>
 EXPECTED: <predicted outcome>
@@ -876,6 +876,10 @@ KEY RULES:
 - Standard keyboard accelerators: Use GUI_HOTKEY with "alt+f" (File menu), "ctrl+o" (Open), "ctrl+s" (Save), "ctrl+n" (New) for fast reliable desktop navigation
 - TERMINAL_EXEC: TARGET/PAYLOAD must be an EXACT shell command, NEVER natural language
 - FILE_WRITE: TARGET is the file path and PAYLOAD is {{"path": "...", "content": "..."}}
+- DEFINE_SUBAGENT: TARGET is subagent name, PAYLOAD is {{"name": "...", "description": "...", "system_prompt": "...", "enable_write_tools": true, "enable_subagent_tools": false}}
+- INVOKE_SUBAGENT: TARGET is task or subagent name, PAYLOAD is {{"subagents": [{{"type_name": "self|research|<custom>", "role": "...", "prompt": "<What to achieve, NOT How>", "requirements": ["..."], "acceptance_criteria": ["..."], "verification_command": "...", "workspace_mode": "inherit|branch|share", "execution_plane": "gui|headless|dual"}}]}}
+- SEND_MESSAGE: TARGET is subagent conversationId, PAYLOAD is {{"conversation_id": "...", "message": "...", "acceptance_criteria": ["..."], "verification_command": "..."}}
+- MANAGE_SUBAGENTS: TARGET is action ("list", "kill", "kill_all"), PAYLOAD is {{"action": "list|kill|kill_all", "conversation_ids": ["..."]}}
 - WAIT_FOR_HUMAN: Pause and request human assistance when CAPTCHA / OTP / 2FA challenge appears
 - GOAL_COMPLETE: Declare immediately when the objective is verified in live observations
 
