@@ -2860,7 +2860,7 @@ class ComputerUseAgent:
                 "\n\n================================================================================\n"
                 "CRITICAL GUI RESPONSE CONTRACT:\n"
                 "Return exactly one JSON object and no Markdown or surrounding prose. "
-                "Include all four keys: action, target, payload, expected. "
+                "Include exactly four keys: action, target, payload, expected. "
                 f"The action value must be exactly one of: {action_schema}. "
                 "target and expected must be strings; payload must be a JSON object. "
                 "Do not omit keys, even when their values are empty. "

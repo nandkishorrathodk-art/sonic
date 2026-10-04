@@ -288,7 +288,7 @@ interface WorklogFeedProps {
   waitingForHuman?: boolean;
   waitingForHumanReason?: string;
   onSendPrompt: (prompt: string, mode: Mode) => Promise<void>;
-  onInterrupt?: () => Promise<void> | void;
+  onInterrupt?: () => Promise<boolean | void> | boolean | void;
   onSelectFile?: (filePath: string) => void;
   sessionName?: string;
   gitBranch?: string;
@@ -658,6 +658,11 @@ export function WorklogFeed({
         onScroll={handleTimelineScroll}
         className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-3 space-y-2 text-xs"
       >
+        {normalizedStatus === "ERROR" && (
+          <div role="alert" className="mb-3 rounded-lg border border-danger/50 bg-danger/10 px-3 py-2 text-sm text-danger">
+            SONIC could not complete this task. Review the latest error and worklog before retrying.
+          </div>
+        )}
         {displayItems.length === 0 ? (
           <div className="h-full min-h-[320px] flex flex-col items-center justify-center text-center p-6 text-muted-dim space-y-2 select-none">
             <div className="w-10 h-10 rounded-full bg-ink-850 border border-ink-800 flex items-center justify-center text-secondary-400 font-mono text-sm shadow-inner">
@@ -985,6 +990,7 @@ export function WorklogFeed({
         >
           <textarea
             ref={textareaRef}
+            aria-label="Message SONIC"
             value={promptText}
             onChange={(e) => setPromptText(e.target.value)}
             onKeyDown={(e) => {
@@ -993,9 +999,9 @@ export function WorklogFeed({
                 handleSubmit();
               }
             }}
-            rows={2}
+            rows={3}
             placeholder="Instruct SONIC or ask a question about a supplied target, application, or workspace..."
-            className="w-full resize-none bg-transparent text-[12.5px] text-slate-100 placeholder:text-muted-dim outline-none font-sans px-1 leading-relaxed"
+            className="w-full min-h-16 resize-y bg-transparent text-sm text-slate-100 placeholder:text-muted-dim outline-none font-sans px-1 leading-relaxed"
           />
 
           <div className="flex items-center justify-between pt-0.5">
@@ -1011,21 +1017,24 @@ export function WorklogFeed({
                 </button>
 
                 {modeMenuOpen && (
-                  <div className="absolute bottom-8 left-0 w-36 rounded-lg bg-ink-850 border border-ink-700 shadow-xl py-1 z-30 text-xs text-muted-bright">
+                  <div role="menu" aria-label="Execution mode" className="absolute bottom-8 left-0 w-36 rounded-lg bg-ink-850 border border-ink-700 shadow-xl py-1 z-30 text-xs text-muted-bright">
                     {MODES.map((m) => (
-                      <div
+                      <button
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={activeMode === m}
                         key={m}
                         onClick={() => {
                           setActiveMode(m);
                           setModeMenuOpen(false);
                         }}
-                        className={`px-3 py-1.5 hover:bg-ink-800 cursor-pointer flex items-center justify-between text-[11px] ${
+                        className={`w-full px-3 py-1.5 hover:bg-ink-800 flex items-center justify-between text-left text-[11px] ${
                           activeMode === m ? "text-secondary-400 font-semibold" : ""
                         }`}
                       >
                         <span>{m}</span>
                         {activeMode === m && <Check className="w-3 h-3" />}
-                      </div>
+                      </button>
                     ))}
                   </div>
                 )}
@@ -1047,8 +1056,9 @@ export function WorklogFeed({
 
               <button
                 type="submit"
-                disabled={!promptText.trim() || (loading && normalizedStatus === "RUNNING")}
-                className="w-7 h-7 rounded-lg bg-secondary-600 hover:bg-secondary-500 disabled:opacity-40 disabled:hover:bg-secondary-600 text-white flex items-center justify-center transition shadow-glow cursor-pointer"
+                disabled={!promptText.trim() || normalizedStatus === "RUNNING"}
+                aria-label="Send instruction"
+                className="w-10 h-10 rounded-lg bg-secondary-600 hover:bg-secondary-500 disabled:opacity-40 disabled:hover:bg-secondary-600 text-white flex items-center justify-center transition shadow-glow cursor-pointer"
                 title="Send instruction"
               >
                 {loading && normalizedStatus === "RUNNING" ? (

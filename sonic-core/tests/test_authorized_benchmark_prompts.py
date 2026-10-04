@@ -34,6 +34,9 @@ def test_computer_use_system_prompt_compact_preserves_workstation_framing():
     assert "graphical desktop" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
     assert "headless terminal" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
     assert "Prove every milestone with empirical receipts" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
+    assert "GUI_MOVE" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
+    assert "GUI_RIGHT_CLICK" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
+    assert "Moves the visible mouse pointer without clicking" in COMPUTER_USE_SYSTEM_PROMPT_COMPACT
 
 
 def test_compose_system_prompt_includes_workstation_execution_clause():

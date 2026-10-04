@@ -512,7 +512,10 @@ class DockerComputerProvider(ComputerProvider):
             timeout=8,
         )
         if code == 0 and out.strip() == "0":
-            return f"http://localhost:{published_port}/vnc.html"
+            return (
+                f"http://localhost:{published_port}/vnc.html"
+                "?autoconnect=true&resize=scale&show_dot=true&cursor=true"
+            )
         return None
 
     async def get_stream_url(self, workspace_id: str) -> str | None:
@@ -1176,9 +1179,8 @@ while True:
                 error=str(exc),
             )
 
-        # If daemon isn't running yet inside container, start it once in background
+        # Retry startup on later observations when the first daemon boot fails.
         if not getattr(self, "_nsi_booted", False):
-            self._nsi_booted = True
             try:
                 import base64
                 b64_script = base64.b64encode(self._NSI_DAEMON_SCRIPT.encode("utf-8")).decode("ascii")
@@ -1204,6 +1206,7 @@ while True:
                         error=boot_err[:300],
                     )
                     return None
+                self._nsi_booted = True
                 nsi_url = (
                     await self._resolve_nsi_state_url()
                     if command == "state"
@@ -1391,7 +1394,7 @@ while True:
                 and math.isfinite(capture_age_ms)
                 and 0 <= capture_age_ms <= _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
             )
-            if has_actionable_nsi_controls and nsi_frame_is_fresh:
+            if nsi_frame_is_fresh:
                 obs = ScreenObservation(
                     screenshot_base64=nsi_b64,
                     capture_timestamp_ns=capture_timestamp_ns,
@@ -1400,7 +1403,7 @@ while True:
                     height=nsi_dimensions[1],
                     active_window=nsi_data.get("active_window") or "Desktop",
                     visible_text=nsi_data.get("visible_text") or "",
-                    detected_controls=nsi_controls,
+                    detected_controls=nsi_controls if has_actionable_nsi_controls else [],
                     desktop_state="INTERACTIVE",
                 )
                 self._last_screenshot = obs
@@ -1813,22 +1816,20 @@ while True:
 
             elif atype == GUIActionType.MOVE:
                 move_cmd = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y}"
-                output = await exec_gui(
-                    f"export DISPLAY={disp}; {move_cmd} && xdotool getmouselocation --shell"
+                location = await exec_gui(
+                    f"export DISPLAY={disp}; {move_cmd} && "
+                    f"xdotool getmouselocation --shell"
                 )
-                actual = {}
-                for line in output.splitlines():
-                    key, separator, value = line.partition("=")
-                    if separator and key in {"X", "Y"}:
-                        try:
-                            actual[key] = int(value)
-                        except ValueError:
-                            actual[key] = None
-                if actual.get("X") != action.x or actual.get("Y") != action.y:
+                actual_x = re.search(r"(?m)^X=(-?\d+)$", location)
+                actual_y = re.search(r"(?m)^Y=(-?\d+)$", location)
+                if (
+                    actual_x is None
+                    or actual_y is None
+                    or (int(actual_x.group(1)), int(actual_y.group(1)))
+                    != (action.x, action.y)
+                ):
                     raise RuntimeError(
-                        "Cursor move verification failed: "
-                        f"requested ({action.x}, {action.y}), "
-                        f"observed ({actual.get('X')}, {actual.get('Y')})"
+                        "GUI cursor move could not be verified at the requested coordinates"
                     )
 
             elif atype == GUIActionType.DRAG:

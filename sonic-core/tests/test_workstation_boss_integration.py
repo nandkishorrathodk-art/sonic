@@ -1,5 +1,6 @@
 """Comprehensive integration tests for BossAgent with Workstation API and MissionDirector."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -257,6 +258,53 @@ async def test_workstation_routes_concise_computer_task_to_boss_agent(monkeypatc
     mock_boss_inst.run.assert_awaited_once()
     assert mock_boss_inst.run.await_args.kwargs["requested_plane"] == "gui"
     assert state["status"] == "IDLE"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_pipeline_exception_remains_visible_as_error(monkeypatch):
+    import sonic.api.routes.workstation as workstation
+
+    tenant_id = "test-tenant-reasoning-error"
+    session_id = "reasoning-error-session"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["status"] = "RUNNING"
+    monkeypatch.setattr(workstation, "_persist_workstation_state", lambda: None)
+    monkeypatch.setattr(
+        workstation,
+        "_looks_like_dashboard_dump",
+        lambda _prompt: (_ for _ in ()).throw(RuntimeError("controlled reasoning failure")),
+    )
+
+    await _run_prompt_reasoning(tenant_id, session_id, "hello")
+
+    assert state["status"] == "ERROR"
+    assert "Reasoning failed" in state["current_action"]
+    assert any(item["title"] == "Execution Failed" for item in state["worklog"])
+
+
+@pytest.mark.asyncio
+async def test_cancelled_replaced_prompt_cannot_overwrite_new_session_state(monkeypatch):
+    import sonic.api.routes.workstation as workstation
+
+    tenant_id = "test-tenant-replaced-prompt"
+    session_id = "replaced-prompt-session"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["status"] = "RUNNING"
+    monkeypatch.setattr(workstation, "_persist_workstation_state", lambda: None)
+    monkeypatch.setattr(
+        workstation,
+        "_looks_like_dashboard_dump",
+        lambda _prompt: (_ for _ in ()).throw(RuntimeError("controlled old-task failure")),
+    )
+    replacement = asyncio.create_task(asyncio.sleep(10))
+    workstation._background_tasks[(tenant_id, session_id)] = replacement
+    try:
+        await _run_prompt_reasoning(tenant_id, session_id, "hello")
+        assert state["status"] == "RUNNING"
+    finally:
+        workstation._background_tasks.pop((tenant_id, session_id), None)
+        replacement.cancel()
+        await asyncio.gather(replacement, return_exceptions=True)
 
 
 @pytest.mark.asyncio

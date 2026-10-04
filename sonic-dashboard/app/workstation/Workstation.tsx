@@ -49,7 +49,7 @@ const TABS: { id: WorkstationTab; label: string; icon: React.ReactNode }[] = [
 ];
 
 function SonicDevinWorkstation() {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [activeTab, setActiveTab] = useState<WorkstationTab>("desktop");
   const [connectionStatus, setConnectionStatus] = useState<SystemStatus>("CONNECTING");
@@ -79,6 +79,7 @@ function SonicDevinWorkstation() {
   }, [workstationState?.worklog, commandLogs]);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [missionErrorMessage, setMissionErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -227,7 +228,9 @@ function SonicDevinWorkstation() {
     const currentTargetSession = sessionId;
     activePromptSessionRef.current = currentTargetSession;
     abortPollRef.current = false;
+    setMissionErrorMessage(null);
     setLoading(true);
+    let keepLoading = false;
 
     try {
       const res = await api.sendPrompt(prompt, currentTargetSession, mode.toLowerCase());
@@ -249,8 +252,8 @@ function SonicDevinWorkstation() {
         }
       }
 
-      // Safeguard: Poll with timeout (max 300 attempts = 5 minutes max wait)
-      const MAX_ATTEMPTS = 300;
+      // Keep the active task visible while workers are still within their backend deadline.
+      const MAX_ATTEMPTS = 1800;
       let finished = false;
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
@@ -283,15 +286,21 @@ function SonicDevinWorkstation() {
         }
       }
 
-      // Timeout safeguard: if 45s passed without completion, perform final state check and release loader
+      // Reconcile the last server state before reporting a poll timeout.
       if (!finished && !abortPollRef.current) {
         try {
           const finalState = await api.getWorkstationState(currentTargetSession);
           if (activePromptSessionRef.current === currentTargetSession) {
             setWorkstationState(finalState);
+            if (finalState?.status === "RUNNING") {
+              keepLoading = true;
+              setMissionErrorMessage(
+                "SONIC is still reporting this task as running. Do not submit a duplicate; use Stop if you want to interrupt it."
+              );
+            }
           }
-        } catch {
-          // ignore
+        } catch (err: any) {
+          setMissionErrorMessage(`Could not confirm the final task state: ${err.message || String(err)}`);
         }
       }
 
@@ -304,10 +313,10 @@ function SonicDevinWorkstation() {
         setSessionListError(err.message || "Could not load sessions.");
       }
     } catch (err: any) {
-      alert(`Execution error: ${err.message}`);
+      setMissionErrorMessage(`Could not submit or monitor the task: ${err.message || String(err)}`);
     } finally {
       if (activePromptSessionRef.current === currentTargetSession) {
-        setLoading(false);
+        setLoading(keepLoading);
       }
     }
   };
@@ -341,14 +350,15 @@ function SonicDevinWorkstation() {
   };
 
   const handleInterrupt = async () => {
-    // Immediate cancellation safeguard: abort polling loop and clear spinner
-    abortPollRef.current = true;
-    setLoading(false);
     try {
       await api.interruptSession(sessionId);
+      abortPollRef.current = true;
+      setLoading(false);
       await fetchWorkstationData(sessionId);
+      return true;
     } catch (err: any) {
-      console.error("Failed to interrupt session:", err);
+      setMissionErrorMessage(`Could not confirm the task was stopped: ${err.message || String(err)}`);
+      return false;
     }
   };
 
@@ -356,6 +366,11 @@ function SonicDevinWorkstation() {
     <div className="sonic-workstation flex flex-col h-screen w-screen bg-ink-950 text-slate-200 overflow-hidden font-sans">
       {connectionStatus === "OFFLINE" && (
         <OfflineBanner onRetry={() => fetchWorkstationData(sessionId)} message={errorMessage || undefined} />
+      )}
+      {missionErrorMessage && (
+        <div role="alert" className="border-b border-amber-500/50 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">
+          {missionErrorMessage}
+        </div>
       )}
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -391,7 +406,7 @@ function SonicDevinWorkstation() {
           />
 
           <div className="sonic-workstation-content flex-1 min-h-0 grid grid-cols-12 overflow-hidden">
-            <div className={`${rightPanelOpen ? "col-span-6" : "col-span-12"} sonic-workstation-conversation flex flex-col h-full bg-ink-900 overflow-hidden`}>
+            <div className={`${rightPanelOpen ? "col-span-5" : "col-span-12"} sonic-workstation-conversation flex flex-col h-full bg-ink-900 overflow-hidden`}>
               <WorklogFeed
                 worklog={workstationState?.worklog || []}
                 currentAction={sanitizeCurrentAction(
@@ -417,7 +432,7 @@ function SonicDevinWorkstation() {
 
 
             {rightPanelOpen && (
-              <div className="col-span-6 sonic-workstation-workspace flex flex-col h-full bg-ink-950 overflow-hidden">
+              <div className="col-span-7 sonic-workstation-workspace flex flex-col h-full bg-ink-950 overflow-hidden">
                 <div className="h-10 border-b border-ink-800 bg-ink-900 px-3 flex items-center justify-between text-xs">
                   <div className="flex items-center gap-1 min-w-0 overflow-x-auto">
                     {TABS.map((tab) => (

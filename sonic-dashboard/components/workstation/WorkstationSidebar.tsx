@@ -58,7 +58,7 @@ export function WorkstationSidebar({
   return (
     <aside
       className={`sonic-workstation-sidebar ${
-        sidebarOpen ? "w-[260px]" : "w-0"
+        sidebarOpen ? "w-[224px]" : "w-0"
       } transition-all duration-200 ease-in-out border-r border-ink-800 bg-ink-900 flex flex-col flex-shrink-0 z-30 overflow-hidden`}
     >
       {/* Workspace Header */}
