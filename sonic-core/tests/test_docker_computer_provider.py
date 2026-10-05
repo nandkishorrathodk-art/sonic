@@ -1201,13 +1201,16 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
     monkeypatch.delenv("DISPLAY", raising=False)
     provider = DockerComputerProvider()
     provider._docker_exec = AsyncMock(return_value=(0, "", ""))
+    provider._resolve_app_binary = AsyncMock(
+        side_effect=lambda query: f"/usr/bin/{query.replace(' ', '-')}"
+    )
 
     success = await provider.launch_application("ws-1", "chromium https://target.local")
     assert success is True
     called_cmds = [call.args[0] for call in provider._docker_exec.call_args_list]
     # Mock returns exit 0 for the --no-sandbox probe, so flags are injected
-    spawn = next(cmd for cmd in called_cmds if "nohup chromium" in cmd)
-    assert "DISPLAY=:99 nohup chromium --no-sandbox --disable-dev-shm-usage https://target.local" in spawn
+    spawn = next(cmd for cmd in called_cmds if "nohup /usr/bin/chromium" in cmd)
+    assert "DISPLAY=:99 nohup /usr/bin/chromium --no-sandbox --disable-dev-shm-usage https://target.local" in spawn
     assert "kill -0" in spawn
     assert "grep -q -- '--no-sandbox'" in spawn
     assert "retry_args=(" not in spawn
@@ -1217,9 +1220,9 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
     success2 = await provider.launch_application("ws-1", "chromium 'https://target.local/path with spaces'")
     assert success2 is True
     called_cmds2 = [call.args[0] for call in provider._docker_exec.call_args_list]
-    spawn2 = next(cmd for cmd in called_cmds2 if "nohup chromium" in cmd)
+    spawn2 = next(cmd for cmd in called_cmds2 if "nohup /usr/bin/chromium" in cmd)
     assert (
-        "DISPLAY=:99 nohup chromium --no-sandbox --disable-dev-shm-usage "
+        "DISPLAY=:99 nohup /usr/bin/chromium --no-sandbox --disable-dev-shm-usage "
         "'https://target.local/path with spaces' >/tmp/sonic_app_launch.log 2>&1 &"
     ) in spawn2
 
@@ -1230,9 +1233,24 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
     called_cmds3 = [call.args[0] for call in provider._docker_exec.call_args_list]
     spawn3 = next(cmd for cmd in called_cmds3 if "nohup" in cmd)
     assert "DISPLAY=:99 nohup" in spawn3
+    assert "/usr/bin/google-chrome" in spawn3
     assert "https://target.local" in spawn3
     # Mock returns exit 0 for probe so flags are injected
     assert "--no-sandbox" in spawn3
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_computer_does_not_guess_unresolved_application(monkeypatch):
+    """An unknown app must not be passed to a shell as a guessed executable."""
+    monkeypatch.delenv("DISPLAY", raising=False)
+    provider = DockerComputerProvider()
+    provider._docker_exec = AsyncMock(return_value=(1, "", ""))
+
+    launched = await provider.launch_application("ws-1", "unavailable application")
+
+    assert launched is False
+    assert all("nohup" not in call.args[0] for call in provider._docker_exec.call_args_list)
 
 
 @pytest.mark.no_live_infra

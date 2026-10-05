@@ -484,6 +484,7 @@ class ComputerUseAgent:
         self.goal_reached: bool = False
         self._consecutive_failures: int = 0
         self._consecutive_unchanged_screens: int = 0
+        self._consecutive_stale_gui_blocks: int = 0
         self._goal_complete_declared: bool = False
         self._replan_count: int = 0
         self._last_gui_navigation_target: str = ""
@@ -4338,6 +4339,7 @@ class ComputerUseAgent:
         visual_stall_detected = False
         action_exit_code: int | None = None
         action_stderr: str = ""
+        app_launch_failed = False
         typing_validation_error = ""
         typing_match = None
         self._last_gui_state_delta = None
@@ -4972,6 +4974,12 @@ class ComputerUseAgent:
                 command_tokens = []
             if command_tokens:
                 tool_name = os.path.basename(command_tokens[0]) or command_tokens[0]
+        if action_type == ComputerActionType.APP_LAUNCH:
+            app_target = str(
+                payload.get("app_name") or target_resource or ""
+            ).strip()
+            if app_target:
+                tool_name = f"{action_type.value}:{app_target.casefold()}"
         if self.failure_budget.substrate_outage:
             diag_info = self.failure_budget.diagnose_substrate_health()
             actual_obs_str = (
@@ -5898,15 +5906,10 @@ class ComputerUseAgent:
                     app_request = app_name
                     if extra_arg:
                         app_request = f"{app_request} {str(extra_arg).strip()}"
-                    before_status = await self.computer.status(workspace_id)
-                    windows_before = {
-                        str(window).strip()
-                        for window in (getattr(before_status, "open_applications", None) or [])
-                        if str(window).strip()
-                    }
                     if hasattr(self.computer, "launch_application"):
                         launched = await self.computer.launch_application(workspace_id, app_request)
                         if not launched:
+                            app_launch_failed = True
                             raise RuntimeError(f"application launch failed for '{app_name}'")
                     else:
                         await self._dispatch_gui_action(
@@ -5938,7 +5941,6 @@ class ComputerUseAgent:
                         for window in (getattr(after_status, "open_applications", None) or [])
                         if str(window).strip()
                     }
-                    newly_focused_window = active_w in windows_after and active_w not in windows_before
                     if (
                         screen_state == "NO_DISPLAY"
                         or not self._last_screenshot_b64
@@ -5949,7 +5951,6 @@ class ComputerUseAgent:
                                 app_name,
                                 active_window_class,
                             )
-                            or newly_focused_window
                         )
                     ):
                         raise RuntimeError(
@@ -7060,7 +7061,7 @@ class ComputerUseAgent:
 
         except Exception as e:
             actual_obs_str = f"Error: {str(e)}"
-            recovery_needed = True
+            recovery_needed = not app_launch_failed
             status = ActionExecutionStatus.FAILED
             err_class, _ = classify_failure(
                 exit_code=1,
@@ -7871,6 +7872,7 @@ class ComputerUseAgent:
         t_start = time.perf_counter()
         self._interrupted = False
         self._watchdog_aborted = False
+        self._consecutive_stale_gui_blocks = 0
         goal_reached = False
         self._last_tool_result = None
         requires_external_gui_judge = (
@@ -8097,6 +8099,34 @@ class ComputerUseAgent:
             # turn a real safety decision into scripted retry noise. The
             # operator can change scope/approval and start a fresh attempt.
             trace_observation = str(getattr(trace, "actual_observation", "") or "")
+            stale_gui_block = (
+                trace.status == ActionExecutionStatus.BLOCKED
+                and action_type in getattr(self, "_GUI_ONLY_ACTIONS", set())
+                and trace_observation.startswith("GUI action blocked before dispatch:")
+                and any(
+                    marker in trace_observation.lower()
+                    for marker in (
+                        "changed since the action was reasoned",
+                        "stale accessibility state",
+                        "desktop state could not be verified",
+                        "fresh screenshot evidence could not be verified",
+                    )
+                )
+            )
+            if stale_gui_block:
+                self._consecutive_stale_gui_blocks += 1
+                if self._consecutive_stale_gui_blocks >= 2:
+                    self.history.append({
+                        "action": "STALE_GUI_LOOP_ABORT",
+                        "result": (
+                            "Stopped after repeated pre-dispatch freshness blocks. "
+                            "No stale GUI action was executed; obtain a stable fresh "
+                            "observation before starting another attempt."
+                        ),
+                    })
+                    break
+            elif action_type != ComputerActionType.GUI_SCREENSHOT:
+                self._consecutive_stale_gui_blocks = 0
             prediction_error = float(getattr(trace, "prediction_error", 0.0) or 0.0)
             action_type_val = getattr(action_type, "value", str(action_type))
             if not is_observation_only and prediction_error >= 0.75 and trace.status not in (

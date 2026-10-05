@@ -2323,7 +2323,8 @@ while True:
     async def _resolve_app_binary(self, app_query: str) -> str:
         """Dynamically resolve an application query to its executable binary on the system.
         Follows AGENTS.md Rule 1: Zero hardcoding. Resolves via PATH, POSIX alternatives,
-        and .desktop entries discovered dynamically from the OS."""
+        and .desktop entries discovered dynamically from the OS. Returns an empty string
+        when discovery cannot verify a matching executable; it never guesses a binary."""
         app_clean = app_query.strip()
         if not app_clean:
             return ""
@@ -2344,7 +2345,7 @@ while True:
                 return out.strip().splitlines()[0]
 
         # 3. Dynamic lookup in .desktop files (/root/Desktop, /usr/share/applications, ~/.local/share/applications)
-        search_esc = app_clean.replace('"', '\\"').lower()
+        search_value = shlex.quote(app_clean.lower())
         desktop_lookup_cmd = (
             f"for d in /root/Desktop/*.desktop /usr/share/applications/*.desktop ~/.local/share/applications/*.desktop; do "
             f"  [ -f \"$d\" ] || continue; "
@@ -2354,7 +2355,7 @@ while True:
             f"  gname=$(grep -i '^GenericName=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
             f"  cats=$(grep -i '^Categories=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]'); "
             f"  base=$(basename \"$d\" .desktop 2>/dev/null | tr '[:upper:]' '[:lower:]'); "
-            f"  if echo \"$name $gname $cats $base\" | grep -q \"{search_esc}\"; then "
+            f"  if echo \"$name $gname $cats $base\" | grep -Fqi -- {search_value}; then "
             f"    exec_line=$(grep '^Exec=' \"$d\" 2>/dev/null | head -n1 | cut -d= -f2-); "
             f"    bin=$(echo \"$exec_line\" | awk '{{print $1}}'); "
             f"    if which \"$bin\" >/dev/null 2>&1; then which \"$bin\"; exit 0; fi; "
@@ -2392,17 +2393,7 @@ while True:
             if code == 0 and out.strip():
                 return out.strip().splitlines()[0]
 
-        # 5. Default fallback: hyphenated if multi-word, else first token
-        try:
-            parts = shlex.split(app_clean)
-            if len(parts) > 1:
-                return "-".join(parts)
-            return parts[0] if parts else app_clean
-        except Exception:
-            parts = app_clean.split()
-            if len(parts) > 1:
-                return "-".join(parts)
-            return parts[0] if parts else app_clean
+        return ""
 
     async def launch_application(self, workspace_id: str, app_name: str, actor: str = "operator") -> bool:
         clean_app = (app_name or "").strip()
@@ -2412,10 +2403,8 @@ while True:
         app_query, args = self._split_app_and_args(clean_app)
         resolved_bin = await self._resolve_app_binary(app_query)
         if not resolved_bin:
-            try:
-                resolved_bin = shlex.split(clean_app)[0]
-            except Exception:
-                resolved_bin = clean_app.split()[0]
+            logger.info("application_launch_unresolved", app_query=app_query)
+            return False
 
         if hasattr(self, "app_policy") and self.app_policy:
             allowed, _ = self.app_policy.is_package_allowed(resolved_bin)
