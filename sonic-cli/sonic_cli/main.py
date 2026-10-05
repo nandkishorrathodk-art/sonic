@@ -1,19 +1,31 @@
 """
-SONIC-REDA — CLI Main Entry Point
-=====================================
-Power-user CLI for SONIC-REDA. Everything the UI does, the CLI does better.
+SONIC — CLI Main Entry Point
+=================================
+Command-line interface for the SONIC Autonomous AI-Human Digital Being.
+Launches an interactive Devin-style prompt by default when invoked without arguments.
 
 Usage:
-    sonic status                        # System health
+    sonic                               # Interactive Devin-style REPL
+    sonic status                        # System health and workspace status
     sonic auth login                    # Google login
-    sonic engage <target>               # Start full multi-agent engagement
-    sonic agents                        # Monitor active agents in swarm
-    sonic graph "find XSS"              # Query Graph Memory
-    sonic evidence --engagement <id>    # Export findings + PoCs
+    sonic mission                       # Mission management
+    sonic computer                      # Workstation control
+    sonic engineer                      # Autonomous software engineer
+    sonic evolution                     # Self-evolution management
     sonic kill --all                    # Emergency stop
 """
 
 from __future__ import annotations
+
+import sys
+
+# Reconfigure console streams to UTF-8 on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import httpx
 import typer
@@ -23,7 +35,7 @@ from rich.panel import Panel
 try:
     from sonic import __version__
 except ImportError:  # pragma: no cover - core not installed in CLI-only envs
-    __version__ = "0.0.0"
+    __version__ = "0.3.0"
 
 from sonic_cli.commands import (
     agents,
@@ -45,12 +57,28 @@ from sonic_cli.commands import (
 
 app = typer.Typer(
     name="sonic",
-    help="🔴 SONIC-REDA — Next-Gen Autonomous AI Bug Hunting System",
-    no_args_is_help=True,
+    help="⚡ SONIC — Autonomous AI-Human Digital Being",
+    no_args_is_help=False,
     rich_markup_mode="rich",
 )
 
-console = Console()
+console = Console(legacy_windows=False)
+
+
+@app.callback(invoke_without_command=True)
+def main_callback(
+    ctx: typer.Context,
+    server: str = typer.Option(
+        "http://127.0.0.1:12000", "--server", "-s", help="Backend server URL"
+    ),
+    token: str = typer.Option("", "--token", "-t", help="JWT authentication token"),
+) -> None:
+    """SONIC — Autonomous AI-Human Digital Being interactive CLI."""
+    if ctx.invoked_subcommand is None:
+        from sonic_cli.repl import run_repl
+
+        run_repl(server_url=server, token=token)
+
 
 # ---- Register Command Groups & Commands ----
 app.add_typer(auth.app, name="auth", help="Authentication (Google OAuth)")
@@ -76,13 +104,13 @@ app.command(name="experiment")(experiment.experiment_command)
 
 @app.command()
 def version():
-    """Show SONIC-REDA version."""
+    """Show SONIC version."""
     console.print(
         Panel(
-            f"[bold red]SONIC-REDA[/bold red] v{__version__}\n"
-            f"[dim]Next-Generation Autonomous AI Bug Hunting System[/dim]\n"
-            f"[dim]Phase: MVP Core Multi-Agent Swarm[/dim]",
-            border_style="red",
+            f"[bold cyan]SONIC[/bold cyan] v{__version__}\n"
+            f"[dim]Autonomous AI-Human Digital Being[/dim]\n"
+            f"[dim]Personal Computer Workstation & Cognitive Agent Platform[/dim]",
+            border_style="cyan",
         )
     )
 
