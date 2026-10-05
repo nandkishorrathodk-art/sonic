@@ -2237,7 +2237,7 @@ _DASHBOARD_CHROME_MARKERS = (
 
 _TASK_IMPERATIVE_RE = re.compile(
     r"(?:"
-    r"\b(?:open|launch|create|write|run|make|install|click|navigate|type|scroll|"
+    r"\b(?:open|launch|create|write|run|make|install|click|move|hover|navigate|type|scroll|"
     r"download|compile|build|delete|focus|kholo|chalao|banao|likho)\b"
     r"|band\s+karo|search\s+karo|install\s+karo|kaam\s+karo|kar\s+do"
     r")",
@@ -2472,7 +2472,7 @@ def _is_observation_only_prompt(prompt: str) -> bool:
         "kya hai", "kya dikh", "dekho", "view", "read screen", "display",
     )
     mutating_terms = (
-        "open", "launch", "click", "double-click", "type", "enter", "navigate", "scroll",
+        "open", "launch", "click", "double-click", "move", "hover", "type", "enter", "navigate", "scroll",
         "drag", "download", "close", "focus", "install", "run", "execute", "create", "write",
         "delete", "rm", "kill", "compile", "build", "exploit", "attack", "scan target",
     )
