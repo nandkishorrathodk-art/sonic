@@ -66,3 +66,57 @@ async def test_visual_mission_uses_shared_gui_computer_use_worker():
     assert result.success is True
     assert result.status == "SUCCESS"
     assert result.actions_taken == 1
+
+
+@pytest.mark.asyncio
+async def test_visual_worker_heartbeat_is_forwarded_to_boss_callback():
+    boss = BossAgent(computer_provider=_MockProvider(), llm_router=_MockLLM())
+    events = []
+
+    async def phase_callback(event_type, data):
+        events.append((event_type, data))
+
+    worker = MagicMock()
+    worker.run_mission = AsyncMock(return_value=[])
+
+    with patch(
+        "sonic.computer_use.agent.ComputerUseAgent",
+        return_value=worker,
+    ):
+        await boss._dispatch_sub_agent(
+            "ws-1",
+            SubMission(
+                id="sub-heartbeat",
+                name="Desktop worker",
+                goal="Inspect the visible desktop",
+                plane="gui",
+                max_steps=1,
+            ),
+            phase_callback=phase_callback,
+            sub_agent_num=1,
+        )
+
+    await worker._heartbeat_callback(
+        {
+            "step": 2,
+            "elapsed_seconds": 4.5,
+            "last_observation_version": 7,
+        }
+    )
+
+    assert events == [
+        (
+            "sub_heartbeat",
+            {
+                "sub_mission_id": "sub-heartbeat",
+                "agent_id": "sub-agent-1",
+                "agent_name": "Desktop worker",
+                "role": "subagent",
+                "plane": "gui",
+                "sub_agent_number": 1,
+                "elapsed_seconds": 4.5,
+                "step": 2,
+                "last_observation_version": 7,
+            },
+        )
+    ]

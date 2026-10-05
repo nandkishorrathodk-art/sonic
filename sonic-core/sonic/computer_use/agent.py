@@ -55,6 +55,8 @@ from sonic.logger import get_logger
 from sonic.research.failure_budget import FailureBudgetTracker
 from sonic.research.failure_classifier import classify_failure
 
+_GUI_REASONING_TIMEOUT_SECONDS = 60.0
+
 
 def _extract_command_from_sig(sig_payload_str: str) -> str:
     """Extract the normalized ``command`` value from a stored action signature.
@@ -2762,19 +2764,6 @@ class ComputerUseAgent:
             raw_b64 = raw_b64.strip()
             if raw_b64:
                 images = [ImageContent(base64=raw_b64, media_type="image/png")]
-                active_geom = (
-                    getattr(observation, "active_window_geometry", None)
-                    or getattr(getattr(observation, "screen", None), "active_window_geometry", None)
-                    or getattr(self, "_last_active_window_geometry", None)
-                )
-                if active_geom:
-                    try:
-                        from sonic.computer_use.grounding import crop_active_window_region
-                        crop_b64, _ = crop_active_window_region(raw_b64, active_geom)
-                        if crop_b64:
-                            images.append(ImageContent(base64=crop_b64, media_type="image/png"))
-                    except Exception:
-                        pass
                 user_text = (
                     f"{obs_summary}\n\nBased on the live desktop pixels and "
                     "observation above, choose the next action."
@@ -3017,7 +3006,15 @@ class ComputerUseAgent:
 
             heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
-            response = await self.llm_router.complete(request)
+            reasoning_timeout = (
+                _GUI_REASONING_TIMEOUT_SECONDS
+                if self._gui_action_contract_active()
+                else 120.0
+            )
+            response = await asyncio.wait_for(
+                self.llm_router.complete(request),
+                timeout=reasoning_timeout,
+            )
             self._last_thought_duration = round(time.perf_counter() - t_thought_start, 2)
             content_str = getattr(response, "content", "") or ""
             tool_calls = list(getattr(response, "tool_calls", []) or [])
@@ -3190,8 +3187,14 @@ class ComputerUseAgent:
                 getattr(self, "gui_only", False)
                 or getattr(self, "execution_plane", "") == "gui"
             ):
+                reason = (
+                    f"GUI reasoning timed out after "
+                    f"{_GUI_REASONING_TIMEOUT_SECONDS:g} seconds; no action was dispatched."
+                    if isinstance(e, TimeoutError)
+                    else f"GUI reasoning failed: {e}"
+                )
                 return self._reasoning_unavailable_action(
-                    f"GUI reasoning failed: {e}"
+                    reason
                 )
             return self._diagnostic_fallback(primary_file)
         finally:

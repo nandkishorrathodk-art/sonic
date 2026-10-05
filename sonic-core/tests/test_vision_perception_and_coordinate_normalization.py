@@ -6,8 +6,8 @@ Tests for Vision Perception & Coordinate Normalization in sonic-core:
 2. extract_bbox_midpoint scales normalized 0-1000 coordinates to
    (raw_x / 1000.0) * width and (raw_y / 1000.0) * height in 1280x800 screens.
 3. ScreenObservation supports active_window_geometry (x, y, w, h) in various formats.
-4. crop_active_window_region crops high-res foveated window regions and passes them
-   alongside the full desktop screenshot to the vision model.
+4. GUI reasoning sends a single full desktop frame rather than duplicating the
+   same visual context with a second active-window crop.
 """
 
 import base64
@@ -497,7 +497,7 @@ def test_crop_active_window_region_cropping():
 
 
 @pytest.mark.asyncio
-async def test_llm_choose_action_attaches_foveated_active_window_crop():
+async def test_llm_choose_action_sends_one_full_frame_with_active_window_geometry():
     provider = _mock_provider()
     agent = ComputerUseAgent(
         computer_provider=provider,
@@ -537,7 +537,6 @@ async def test_llm_choose_action_attaches_foveated_active_window_crop():
 
     assert len(captured_requests) == 1
     user_msg = captured_requests[0].messages[1]
-    # Expect 2 images: full desktop screenshot + foveated active window crop
-    assert len(user_msg.images) == 2
+    # Keep the full desktop for spatial context without duplicating screenshot tokens.
+    assert len(user_msg.images) == 1
     assert user_msg.images[0].base64 == fake_b64
-    assert user_msg.images[1].base64 != fake_b64

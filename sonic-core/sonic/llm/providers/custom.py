@@ -137,6 +137,17 @@ def _is_transient_error(error: Exception) -> bool:
     intentionally NOT retried — they will not succeed by repeating the request.
     """
     error_text = f"{type(error).__name__} {error}".lower()
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
+    if status_code is not None:
+        try:
+            status = int(status_code)
+        except (TypeError, ValueError):
+            status = None
+        if status is not None:
+            return status == 429 or 500 <= status < 600
+
     # HTTP status markers surfaced by SDKs / httpx.
     status_markers = (
         "429", "rate limit", "rate_limit", "overloaded",

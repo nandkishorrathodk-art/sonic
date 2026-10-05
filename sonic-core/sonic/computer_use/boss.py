@@ -1211,6 +1211,26 @@ Rules:
                             },
                     })
 
+            async def _sub_heartbeat_callback(event):
+                if phase_callback:
+                    await self._emit(phase_callback, "sub_heartbeat", {
+                        "sub_mission_id": sub_mission.id,
+                        "agent_id": sub_agent_id,
+                        "agent_name": _sub_mission_display_name(
+                            sub_mission, sub_agent_num
+                        ),
+                        "role": sub_mission.role,
+                        "plane": execution_plane,
+                        "sub_agent_number": sub_agent_num,
+                        "elapsed_seconds": event.get("elapsed_seconds", 0),
+                        "step": event.get("step", 0),
+                        "last_observation_version": event.get(
+                            "last_observation_version", 0
+                        ),
+                    })
+
+            agent._heartbeat_callback = _sub_heartbeat_callback
+
             # Forward accumulated discoveries so SubAgents aren't context-starved
             sub_goal = sub_mission.goal
             if self._accumulated_context:
