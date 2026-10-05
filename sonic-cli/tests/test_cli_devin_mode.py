@@ -228,3 +228,68 @@ def test_accepted_backend_prompt_polls_until_workstation_is_idle(monkeypatch):
     assert client.post.call_args.kwargs["headers"].get("Authorization")
     client.get.assert_called_once()
     assert client.get.call_args.args[0] == "/workstation/state"
+
+
+def test_dev_auth_login_saves_token_and_uses_configured_backend(monkeypatch, tmp_path):
+    from sonic_cli.commands import auth
+
+    token_path = tmp_path / ".sonic" / "token"
+    monkeypatch.setattr(auth, "TOKEN_PATH", token_path)
+    monkeypatch.setattr(auth.httpx, "post", MagicMock(
+        return_value=MagicMock(
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"access_token": "test-token"}),
+        )
+    ))
+
+    result = runner.invoke(app, [
+        "auth", "login", "--dev", "--email", "operator@example.test",
+        "--server", "http://127.0.0.1:12000",
+    ])
+
+    assert result.exit_code == 0
+    assert token_path.read_text(encoding="utf-8") == "test-token"
+    auth.httpx.post.assert_called_once_with(
+        "http://127.0.0.1:12000/auth/login",
+        json={"email": "operator@example.test"},
+        timeout=15,
+    )
+
+
+def test_auth_whoami_uses_saved_token(monkeypatch, tmp_path):
+    from sonic_cli.commands import auth
+
+    monkeypatch.delenv("SONIC_TOKEN", raising=False)
+    token_path = tmp_path / ".sonic" / "token"
+    token_path.parent.mkdir()
+    token_path.write_text("test-token", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(auth, "TOKEN_PATH", token_path)
+    response = MagicMock()
+    response.raise_for_status = MagicMock()
+    response.json.return_value = {"authenticated": True}
+    request = MagicMock(return_value=response)
+    monkeypatch.setattr(auth.httpx, "get", request)
+
+    result = runner.invoke(app, ["auth", "whoami", "--server", "http://127.0.0.1:12000"])
+
+    assert result.exit_code == 0
+    request.assert_called_once_with(
+        "http://127.0.0.1:12000/auth/me",
+        headers={"Authorization": "Bearer test-token"},
+        timeout=15,
+    )
+
+
+def test_auth_logout_removes_local_token(monkeypatch, tmp_path):
+    from sonic_cli.commands import auth
+
+    token_path = tmp_path / ".sonic" / "token"
+    token_path.parent.mkdir()
+    token_path.write_text("test-token", encoding="utf-8")
+    monkeypatch.setattr(auth, "TOKEN_PATH", token_path)
+
+    result = runner.invoke(app, ["auth", "logout"])
+
+    assert result.exit_code == 0
+    assert not token_path.exists()
