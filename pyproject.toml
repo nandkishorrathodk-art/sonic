@@ -12,6 +12,7 @@ members = ["sonic-core", "sonic-cli"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["sonic-core/tests", "sonic-cli/tests"]
+addopts = "--import-mode=importlib"
 
 [tool.ruff]
 target-version = "py312"
