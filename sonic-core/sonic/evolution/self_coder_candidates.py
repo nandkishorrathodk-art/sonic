@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from sonic.evolution.codebase_evolver import CodebaseEvolver
+from sonic.evolution.evolution_journal import EvolutionJournal, JournalEntry
 from sonic.evolution.pipeline import EvolutionStage
+from sonic.evolution.version_tracker import VersionTracker
 
 
 class CandidateWorkflowError(RuntimeError):
@@ -421,12 +423,12 @@ class SelfCoderCandidateStore:
     def approve(self, candidate_id: str, tenant_id: str) -> dict[str, Any]:
         return self._promote(candidate_id, tenant_id, automatic=False)
 
-    def auto_promote(self, candidate_id: str, tenant_id: str) -> dict[str, Any]:
+    def auto_promote(self, candidate_id: str, tenant_id: str, *, auto_commit: bool = False) -> dict[str, Any]:
         """Apply an already verified candidate to the active working tree."""
-        return self._promote(candidate_id, tenant_id, automatic=True)
+        return self._promote(candidate_id, tenant_id, automatic=True, auto_commit=auto_commit)
 
     def _promote(
-        self, candidate_id: str, tenant_id: str, *, automatic: bool
+        self, candidate_id: str, tenant_id: str, *, automatic: bool, auto_commit: bool = False
     ) -> dict[str, Any]:
         with self._lock(candidate_id):
             record = self.get(candidate_id, tenant_id)
@@ -524,14 +526,72 @@ class SelfCoderCandidateStore:
                     raise CandidateWorkflowError(
                         post_verification.get("error", "Post-application verification failed")
                     )
-                record["status"] = "applied"
-                record["error"] = ""
-                record["commit"] = ""
-                record["commit_branch"] = ""
-                record["promotion"] = (
-                    "verified patch applied to active working tree; no commit or push"
-                    if automatic else "operator-approved patch applied to active working tree; no commit or push"
-                )
+
+                if auto_commit:
+                    commit_msg = (
+                        f"evo({record['candidate_id'][:8]}): {record.get('description', 'Auto-evolution patch')}\n\n"
+                        f"[Verified by SONIC Auto-Evolution Engine]\n"
+                        f"Candidate: {record['candidate_id']}\n"
+                    )
+                    commit_cmd = ["git", "commit", "--only", "-m", commit_msg, "--", *diff_paths]
+                    commit_proc = subprocess.run(
+                        commit_cmd,
+                        cwd=str(self.repo_root),
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if commit_proc.returncode == 0:
+                        new_commit, _ = self._base_state()
+                        record["commit"] = new_commit
+                        try:
+                            record["commit_branch"] = self._git(["branch", "--show-current"])
+                        except Exception:
+                            record["commit_branch"] = ""
+                        record["status"] = "promoted"
+                        record["promotion"] = f"verified patch committed to git: {new_commit[:8]}"
+
+                        try:
+                            tracker = VersionTracker(repo_root=self.repo_root)
+                            ver_before = tracker.current_version()
+                            new_version = tracker.bump_patch(
+                                goal_id=record["candidate_id"],
+                                title=record.get("description", "Auto-evolution patch"),
+                                git_commit=new_commit,
+                                metadata={"candidate_id": record["candidate_id"], "files": diff_paths},
+                            )
+                            journal = EvolutionJournal(repo_root=self.repo_root)
+                            journal.record_entry(
+                                JournalEntry(
+                                    entry_id=f"evo-{record['candidate_id'][:8]}",
+                                    goal_id=record["candidate_id"],
+                                    title=record.get("description", "Auto-evolution patch"),
+                                    category=record.get("category", "logic_improvement"),
+                                    status="promoted",
+                                    version_before=ver_before,
+                                    version_after=new_version,
+                                    files_affected=diff_paths,
+                                    test_summary=str(record.get("verification", {}).get("test_summary", "Tests passed")),
+                                    notes=f"Automated evolution cycle on {', '.join(diff_paths)}",
+                                    commit_hash=new_commit,
+                                )
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        record["status"] = "applied"
+                        record["commit"] = ""
+                        record["commit_branch"] = ""
+                        record["promotion"] = "verified patch applied to active working tree; commit failed"
+                else:
+                    record["status"] = "applied"
+                    record["error"] = ""
+                    record["commit"] = ""
+                    record["commit_branch"] = ""
+                    record["promotion"] = (
+                        "verified patch applied to active working tree; no commit or push"
+                        if automatic else "operator-approved patch applied to active working tree; no commit or push"
+                    )
                 self.save(record)
                 return record
             except Exception as exc:
