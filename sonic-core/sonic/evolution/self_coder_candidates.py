@@ -161,12 +161,17 @@ class SelfCoderCandidateStore:
         coder_factory: Callable[[Path], Any],
         *,
         auto_commit: bool = False,
+        signals: list[tuple[str, str, str]] | None = None,
     ) -> dict[str, Any]:
         lock = self._repo_lock()
         await asyncio.to_thread(lock.acquire)
         try:
             return await self._run_candidate_unlocked(
-                tenant_id, max_cycles, coder_factory, auto_commit=auto_commit
+                tenant_id,
+                max_cycles,
+                coder_factory,
+                auto_commit=auto_commit,
+                signals=signals,
             )
         finally:
             lock.release()
@@ -178,6 +183,7 @@ class SelfCoderCandidateStore:
         coder_factory: Callable[[Path], Any],
         *,
         auto_commit: bool = False,
+        signals: list[tuple[str, str, str]] | None = None,
     ) -> dict[str, Any]:
         if not 1 <= max_cycles <= 10:
             raise ValueError("max_cycles must be between 1 and 10")
@@ -235,10 +241,13 @@ class SelfCoderCandidateStore:
         try:
             coder = coder_factory(worktree)
             try:
-                report = await coder.run(
-                    max_cycles=max_cycles,
-                    excluded_signals=excluded_signals,
-                )
+                run_kwargs: dict[str, Any] = {
+                    "max_cycles": max_cycles,
+                    "excluded_signals": excluded_signals,
+                }
+                if signals is not None:
+                    run_kwargs["signals"] = signals
+                report = await coder.run(**run_kwargs)
             except Exception as exc:
                 raise CandidateWorkflowError(f"Self-coder execution failed: {exc}") from exc
             finally:

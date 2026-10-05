@@ -172,6 +172,7 @@ class SelfCoder:
         self.agentic = agentic
         self.max_agent_steps = max_agent_steps
         self.last_coding_result: Any = None
+        self._temporary_storage: tempfile.TemporaryDirectory[str] | None = None
         self._related_test_paths: dict[str, set[str]] = {}
         self.evolver = evolver or CodebaseEvolver(repo_root=self.repo_root)
         self.evolution_engine = evolution_engine
@@ -258,9 +259,10 @@ class SelfCoder:
 
     def close(self) -> None:
         """Release temporary evolution state created for an isolated candidate."""
-        if self._temporary_storage is not None:
-            self._temporary_storage.cleanup()
-            self._temporary_storage = None
+        temporary_storage = self._temporary_storage
+        self._temporary_storage = None
+        if temporary_storage is not None:
+            temporary_storage.cleanup()
 
     # ------------------------------------------------------------------
     # 1. Observe real signals
@@ -652,6 +654,7 @@ class SelfCoder:
         self,
         max_cycles: int | None = None,
         excluded_signals: set[tuple[str, str]] | None = None,
+        signals: list[tuple[str, str, str]] | None = None,
     ) -> SelfCoderReport:
         report = SelfCoderReport()
         if not self.enabled:
@@ -672,6 +675,7 @@ class SelfCoder:
                         "default",
                         cycles,
                         lambda candidate_root: self.isolated_copy(candidate_root),
+                        signals=signals,
                     )
 
                 return asyncio.run(run_candidates())
@@ -700,7 +704,8 @@ class SelfCoder:
             )
             return report
 
-        signals = self.discover_signals()
+        if signals is None:
+            signals = self.discover_signals()
         if excluded_signals:
             signals = [
                 signal
@@ -738,8 +743,13 @@ class SelfCoder:
         self,
         max_cycles: int | None = None,
         excluded_signals: set[tuple[str, str]] | None = None,
+        signals: list[tuple[str, str, str]] | None = None,
     ) -> SelfCoderReport:
         """Blocking entry point for schedulers/CLI."""
         return asyncio.run(
-            self.run(max_cycles=max_cycles, excluded_signals=excluded_signals)
+            self.run(
+                max_cycles=max_cycles,
+                excluded_signals=excluded_signals,
+                signals=signals,
+            )
         )

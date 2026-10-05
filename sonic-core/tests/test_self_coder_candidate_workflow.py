@@ -327,6 +327,32 @@ def test_handled_signal_is_excluded_from_later_candidate_runs(candidate_repo):
     assert result["candidates"][0]["status"] == "no_candidate"
 
 
+def test_candidate_store_passes_pinned_signal_to_coder(candidate_repo):
+    root, storage = candidate_repo
+    store = SelfCoderCandidateStore(root, storage_dir=storage)
+    captured = {}
+    pinned_signal = ("Fix the requested defect", "sonic-core/app.py", "bug_fix")
+
+    class CapturingCoder:
+        async def run(self, max_cycles: int, excluded_signals=None, signals=None):
+            captured["max_cycles"] = max_cycles
+            captured["signals"] = signals
+            return SimpleNamespace(cycles=[], to_text=lambda: "No new signal")
+
+    result = asyncio.run(
+        store.run_candidate(
+            "tenant-a",
+            1,
+            lambda _worktree: CapturingCoder(),
+            signals=[pinned_signal],
+        )
+    )
+
+    assert captured["max_cycles"] == 1
+    assert captured["signals"] == [pinned_signal]
+    assert result["candidates"][0]["status"] == "no_candidate"
+
+
 def test_rejection_and_stale_revalidation_do_not_commit(candidate_repo):
     root, storage = candidate_repo
     store, rejected = _new_candidate(root, storage)
