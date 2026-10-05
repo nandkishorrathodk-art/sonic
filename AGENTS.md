@@ -2398,3 +2398,38 @@ are a historical engineering record and must not override it.
   multi-application completion has not yet been demonstrated. Do not describe
   this slice as a complete push/event subscription or proven real-time
   computer-use capability.
+
+## Self-evolution verification gate — runtime blockers fixed (2026-10-05)
+The self-evolution department (`sonic-core/sonic/evolution/`) was reported as
+"not working at all" while its own unit tests passed. Root cause was in the
+**candidate verification gate**, not the reasoning/LLM layer: `SelfCoderCandidateStore`
+reapplies a candidate diff in a detached worktree, runs the full configured test
+dirs (`sonic-core/tests` + `sonic-cli/tests`) via `CodebaseEvolver.run_tests`, and
+requires a 100% green exit code to promote. Three defects made promotion
+impossible, so every candidate was rolled back / reported failed:
+- `CodebaseEvolver.run_tests` used a fixed `timeout=120` s subprocess while the
+  full suite takes ~164 s, so every full-suite verification timed out
+  (`Tests failed with exit code 2` / `timed out after 120 seconds`). Fixed:
+  env-configurable `SONIC_EVOLUTION_TEST_TIMEOUT`, default 600 s, floor 120 s.
+- A GUI TARGET JSON object carrying extra fields (e.g. `coordinate_space`) was
+  accepted as an explicit pixel point, guessing an unknown coordinate space.
+  `_parse_gui_action_response` now fails closed unless the object is exactly an
+  integer `x`/`y` pair (`_parse_pixel_coordinate_target`).
+- Pre-dispatch fresh-screenshot revalidation hard-blocked *any* pixel difference.
+  It now fails closed on a differing frame only when there is no stable semantic
+  evidence (`detected_controls`/`visible_text`); identical semantics confirm
+  transient pixel noise (cursor blink / clock tick) and allow dispatch.
+- `sonic-cli` must be installed for `sonic-cli/tests` to collect (its `typer`
+  dependency lives in `sonic-cli/pyproject.toml`); CI installs it. Without it the
+  gate returns exit 2 (collection error). `sonic-cli` is not a member of the
+  root `uv` workspace, so `uv sync` does not install it — use
+  `uv pip install -e sonic-core -e sonic-cli`.
+- Environment reminder: a fresh checkout needs `uv sync --all-packages --extra dev`
+  then `uv pip install -e sonic-core -e sonic-cli`; otherwise `import sonic`
+  fails after a plain `uv sync`.
+
+Verified end-to-end: a stub candidate diff applied to `logger.py` promoted to
+`STATUS: applied` with `full_test_suite: True`, `security_regression: True`,
+1872 passed / 0 failed, both in the detached worktree and after applying to the
+active checkout. Full `sonic-core/tests` baseline after the fix: **1859 passed,
+41 skipped, 0 failures**.

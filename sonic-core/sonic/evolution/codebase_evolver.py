@@ -162,6 +162,20 @@ class CodebaseEvolver:
         self.lessons_ledger = lessons_ledger
         self.pipeline = pipeline if pipeline is not None else EvolutionPipeline()
         self._snapshots: dict[Path, str | None] = {}
+        # The verification gate runs the full configured test suite, which is
+        # substantially slower than a single component suite. A too-small
+        # timeout would time out every verification and block promotion.
+        self._test_timeout_seconds = self._resolve_test_timeout()
+
+    @staticmethod
+    def _resolve_test_timeout() -> int:
+        """Resolve the verification subprocess timeout (env-overridable, >=120s)."""
+        raw = os.environ.get("SONIC_EVOLUTION_TEST_TIMEOUT", "")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 600
+        return max(120, value)
 
     # ------------------------------------------------------------------
     # 1. Safety Envelope Invariant Check
@@ -467,7 +481,7 @@ class CodebaseEvolver:
                 cwd=str(self.repo_root),
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=self._test_timeout_seconds,
                 env=env,
             )
             duration = time.time() - start_time
