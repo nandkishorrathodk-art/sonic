@@ -222,6 +222,9 @@ async def test_continuous_runner_successful_cycle_promoted(tmp_path):
     assert "deadbeef" in success_ev["message"]
     assert success_ev["commit"] == "deadbeef1234567890abcdef"
     assert success_ev["version"] == "0.1.1"
+    assert mock_store.run_candidate.await_args.kwargs["signals"] == [
+        ("Remove unused variable", "sonic/core.py", "optimization")
+    ]
 
 
 @pytest.mark.asyncio

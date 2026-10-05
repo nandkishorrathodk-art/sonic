@@ -141,6 +141,7 @@ class ContinuousAutoEvolutionRunner:
                     1,
                     coder_factory,
                     auto_commit=self.auto_commit,
+                    signals=[target_sig],
                 )
             except Exception as exc:
                 self._emit("cycle_error", f"Candidate execution error: {exc}", error=str(exc))
