@@ -206,24 +206,56 @@ class CheckpointManager:
         *,
         current_state: Mapping[str, Any],
         apply_state: Callable[[dict[str, Any]], Any] | None = None,
+        read_state: Callable[[], Mapping[str, Any] | Any] | None = None,
     ) -> ActionReceipt:
         checkpoint = self._checkpoints.get(checkpoint_id)
         if checkpoint is None:
             return self._failed_receipt("unknown checkpoint", current_state)
         if not self._valid(checkpoint):
             return self._failed_receipt("checkpoint is corrupt", current_state)
+        before_state = dict(current_state)
+        if checkpoint.state != before_state and apply_state is None:
+            return self._failed_receipt(
+                "checkpoint state differs but no state applier was provided",
+                before_state,
+            )
+
+        original_artifacts: dict[str, bytes | str] = {}
+        restored_paths: list[str] = []
+        state_attempted = False
         try:
-            # Preflight every read before changing any artifact.
             for artifact in checkpoint.artifacts:
                 if not isinstance(artifact.content, bytes):
                     raise ValueError("checkpoint artifact content is invalid")
+                original = await self.store.read_file(artifact.path)
+                if not isinstance(original, (bytes, str)):
+                    raise TypeError(f"workspace returned invalid content for {artifact.path}")
+                original_artifacts[artifact.path] = original
+
             for artifact in checkpoint.artifacts:
                 if not await self.store.write_file(artifact.path, artifact.content):
                     raise OSError(f"workspace refused restore: {artifact.path}")
+                restored_paths.append(artifact.path)
+                restored = await self.store.read_file(artifact.path)
+                if not isinstance(restored, (bytes, str)):
+                    raise TypeError(f"workspace returned invalid read-back for {artifact.path}")
+                restored_bytes = restored.encode() if isinstance(restored, str) else restored
+                if hashlib.sha256(restored_bytes).hexdigest() != artifact.digest:
+                    raise OSError(f"workspace read-back did not match checkpoint: {artifact.path}")
+
             if apply_state is not None:
+                state_attempted = True
                 result = apply_state(dict(checkpoint.state))
                 if inspect.isawaitable(result):
-                    await result
+                    result = await result
+                observed_state = read_state() if read_state is not None else result
+                if inspect.isawaitable(observed_state):
+                    observed_state = await observed_state
+                if not isinstance(observed_state, Mapping):
+                    raise TypeError("state rollback requires a readable state mapping")
+                if dict(observed_state) != checkpoint.state:
+                    raise OSError("state read-back did not match checkpoint")
+
             delta = StateDelta.from_states(dict(current_state), checkpoint.state)
             evidence = f"restored checkpoint {checkpoint.id}; artifacts={len(checkpoint.artifacts)}"
             return ActionReceipt(
@@ -235,7 +267,43 @@ class CheckpointManager:
                 evidence=evidence,
             )
         except Exception as exc:
-            return self._failed_receipt(f"rollback failed: {type(exc).__name__}", current_state)
+            compensation_errors: list[str] = []
+            for path in reversed(restored_paths):
+                try:
+                    if not await self.store.write_file(path, original_artifacts[path]):
+                        raise OSError("workspace refused compensation")
+                    restored = await self.store.read_file(path)
+                    restored_bytes = restored.encode() if isinstance(restored, str) else restored
+                    original = original_artifacts[path]
+                    original_bytes = original.encode() if isinstance(original, str) else original
+                    if restored_bytes != original_bytes:
+                        raise OSError("compensation read-back mismatch")
+                except Exception as compensation_exc:
+                    compensation_errors.append(
+                        f"{path}: {type(compensation_exc).__name__}: {compensation_exc}"
+                    )
+
+            if state_attempted and apply_state is not None:
+                try:
+                    result = apply_state(before_state)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    observed_state = read_state() if read_state is not None else result
+                    if inspect.isawaitable(observed_state):
+                        observed_state = await observed_state
+                    if not isinstance(observed_state, Mapping) or dict(observed_state) != before_state:
+                        raise OSError("state compensation read-back mismatch")
+                except Exception as compensation_exc:
+                    compensation_errors.append(
+                        f"state: {type(compensation_exc).__name__}: {compensation_exc}"
+                    )
+
+            reason = f"rollback failed: {type(exc).__name__}: {exc}"
+            if compensation_errors:
+                reason += "; compensation incomplete: " + "; ".join(compensation_errors)
+            else:
+                reason += "; original state restored"
+            return self._failed_receipt(reason, before_state)
 
     @staticmethod
     def _failed_receipt(reason: str, state: Mapping[str, Any]) -> ActionReceipt:

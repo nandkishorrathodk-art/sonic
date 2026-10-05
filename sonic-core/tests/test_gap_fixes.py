@@ -5,7 +5,6 @@ Tests verifying that all 13 disclosed gaps are fixed:
 
 Gap #1+2: Engagement path wired to sandbox + ComputerUseAgent
 Gap #3:   VerifierAgent receives ReproductionEngine
-Gap #4:   BugBountyClient wired into engagement
 Gap #5:   Toolsmith + MethodLab wired in engagement + director
 Gap #6:   ResearchManager wired into engagement
 Gap #7:   ExperimentDesigner wiring (tested via research phase)
@@ -15,7 +14,6 @@ Gap #13:  verify_goal is LLM-driven (tested structurally)
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -90,7 +88,7 @@ class TestGap1_2_EngagementProvider:
         assert mgr.provider is None
 
     def test_default_phases_include_new_phases(self):
-        """Default phase list includes research, computer_dynamic, chain, submit."""
+        """Default phase list includes research, computer_dynamic, chain, report."""
         from sonic.agents.engagement import EngagementManager
         mgr = EngagementManager(
             model_router=_stub_router(),
@@ -99,7 +97,7 @@ class TestGap1_2_EngagementProvider:
         )
         import inspect
         source = inspect.getsource(mgr.run_engagement)
-        for phase in ["research", "computer_dynamic", "chain", "submit"]:
+        for phase in ["research", "computer_dynamic", "chain", "report"]:
             assert phase in source, f"Phase '{phase}' missing from run_engagement"
 
     @pytest.mark.asyncio
@@ -168,64 +166,6 @@ class TestGap3_VerifierReproduction:
 
 
 # ===========================================================================
-# Gap #4: BugBountyClient wiring
-# ===========================================================================
-
-
-class TestGap4_BugBountyClient:
-    """BugBountyClient is wired into the engagement pipeline."""
-
-    def test_engagement_manager_accepts_bugbounty_client(self):
-        from sonic.agents.engagement import EngagementManager
-        mock_client = MagicMock()
-        mgr = EngagementManager(
-            model_router=_stub_router(),
-            graph_memory=_stub_memory(),
-            scope_checker=_stub_scope(),
-            bugbounty_client=mock_client,
-        )
-        assert mgr.bugbounty_client is mock_client
-
-    @pytest.mark.asyncio
-    async def test_submit_skips_without_client(self):
-        """_run_submit gracefully skips when no client configured."""
-        from sonic.agents.engagement import EngagementManager
-        mgr = EngagementManager(
-            model_router=_stub_router(),
-            graph_memory=_stub_memory(),
-            scope_checker=_stub_scope(),
-            bugbounty_client=None,
-        )
-        result = await mgr._run_submit("eng-1", {})
-        assert result.get("skipped") is True
-
-    @pytest.mark.asyncio
-    async def test_submit_formats_high_findings(self):
-        """_run_submit formats high/critical findings when client is set."""
-        from sonic.agents.engagement import EngagementManager
-        mock_client = MagicMock()
-        mock_client.format_report = MagicMock(return_value={"formatted": True})
-        mgr = EngagementManager(
-            model_router=_stub_router(),
-            graph_memory=_stub_memory(),
-            scope_checker=_stub_scope(),
-            bugbounty_client=mock_client,
-        )
-        results = {
-            "dynamic": {
-                "findings": [
-                    {"title": "Critical SQLi", "severity": "critical", "url": "http://test.com"},
-                    {"title": "Info leak", "severity": "info", "url": "http://test.com/info"},
-                ],
-            },
-        }
-        submit_result = await mgr._run_submit("eng-1", results)
-        assert submit_result.get("auto_submitted") is False
-        assert len(submit_result.get("drafts", [])) == 1
-        mock_client.format_report.assert_called_once()
-
-
-# ===========================================================================
 # Gap #8: ExploitChainEngine
 # ===========================================================================
 
@@ -235,7 +175,7 @@ class TestGap8_ExploitChain:
 
     @pytest.mark.asyncio
     async def test_chain_engine_exists(self):
-        from sonic.agents.exploit_chain import ExploitChainEngine, ChainedExploit
+        from sonic.agents.exploit_chain import ExploitChainEngine
         engine = ExploitChainEngine()
         assert engine is not None
 
@@ -366,10 +306,7 @@ class TestAPIRouteWiring:
         assert "compute_provider" in source
         assert "get_compute_provider" in source
 
-    def test_api_route_has_bugbounty_wiring(self):
-        """engagements.py get_engagement_manager wires bugbounty_client."""
-        import inspect
-        from sonic.api.routes.engagements import get_engagement_manager
-        source = inspect.getsource(get_engagement_manager)
-        assert "bugbounty_client" in source
-        assert "BugBountyClient" in source
+    def test_bug_bounty_submission_route_is_not_registered(self):
+        from sonic.api.routes.engagements import router
+
+        assert not any(route.path.endswith("/submit-report") for route in router.routes)

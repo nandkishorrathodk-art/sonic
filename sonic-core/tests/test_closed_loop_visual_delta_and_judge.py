@@ -2,20 +2,21 @@
 
 Covers:
 1. ComputerUseAgent _consecutive_unchanged_screens active watchdog
-   (refocus at 2, Alt+F accelerator at 3, abort before burning quota at >= 4).
+   (no recovery input; abort before burning quota at >= 4).
 2. Typing verification rejecting garbage text and wrong fields instead of falsely marking SUCCESS.
 3. JudgeAgent requiring verified application state or artifacts for GUI actions with exit_code=None,
    rejecting terminal syntax errors, and verifying file artifacts on disk.
 4. BossAgent not advancing phases on actions_taken > 0 when all actions failed.
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from sonic.agents.judge import JudgeAgent, JudgeVerdict
-from sonic.computer.models import GUIAction, GUIActionType, ScreenObservation
+from sonic.computer.models import GUIActionType, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.boss import BossAgent
 from sonic.computer_use.models import (
@@ -24,23 +25,53 @@ from sonic.computer_use.models import (
     ComputerDecisionTrace,
     ComputerWorldObservation,
 )
-from sonic.computer_use.models_boss import Phase, SubMission, SubMissionResult
-from sonic.sandbox.provider import ExecResult
+from sonic.computer_use.models_boss import SubMission, SubMissionResult
+
+
+@pytest.fixture(autouse=True)
+def _keep_visual_grounding_offline(monkeypatch):
+    """Use deterministic mocked grounding; these unit tests never call a model."""
+    async def _grounded_target(*args, **kwargs):
+        return (240, 180)
+
+    monkeypatch.setattr(
+        "sonic.computer_use.agent.resolve_ui_target_async",
+        _grounded_target,
+    )
 
 
 def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
     """Mock provider that always returns the exact same screenshot hash."""
     provider = AsyncMock()
+    provider.observe_state = None
+    controls = [
+        {
+            "name": name,
+            "role": "entry",
+            "bbox": (220, 160, 80, 40),
+            "bbox_format": "xywh",
+            "source": "atspi",
+            "confidence": 0.95,
+            "freshness_ms": 0,
+            "editable": True,
+            "focused": True,
+        }
+        for name in ("text field", "search input", "input_box")
+    ]
     screen_obs = ScreenObservation(
         width=1280,
         height=800,
         screenshot_base64=screen_b64,
-        active_window="Desktop",
+        active_window="TextEditor",
+        capture_age_ms=0,
+        controls_age_ms=0,
+        detected_controls=controls,
     )
     provider.screenshot.return_value = screen_obs
     provider.gui_action.return_value = screen_obs
     provider.status.return_value = MagicMock(
         active_application="TextEditor",
+        active_window="TextEditor",
         open_applications=["TextEditor"],
         running_processes=["gedit"],
     )
@@ -54,12 +85,12 @@ def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
 
 
 @pytest.mark.asyncio
-async def test_watchdog_refocuses_window_at_two_unchanged_screens():
+async def test_unchanged_click_is_unverified_without_refocusing_window():
     provider = _mock_static_gui_provider("fixed_screen_hash_123")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    agent._last_screenshot_b64 = "fixed_screen_hash_123"
+    await agent.observe("ws-1")
 
-    # Action 1: First unchanged screen
+    # An unchanged frame cannot prove whether a click focused a control.
     trace1 = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_CLICK,
@@ -69,8 +100,9 @@ async def test_watchdog_refocuses_window_at_two_unchanged_screens():
     )
     assert agent._consecutive_unchanged_screens == 1
     assert trace1.status == ActionExecutionStatus.FAILED
+    assert trace1.recovery_attempted is False
 
-    # Action 2: Second unchanged screen -> watchdog level 1: refocus window
+    # Re-observation is safe; the watchdog must not inject focus or key input.
     trace2 = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_CLICK,
@@ -79,29 +111,21 @@ async def test_watchdog_refocuses_window_at_two_unchanged_screens():
         "Click button again",
     )
     assert agent._consecutive_unchanged_screens == 2
-    assert "WATCHDOG ADAPTIVE RECOVERY (count=2)" in trace2.actual_observation
-    assert "Triggered window refocus" in trace2.actual_observation
-
-    # Verify provider was called to refocus active window
-    gui_calls = [
-        call.args[1] for call in provider.gui_action.call_args_list
-        if hasattr(call.args[1], "action")
-    ]
-    refocus_actions = [
-        a for a in gui_calls
-        if a.action in (GUIActionType.SELECT_WINDOW, GUIActionType.HOTKEY)
-    ]
-    assert len(refocus_actions) > 0
+    assert trace2.status == ActionExecutionStatus.FAILED
+    assert "No recovery input was sent" in trace2.actual_observation
+    gui_calls = [call.args[1] for call in provider.gui_action.call_args_list]
+    assert len(gui_calls) == 2
+    assert all(action.action == GUIActionType.CLICK for action in gui_calls)
 
 
 @pytest.mark.asyncio
-async def test_watchdog_triggers_alt_f_accelerator_at_three_unchanged_screens():
+async def test_watchdog_never_injects_application_specific_shortcuts():
     provider = _mock_static_gui_provider("fixed_screen_hash_456")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    agent._last_screenshot_b64 = "fixed_screen_hash_456"
+    await agent.observe("ws-1")
     agent._consecutive_unchanged_screens = 2  # Already at 2
 
-    # Action 3: Third unchanged screen -> watchdog level 2: Alt+F accelerator
+    # An unchanged frame in an arbitrary application must not cause Alt+F.
     trace = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_CLICK,
@@ -110,27 +134,21 @@ async def test_watchdog_triggers_alt_f_accelerator_at_three_unchanged_screens():
         "Click stuck element",
     )
     assert agent._consecutive_unchanged_screens == 3
-    assert "WATCHDOG ADAPTIVE RECOVERY (count=3)" in trace.actual_observation
-    assert "Alt+F" in trace.actual_observation
-
-    # Verify provider was dispatched Alt+F
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert "No recovery input was sent" in trace.actual_observation
     gui_calls = [call.args[1] for call in provider.gui_action.call_args_list]
-    alt_f_calls = [
-        a for a in gui_calls
-        if getattr(a, "key", "") == "Alt+F" or getattr(a, "text", "") == "Alt+F"
-    ]
-    assert len(alt_f_calls) > 0
+    assert len(gui_calls) == 1
+    assert gui_calls[0].action == GUIActionType.CLICK
 
 
 @pytest.mark.asyncio
 async def test_watchdog_aborts_run_mission_before_burning_quota():
     provider = _mock_static_gui_provider("perpetually_stuck_pixels")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    agent._last_screenshot_b64 = "perpetually_stuck_pixels"
 
     # Mock choose_action to repeatedly attempt GUI_CLICK
     async def _mock_choose(goal, obs, step):
-        return ComputerActionType.GUI_CLICK, "stuck_btn", {"x": 50, "y": 50}, "Click"
+        return ComputerActionType.GUI_CLICK, "50,50", {"x": 50, "y": 50}, "Click"
 
     agent.choose_action = AsyncMock(side_effect=_mock_choose)
 
@@ -139,6 +157,148 @@ async def test_watchdog_aborts_run_mission_before_burning_quota():
     assert len(traces) <= 5
     assert agent._consecutive_unchanged_screens >= 4
     assert any("WATCHDOG_ABORT" in h.get("action", "") for h in agent.history)
+    assert all(
+        call.args[1].action == GUIActionType.CLICK
+        for call in provider.gui_action.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_unchanged_focus_click_does_not_send_escape_before_typing():
+    provider = _mock_static_gui_provider("unchanged_dialog_frame")
+    agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+    await agent.observe("ws-1")
+
+    click_trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_CLICK,
+        "text field",
+        {"x": 240, "y": 180},
+        "Focus the visible text field",
+    )
+
+    assert click_trace.status == ActionExecutionStatus.FAILED
+    assert click_trace.recovery_attempted is False
+    assert provider.gui_action.await_count == 1
+    assert provider.gui_action.await_args.args[1].action == GUIActionType.CLICK
+
+
+@pytest.mark.asyncio
+async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
+    provider = _mock_static_gui_provider("unchanged_input_frame")
+    agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+    await agent.observe("ws-1")
+
+    typing_trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_TYPE,
+        "text field",
+        {"x": 240, "y": 180, "text": "folder name"},
+        "Enter text in the focused field",
+    )
+    keypress_trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_KEYPRESS,
+        "text field",
+        {"key": "Return"},
+        "Submit the focused field",
+    )
+
+    assert typing_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert keypress_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert typing_trace.recovery_attempted is False
+    assert keypress_trace.recovery_attempted is False
+    actions = [call.args[1].action for call in provider.gui_action.call_args_list]
+    assert actions == [
+        GUIActionType.CLICK,
+        GUIActionType.TYPE,
+        GUIActionType.KEYPRESS,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("updated_text", "changed_region", "expected_status", "expected_changed"),
+    [
+        ("Document - Saved", None, ActionExecutionStatus.SUCCESS, True),
+        ("Document - Untitled", None, ActionExecutionStatus.FAILED, False),
+        (
+            "Document - Untitled",
+            (10, 20, 90, 70),
+            ActionExecutionStatus.SUCCESS,
+            True,
+        ),
+    ],
+)
+async def test_state_only_gui_receipt_verifies_delta_without_screenshot(
+    updated_text, changed_region, expected_status, expected_changed
+):
+    class StateReceiptProvider:
+        async def gui_action_state(self, workspace_id, action, actor="operator"):
+            return ScreenObservation(
+                screenshot_base64="",
+                capture_age_ms=20,
+                controls_age_ms=15,
+                perception_version=2,
+                width=1280,
+                height=800,
+                active_window="Document",
+                visible_text=updated_text,
+                changed_region=changed_region,
+                detected_controls=[],
+                desktop_state="STATE_ONLY",
+            )
+
+        async def gui_action(self, workspace_id, action, actor="operator"):
+            raise AssertionError("state-only path should dispatch via gui_action_state")
+
+        async def status(self, workspace_id):
+            return MagicMock(active_application="Document", active_window="Document")
+
+    provider = StateReceiptProvider()
+    agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+    snapshot = agent.perception_bus.publish(
+        width=1280,
+        height=800,
+        active_window="Document",
+        controls=[],
+    )
+    screen = ScreenObservation(
+        screenshot_base64="",
+        capture_age_ms=20,
+        controls_age_ms=15,
+        perception_version=snapshot.version,
+        width=1280,
+        height=800,
+        active_window="Document",
+        visible_text="Document - Untitled",
+        detected_controls=[],
+        desktop_state="STATE_ONLY",
+    )
+    agent._last_world_observation = ComputerWorldObservation(
+        screen=screen,
+        active_application="Document",
+        perception_version=snapshot.version,
+        observation_age_ms=20,
+    )
+    agent._last_observed_screen = screen
+    agent._last_gui_state_observation = screen
+    agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+
+    trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_CLICK,
+        "100,100",
+        {"x": 100, "y": 100},
+        "Save document",
+    )
+
+    assert trace.status == expected_status, trace.actual_observation
+    assert trace.state_changed is expected_changed
+    assert trace.verification_evidence.startswith("accessibility_state_changed=")
+    assert "ACCESSIBILITY STATE" in trace.actual_observation or expected_changed is False
+    assert agent._last_screenshot_b64 == ""
+    assert agent._last_gui_state_observation.desktop_state == "STATE_ONLY"
 
 
 # =========================================================================
@@ -150,6 +310,7 @@ async def test_watchdog_aborts_run_mission_before_burning_quota():
 async def test_typing_verification_rejects_garbage_and_sentinel_text():
     provider = _mock_static_gui_provider("diff_screen_1")
     agent = ComputerUseAgent(computer_provider=provider)
+    await agent.observe("ws-1")
 
     garbage_payloads = [
         {"text": "undefined"},
@@ -169,13 +330,17 @@ async def test_typing_verification_rejects_garbage_and_sentinel_text():
             "Type into input",
         )
         assert trace.status == ActionExecutionStatus.BLOCKED, f"Payload {p} was not fail-closed: {trace.status}"
-        assert "[TYPING VERIFICATION FAILED]" in trace.actual_observation
+        assert (
+            "[TYPING VERIFICATION FAILED]" in trace.actual_observation
+            or "fresh accessibility evidence did not identify" in trace.actual_observation
+        )
 
 
 @pytest.mark.asyncio
 async def test_typing_verification_rejects_wrong_field_targets():
     provider = _mock_static_gui_provider("diff_screen_2")
     agent = ComputerUseAgent(computer_provider=provider)
+    await agent.observe("ws-1")
 
     wrong_targets = [
         "submit button",
@@ -194,14 +359,42 @@ async def test_typing_verification_rejects_wrong_field_targets():
             f"Type into {target}",
         )
         assert trace.status == ActionExecutionStatus.BLOCKED, f"Target {target} was not fail-closed: {trace.status}"
-        assert "[TYPING VERIFICATION FAILED]" in trace.actual_observation
-        assert "wrong field" in trace.actual_observation.lower()
+        assert (
+            "[TYPING VERIFICATION FAILED]" in trace.actual_observation
+            or "fresh accessibility evidence did not identify" in trace.actual_observation
+        )
 
 
 @pytest.mark.asyncio
 async def test_typing_verification_accepts_valid_field_and_text():
     provider = _mock_static_gui_provider("diff_screen_3")
+    screen_obs = provider.screenshot.return_value
+    screen_obs = screen_obs.model_copy(
+        update={
+            "detected_controls": [
+                {
+                    "name": "search input",
+                    "role": "entry",
+                    "bbox": (220, 160, 80, 40),
+                    "bbox_format": "xywh",
+                    "source": "atspi",
+                    "confidence": 0.95,
+                    "freshness_ms": 0,
+                    "editable": True,
+                    "focused": True,
+                }
+            ]
+        }
+    )
+    provider.screenshot.side_effect = [
+        screen_obs,
+        screen_obs,
+        screen_obs.model_copy(
+            update={"screenshot_base64": "diff_screen_3_after_typing"}
+        ),
+    ]
     agent = ComputerUseAgent(computer_provider=provider)
+    await agent.observe("ws-1")
 
     trace = await agent.execute_action(
         "ws-1",
@@ -210,7 +403,7 @@ async def test_typing_verification_accepts_valid_field_and_text():
         {"text": "my search query"},
         "Type query",
     )
-    assert trace.status == ActionExecutionStatus.COMPLETED
+    assert trace.status == ActionExecutionStatus.COMPLETED, trace.actual_observation
     assert "Typed 15 chars" in trace.actual_observation
 
 
@@ -240,7 +433,7 @@ async def test_judge_rejects_unverified_gui_actions_with_none_exit_code():
     )
 
     eval_result = await judge.evaluate_sub_mission("ws-1", sub_m, result)
-    assert eval_result.verdict == JudgeVerdict.FALSIFIED
+    assert eval_result.verdict == JudgeVerdict.INCONCLUSIVE
     assert eval_result.self_attestation_rejected is True
 
 

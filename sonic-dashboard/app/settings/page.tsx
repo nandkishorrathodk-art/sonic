@@ -73,7 +73,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="min-h-screen bg-ink-950 bg-grid-glow max-w-4xl mx-auto p-6 space-y-6 font-sans">
+    <main className="sonic-direct-page min-h-screen max-w-4xl mx-auto p-4 sm:p-6 space-y-6 font-sans">
       <div className="pb-4 border-b border-ink-800 flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2">
@@ -159,6 +159,6 @@ export default function SettingsPage() {
           <input type="text" value={allowedDomains} onChange={(e) => setAllowedDomains(e.target.value)} className="input-field !text-xs" />
         </div>
       </div>
-    </div>
+    </main>
   );
 }

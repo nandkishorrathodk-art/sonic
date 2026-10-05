@@ -1,11 +1,14 @@
 """Tests for the Boss Agent + SubAgents orchestration system."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sonic.computer_use.boss import BossAgent
+from sonic.agents.judge import JudgeEvaluation, JudgeVerdict
+from sonic.agents.task_graph import TaskGraphError
+from sonic.computer_use.boss import BossAgent, _sub_mission_display_name
 from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionType,
@@ -13,11 +16,29 @@ from sonic.computer_use.models import (
 )
 from sonic.computer_use.models_boss import (
     BossReport,
-    BossThinking,
     Phase,
     SubMission,
     SubMissionResult,
 )
+
+
+@pytest.fixture(autouse=True)
+def _confirm_successful_worker_receipts(monkeypatch):
+    """Keep orchestration unit tests independent from the vision Judge implementation."""
+    async def evaluate(self, workspace_id, sub_mission, result, worker_agent_id="worker"):
+        if result.success:
+            return JudgeEvaluation(
+                verdict=JudgeVerdict.CONFIRMED,
+                confidence=1.0,
+                notes="Test fixture independently confirms the worker receipt.",
+            )
+        return JudgeEvaluation(
+            verdict=JudgeVerdict.INCONCLUSIVE,
+            confidence=0.0,
+            notes="Test fixture received no successful worker outcome.",
+        )
+
+    monkeypatch.setattr("sonic.agents.judge.JudgeAgent.evaluate_sub_mission", evaluate)
 
 
 def _make_llm_mock(responses: list[str]):
@@ -67,6 +88,14 @@ def _make_trace(
     )
 
 
+def test_boss_worker_name_supports_older_sub_mission_records():
+    legacy_sub_mission = SimpleNamespace(goal="inspect the visible desktop")
+
+    assert _sub_mission_display_name(legacy_sub_mission, 3) == (
+        "Worker 3: inspect the visible desktop"
+    )
+
+
 @pytest.mark.asyncio
 async def test_boss_strategic_decomposition_creates_phase():
     """Boss deep-thinks and decomposes objective into sub-missions."""
@@ -93,15 +122,17 @@ async def test_boss_strategic_decomposition_creates_phase():
     assert len(boss.thinking_log) == 1
     assert boss.thinking_log[0].thinking_type == "strategic_decomposition"
     assert "reconnaissance" in boss.thinking_log[0].content.lower()
+    prompt = llm.complete.await_args.args[0].messages[1].content
+    assert "Never invent a product, application, or executable name" in prompt
 
 
 @pytest.mark.asyncio
 async def test_boss_planning_only_result_is_not_reported_complete():
-    """A no-submission plan must not claim the user's objective was completed."""
+    """An empty objective must not create a worker or claim completion."""
     llm = _make_llm_mock(["{}"])
     boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=llm)
 
-    report = await boss.run(workspace_id="ws-1", objective="inspect the target")
+    report = await boss.run(workspace_id="ws-1", objective="")
 
     assert report.status == "INCOMPLETE"
     assert report.total_actions == 0
@@ -109,7 +140,7 @@ async def test_boss_planning_only_result_is_not_reported_complete():
 
 @pytest.mark.asyncio
 async def test_boss_delegates_when_llm_omits_workers_for_actionable_objective():
-    """A non-trivial objective must not be dropped as a planning no-op."""
+    """An actionable objective must not be dropped when planning omits workers."""
     llm = _make_llm_mock([json.dumps({
         "domain": "WEB",
         "thinking": "The objective requires live browser navigation and repository discovery.",
@@ -125,6 +156,18 @@ async def test_boss_delegates_when_llm_omits_workers_for_actionable_objective():
     assert phase is not None
     assert len(phase.sub_missions) == 1
     assert "open the browser" in phase.sub_missions[0].goal.lower()
+
+
+@pytest.mark.asyncio
+async def test_boss_delegates_concise_objective_when_planner_omits_workers():
+    llm = _make_llm_mock(["{}"])
+    boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=llm)
+
+    phase = await boss._strategic_decomposition("pwd")
+
+    assert phase is not None
+    assert len(phase.sub_missions) == 1
+    assert "pwd" in phase.sub_missions[0].goal
 
 
 @pytest.mark.asyncio
@@ -144,13 +187,22 @@ async def test_boss_sub_agent_dispatch_creates_focused_agent():
         boss = BossAgent(computer_provider=computer, llm_router=llm)
         sub_mission = SubMission(id="sub-1", goal="scan target endpoints", max_steps=3)
 
-        result = await boss._dispatch_sub_agent("ws-1", sub_mission)
+        def interrupt_check():
+            return True
+
+        result = await boss._dispatch_sub_agent(
+            "ws-1",
+            sub_mission,
+            interrupt_check=interrupt_check,
+        )
 
         assert isinstance(result, SubMissionResult)
         assert result.sub_mission_id == "sub-1"
         assert result.success is True
         assert len(result.traces) == 1
         assert result.actions_taken == 1
+        mock_agent.run_mission.assert_awaited_once()
+        assert mock_agent.run_mission.await_args.kwargs["interrupt_check"] is interrupt_check
         # Verify ComputerUseAgent was instantiated with focused max_actions
         MockAgentClass.assert_called_once()
         _, kwargs = MockAgentClass.call_args
@@ -329,6 +381,164 @@ async def test_boss_stops_when_phase_has_no_execution_evidence():
 
 
 @pytest.mark.asyncio
+async def test_boss_does_not_replan_after_screenshot_only_worker():
+    """A screenshot proves observation, not progress toward a GUI task."""
+    boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=MagicMock())
+    first_phase = Phase(
+        phase_number=1,
+        name="Observe",
+        sub_missions=[SubMission(id="sub-observe", goal="create a folder in the GUI", max_steps=2)],
+    )
+    screenshot_only_result = SubMissionResult(
+        sub_mission_id="sub-observe",
+        goal="create a folder in the GUI",
+        success=False,
+        status="FAILED",
+        actions_taken=1,
+        traces=[_make_trace(action_type=ComputerActionType.GUI_SCREENSHOT, target="visible-desktop")],
+        findings_summary="A screenshot was captured, but no GUI action was completed.",
+    )
+
+    with patch.object(boss, "_strategic_decomposition", AsyncMock(return_value=first_phase)), \
+         patch.object(boss, "_dispatch_sub_agent", AsyncMock(return_value=screenshot_only_result)), \
+         patch.object(boss, "_aggregate_findings", AsyncMock(return_value="")), \
+         patch.object(boss, "_check_objective_complete", AsyncMock(return_value=(False, ""))), \
+         patch.object(boss, "_plan_next_phase", AsyncMock()) as plan_next:
+        report = await boss.run(workspace_id="ws-1", objective="create a folder in the GUI")
+
+    assert len(report.phases) == 1
+    assert report.status != "COMPLETE"
+    plan_next.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_boss_does_not_replan_after_unverified_gui_action_without_state_change():
+    boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=MagicMock())
+    first_phase = Phase(
+        phase_number=1,
+        name="Create",
+        sub_missions=[
+            SubMission(id="sub-create", goal="create a folder in the GUI", plane="gui")
+        ],
+    )
+    failed_result = SubMissionResult(
+        sub_mission_id="sub-create",
+        goal="create a folder in the GUI",
+        success=False,
+        status="FAILED",
+        actions_taken=1,
+        traces=[
+            _make_trace(
+                action_type=ComputerActionType.GUI_CLICK,
+                target="Location Selector",
+            )
+        ],
+        findings_summary="The proposed click produced no verified desktop change.",
+    )
+
+    with patch.object(boss, "_strategic_decomposition", AsyncMock(return_value=first_phase)), \
+         patch.object(boss, "_dispatch_sub_agent", AsyncMock(return_value=failed_result)), \
+         patch.object(boss, "_aggregate_findings", AsyncMock(return_value="")), \
+         patch.object(boss, "_check_objective_complete", AsyncMock(return_value=(False, ""))), \
+         patch.object(boss, "_plan_next_phase", AsyncMock()) as plan_next:
+        report = await boss.run(
+            workspace_id="ws-1",
+            objective="create a folder in the GUI",
+            requested_plane="gui",
+        )
+
+    assert len(report.phases) == 1
+    plan_next.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_boss_task_graph_orders_forward_dependencies_and_tracks_worker_ids():
+    boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=MagicMock())
+    inspect = SubMission(
+        id="inspect",
+        name="Inspect resulting folder",
+        goal="Inspect the resulting folder",
+        depends_on=["create"],
+        plane="gui",
+    )
+    create = SubMission(
+        id="create",
+        name="Create requested folder",
+        goal="Create the requested folder",
+        plane="gui",
+    )
+    phase = Phase(
+        phase_number=1,
+        name="GUI task",
+        sub_missions=[inspect, create],
+    )
+    dispatch_order: list[str] = []
+    events: list[tuple[str, dict]] = []
+
+    async def dispatch(workspace_id, sub_mission, *args, **kwargs):
+        dispatch_order.append(sub_mission.id)
+        return SubMissionResult(
+            sub_mission_id=sub_mission.id,
+            goal=sub_mission.goal,
+            success=True,
+            status="SUCCESS",
+            evidence_verified=True,
+            findings_summary=f"Completed {sub_mission.name}.",
+            actions_taken=1,
+            traces=[_make_trace(action_type=ComputerActionType.GUI_CLICK)],
+        )
+
+    async def on_event(event_type, data):
+        events.append((event_type, data))
+
+    with patch.object(boss, "_strategic_decomposition", AsyncMock(return_value=phase)), \
+         patch.object(boss, "_dispatch_sub_agent", AsyncMock(side_effect=dispatch)), \
+         patch.object(boss, "_aggregate_findings", AsyncMock(return_value="Verified task output")), \
+         patch.object(boss, "_check_objective_complete", AsyncMock(return_value=(True, "verified"))), \
+         patch.object(
+             boss,
+             "_synthesize_final_report",
+             AsyncMock(return_value=BossReport(objective="complete", status="SUCCESS")),
+         ):
+        await boss.run(
+            workspace_id="ws-1",
+            objective="Create and inspect a folder in the GUI",
+            phase_callback=on_event,
+        )
+
+    assert dispatch_order == ["create", "inspect"]
+    assert boss.task_graph.get_task("create").status.value == "succeeded"
+    assert boss.task_graph.get_task("inspect").status.value == "succeeded"
+    assert boss.task_graph.get_task("create").agent_id == "sub-agent-1"
+    assert boss.task_graph.get_task("inspect").agent_id == "sub-agent-2"
+    graph_events = [data for event_type, data in events if event_type == "task_graph"]
+    assert graph_events
+    assert any(
+        task["task_id"] == "inspect" and task["status"] == "pending"
+        for task in graph_events[0]["tasks"]
+    )
+
+
+def test_boss_rejects_unknown_task_graph_dependencies():
+    boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=MagicMock())
+    phase = Phase(
+        phase_number=1,
+        name="Invalid graph",
+        sub_missions=[
+            SubMission(
+                id="orphan",
+                name="Orphan task",
+                goal="This task has an unknown dependency",
+                depends_on=["missing"],
+            )
+        ],
+    )
+
+    with pytest.raises(TaskGraphError, match="unknown dependencies"):
+        boss._sync_phase_to_graph(phase)
+
+
+@pytest.mark.asyncio
 async def test_boss_safety_inherited_by_sub_agents():
     """Safety policy is propagated to all SubAgents with self_host=True."""
     decomp_json = json.dumps({
@@ -380,8 +590,8 @@ async def test_boss_phase_callback_streams_events():
         "thinking": "Two quick tasks.",
         "phase_name": "Quick Tasks",
         "sub_missions": [
-            {"goal": "Task 1", "max_steps": 2, "priority": 2},
-            {"goal": "Task 2", "max_steps": 2, "priority": 1},
+            {"name": "First Worker", "goal": "Task 1", "role": "computer_operator", "plane": "gui", "max_steps": 2, "priority": 2},
+            {"name": "Second Worker", "goal": "Task 2", "role": "software_builder", "plane": "headless", "max_steps": 2, "priority": 1},
         ],
     })
     llm = _make_llm_mock([
@@ -397,7 +607,7 @@ async def test_boss_phase_callback_streams_events():
     events = []
 
     async def _on_event(event_type, data):
-        events.append(event_type)
+        events.append((event_type, data))
 
     with patch("sonic.computer_use.agent.ComputerUseAgent") as MockAgentClass:
         mock_agent = MagicMock()
@@ -407,11 +617,22 @@ async def test_boss_phase_callback_streams_events():
         boss = BossAgent(computer_provider=computer, llm_router=llm)
         await boss.run(workspace_id="ws-1", objective="run tasks", phase_callback=_on_event)
 
-        assert "boss_thinking" in events
-        assert "sub_dispatch" in events
-        assert "sub_report" in events
-        assert "phase_complete" in events
-        assert "boss_report" in events
+        event_types = [event for event, _ in events]
+        assert "boss_thinking" in event_types
+        dispatches = [data for event, data in events if event == "sub_dispatch"]
+        reports = [data for event, data in events if event == "sub_report"]
+        first_dispatch = next(data for data in dispatches if data["agent_name"] == "First Worker")
+        first_report = next(data for data in reports if data["agent_name"] == "First Worker")
+        assert first_dispatch["agent_id"] == "sub-agent-1"
+        assert first_dispatch["status"] == "RUNNING"
+        assert first_dispatch["role"] == "computer_operator"
+        assert first_dispatch["plane"] == "gui"
+        assert first_report["agent_id"] == "sub-agent-1"
+        assert first_report["status"] == "SUCCESS"
+        assert first_report["role"] == "computer_operator"
+        assert first_report["plane"] == "gui"
+        assert "phase_complete" in event_types
+        assert "boss_report" in event_types
 
 
 @pytest.mark.asyncio

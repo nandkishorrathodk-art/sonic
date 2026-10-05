@@ -60,8 +60,6 @@ class EngagementManager:
         sandbox_provider: Any = None,
         computer_provider: Any = None,
         reproduction_engine: Any = None,
-        bug_bounty_client: Any = None,
-        bugbounty_client: Any = None,
         **kwargs: Any,
     ):
         self.router = model_router
@@ -76,8 +74,6 @@ class EngagementManager:
         # ComputerUseAgent and it now prefers this GUI body.
         self.computer_provider = computer_provider if computer_provider is not None else self.provider
         self.reproduction_engine = reproduction_engine
-        self.bug_bounty_client = bug_bounty_client if bug_bounty_client is not None else bugbounty_client
-        self.bugbounty_client = self.bug_bounty_client
 
         self.active_engagements: dict[str, dict] = {}
         self.agents: dict[str, Any] = {}
@@ -238,7 +234,7 @@ class EngagementManager:
 
         default_phases = [
             "recon", "hypothesis", "research", "static", "dynamic",
-            "computer_dynamic", "verify", "chain", "report", "submit",
+            "computer_dynamic", "verify", "chain", "report",
         ]
         run_phases = phases or default_phases
         results: dict[str, Any] = {}
@@ -293,9 +289,6 @@ class EngagementManager:
 
                 elif phase == "report":
                     results["report"] = await self._run_report(engagement_id, target, results)
-
-                elif phase == "submit":
-                    results["submit"] = await self._run_submit(engagement_id, results)
 
                 logger.info("phase_complete", engagement=engagement_id, phase=phase)
 
@@ -588,6 +581,7 @@ class EngagementManager:
                     llm=self.router,
                     vector_memory=get_vector_memory(),
                     toolsmith=toolsmith,
+                    tenant_id=tenant_id,
                 )
                 extra_agent_kwargs["toolsmith"] = toolsmith
                 extra_agent_kwargs["method_lab"] = method_lab
@@ -609,7 +603,6 @@ class EngagementManager:
             agent = ComputerUseAgent(
                 computer_provider=provider,
                 safety=safety,
-                browser=None,
                 gui_only=False,
                 observe_desktop=True,
                 tenant_id=tenant_id,
@@ -735,43 +728,6 @@ class EngagementManager:
                     chains_found=len(chains))
         return {"chains": chain_dicts}
 
-    async def _run_submit(self, engagement_id: str, results: dict) -> dict:
-        """Auto-format and optionally submit findings to bug bounty platforms (Gap #4).
-
-        When a BugBountyClient is configured, formats verified findings
-        as platform-ready draft reports. Does NOT auto-submit without
-        explicit confirmation ??? generates drafts for operator review.
-        """
-        client = self.bug_bounty_client or self.bugbounty_client
-        if client is None:
-            return {"skipped": True, "reason": "No BugBountyClient configured"}
-
-        all_findings = self._collect_findings(results)
-        reportable = [
-            f for f in all_findings
-            if (f.get("severity", "").lower() in ("critical", "high"))
-        ]
-        if not reportable:
-            return {"drafts": [], "reason": "No high/critical findings to report"}
-
-        drafts = []
-        for finding in reportable:
-            try:
-                draft = client.format_report(finding)
-                drafts.append({
-                    "title": finding.get("title", ""),
-                    "severity": finding.get("severity", ""),
-                    "draft": draft if isinstance(draft, dict) else str(draft),
-                })
-            except Exception as e:
-                logger.warning("bugbounty_format_failed",
-                             title=finding.get("title", ""), error=str(e))
-
-        logger.info("bugbounty_drafts_generated",
-                    engagement=engagement_id,
-                    drafts=len(drafts))
-        return {"drafts": drafts, "auto_submitted": False}
-
     async def _run_report(self, engagement_id: str, target: str, results: dict) -> dict:
         """Compile a final report from all verified findings."""
         report = await self.get_findings_report(engagement_id)
@@ -875,53 +831,6 @@ class EngagementManager:
             },
             "findings": findings,
             "generated_at": datetime.now(UTC).isoformat(),
-        }
-
-    async def prepare_bug_bounty_reports(
-        self, engagement_id: str, platform: str = "hackerone",
-        tenant_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Render every VERIFIED finding into a platform-ready draft report.
-
-        This wires the (previously dead) BugBountyClient into the engagement
-        pipeline: verified findings no longer sit idle in graph memory, they
-        become submission-ready reports. Returns the reports without submitting
-        them anywhere ??? submission to HackerOne/Bugcrowd still requires API
-        keys and an explicit operator action.
-        """
-        report = await self.get_findings_report(engagement_id, tenant_id=tenant_id)
-        findings = report.get("findings", [])
-
-        client = self.bug_bounty_client
-        if client is None:
-            from sonic.integrations.bugbounty import BugBountyClient
-            client = BugBountyClient()
-
-        drafts = []
-        for finding in findings:
-            try:
-                drafts.append(client.format_report(finding, platform=platform))
-            except Exception as e:
-                logger.warning("bugbounty_report_failed", finding=finding.get("uid", ""), error=str(e))
-
-        logger.info(
-            "bugbounty_reports_prepared",
-            engagement_id=engagement_id, verified=len(findings), drafts=len(drafts),
-        )
-        return {
-            "engagement_id": engagement_id,
-            "platform": platform,
-            "total_verified": len(findings),
-            "draft_reports": [
-                {
-                    "title": d.title,
-                    "severity": d.severity,
-                    "vulnerability_type": d.vulnerability_type,
-                    "description": d.description,
-                    "poc": d.poc,
-                }
-                for d in drafts
-            ],
         }
 
     def list_agents(self) -> list[dict]:

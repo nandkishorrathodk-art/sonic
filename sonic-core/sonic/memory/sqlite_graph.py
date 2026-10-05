@@ -30,6 +30,7 @@ import aiosqlite
 
 from sonic.logger import get_logger
 from sonic.memory.schemas import (
+    ALL_TENANTS,
     AgentNode,
     AssetNode,
     EngagementNode,
@@ -41,6 +42,10 @@ from sonic.memory.schemas import (
 )
 
 logger = get_logger(__name__)
+
+
+def _tenant_filter(tenant_id: str | None) -> str | None:
+    return None if tenant_id == ALL_TENANTS else (tenant_id or "default")
 
 
 def _default_db_path() -> str:
@@ -202,9 +207,10 @@ class SqliteGraph:
 
     async def _get_node(self, label: str, uid: str, tenant_id: str | None = None) -> dict | None:
         assert self._db is not None
-        if tenant_id:
+        scope = _tenant_filter(tenant_id)
+        if scope is not None:
             sql = "SELECT label, props_json, tenant_id FROM memory_nodes WHERE uid = ? AND label = ? AND tenant_id = ?"
-            params: tuple = (uid, label, tenant_id)
+            params: tuple = (uid, label, scope)
         else:
             sql = "SELECT label, props_json, tenant_id FROM memory_nodes WHERE uid = ? AND label = ?"
             params = (uid, label)
@@ -219,8 +225,12 @@ class SqliteGraph:
 
     async def _update_node(self, label: str, uid: str, updates: dict[str, Any], tenant_id: str | None = None) -> bool:
         assert self._db is not None
+        if _tenant_filter(tenant_id) is None:
+            return False
         existing = await self._get_node(label, uid, tenant_id=tenant_id)
         if existing is None:
+            return False
+        if "tenant_id" in updates and updates["tenant_id"] != existing.get("tenant_id"):
             return False
         merged = {**existing, **updates}
         storable = {k: v for k, v in merged.items() if k != "_label"}
@@ -234,6 +244,8 @@ class SqliteGraph:
 
     async def _delete_node(self, label: str, uid: str, tenant_id: str | None = None) -> bool:
         assert self._db is not None
+        if _tenant_filter(tenant_id) is None:
+            return False
         existing = await self._get_node(label, uid, tenant_id=tenant_id)
         if existing is None:
             return False
@@ -253,6 +265,13 @@ class SqliteGraph:
         tenant_id: str | None = None,
     ) -> bool:
         assert self._db is not None
+        scope = _tenant_filter(tenant_id)
+        if scope is None:
+            return False
+        source = await self._get_node(from_label, from_uid, tenant_id=scope)
+        target = await self._get_node(to_label, to_uid, tenant_id=scope)
+        if source is None or target is None:
+            return False
         await self._db.execute(
             "INSERT INTO memory_relationships "
             "(from_uid, to_uid, type, from_label, to_label, props_json, tenant_id) "
@@ -260,7 +279,7 @@ class SqliteGraph:
             (
                 from_uid, to_uid, rel_type, from_label, to_label,
                 json.dumps(props or {}, default=str),
-                tenant_id or "default",
+                scope,
             ),
         )
         await self._db.commit()
@@ -374,9 +393,10 @@ class SqliteGraph:
             "WHERE r.type = ? AND r.from_uid = ? AND n.label = 'Evidence'"
         )
         params: list[Any] = [RelationshipType.HAS_EVIDENCE, finding_id]
-        if tenant_id:
-            sql += " AND r.tenant_id = ?"
-            params.append(tenant_id)
+        scope = _tenant_filter(tenant_id)
+        if scope is not None:
+            sql += " AND r.tenant_id = ? AND n.tenant_id = ?"
+            params.extend((scope, scope))
         out: list[dict] = []
         async with self._db.execute(sql, params) as cur:
             for label_val, props_json in await cur.fetchall():
@@ -407,9 +427,10 @@ class SqliteGraph:
         assert self._db is not None
         sql = "SELECT label, props_json FROM memory_nodes WHERE label = ?"
         params: list[Any] = [label]
-        if tenant_id:
+        scope = _tenant_filter(tenant_id)
+        if scope is not None:
             sql += " AND tenant_id = ?"
-            params.append(tenant_id)
+            params.append(scope)
         rows: list[dict] = []
         async with self._db.execute(sql, params) as cur:
             for label_val, props_json in await cur.fetchall():
@@ -427,9 +448,10 @@ class SqliteGraph:
         assert self._db is not None
         sql = "SELECT label, props_json FROM memory_nodes"
         p: list[Any] = []
-        if tenant_id:
+        scope = _tenant_filter(tenant_id)
+        if scope is not None:
             sql += " WHERE tenant_id = ?"
-            p.append(tenant_id)
+            p.append(scope)
         out = []
         async with self._db.execute(sql, p) as cur:
             for label_val, props_json in await cur.fetchall():
@@ -464,13 +486,14 @@ class SqliteGraph:
         node_sql = "SELECT label, tenant_id FROM memory_nodes"
         rel_sql = "SELECT COUNT(*) FROM memory_relationships"
         rel_params: list[Any] = []
-        if tenant_id:
+        scope = _tenant_filter(tenant_id)
+        if scope is not None:
             node_sql = "SELECT label FROM memory_nodes WHERE tenant_id = ?"
             rel_sql = "SELECT COUNT(*) FROM memory_relationships WHERE tenant_id = ?"
-            rel_params = [tenant_id]
+            rel_params = [scope]
         labels: dict[str, int] = {}
         total_nodes = 0
-        async with self._db.execute(node_sql, [tenant_id] if tenant_id else []) as cur:
+        async with self._db.execute(node_sql, [scope] if scope is not None else []) as cur:
             for row in await cur.fetchall():
                 lbl = row[0]
                 labels[lbl] = labels.get(lbl, 0) + 1
@@ -490,9 +513,10 @@ class SqliteGraph:
         assert self._db is not None
         node_sql = "SELECT uid, label, props_json FROM memory_nodes"
         node_params: list[Any] = []
-        if tenant_id:
+        scope = _tenant_filter(tenant_id)
+        if scope is not None:
             node_sql += " WHERE tenant_id = ?"
-            node_params.append(tenant_id)
+            node_params.append(scope)
 
         nodes: list[dict] = []
         async with self._db.execute(node_sql, node_params) as cur:
@@ -511,9 +535,9 @@ class SqliteGraph:
         node_ids = {n["id"] for n in nodes}
         rel_sql = "SELECT from_uid, to_uid, type FROM memory_relationships"
         rel_params: list[Any] = []
-        if tenant_id:
+        if scope is not None:
             rel_sql += " WHERE tenant_id = ?"
-            rel_params.append(tenant_id)
+            rel_params.append(scope)
 
         edges: list[dict] = []
         async with self._db.execute(rel_sql, rel_params) as cur:
@@ -526,4 +550,3 @@ class SqliteGraph:
                     })
 
         return nodes, edges
-

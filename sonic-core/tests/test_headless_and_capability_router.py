@@ -174,13 +174,22 @@ async def test_async_tcp_port_scanning(monkeypatch):
     )
 
     # Start an ephemeral TCP server to represent an active listening port (e.g. 12000 or ephemeral)
+    async def close_client_connection(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        writer.close()
+        with suppress(Exception):
+            await writer.wait_closed()
+
     server = None
     target_port = 12000
     try:
-        server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", target_port)
+        server = await asyncio.start_server(
+            close_client_connection, "127.0.0.1", target_port
+        )
     except OSError:
         # If port 12000 is occupied by the host environment, bind to an ephemeral port
-        server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+        server = await asyncio.start_server(
+            close_client_connection, "127.0.0.1", 0
+        )
         target_port = server.sockets[0].getsockname()[1]
 
     # Use a port that is guaranteed closed (pick high port)
@@ -251,6 +260,20 @@ def test_capability_router_action_classification():
     assert (
         CapabilityRouter.route_action(ComputerActionType.BROWSER_NAVIGATE, {"render_js": True})
         == ExecutionSubstrate.COMPUTER
+    )
+    assert (
+        CapabilityRouter.route_action(
+            ComputerActionType.BROWSER_NAVIGATE, {}, requested_plane="gui"
+        )
+        == ExecutionSubstrate.COMPUTER
+    )
+    assert (
+        CapabilityRouter.route_action(
+            ComputerActionType.BROWSER_NAVIGATE,
+            {"interactive": True},
+            requested_plane="headless",
+        )
+        == ExecutionSubstrate.HEADLESS
     )
 
     # Headless actions -> HEADLESS

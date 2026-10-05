@@ -99,12 +99,8 @@ export const api = {
     apiClient<any>(`/workstation/state?session_id=${encodeURIComponent(sessionId)}`, { timeout: 30000 }),
 
   listSessions: async (): Promise<SessionItem[]> => {
-    try {
-      const data = await apiClient<any>("/workstation/sessions");
-      return normalizeSessionList(data);
-    } catch {
-      return [];
-    }
+    const data = await apiClient<any>("/workstation/sessions");
+    return normalizeSessionList(data);
   },
 
   deleteSession: (sessionId: string) =>
@@ -396,12 +392,6 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  createOrganizationProject: (payload: any) =>
-    apiClient<any>("/organization/projects", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-
   createWorkItem: (payload: any) =>
     apiClient<any>("/organization/work-items", {
       method: "POST",
@@ -422,9 +412,6 @@ export const api = {
     apiClient<any>(`/agents/${encodeURIComponent(agentId)}`),
 
   // Persistent AI employee organization and work ownership
-  getOrganization: () =>
-    apiClient<any>("/organization/"),
-
   createOrganizationEmployee: (payload: Record<string, unknown>) =>
     apiClient<any>("/organization/employees", {
       method: "POST",

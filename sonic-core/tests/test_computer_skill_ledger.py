@@ -1,8 +1,11 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+import base64
+import io
 
 import pytest
+from PIL import Image
 
 from sonic.computer.models import ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
@@ -45,8 +48,26 @@ def test_skill_ledger_handles_dynamic_inventory(tmp_path: Path, applications: li
 
 @pytest.mark.asyncio
 async def test_agent_learns_inventory_and_successful_gui_action(tmp_path: Path):
+    def image(color: str) -> str:
+        buffer = io.BytesIO()
+        Image.new("RGB", (4, 4), color=color).save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    screen_before = ScreenObservation(
+        screenshot_base64=image("white"),
+        width=1280,
+        height=800,
+        desktop_state="INTERACTIVE",
+        active_window="Research Desk",
+        visible_text="Research workspace",
+        capture_age_ms=0,
+        controls_age_ms=0,
+    )
+    screen_after = screen_before.model_copy(
+        update={"screenshot_base64": image("black")}
+    )
     provider = SimpleNamespace(
-        screenshot=AsyncMock(return_value=ScreenObservation(width=1280, height=800)),
+        screenshot=AsyncMock(return_value=screen_before),
         status=AsyncMock(
             return_value=SimpleNamespace(
                 active_application="Research Desk",
@@ -62,7 +83,7 @@ async def test_agent_learns_inventory_and_successful_gui_action(tmp_path: Path):
         terminal=AsyncMock(
             return_value=SimpleNamespace(stdout="__sonic_obs_ready__", stderr="", exit_code=0)
         ),
-        gui_action=AsyncMock(),
+        gui_action=AsyncMock(return_value=screen_after),
     )
     ledger = ComputerSkillLedger("tenant", root=str(tmp_path))
     agent = ComputerUseAgent(computer_provider=provider, skill_ledger=ledger)
@@ -80,7 +101,7 @@ async def test_agent_learns_inventory_and_successful_gui_action(tmp_path: Path):
     context = reloaded.context()
     assert "Research Desk" in context
     assert "Terminal" in context
-    assert trace.status == "SUCCESS"
+    assert trace.status.value == "COMPLETED"
     assert "GUI_CLICK" in context
     provider.application_list.assert_awaited_once()
     provider.gui_action.assert_awaited_once()
@@ -128,9 +149,16 @@ def test_workflow_is_observed_then_replayed_before_promotion(tmp_path: Path):
         "open-and-submit",
         {
             "status": "SUCCESS",
+            "exit_code": 0,
             "evidence": "confirmation was visible after replay",
             "metadata": {"replay_id": "replay-1", "postcondition": "confirmation-visible"},
         },
+        independent_verifier=lambda workflow_id, steps, replay: (
+            workflow_id == "open-and-submit"
+            and len(steps) == 2
+            and replay.get("exit_code") == 0
+            and replay.get("metadata", {}).get("postcondition") == "confirmation-visible"
+        ),
     )
     assert verified is not None
     assert verified.replay_attempts == 1
@@ -173,3 +201,21 @@ def test_workflow_rejects_empty_or_unobserved_steps(tmp_path: Path):
         "missing-observation", [{"action_type": "GUI_CLICK", "target": "control"}]
     ) is None
     assert ledger.workflows() == []
+
+
+def test_skill_ledger_tenant_paths_do_not_collide(tmp_path: Path):
+    left = ComputerSkillLedger("a/b", root=str(tmp_path))
+    right = ComputerSkillLedger("a_b", root=str(tmp_path))
+    left.observe_applications(["left-only"])
+    right.observe_applications(["right-only"])
+
+    assert left.path != right.path
+    assert "left-only" in ComputerSkillLedger("a/b", root=str(tmp_path)).context()
+    assert "left-only" not in right.context()
+
+
+def test_skill_ledger_requires_canonical_tenant_id(tmp_path: Path):
+    with pytest.raises(ValueError, match="tenant_id"):
+        ComputerSkillLedger("  ", root=str(tmp_path))
+    with pytest.raises(ValueError, match="tenant_id"):
+        ComputerSkillLedger("tenant ", root=str(tmp_path))

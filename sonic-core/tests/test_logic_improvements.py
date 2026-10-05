@@ -187,6 +187,25 @@ class TestMultimodalLLM:
         assert content[1]["type"] == "image_url"
         assert "data:image/png;base64,abc123" in content[1]["image_url"]["url"]
 
+    def test_nvidia_llama_vision_places_image_before_text_without_manual_tokens(self):
+        provider = CustomLLMProvider.__new__(CustomLLMProvider)
+        provider.name = "nvidia"
+        req = LLMRequest(
+            model="meta/llama-3.2-11b-vision-instruct",
+            messages=[
+                Message(
+                    role=MessageRole.USER,
+                    content="Describe the screenshot",
+                    images=[ImageContent(base64="abc123", media_type="image/png")],
+                )
+            ],
+        )
+
+        content = provider._to_openai_messages(req)[0]["content"]
+
+        assert content[0]["type"] == "image_url"
+        assert content[1] == {"type": "text", "text": "Describe the screenshot"}
+
     def test_openai_text_only_unchanged(self):
         """Non-vision messages should still use plain string content."""
         provider = CustomLLMProvider.__new__(CustomLLMProvider)

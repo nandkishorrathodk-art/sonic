@@ -35,7 +35,7 @@ class ProposeExperimentRequest(BaseModel):
 @router.post("/propose")
 async def propose_experiment(
     req: ProposeExperimentRequest,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_operator),
 ):
     """Propose a new self-development capability upgrade."""
     ok, proposal, message = _experiment_manager.propose(
@@ -78,7 +78,7 @@ async def get_experiment(
 @router.post("/{experiment_id}/rollback")
 async def rollback_experiment(
     experiment_id: str,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_operator),
 ):
     """Force rollback of an experiment."""
     ok = _experiment_manager.update_status(
@@ -152,6 +152,16 @@ async def promote_experiment(
         raise HTTPException(
             status_code=409,
             detail=f"Experiment must be in canary_testing or benchmarking to promote (currently '{exp.status}').",
+        )
+    if (
+        not exp.benchmark_completed
+        or not exp.benchmark_passed
+        or not exp.benchmark_eligible
+        or not exp.benchmark_suite_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Experiment cannot be promoted without a completed, passing, promotion-eligible benchmark.",
         )
     ok = _experiment_manager.update_status(
         experiment_id,

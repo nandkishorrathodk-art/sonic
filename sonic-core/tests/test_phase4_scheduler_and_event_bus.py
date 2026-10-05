@@ -10,6 +10,8 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from sonic.kernel.event_bus import EventBus, EventTopic
@@ -35,6 +37,46 @@ def test_event_bus_delivery():
     assert len(received_payloads) == 1
     assert received_payloads[0]["exp_id"] == "exp-1"
     assert len(bus.get_events(EventTopic.EXPERIMENT_RESULT)) == 1
+
+
+@pytest.mark.no_live_infra
+def test_event_bus_runs_async_handler_without_running_loop():
+    bus = EventBus()
+    received_payloads = []
+
+    async def on_result(event):
+        received_payloads.append(event.payload)
+
+    bus.subscribe(EventTopic.EXPERIMENT_RESULT, on_result)
+    bus.publish(
+        topic=EventTopic.EXPERIMENT_RESULT,
+        sender="worker",
+        payload={"status": "completed"},
+    )
+
+    assert received_payloads == [{"status": "completed"}]
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_event_bus_schedules_async_handler_on_running_loop():
+    bus = EventBus()
+    delivered = asyncio.Event()
+    received_payloads = []
+
+    async def on_result(event):
+        received_payloads.append(event.payload)
+        delivered.set()
+
+    bus.subscribe(EventTopic.EXPERIMENT_RESULT, on_result)
+    bus.publish(
+        topic=EventTopic.EXPERIMENT_RESULT,
+        sender="worker",
+        payload={"status": "completed"},
+    )
+    await asyncio.wait_for(delivered.wait(), timeout=1)
+
+    assert received_payloads == [{"status": "completed"}]
 
 
 @pytest.mark.no_live_infra

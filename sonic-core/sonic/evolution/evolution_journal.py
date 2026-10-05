@@ -1,5 +1,5 @@
 """
-SONIC v2 — Evolution Journal & Live `evolution.md` Logger
+SONIC — Evolution Journal & Live `evolution.md` Logger
 ==========================================================
 Durable audit trail and real-time evolution notes logger.
 
@@ -143,8 +143,44 @@ class EvolutionJournal:
             except Exception as e:
                 logger.warning("evolution_md_header_init_failed", error=str(e))
 
-    def record_entry(self, entry: JournalEntry) -> None:
+    def record_entry(
+        self,
+        entry: JournalEntry | None = None,
+        *,
+        entry_id: str | None = None,
+        goal_id: str | None = None,
+        title: str | None = None,
+        category: str | None = None,
+        status: str | None = None,
+        version_before: str | None = None,
+        version_after: str | None = None,
+        files: list[str] | None = None,
+        files_affected: list[str] | None = None,
+        lines_added: int = 0,
+        lines_removed: int = 0,
+        test_summary: str = "",
+        notes: str = "",
+        commit_hash: str = "",
+        timestamp: str | None = None,
+    ) -> None:
         """Saves a journal entry to SQLite and appends live notes to evolution.md."""
+        if entry is None:
+            entry = JournalEntry(
+                entry_id=entry_id or "evo-entry",
+                goal_id=goal_id or "",
+                title=title or "Evolution Task",
+                category=category or "codebase",
+                status=status or "promoted",
+                version_before=version_before or "0.1.0",
+                version_after=version_after or "0.1.1",
+                files_affected=files_affected or files or [],
+                lines_added=lines_added,
+                lines_removed=lines_removed,
+                test_summary=test_summary,
+                notes=notes,
+                commit_hash=commit_hash,
+                timestamp=timestamp or _now(),
+            )
         # 1. Save to SQLite
         with self._get_connection() as conn:
             conn.execute("""

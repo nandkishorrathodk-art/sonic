@@ -165,6 +165,8 @@ class SecurityTool(ABC):
             except Exception as e:
                 logger.error("tool_output_parsing_failed", tool=self.name, error=str(e))
                 err = f"Output parsing error: {str(e)}"
+                status = ToolStatus.FAILED
+                parsed_data = []
 
         # Build evidence
         evidence_items = []

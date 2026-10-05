@@ -5,7 +5,7 @@ Covers:
   - egress: IPv4-mapped IPv6 SSRF bypass is blocked
   - recon: CT-log subdomain scope-injection (endswith) is blocked
   - docker/local providers: process is killed on timeout (no leak)
-  - browser agent: safe close on partial launch + async context manager
+  - generic visible-desktop and application workflow robustness
   - rate limiter: release-without-acquire underflow guard
 """
 
@@ -13,11 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from unittest.mock import patch
 
 import pytest
 
-from sonic.agents.browser_agent import BrowserAgent
 from sonic.agents.recon import _is_subdomain_of
 from sonic.safety.rate_limiter import EgressRateLimiter
 from sonic.sandbox.egress import BLOCKED_NETWORKS, is_target_allowed
@@ -120,47 +118,6 @@ class TestProviderTimeoutKillsProcess:
             )
             assert ps.stdout.strip() == "", "orphaned process leaked after timeout"
         await provider.destroy_workspace("ws-timeout")
-
-
-# =====================================================================
-# browser agent: safe close + async context manager
-# =====================================================================
-
-class TestBrowserAgentSafeClose:
-    @pytest.mark.asyncio
-    async def test_close_without_launch_is_safe(self):
-        agent = BrowserAgent()
-        # Must not raise even though nothing was launched.
-        await agent.close()
-        assert agent._playwright is None
-        assert agent._browser is None
-        assert agent._using_playwright is False
-
-    @pytest.mark.asyncio
-    async def test_double_close_is_safe(self):
-        agent = BrowserAgent()
-        await agent.close()
-        await agent.close()  # idempotent
-
-    @pytest.mark.asyncio
-    async def test_async_context_manager_calls_close(self):
-        agent = BrowserAgent()
-        # launch() returns True even without playwright installed (httpx fallback),
-        # but close() must still run on exit via __aexit__.
-        with patch.object(BrowserAgent, "launch", return_value=True), \
-             patch.object(BrowserAgent, "close", return_value=None) as mock_close:
-            async with agent:
-                pass
-            mock_close.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_close_resets_all_handles(self):
-        agent = BrowserAgent()
-        # Simulate a partially-launched state.
-        agent._using_playwright = True
-        agent._active_window = None
-        await agent.close()
-        assert agent._using_playwright is False
 
 
 # =====================================================================
@@ -480,60 +437,6 @@ class TestHumanLikeInteraction:
         )
         assert v.allowed, f"BROWSER_DOWNLOAD must be allowed: {v.reason}"
 
-    @pytest.mark.asyncio
-    async def test_browser_download_requires_browser_agent(self):
-        """The action-map must parse GUI_DRAG with destination coords so the
-        agent can issue a real drag. This verifies the LLM-response parser maps
-        GUI_DRAG to ComputerActionType and accepts x2/y2 in the payload."""
-        from sonic.computer_use.agent import ComputerUseAgent
-        from sonic.computer_use.models import ComputerActionType
-
-        class _FakeComputer:
-            pass
-
-        agent = ComputerUseAgent.__new__(ComputerUseAgent)
-        # Exercise the static action_map the parser uses (no instance state).
-        amap = {
-            "GUI_DRAG": ComputerActionType.GUI_DRAG,
-            "GUI_WAIT": ComputerActionType.GUI_WAIT,
-            "BROWSER_WAIT": ComputerActionType.BROWSER_WAIT,
-            "BROWSER_DOWNLOAD": ComputerActionType.BROWSER_DOWNLOAD,
-        }
-        for name, expected in amap.items():
-            # The real map lives in _parse_llm_action; assert these keys exist
-            # in ComputerActionType so the parser wiring is valid.
-            assert getattr(ComputerActionType, name).value == expected.value
-
-    def test_browser_agent_has_wait_and_download_methods(self):
-        """BrowserAgent exposes the human-like primitives: wait_for_element
-        and download (with accept_downloads enabled)."""
-        from sonic.agents.browser_agent import BrowserAgent
-        b = BrowserAgent()
-        assert hasattr(b, "wait_for_element")
-        assert hasattr(b, "download")
-
-    @pytest.mark.asyncio
-    async def test_browser_wait_fails_without_observable_page(self):
-        """A wait cannot report success when no browser page can observe the selector."""
-        from sonic.agents.browser_agent import BrowserAgent
-        b = BrowserAgent()
-        b._using_playwright = False
-        b._page = None
-        ok = await b.wait_for_element("#anything")
-        assert ok is False
-
-    @pytest.mark.asyncio
-    async def test_browser_download_fails_without_playwright(self):
-        """download() must return False (not raise) when Playwright is not
-        available — fail-closed, no fabricated file."""
-        from sonic.agents.browser_agent import BrowserAgent
-        b = BrowserAgent()
-        b._using_playwright = False
-        b._page = None
-        ok = await b.download("#dl", "/tmp/x.deb")
-        assert ok is False
-
-
 # =====================================================================
 # Devin-style closed loop: VERIFY + REPLAN (stages 7 & 8)
 # =====================================================================
@@ -565,8 +468,6 @@ class TestVerifyAndReplan:
         agent = ComputerUseAgent.__new__(ComputerUseAgent)
         agent.computer = _FakeComputer()
         agent._last_screenshot_b64 = ""
-        agent._last_browser_snapshot = None
-        agent.browser = None
         verified, evidence = await agent.verify_goal("ws", "run the tests")
         assert verified is False
         assert "traceback" in evidence.lower()
@@ -609,8 +510,6 @@ class TestVerifyAndReplan:
         agent = ComputerUseAgent.__new__(ComputerUseAgent)
         agent.computer = _FakeComputer()
         agent._last_screenshot_b64 = ""
-        agent._last_browser_snapshot = None
-        agent.browser = None
         verified, evidence = await agent.verify_goal("ws", "review the architecture")
         assert "re-observed" in evidence.lower()
 
@@ -665,9 +564,7 @@ class TestVerifyAndReplan:
         agent.max_recovery_attempts = 0
         agent.metrics = type("M", (), {})()
         agent._last_screenshot_b64 = ""
-        agent._last_browser_snapshot = None
         agent._last_tool_result = None
-        agent.browser = None
         agent.security_tools = {}
         agent.safety = None
         agent._consecutive_failures = 0
@@ -699,6 +596,105 @@ class TestVerifyAndReplan:
 
         await agent.run_mission("ws", "do something", steps=4)
         # After 3 consecutive failures, a replan must have been injected.
+
+    @pytest.mark.asyncio
+    async def test_run_mission_stops_after_repeated_stale_gui_blocks(self):
+        """Refresh once, then stop rather than looping on stale GUI proposals."""
+        from sonic.computer_use.agent import ComputerUseAgent
+        from sonic.computer_use.models import (
+            ActionExecutionStatus,
+            ComputerActionType,
+            ComputerDecisionTrace,
+        )
+
+        class _FakeComputer:
+            async def terminal(self, ws, cmd):
+                return type("R", (), {"stdout": "ok", "exit_code": 0})()
+            async def screenshot(self, ws):
+                from sonic.computer.models import ScreenObservation
+                return ScreenObservation(
+                    screenshot_base64="",
+                    width=1920,
+                    height=1080,
+                    visible_text="",
+                )
+            async def status(self, ws):
+                return type(
+                    "St",
+                    (),
+                    {
+                        "active_application": "Application",
+                        "open_applications": ["Application"],
+                        "running_processes": [],
+                    },
+                )()
+            async def list_files(self, ws, path):
+                return []
+            async def git_action(self, ws, action):
+                return type("G", (), {"branch": "main", "is_clean": True})()
+
+        agent = ComputerUseAgent.__new__(ComputerUseAgent)
+        agent.computer = _FakeComputer()
+        agent.llm_router = None
+        agent.traces = []
+        agent.history = []
+        agent.recovery_events = 0
+        agent.action_counter = 0
+        agent.max_actions = 100
+        agent.max_recovery_attempts = 0
+        agent.metrics = type("M", (), {})()
+        agent._last_screenshot_b64 = ""
+        agent._last_tool_result = None
+        agent.security_tools = {}
+        agent.safety = None
+        agent._consecutive_failures = 0
+        agent._replan_count = 0
+        agent.toolsmith = None
+        agent.method_lab = None
+        agent.lessons_ledger = None
+        agent._files_cache = []
+        agent.execution_plane = "gui"
+        agent.gui_only = True
+        proposal_count = 0
+
+        async def _choose(goal, obs, step):
+            nonlocal proposal_count
+            proposal_count += 1
+            return (
+                ComputerActionType.GUI_CLICK,
+                "100,100",
+                {"x": 100, "y": 100},
+                "Click the observed control",
+            )
+
+        async def _stale_block(ws, action_type, target, payload, expected):
+            agent.action_counter += 1
+            trace = ComputerDecisionTrace(
+                step_index=agent.action_counter,
+                action_type=action_type,
+                target_resource=target,
+                payload=str(payload),
+                predicted_outcome=expected,
+                actual_observation=(
+                    "GUI action blocked before dispatch: desktop screenshot "
+                    "changed since the action was reasoned"
+                ),
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+            )
+            agent.traces.append(trace)
+            return trace
+
+        agent.choose_action = _choose
+        agent.execute_action = _stale_block
+
+        await agent.run_mission("ws", "click the observed control", steps=8)
+
+        assert proposal_count == 2
+        assert len(agent.traces) == 2
+        assert agent.history[-1]["action"] == "STALE_GUI_LOOP_ABORT"
 
 
 # =====================================================================
@@ -841,6 +837,8 @@ class TestLessonsLedger:
         def _make_agent():
             a = ComputerUseAgent.__new__(ComputerUseAgent)
             a.computer = _FakeComputer()
+            from sonic.computer_use.perception_bus import PerceptionBus
+            a.perception_bus = PerceptionBus()
             a.llm_router = None
             a.traces = []
             a.history = []
@@ -850,9 +848,7 @@ class TestLessonsLedger:
             a.max_recovery_attempts = 0
             a.metrics = type("M", (), {})()
             a._last_screenshot_b64 = ""
-            a._last_browser_snapshot = None
             a._last_tool_result = None
-            a.browser = None
             a.security_tools = {}
             a.safety = None
             a._consecutive_failures = 0

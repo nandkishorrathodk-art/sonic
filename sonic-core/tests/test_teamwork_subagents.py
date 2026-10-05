@@ -9,7 +9,6 @@ Verifies:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 import subprocess
@@ -52,7 +51,8 @@ async def test_define_and_invoke_parallel_branch_subagents_merge_on_verify(tmp_p
 
     policy = ActionPolicy(workspace_root=str(ws_dir), allow_private_networks=True, max_actions_per_minute=200)
 
-    # LLM responses for the 2 parallel subagents (each writes a file in its isolated branch and completes)
+    # Each parallel worker needs exactly one response; verification is performed
+    # independently by a command, not by consuming another worker-action response.
     llm = _AdaptiveFakeLLM([
         (
             "THOUGHT: I will create module_a.txt in the workspace to satisfy R1.\n"
@@ -106,7 +106,11 @@ async def test_define_and_invoke_parallel_branch_subagents_merge_on_verify(tmp_p
                     "role": "Module A Builder",
                     "prompt": "Create module_a.txt with non-empty content.",
                     "requirements": ["Deliver module_a.txt"],
-                    "acceptance_criteria": ["module_a.txt exists and is non-empty"],
+                    "verification_command": (
+                        'python -c "from pathlib import Path; '
+                        'assert Path(\'module_a.txt\').read_text().strip() == '
+                        '\'module A verified content\'"'
+                    ),
                     "workspace_mode": "branch",
                     "max_steps": 1,
                 },
@@ -115,7 +119,11 @@ async def test_define_and_invoke_parallel_branch_subagents_merge_on_verify(tmp_p
                     "role": "Module B Builder",
                     "prompt": "Create module_b.txt with non-empty content.",
                     "requirements": ["Deliver module_b.txt"],
-                    "acceptance_criteria": ["module_b.txt exists and is non-empty"],
+                    "verification_command": (
+                        'python -c "from pathlib import Path; '
+                        'assert Path(\'module_b.txt\').read_text().strip() == '
+                        '\'module B verified content\'"'
+                    ),
                     "workspace_mode": "branch",
                     "max_steps": 1,
                 },
@@ -125,7 +133,10 @@ async def test_define_and_invoke_parallel_branch_subagents_merge_on_verify(tmp_p
     )
     assert "judge=CONFIRMED" in invoke_trace.actual_observation
     assert (ws_dir / "module_a.txt").exists()
-    assert (ws_dir / "module_b.txt").exists()
+    assert (ws_dir / "module_b.txt").exists(), (
+        f"second artifact missing; observation={invoke_trace.actual_observation!r}; "
+        f"subagents={[(c.role, c.state_detail, c.last_summary, c.merged_files) for c in parent_agent._teamwork_manager.conversations.values()]}"
+    )
 
 
 @pytest.mark.no_live_infra
@@ -274,7 +285,7 @@ async def test_subagent_default_separate_workspace_and_dual_plane_gui_and_termin
     assert conv.effective_workspace_id != ws_id
     assert conv.agent_instance.observe_desktop is True
     assert conv.agent_instance.gui_only is False
-    assert conv.agent_instance.execution_plane == "gui"
+    assert conv.agent_instance.execution_plane == "dual"
     assert conv.verified is True
     assert "dual_plane_result.txt" in conv.merged_files
     assert (ws_dir / "dual_plane_result.txt").read_text(encoding="utf-8") == "GUI + Terminal Dual-Plane Verified"

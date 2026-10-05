@@ -41,10 +41,12 @@ export function FileActionBlock({
         <FileEdit className="w-3.5 h-3.5 text-warning shrink-0" />
       )}
 
-      <div
+      <button
+        type="button"
         onClick={handleClick}
-        className="inline-flex items-center gap-1.5 cursor-pointer group"
-        title={onSelectFile ? `Click to inspect ${file} in Code Viewer` : file}
+        disabled={!onSelectFile || !file}
+        className="inline-flex items-center gap-1.5 cursor-pointer group disabled:cursor-default"
+        title={onSelectFile ? `Inspect ${file} in Code Viewer` : file}
       >
         <span className="text-muted group-hover:text-muted-bright transition text-[11.5px] font-sans">
           {isRead ? "Read" : isWrite ? "Wrote" : "Edited"}
@@ -57,7 +59,7 @@ export function FileActionBlock({
             <ChevronRight className="w-2.5 h-2.5 text-muted-dim group-hover:text-secondary-400 transition" />
           )}
         </span>
-      </div>
+      </button>
     </div>
   );
 }

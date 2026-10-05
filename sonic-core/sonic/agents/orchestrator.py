@@ -80,11 +80,11 @@ class MetaOrchestrator(BaseAgent):
                     worker_fn=worker_fn,
                 )
                 all_findings.extend(loop_res.get("findings", []))
-            phases_completed = (
-                [p.get("name", "") for p in phases if p.get("name")]
-                if loop_res.get("graph_complete") and not loop_res.get("failed")
-                else []
-            )
+            # Director builds and executes its own task graph; its graph nodes
+            # are not mapped to this separate plan's phase/task names.
+            # Until the Director exposes an explicit mapping, report no phases
+            # as complete rather than attributing unrelated successful work.
+            phases_completed = []
         else:
             # Build and execute via TaskGraph DAG
             graph = TaskGraph(engagement_id=engagement_id, tenant_id=tenant_id)
@@ -114,22 +114,34 @@ class MetaOrchestrator(BaseAgent):
                     if not ready:
                         break
                     for r_task in ready:
-                        graph.mark_running(r_task.id)
+                        execution_id = graph.mark_running(r_task.id)
                         try:
-                            task_dict = r_task.model_dump() if hasattr(r_task, "model_dump") else {"name": r_task.name, "task_id": r_task.id, "payload": r_task.task_payload}
+                            task_dict = r_task.model_dump() if hasattr(r_task, "model_dump") else {"name": r_task.name, "task_id": r_task.id, "payload": r_task.task_payload, "execution_id": execution_id}
                             res = worker_fn(task_dict)
                             if inspect.isawaitable(res):
                                 res = await res
                             worker_status = str(res.get("status", "")).lower() if isinstance(res, dict) else ""
                             if worker_status not in {"success", "succeeded", "completed", "verified", "recovered"}:
-                                graph.mark_failed(r_task.id, "Worker did not report explicit successful execution")
+                                graph.mark_failed(
+                                    r_task.id,
+                                    "Worker did not report explicit successful execution",
+                                    execution_id=execution_id,
+                                )
                                 continue
-                            graph.mark_completed(r_task.id, res)
+                            graph.mark_completed(
+                                r_task.id,
+                                res,
+                                execution_id=execution_id,
+                            )
                             if isinstance(res, dict) and "findings" in res and isinstance(res["findings"], list):
                                 all_findings.extend(res["findings"])
                         except Exception as exc:
                             logger.warning("orchestrator_worker_failed", task_id=r_task.id, error=str(exc))
-                            graph.mark_failed(r_task.id, str(exc))
+                            graph.mark_failed(
+                                r_task.id,
+                                str(exc),
+                                execution_id=execution_id,
+                            )
 
             phases_completed = self._completed_phase_names(graph, phases)
 

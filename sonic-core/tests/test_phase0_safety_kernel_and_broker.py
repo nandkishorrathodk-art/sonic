@@ -19,7 +19,6 @@ import pytest
 from sonic.computer_use.models import ActionExecutionStatus
 from sonic.kernel.action_broker import ActionBroker
 from sonic.safety.kernel import KernelVerdict, SafetyKernel
-from sonic.safety.sealed import SealedActionPolicy
 
 
 @pytest.mark.no_live_infra
@@ -86,14 +85,15 @@ def test_safety_kernel_zero_host_escape():
 
 
 @pytest.mark.no_live_infra
-def test_action_broker_blocks_denied_actions_from_touching_provider():
+@pytest.mark.asyncio
+async def test_action_broker_blocks_denied_actions_from_touching_provider():
     kernel = SafetyKernel(tenant_id="test-tenant")
     broker = ActionBroker(safety_kernel=kernel, tenant_id="test-tenant")
 
     mock_provider = MagicMock()
 
     # Path traversal attack
-    res = broker.execute(
+    res = await broker.execute(
         action_type="FILE_READ",
         parameters={"path": "../../etc/passwd"},
         provider=mock_provider,
@@ -107,7 +107,8 @@ def test_action_broker_blocks_denied_actions_from_touching_provider():
 
 
 @pytest.mark.no_live_infra
-def test_action_broker_dispatches_permitted_action():
+@pytest.mark.asyncio
+async def test_action_broker_dispatches_permitted_action():
     kernel = SafetyKernel(tenant_id="test-tenant")
     broker = ActionBroker(safety_kernel=kernel, tenant_id="test-tenant")
 
@@ -118,9 +119,12 @@ def test_action_broker_dispatches_permitted_action():
     mock_exec_res.stderr = ""
     mock_provider.execute.return_value = mock_exec_res
 
-    res = broker.execute(
+    res = await broker.execute(
         action_type="TERMINAL_COMMAND",
-        parameters={"command": "ls /home/sonic/workspace"},
+        parameters={
+            "command": "ls /home/sonic/workspace",
+            "workspace_id": "test-workspace",
+        },
         provider=mock_provider,
     )
 

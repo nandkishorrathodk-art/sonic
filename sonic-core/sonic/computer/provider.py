@@ -8,6 +8,7 @@ Applications, Git, Services, and Process management on top of ComputeProviders.
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 from abc import ABC, abstractmethod
 from typing import Any
@@ -77,10 +78,32 @@ class ComputerProvider(ABC):
         """Capture authenticated screen observation."""
         pass
 
+    async def observe_state(self, workspace_id: str) -> ScreenObservation | None:
+        """Return a fresh structured desktop state without requiring image pixels.
+
+        Providers without a continuously maintained state feed may return None;
+        callers should then use screenshot() for the visual observation path.
+        """
+        return None
+
     @abstractmethod
     async def gui_action(self, workspace_id: str, action: GUIAction, actor: str = "operator") -> ScreenObservation:
         """Execute a desktop GUI action and capture updated screen."""
         pass
+
+    async def gui_action_state(
+        self,
+        workspace_id: str,
+        action: GUIAction,
+        actor: str = "operator",
+    ) -> ScreenObservation:
+        """Execute a GUI action and return its updated state when supported.
+
+        The compatibility implementation keeps existing providers' visual
+        post-action capture behavior. Providers with a fresh structured state
+        feed may override this and return a state-only observation.
+        """
+        return await self.gui_action(workspace_id, action, actor=actor)
 
     @abstractmethod
     async def terminal(self, workspace_id: str, command: str, timeout: int = 60, actor: str = "operator") -> ExecResult:
@@ -186,6 +209,7 @@ class UnifiedComputerProvider(ComputerProvider):
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._vfs: dict[str, dict[str, str]] = {}  # workspace_id -> {path: content}
         self._active_window: dict[str, str] = {}  # workspace_id -> active window name
+        self._app_process_ids: dict[str, dict[str, set[int]]] = {}
 
     # -------------------------------------------------------------
     # 1. Lifecycle
@@ -244,6 +268,7 @@ class UnifiedComputerProvider(ComputerProvider):
             if detected or (has_display.exit_code == 0 and has_display.stdout.strip() == "0"):
                 detected.append("Desktop")
         self._running_apps[ws.id] = set(detected)
+        self._app_process_ids[ws.id] = {}
         self._active_window[ws.id] = ""
         self._installed_apps[ws.id] = set()
         self._services[ws.id] = {}
@@ -264,10 +289,36 @@ class UnifiedComputerProvider(ComputerProvider):
         ws = self.workspaces.get(workspace_id)
         if ws:
             ws.status = ComputerWorkspaceStatus.DESTROYING
-            await self.compute.destroy_workspace(workspace_id)
+            try:
+                destroyed = await self.compute.destroy_workspace(workspace_id)
+            except Exception:
+                ws.status = ComputerWorkspaceStatus.DEGRADED
+                self._record_audit(
+                    session_id="system",
+                    workspace_id=workspace_id,
+                    tenant_id=ws.tenant_id,
+                    actor="ComputerProvider",
+                    action="DESTROY_COMPUTER",
+                    resource=workspace_id,
+                    result="FAILED",
+                )
+                raise
+            if destroyed is not True:
+                ws.status = ComputerWorkspaceStatus.DEGRADED
+                self._record_audit(
+                    session_id="system",
+                    workspace_id=workspace_id,
+                    tenant_id=ws.tenant_id,
+                    actor="ComputerProvider",
+                    action="DESTROY_COMPUTER",
+                    resource=workspace_id,
+                    result="FAILED",
+                )
+                return False
             ws.status = ComputerWorkspaceStatus.DESTROYED
             self.workspaces.pop(workspace_id, None)
             self._running_apps.pop(workspace_id, None)
+            self._app_process_ids.pop(workspace_id, None)
             self._installed_apps.pop(workspace_id, None)
             self._services.pop(workspace_id, None)
             self._vfs.pop(workspace_id, None)
@@ -473,8 +524,27 @@ class UnifiedComputerProvider(ComputerProvider):
         parts = shlex.split(app_name)
         if not parts:
             return False
-        command = f"DISPLAY=:99 nohup {' '.join(shlex.quote(part) for part in parts)} >/tmp/sonic-app.log 2>&1 &"
+        command = (
+            f"DISPLAY=:99 nohup {shlex.join(parts)} "
+            ">/tmp/sonic-app.log 2>&1 </dev/null & app_pid=$!; "
+            "printf '%s\\n' \"$app_pid\""
+        )
         result = await self.compute.execute(workspace_id, command)
+        pid_lines = str(getattr(result, "stdout", "") or "").strip().splitlines()
+        try:
+            app_pid = int(pid_lines[-1]) if pid_lines else 0
+        except ValueError:
+            app_pid = 0
+        verified = False
+        if result.exit_code == 0 and app_pid > 0:
+            check = await self.compute.execute(workspace_id, f"ps -p {app_pid} -o pid=")
+            verified = check.exit_code == 0 and check.stdout.strip() == str(app_pid)
+        if verified:
+            app_key = parts[0]
+            self._app_process_ids.setdefault(workspace_id, {}).setdefault(
+                app_key, set()
+            ).add(app_pid)
+            self._running_apps.setdefault(workspace_id, set()).add(app_key)
         self._record_audit(
             session_id=actor,
             workspace_id=workspace_id,
@@ -483,15 +553,56 @@ class UnifiedComputerProvider(ComputerProvider):
             action="LAUNCH_APP",
             application=app_name,
             resource=app_name,
-            result="SUCCESS" if result.exit_code == 0 else f"EXIT_{result.exit_code}",
+            result="SUCCESS" if verified else f"UNVERIFIED_EXIT_{result.exit_code}",
         )
-        return result.exit_code == 0
+        return verified
 
     async def close_application(self, workspace_id: str, app_name: str, actor: str = "operator") -> bool:
         ws = self._require_workspace(workspace_id)
         if not app_name.strip():
             return False
-        result = await self.compute.execute(workspace_id, f"pkill -f -- {shlex.quote(app_name)}")
+        parts = shlex.split(app_name)
+        if not parts:
+            return False
+        app_key = parts[0]
+        process_map = self._app_process_ids.get(workspace_id, {})
+        process_ids = set(process_map.get(app_key, set()))
+        if not process_ids:
+            self._record_audit(
+                session_id=actor,
+                workspace_id=workspace_id,
+                tenant_id=ws.tenant_id,
+                actor=actor,
+                action="CLOSE_APP",
+                application=app_name,
+                resource=app_name,
+                result="UNVERIFIED_NO_TRACKED_PROCESS",
+            )
+            return False
+
+        closed = True
+        for process_id in sorted(process_ids):
+            stop = await self.compute.execute(
+                workspace_id, f"kill -TERM -- {process_id}"
+            )
+            for _ in range(20):
+                check = await self.compute.execute(
+                    workspace_id, f"ps -p {process_id} -o pid="
+                )
+                if check.exit_code != 0 or not check.stdout.strip():
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                closed = False
+            if stop.exit_code != 0:
+                check = await self.compute.execute(
+                    workspace_id, f"ps -p {process_id} -o pid="
+                )
+                if check.exit_code == 0 and check.stdout.strip():
+                    closed = False
+        if closed:
+            process_map.pop(app_key, None)
+            self._running_apps.get(workspace_id, set()).discard(app_key)
         self._record_audit(
             session_id=actor,
             workspace_id=workspace_id,
@@ -500,9 +611,9 @@ class UnifiedComputerProvider(ComputerProvider):
             action="CLOSE_APP",
             application=app_name,
             resource=app_name,
-            result="SUCCESS" if result.exit_code == 0 else f"EXIT_{result.exit_code}",
+            result="SUCCESS" if closed else "FAILED_PROCESS_STILL_RUNNING",
         )
-        return result.exit_code == 0
+        return closed
 
     async def install_application(
         self,

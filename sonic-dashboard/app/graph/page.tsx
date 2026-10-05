@@ -249,9 +249,10 @@ const DEFAULT_COGNITIVE_EDGES: GraphEdgeData[] = [
 ];
 
 export default function CognitiveMemoryGraphPage() {
-  const [nodes, setNodes] = useState<GraphNodeData[]>(DEFAULT_COGNITIVE_NODES);
-  const [edges, setEdges] = useState<GraphEdgeData[]>(DEFAULT_COGNITIVE_EDGES);
-  const [backend, setBackend] = useState<string>("SqliteGraph (Persistent)");
+  const showDemoGraph = process.env.NEXT_PUBLIC_SHOW_DEMO_GRAPH === "1";
+  const [nodes, setNodes] = useState<GraphNodeData[]>([]);
+  const [edges, setEdges] = useState<GraphEdgeData[]>([]);
+  const [backend, setBackend] = useState<string>("Not loaded");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNodeData | null>(null);
@@ -278,15 +279,16 @@ export default function CognitiveMemoryGraphPage() {
         setEdges(data.edges || []);
         setBackend(data.backend ? `${data.backend} (Persistent)` : "SqliteGraph (Persistent)");
       } else {
-        // Use rich default cognitive topology if database is newly initialized
-        setNodes(DEFAULT_COGNITIVE_NODES);
-        setEdges(DEFAULT_COGNITIVE_EDGES);
+        setNodes(showDemoGraph ? DEFAULT_COGNITIVE_NODES : []);
+        setEdges(showDemoGraph ? DEFAULT_COGNITIVE_EDGES : []);
+        setBackend(showDemoGraph ? "DEMO DATA — not live" : "No persisted graph data");
       }
     } catch (err: any) {
-      console.warn("Using default Cognitive Memory topology due to fetch error:", err);
-      // Graceful fallback to default cognitive topology so 3D graph is never broken
-      setNodes(DEFAULT_COGNITIVE_NODES);
-      setEdges(DEFAULT_COGNITIVE_EDGES);
+      console.warn("Cognitive graph request failed:", err);
+      setNodes(showDemoGraph ? DEFAULT_COGNITIVE_NODES : []);
+      setEdges(showDemoGraph ? DEFAULT_COGNITIVE_EDGES : []);
+      setBackend(showDemoGraph ? "DEMO DATA — backend unavailable" : "Backend unavailable");
+      setError("Could not load persisted graph data.");
     } finally {
       setLoading(false);
     }

@@ -92,30 +92,38 @@ class HealthChecker:
 
     @classmethod
     async def check_database(cls) -> ComponentHealth:
-        db_url = os.environ.get("DATABASE_URL")
-        if not db_url:
-            return ComponentHealth(
-                name="postgresql",
-                status=HealthStatus.DEGRADED,
-                message="DATABASE_URL not configured. In-memory sqlite/mock mode.",
-                is_critical=False,
-            )
         start = time.perf_counter()
+        from sqlalchemy import text
+
+        from sonic.db.session import get_database_url, get_engine
+
+        db_url = get_database_url()
+        backend = db_url.split(":", 1)[0].split("+", 1)[0]
+
         try:
-            # Test connection
+            async def probe_database() -> None:
+                async with get_engine().connect() as connection:
+                    result = await connection.execute(text("SELECT 1"))
+                    if result.scalar_one() != 1:
+                        raise RuntimeError("Database health query returned an unexpected result")
+
+            await asyncio.wait_for(probe_database(), timeout=3.0)
             latency = round((time.perf_counter() - start) * 1000, 2)
             return ComponentHealth(
-                name="postgresql",
+                name="database",
                 status=HealthStatus.HEALTHY,
                 latency_ms=latency,
-                message="PostgreSQL database operational",
+                message=f"{backend} database connection and health query succeeded",
                 is_critical=True,
             )
         except Exception as e:
+            latency = round((time.perf_counter() - start) * 1000, 2)
+            logger.error("database_health_check_failed", backend=backend, error=str(e))
             return ComponentHealth(
-                name="postgresql",
+                name="database",
                 status=HealthStatus.UNAVAILABLE,
-                message=f"PostgreSQL connection failed: {str(e)}",
+                latency_ms=latency,
+                message=f"{backend} database health check failed: {e}",
                 is_critical=True,
             )
 
@@ -180,33 +188,52 @@ class HealthChecker:
 
     @classmethod
     async def check_llm(cls) -> ComponentHealth:
-        has_nvidia = bool(os.environ.get("NVIDIA_API_KEY"))
-        has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
-        has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-        has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
-        has_deepseek = bool(os.environ.get("DEEPSEEK_API_KEY"))
-        has_openrouter = bool(os.environ.get("OPENROUTER_API_KEY"))
-        has_groq = bool(os.environ.get("GROQ_API_KEY"))
+        try:
+            from sonic.llm.router import ModelRouter
 
-        if has_nvidia or has_gemini or has_openai or has_anthropic or has_deepseek or has_openrouter or has_groq:
-            active = []
-            if has_openrouter: active.append("OpenRouter")
-            if has_deepseek: active.append("DeepSeek")
-            if has_anthropic: active.append("Anthropic")
-            if has_openai: active.append("OpenAI")
-            if has_groq: active.append("Groq")
-            if has_gemini: active.append("Gemini")
-            if has_nvidia: active.append("NVIDIA NIM")
+            router = ModelRouter.from_config()
+        except Exception as exc:
+            logger.error("llm_health_router_load_failed", error=str(exc))
             return ComponentHealth(
                 name="llm_router",
-                status=HealthStatus.HEALTHY,
-                message=f"Configured providers: {', '.join(active)}",
+                status=HealthStatus.DEGRADED,
+                message="LLM routing configuration could not be loaded.",
+                is_critical=True,
+            )
+
+        active = sorted(
+            name
+            for name in router.providers
+            if router._is_provider_ready(name)
+        )
+        vision_rule = router.routing_rules.get("vision", {})
+        vision_candidates = [vision_rule.get("provider", "")]
+        for fallback in vision_rule.get("fallback", []):
+            vision_candidates.append(
+                fallback.split("/", 1)[0] if "/" in fallback else fallback
+            )
+        ready_vision = sorted({
+            name for name in vision_candidates
+            if name in router.providers and router._is_provider_ready(name)
+        })
+        if not ready_vision:
+            active_names = ", ".join(active) if active else "none"
+            return ComponentHealth(
+                name="llm_router",
+                status=HealthStatus.DEGRADED,
+                message=(
+                    "No configured vision provider credentials are available for GUI reasoning. "
+                    f"Other ready providers: {active_names}."
+                ),
                 is_critical=True,
             )
         return ComponentHealth(
             name="llm_router",
-            status=HealthStatus.DEGRADED,
-            message="No LLM API keys configured in environment.",
+            status=HealthStatus.HEALTHY,
+            message=(
+                "Configured vision providers: "
+                f"{', '.join(ready_vision)}; remote reachability is not probed."
+            ),
             is_critical=True,
         )
 

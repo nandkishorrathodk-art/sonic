@@ -55,6 +55,10 @@ class ExperimentProposal:
     status: ExperimentStatus = ExperimentStatus.PROPOSED
     baseline_score: float = 0.0
     candidate_score: float = 0.0
+    benchmark_completed: bool = False
+    benchmark_passed: bool = False
+    benchmark_eligible: bool = False
+    benchmark_suite_id: str = ""
     evaluation_notes: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())

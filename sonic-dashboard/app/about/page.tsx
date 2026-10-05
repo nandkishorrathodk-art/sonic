@@ -160,16 +160,16 @@ export default function AboutPage() {
 
       {/* Top Navbar */}
       <header className="h-16 border-b border-ink-800/80 backdrop-blur-xl bg-ink-950/70 px-6 md:px-12 flex items-center justify-between sticky top-0 z-50">
-        <BrandMark withWordmark href="/landing" />
+        <BrandMark withWordmark href="/" />
         <div className="flex items-center gap-3 text-xs font-mono">
-          <Link href="/landing" className="btn-ghost hidden sm:inline-flex">Home</Link>
+          <Link href="/" className="btn-ghost hidden sm:inline-flex">Home</Link>
           <Link href="/graph" className="btn-ghost hidden md:inline-flex">Graph Memory</Link>
           <Link href="/evidence" className="btn-ghost hidden md:inline-flex">Evidence Board</Link>
           <Link href="/login" className="btn-secondary !px-4 !py-2 text-xs">
             <Lock className="w-3.5 h-3.5" />
             <span>Sign In</span>
           </Link>
-          <Link href="/" className="btn-primary !px-4 !py-2 text-xs">
+          <Link href="/login" className="btn-primary !px-4 !py-2 text-xs">
             <span>Launch</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </Link>
@@ -406,11 +406,11 @@ export default function AboutPage() {
             reason, act, and prove — with every finding backed by real evidence.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-3">
-            <Link href="/" className="btn-primary !px-7 !py-3.5 text-sm hover:scale-[1.02]">
+            <Link href="/login" className="btn-primary !px-7 !py-3.5 text-sm hover:scale-[1.02]">
               <span>Open Workstation</span>
               <ArrowRight className="w-4 h-4" />
             </Link>
-            <Link href="/landing" className="btn-ghost !px-5 !py-3.5 text-sm border border-ink-700 hover:border-ink-600 font-mono">
+            <Link href="/" className="btn-ghost !px-5 !py-3.5 text-sm border border-ink-700 hover:border-ink-600 font-mono">
               <span>Back to home</span>
             </Link>
           </div>
@@ -421,10 +421,10 @@ export default function AboutPage() {
       <footer className="relative mt-auto border-t border-ink-800/80 px-6 md:px-12 py-6 flex flex-col sm:flex-row items-center justify-between text-xs font-mono text-muted-dim gap-3 z-10">
         <div>SONIC Autonomous AI-Human Workstation Core v1.3.0</div>
         <div className="flex items-center gap-4">
-          <Link href="/landing" className="hover:text-slate-300 transition">Home</Link>
+          <Link href="/" className="hover:text-slate-300 transition">Home</Link>
           <Link href="/about" className="hover:text-slate-300 transition">About</Link>
           <Link href="/login" className="hover:text-slate-300 transition">Login</Link>
-          <Link href="/" className="hover:text-slate-300 transition">Workstation</Link>
+          <Link href="/login" className="hover:text-slate-300 transition">Workstation</Link>
         </div>
       </footer>
     </div>

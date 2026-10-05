@@ -36,7 +36,7 @@ providers:
         speed_tier: medium
         cost_per_1k_input: 0.0025
         cost_per_1k_output: 0.01
-        capabilities: [reasoning, coding, verification]
+        capabilities: [reasoning, coding, verification, vision, multimodal, computer_use]
 
   deepseek:
     name: DeepSeek Native (V3 & R1 671B)
@@ -214,15 +214,16 @@ routing_rules:
 
   vision:
     description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [openrouter/openai/gpt-4o, nvidia/meta/llama-3.2-11b-vision-instruct]
 
   computer_use:
     description: 'Autonomous computer vision and desktop interaction'
-    provider: nvidia
-    model: meta/llama-3.2-11b-vision-instruct
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [openrouter/openai/gpt-4o, nvidia/meta/llama-3.2-11b-vision-instruct]
+
 
 # ---- Global Fallback Chain ----
 # If the preferred provider for a task fails, try these in order

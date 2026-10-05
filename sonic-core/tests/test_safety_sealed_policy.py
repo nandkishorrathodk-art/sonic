@@ -58,11 +58,42 @@ def test_seal_freezes_config_and_records_hash():
 
 
 def test_seal_default_is_sealed():
-    p = seal_default("/ws")
+    p = seal_default("/ws", allow_security_tool_targets={_PUB})
     assert p.sealed is True
-    # behaves like a policy: public target allowed, private blocked
+    # Only the explicitly authorized public target is allowed.
     assert p.evaluate("SECURITY_TOOL", _PUB, {"target": _PUB}).allowed is True
     assert p.evaluate("SECURITY_TOOL", _PRIV, {"target": _PRIV}).allowed is False
+
+
+def test_security_tool_requires_explicit_authorization():
+    p = seal_default("/ws")
+    verdict = p.evaluate("SECURITY_TOOL", _PUB, {"target": _PUB})
+    assert verdict.allowed is False
+    assert "explicit operator authorization" in verdict.reason
+
+
+@pytest.mark.parametrize("target", ["localhost", "127.0.0.1", "::1", "0.0.0.0"])
+def test_loopback_egress_is_denied_even_for_authorized_scans(target):
+    p = seal_default("/ws", allow_security_tool_targets={target})
+    verdict = p.evaluate("SECURITY_TOOL", target, {"target": target})
+    assert verdict.allowed is False
+
+
+@pytest.mark.parametrize("remote", ["origin", "https://127.0.0.1/repo.git", "https://169.254.169.254/repo.git"])
+def test_git_push_requires_egress_checked_public_remote(remote):
+    p = seal_default("/ws")
+    verdict = p.evaluate("GIT_PUSH", remote, {"remote": remote})
+    assert verdict.allowed is False
+
+
+def test_git_push_checks_public_remote_egress():
+    p = seal_default("/ws")
+    verdict = p.evaluate(
+        "GIT_PUSH",
+        "https://93.184.216.34/repo.git",
+        {"remote_url": "https://93.184.216.34/repo.git"},
+    )
+    assert verdict.allowed is True
 
 
 # ---------------------------------------------------------------------------
@@ -139,16 +170,13 @@ def test_module_blocked_networks_mutation_cannot_widen_policy(restore_nets):
     assert p._compute_seal_hash() == p._seal_hash
 
 
-def test_unsealed_base_policy_is_widened_by_module_mutation(restore_nets):
-    """Contrast: a plain (unsealed) ActionPolicy IS widened by the module
-    mutation — this is exactly the gap the sealed layer closes."""
+def test_unsealed_base_policy_uses_blocked_network_snapshot(restore_nets):
+    """A base policy must not be widened by mutating module-level egress state."""
     p = ActionPolicy(workspace_root="/ws")
-    assert p.evaluate("SECURITY_TOOL", _PRIV, {"target": _PRIV}).allowed is False
+    target = f"http://{_PRIV}/"
+    assert p.evaluate("BROWSER_NAVIGATE", target, {"url": target}).allowed is False
     egress.BLOCKED_NETWORKS.clear()
-    try:
-        assert p.evaluate("SECURITY_TOOL", _PRIV, {"target": _PRIV}).allowed is True
-    finally:
-        pass  # autouse fixture restores the list
+    assert p.evaluate("BROWSER_NAVIGATE", target, {"url": target}).allowed is False
 
 
 # ---------------------------------------------------------------------------

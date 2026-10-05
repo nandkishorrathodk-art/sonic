@@ -110,6 +110,7 @@ class HumanFirstWorkflow:
                 tenant_id=self.graph.tenant_id,
                 engagement_id=self.graph.engagement_id,
                 expected_observation=f"Observed outcome for {stage.value}",
+                max_retries=0,
             )
             task_id = self.graph.add_task(node)
             self._stage_ids[stage.value] = task_id
@@ -139,6 +140,7 @@ class HumanFirstWorkflow:
                 checkpoints=[],
                 tenant_id=self.graph.tenant_id,
                 engagement_id=self.graph.engagement_id,
+                max_retries=0,
             )
             task_id = self.graph.add_task(node)
             checkpoint = self.graph.add_checkpoint(

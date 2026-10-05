@@ -38,6 +38,7 @@ SECURITY INVARIANT:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -192,6 +193,10 @@ class LessonsLedger:
         agent_id: str = "computer-use-agent",
         semantic_memory: Any | None = None,
     ):
+        if not isinstance(tenant_id, str) or not tenant_id.strip():
+            raise ValueError("tenant_id must be a non-empty string")
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            raise ValueError("agent_id must be a non-empty string")
         self.tenant_id = tenant_id
         self.agent_id = agent_id
         self.semantic_memory = semantic_memory
@@ -199,10 +204,24 @@ class LessonsLedger:
         self._load()
 
     def _path(self) -> str:
-        return os.path.join(_ledger_root(), f"{self.tenant_id}_{self.agent_id}.json")
+        identity = f"{self.tenant_id}\0{self.agent_id}".encode("utf-8")
+        filename = hashlib.sha256(identity).hexdigest()
+        return os.path.join(_ledger_root(), f"{filename}.json")
+
+    def _legacy_path(self) -> str | None:
+        if not all(
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value)
+            for value in (self.tenant_id, self.agent_id)
+        ):
+            return None
+        return os.path.join(
+            _ledger_root(), f"{self.tenant_id}_{self.agent_id}.json"
+        )
 
     def _load(self) -> None:
         path = self._path()
+        if not os.path.exists(path):
+            path = self._legacy_path() or path
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -220,6 +239,8 @@ class LessonsLedger:
             ]
             for lesson in self._lessons:
                 self._index_semantic(lesson)
+            if path != self._path():
+                self._save()
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             self._lessons = []
 

@@ -1,0 +1,325 @@
+"""
+Hardening and Edge-Case Tests for SONIC's Subagent Teamwork Architecture.
+Verifies:
+1. INVOKE_SUBAGENT empty prompt rejection and multiline string normalization for requirements/criteria.
+2. SEND_MESSAGE preservation of existing criteria and verification commands when omitted.
+3. SEND_MESSAGE resolution of conversation_id from payload.
+4. MANAGE_SUBAGENTS flexible resolution of target and payload for kill/kill_all.
+5. DisplayLeaseManager 60-second watchdog TTL breaking stale locks.
+6. ComputerUseAgent holistic goal decomposition and rubric bullet exclusion.
+7. ComputerUseAgent reasoning context formatting for assigned subagents and system prompt overlay.
+8. Independent Judge failing closed on inconclusive verdicts and unconfirmed acceptance criteria.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+import time
+import pytest
+
+from sonic.agents.judge import JudgeAgent, JudgeVerdict, JudgeEvaluation
+from sonic.computer.headless import HeadlessComputeProvider
+from sonic.computer_use.agent import ComputerUseAgent
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
+from sonic.computer_use.teamwork import DisplayLeaseManager, SubagentTaskSpec, SubagentTeamworkManager
+from sonic.llm.schemas import LLMRequest, LLMResponse
+from sonic.safety.action_policy import ActionPolicy
+
+
+class _HardeningStubLLM:
+    def __init__(self, response: str = '{"passed": true, "notes": "ok"}'):
+        self.response = response
+        self.calls = 0
+
+    async def complete(self, request: LLMRequest, **kwargs) -> LLMResponse:
+        self.calls += 1
+        return LLMResponse(
+            content=self.response,
+            model="test-stub",
+            provider="local",
+            input_tokens=10,
+            output_tokens=10,
+        )
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_invoke_subagent_empty_prompt_rejected(tmp_path: Path):
+    """Empty or blank prompt must be rejected with ActionExecutionStatus.FAILED."""
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+    ws = await provider.create(tenant_id="t-hardening", engagement_id="e-empty")
+    agent = ComputerUseAgent(computer_provider=provider, tenant_id="t-hardening")
+
+    # 1. Blank string prompt
+    trace = await agent.execute_action(
+        ws.id,
+        ComputerActionType.INVOKE_SUBAGENT,
+        "",
+        {"prompt": "   "},
+        "attempt empty prompt",
+    )
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert "Cannot invoke subagents with empty prompt" in trace.actual_observation
+
+    # 2. Subagents array with empty prompt
+    trace2 = await agent.execute_action(
+        ws.id,
+        ComputerActionType.INVOKE_SUBAGENT,
+        "subagent_task",
+        {"subagents": [{"role": "Worker", "prompt": ""}]},
+        "attempt empty subagent in array",
+    )
+    assert trace2.status == ActionExecutionStatus.FAILED
+    assert "Cannot invoke subagents with empty prompt" in trace2.actual_observation
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_invoke_subagent_string_requirements_and_criteria_normalization(tmp_path: Path):
+    """Passing multiline or single string for requirements and criteria must NOT character-split."""
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+    ws = await provider.create(tenant_id="t-hardening", engagement_id="e-norm")
+    agent = ComputerUseAgent(computer_provider=provider, tenant_id="t-hardening")
+
+    # Manually invoke teamwork manager with string requirements and criteria
+    mgr = SubagentTeamworkManager(
+        parent_agent=agent,
+        computer_provider=provider,
+        llm_router=_HardeningStubLLM(),
+        safety=None,
+        tenant_id="t-hardening",
+    )
+
+    convs = await mgr.invoke_subagents(
+        ws.id,
+        [
+            {
+                "type_name": "self",
+                "role": "Normalizer Worker",
+                "prompt": "Test normalization.",
+                "requirements": "R1: First requirement\nR2: Second requirement",
+                "acceptance_criteria": "Criterion A\nCriterion B",
+                "max_steps": 1,
+            }
+        ],
+    )
+    assert len(convs) == 1
+    spec = convs[0].last_spec
+    assert spec is not None
+    assert spec.requirements == ["R1: First requirement", "R2: Second requirement"]
+    assert spec.acceptance_criteria == ["Criterion A", "Criterion B"]
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_send_message_preserves_existing_criteria_and_command(tmp_path: Path):
+    """send_message must NOT wipe out existing acceptance_criteria or verification_command when omitted."""
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+    ws = await provider.create(tenant_id="t-hardening", engagement_id="e-preserve")
+
+    llm = _HardeningStubLLM(
+        "THOUGHT: Write file.\nACTION: FILE_WRITE\nTARGET: f.txt\nPAYLOAD: {\"path\": \"f.txt\", \"content\": \"c\"}\nEXPECTED: ok"
+    )
+    agent = ComputerUseAgent(computer_provider=provider, llm_router=llm, tenant_id="t-hardening")
+    mgr = SubagentTeamworkManager(
+        parent_agent=agent,
+        computer_provider=provider,
+        llm_router=llm,
+        safety=None,
+        tenant_id="t-hardening",
+    )
+
+    convs = await mgr.invoke_subagents(
+        ws.id,
+        [
+            {
+                "type_name": "self",
+                "role": "Preservation Worker",
+                "prompt": "Initial setup.",
+                "requirements": ["R1: setup"],
+                "acceptance_criteria": ["File f.txt exists"],
+                "verification_command": "python -c \"pass\"",
+                "max_steps": 1,
+            }
+        ],
+    )
+    conv = convs[0]
+    orig_criteria = list(conv.last_spec.acceptance_criteria)
+    orig_command = conv.last_spec.verification_command
+
+    # Now call send_message with NO criteria and NO verification command
+    continued_conv = await mgr.send_message(
+        conversation_id=conv.conversation_id,
+        message="Follow up message without specifying criteria.",
+        acceptance_criteria=None,
+        verification_command="",
+        max_steps=1,
+    )
+    assert continued_conv.last_spec.acceptance_criteria == orig_criteria
+    assert continued_conv.last_spec.verification_command == orig_command
+
+    # Also test passing empty list [] - it must NOT wipe out existing criteria either
+    continued_conv2 = await mgr.send_message(
+        conversation_id=conv.conversation_id,
+        message="Another follow up with empty list criteria.",
+        acceptance_criteria=[],
+        verification_command="",
+        max_steps=1,
+    )
+    assert continued_conv2.last_spec.acceptance_criteria == orig_criteria
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_manage_subagents_kill_and_kill_all(tmp_path: Path):
+    """manage_subagents kill and kill_all properly mark conversations canceled and terminate tasks."""
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+    ws = await provider.create(tenant_id="t-hardening", engagement_id="e-manage")
+    agent = ComputerUseAgent(computer_provider=provider, tenant_id="t-hardening")
+    mgr = SubagentTeamworkManager(
+        parent_agent=agent,
+        computer_provider=provider,
+        llm_router=_HardeningStubLLM(),
+        safety=None,
+        tenant_id="t-hardening",
+    )
+
+    # Launch two dummy conversations
+    convs = await mgr.invoke_subagents(
+        ws.id,
+        [
+            {"role": "Worker 1", "prompt": "Task 1", "max_steps": 1},
+            {"role": "Worker 2", "prompt": "Task 2", "max_steps": 1},
+        ],
+    )
+    c1, c2 = convs[0], convs[1]
+
+    # Kill single subagent
+    listing = mgr.manage_subagents(action="kill", conversation_ids=[c1.conversation_id])
+    assert any(item["conversationId"] == c1.conversation_id and item["state"] == "canceled" for item in listing)
+
+    # Kill all
+    c2.state = "running"
+    listing_all = mgr.manage_subagents(action="kill_all")
+    assert any(item["conversationId"] == c2.conversation_id and item["state"] == "canceled" for item in listing_all)
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_display_lease_watchdog_ttl_breaks_stale_lock():
+    """DisplayLeaseManager breaks locks held longer than WATCHDOG_TTL_SECONDS to avoid deadlock."""
+    display = ":9988"
+    key = f"display:{display}"
+    lock = DisplayLeaseManager.get_lock("ws-ttl", display=display)
+
+    # Acquire lock and simulate expired acquisition timestamp (70s ago)
+    await lock.acquire()
+    DisplayLeaseManager._lock_metadata[key] = {
+        "owner": "stale-worker",
+        "acquired_at": time.time() - 70.0,
+    }
+
+    # Now a second caller attempts to acquire with acquire()
+    # The watchdog must detect expiration, break stale lock, and succeed
+    new_lock = await asyncio.wait_for(
+        DisplayLeaseManager.acquire("ws-ttl", display=display, timeout=5.0, owner="fresh-worker"),
+        timeout=6.0,
+    )
+    assert new_lock.locked()
+    assert DisplayLeaseManager._lock_metadata[key]["owner"] == "fresh-worker"
+    DisplayLeaseManager.release(new_lock, display=display)
+    assert not new_lock.locked()
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_decompose_goal_holistic_and_rubric_filtering(tmp_path: Path):
+    """Subagent worker pursues goal holistically and does not split rubric bullets into procedural sub-goals."""
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+
+    # 1. Subagent worker context (is_subagent_worker=True)
+    worker = ComputerUseAgent(
+        computer_provider=provider,
+        is_subagent_worker=True,
+        tenant_id="t-hardening",
+    )
+    goal_with_rubric = (
+        "Implement auth module\n"
+        "- **R1**: Create auth.py with verify() function\n"
+        "- **R2**: Implement token validation\n"
+        "- [ ] Token expires after 3600 seconds\n"
+        "- [ ] Unit tests pass"
+    )
+    checklist = await worker.decompose_goal(goal_with_rubric)
+    assert len(checklist.sub_goals) == 1
+    assert "Pursue objective:" in checklist.sub_goals[0].description
+
+    # 2. General agent with rubric bullets (not a subagent worker)
+    # Even outside worker context, rubric bullets like - **R1**: and - [ ] must not be treated as sequential steps
+    general_agent = ComputerUseAgent(
+        computer_provider=provider,
+        is_subagent_worker=False,
+        initial_context={},
+        tenant_id="t-hardening",
+    )
+    cl2 = await general_agent.decompose_goal(goal_with_rubric)
+    # Sub-goals should not contain raw rubric lines
+    for sg in cl2.sub_goals:
+        assert not sg.description.startswith("- [ ]")
+        assert not sg.description.startswith("- **R")
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_reasoning_prompt_subagent_role_banner_and_overlay(tmp_path: Path):
+    """Reasoning prompt formats assigned subagent role banner and prepends system_prompt_overlay."""
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+    ws = await provider.create(tenant_id="t-hardening", engagement_id="e-prompt")
+
+    agent = ComputerUseAgent(
+        computer_provider=provider,
+        initial_context={"subagent_role": "Security Specialist", "silent_background": True},
+        system_prompt_overlay="CRITICAL SYSTEM OVERLAY INSTRUCTION",
+        tenant_id="t-hardening",
+    )
+    obs = await agent.observe(ws.id)
+    sys_prompt, user_prompt = agent._build_reasoning_context("test mission", obs, 1, "", "")
+
+    assert sys_prompt.startswith("CRITICAL SYSTEM OVERLAY INSTRUCTION")
+    assert "=== ASSIGNED SUBAGENT ROLE & WORKSPACE: Security Specialist ===" in user_prompt
+    assert "=== ADVISORY INITIAL CONTEXT (UNVERIFIED) ===" not in user_prompt
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_independent_judge_fails_closed_on_unparseable_or_inconclusive(tmp_path: Path):
+    """Judge fails closed when acceptance criteria evaluation is falsified or inconclusive."""
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+
+    # LLM returns unparseable rejection
+    llm = _HardeningStubLLM("Unparseable output without JSON.")
+    agent = ComputerUseAgent(computer_provider=provider, llm_router=llm, tenant_id="t-hardening")
+    mgr = SubagentTeamworkManager(
+        parent_agent=agent,
+        computer_provider=provider,
+        llm_router=llm,
+        safety=None,
+        tenant_id="t-hardening",
+    )
+
+    spec = SubagentTaskSpec(
+        prompt="Deliver artifact",
+        acceptance_criteria=["Criterion 1 must pass"],
+        max_steps=1,
+        max_correction_rounds=0,
+    )
+    conv = (await mgr.invoke_subagents(
+        "ws-test",
+        [spec],
+    ))[0]
+
+    # Verify that judge verdict is FALSIFIED (not promoted to CONFIRMED)
+    assert conv.verified is False
+    assert conv.judge_verdict == JudgeVerdict.FALSIFIED.value

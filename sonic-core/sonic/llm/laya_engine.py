@@ -4,19 +4,19 @@ SONIC — Laya System-1 Non-Autoregressive Decision Engine Integration
 Integrates the Laya System-1 decision architecture (https://github.com/NandhaKishorM/laya)
 into SONIC's AI-Human Digital Being cognitive core.
 
-Provides sub-35ms single-pass typed judgments (`choice`, `score`, `noul`) across
-100+ languages (including English, Hindi, and Hinglish) for:
+Provides English single-pass typed judgments (`choice`, `score`, `noul`) for:
   1. Dual-Plane Execution Routing (`gui` vs `headless` vs `dual`)
   2. Empirical Goal Verification (`noul` receipt proof probability)
   3. BeingMind Curiosity & Novelty Affect Evaluation (`score` & `noul`)
   4. Semantic Pre-Action Safety Triage (`safe`, `needs_approval`, `destructive`)
+The local lexical fallback and script routing support English only.
 
 Hardware & RAM Safety Guard:
   - Never preloads all 3 PyTorch checkpoints unless `LAYA_PRELOAD=1`.
   - Supports remote `laya-serve` HTTP API (`LAYA_API_URL`) with 0 MB host RAM overhead.
   - Supports local `laya.Router(preload=False)` when `SONIC_ENABLE_LOCAL_LAYA=1` and
     free system RAM >= 1.5 GB.
-  - Includes a zero-RAM calibrated multilingual scoring engine fallback so typed
+  - Includes a zero-RAM calibrated English scoring engine fallback so typed
     decisions always return valid `choice` / `score` / `noul` probability distributions.
 """
 
@@ -36,6 +36,62 @@ from sonic.logger import get_logger
 logger = get_logger(__name__)
 
 _TOKEN_RE = re.compile(r"\w+")
+_DANGEROUS_ACTION_MARKERS = (
+    "rm -rf", "drop", "delete", "format", "truncate", "destroy", "wipe",
+    "kill", "mkfs", "dd if=", "dd of=",
+)
+
+
+def _marker_is_negated(text: str, marker: str) -> bool:
+    marker_pattern = r"(?<!\w)" + r"\s+".join(re.escape(part) for part in marker.split()) + r"(?!\w)"
+    return bool(
+        re.search(
+            rf"\b(?:do\s+not|don't|dont|never|avoid|without|not|0)\b"
+            rf"(?:[ \t]+\w+){{0,5}}[ \t]+{marker_pattern}",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _contains_unnegated_marker(text: str, marker: str) -> bool:
+    marker_pattern = r"(?<!\w)" + r"\s+".join(re.escape(part) for part in marker.split()) + r"(?!\w)"
+    return any(
+        not _marker_is_negated(text[max(0, match.start() - 48):match.end()], marker)
+        for match in re.finditer(marker_pattern, text, re.IGNORECASE)
+    )
+
+
+def _has_unnegated_dangerous_action(text: str) -> bool:
+    return any(_contains_unnegated_marker(text, marker) for marker in _DANGEROUS_ACTION_MARKERS)
+
+
+def _has_explicit_failure(text: str) -> bool:
+    if re.search(
+        r"\b(?:(?:do|does|did)\s+not|don't|doesn't|didn't|never)\s+"
+        r"(?:pass|succeed|complete|verify)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.search(r"\bunsuccessful(?:ly)?\b", text, re.IGNORECASE):
+        return True
+    if re.search(r"\bexit(?:_code|\s+code)?\s*[:= ]+\s*(?!0\b)\d+\b", text, re.IGNORECASE):
+        return True
+    if re.search(r"\b[1-9]\d*\s+(?:tests?\s+)?failed\b", text, re.IGNORECASE):
+        return True
+    return any(
+        _contains_unnegated_marker(text, marker)
+        for marker in (
+            "traceback", "assertionerror", "command not found",
+            "connection refused", "timed out", "blocked",
+            "disk verification failed", "failed", "failure",
+            "exception", "error", "syntax error", "syntaxerror",
+            "indentationerror", "taberror", "invalid syntax",
+            "terminal ready (0 procs)", "__sonic_obs_ready__",
+            "exit 126", "unsaved",
+        )
+    )
 
 
 @dataclass
@@ -61,7 +117,7 @@ class LayaDecisionResult:
 
 
 def _detect_script_and_model(text: str) -> tuple[str, str]:
-    """Laya System-1 default routing — English model and 'en' language."""
+    """Route English input to the English checkpoint."""
     return "en", "english"
 
 
@@ -86,7 +142,8 @@ def _has_sufficient_ram_gb(min_free_gb: float = 1.5) -> bool:
 
             stat = MEMORYSTATUSEX()
             stat.dwLength = ctypes.sizeof(stat)
-            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                raise OSError("GlobalMemoryStatusEx failed")
             free_gb = stat.ullAvailPhys / (1024 ** 3)
             return free_gb >= min_free_gb
         elif os.path.exists("/proc/meminfo"):
@@ -95,9 +152,10 @@ def _has_sufficient_ram_gb(min_free_gb: float = 1.5) -> bool:
                     if line.startswith("MemAvailable:"):
                         kb = int(line.split()[1])
                         return (kb / (1024 ** 2)) >= min_free_gb
-    except Exception:
-        pass
-    return True
+        raise OSError("No supported physical-memory source is available")
+    except Exception as exc:
+        logger.warning("laya_ram_check_failed_closed", error=str(exc))
+        return False
 
 
 class LayaSystem1Engine:
@@ -121,6 +179,7 @@ class LayaSystem1Engine:
         self.preload = preload or (os.environ.get("LAYA_PRELOAD", "0") == "1")
         self._local_router: Any = None
         self._lock = threading.Lock()
+        self._active_backend = "laya_vector_projection"
 
     def _get_local_router(self) -> Any:
         """Lazily load `laya.Router` only if enabled and RAM >= 1.5 GB."""
@@ -168,7 +227,7 @@ class LayaSystem1Engine:
                         json={
                             "state": state,
                             "questions": questions,
-                            "model": chosen_model,
+                            "model": model,
                             "max_len": max_len,
                         },
                     )
@@ -178,6 +237,7 @@ class LayaSystem1Engine:
                             data, questions, chosen_model, "laya_remote"
                         )
                         if result is not None:
+                            self._active_backend = "laya_remote"
                             return result
                         logger.warning("laya_remote_invalid_response")
                     else:
@@ -192,17 +252,21 @@ class LayaSystem1Engine:
         local_router = self._get_local_router()
         if local_router is not None:
             try:
-                raw = local_router.predict(state, questions, model=chosen_model, max_len=max_len)
+                local_options: dict[str, Any] = {"max_len": max_len}
+                if model is not None:
+                    local_options["model"] = model
+                raw = local_router.predict(state, questions, **local_options)
                 result = self._validate_backend_result(
                     raw, questions, chosen_model, "laya_local"
                 )
                 if result is not None:
+                    self._active_backend = "laya_local"
                     return result
                 logger.warning("laya_local_invalid_response")
             except Exception as exc:
                 logger.warning("laya_local_predict_failed", error=str(exc))
 
-        # 3. Zero-RAM Calibrated System-1 Scoring Engine (Multilingual EN / HI / Hinglish)
+        # 3. Zero-RAM calibrated English scoring fallback.
         answers: dict[str, dict[str, Any]] = {}
         for q_key, q_spec in questions.items():
             q_type = str(q_spec.get("type", "choice")).lower()
@@ -210,8 +274,21 @@ class LayaSystem1Engine:
             criteria = q_spec.get("criteria")
 
             if q_type == "choice" and isinstance(criteria, dict) and criteria:
-                probs = self._score_choice_criteria(state_text, instructions, criteria)
-                best_choice = max(probs.items(), key=lambda kv: kv[1])[0]
+                risk_levels = {key.lower() for key in criteria}
+                negated_only = (
+                    {"l0", "l1", "l2"}.issubset(risk_levels)
+                    and not _has_unnegated_dangerous_action(state_text)
+                    and any(
+                        _marker_is_negated(state_text, marker)
+                        for marker in _DANGEROUS_ACTION_MARKERS
+                    )
+                )
+                if negated_only:
+                    best_choice = next(key for key in criteria if key.lower() == "l0")
+                    probs = {key: float(key == best_choice) for key in criteria}
+                else:
+                    probs = self._score_choice_criteria(state_text, instructions, criteria)
+                    best_choice = max(probs.items(), key=lambda kv: kv[1])[0]
                 answers[q_key] = {
                     "choice": best_choice,
                     "probability": round(probs[best_choice], 4),
@@ -233,6 +310,7 @@ class LayaSystem1Engine:
                     "answer": prob_yes >= 0.5,
                 }
 
+        self._active_backend = "laya_vector_projection"
         return LayaDecisionResult(
             answers=answers,
             routing={
@@ -302,10 +380,8 @@ class LayaSystem1Engine:
     ) -> dict[str, float]:
         """Compute calibrated Softmax distribution over candidate choices."""
         state_tokens = [t.lower() for t in _TOKEN_RE.findall(state_text)]
-        state_token_set = set(state_tokens)
         state_lower = state_text.lower()
 
-        # English concept expansion
         english_concepts: dict[str, set[str]] = {
             "gui": {
                 "gui", "visual", "visually", "screen", "screenshot", "desktop", "window",
@@ -433,15 +509,16 @@ class LayaSystem1Engine:
         """Return runtime diagnostic telemetry for the Laya System-1 engine."""
         ram_ok = _has_sufficient_ram_gb(1.5)
         if self.api_url:
-            backend = "laya_remote"
+            configured_backend = "laya_remote"
         elif self.enable_local_model and ram_ok:
-            backend = "laya_local"
+            configured_backend = "laya_local"
         else:
-            backend = "laya_vector_projection"
+            configured_backend = "laya_vector_projection"
 
         return {
             "status": "ready",
-            "backend": backend,
+            "backend": self._active_backend,
+            "configured_backend": configured_backend,
             "api_url": self.api_url or None,
             "api_url_configured": bool(self.api_url),
             "local_model_enabled": bool(self.enable_local_model),
@@ -479,6 +556,26 @@ class LayaSystem1Engine:
         """Compute calibrated binary `noul` probability P(Yes | state, instructions)."""
         s_lower = state_text.lower()
         inst_lower = instructions.lower()
+
+        if any(w in inst_lower for w in ("dangerous", "harmful", "destructive", "risk")):
+            if any(_marker_is_negated(s_lower, marker) for marker in _DANGEROUS_ACTION_MARKERS):
+                if not _has_unnegated_dangerous_action(s_lower):
+                    return 0.05
+
+        if any(w in inst_lower for w in ("verify", "empirical proof", "succeeded", "proof")):
+            if _has_explicit_failure(s_lower):
+                return 0.08
+            proof_markers = (
+                "file_verified", "verified", "success", "succeeded", "passed",
+                "created", "committed", "exit 0", "200 ok", "completed",
+                "process is running", "authenticated landing state observed",
+                "positive service state observed",
+            )
+            proof_hits = sum(
+                1 for marker in proof_markers
+                if _contains_unnegated_marker(s_lower, marker)
+            )
+            return min(0.96, 0.70 + 0.08 * (proof_hits - 1)) if proof_hits else 0.10
 
         # 1. Anchor-based score if affirmative or negative anchor provided
         if affirmative_anchor or negative_anchor:
@@ -521,24 +618,12 @@ class LayaSystem1Engine:
 
         # 2. Instruction-based fallback heuristics
         if any(w in inst_lower for w in ("dangerous", "harmful", "destructive", "risk")):
-            dangerous_markers = ("rm -rf", "drop", "delete", "format", "truncate", "destroy", "kill -9", "mkfs", "dd if=")
-            if any(m in s_lower for m in dangerous_markers):
+            if _has_unnegated_dangerous_action(s_lower):
                 return 0.92
             return 0.15
 
         if any(w in inst_lower for w in ("verify", "empirical proof", "succeeded", "proof")):
-            neg_markers = (
-                "error", "traceback", "exception", "failed",
-                "terminal ready (0 procs)", "__sonic_obs_ready__",
-                "exit 126", "blocked", "syntaxerror", "syntax error",
-                "indentationerror", "taberror", "invalid syntax",
-                "*untitled", "unsaved", "disk verification failed",
-            )
-            pos_markers = ("verified", "success", "passed", "created", "committed", "exit 0", "200 ok", "file_verified")
-            if any(m in s_lower for m in neg_markers):
-                return 0.08
-            pos_hits = sum(1 for m in pos_markers if m in s_lower)
-            return min(0.96, 0.58 + 0.12 * pos_hits) if s_lower.strip() else 0.20
+            return 0.10
 
         if any(w in inst_lower for w in ("stuck", "loop", "repeating")):
             err_hits = sum(s_lower.count(w) for w in ("error", "failed", "blocked", "timeout"))
@@ -553,7 +638,7 @@ class LayaSystem1Engine:
     def decide_execution_plane(self, goal: str) -> tuple[str, float]:
         """
         Use System-1 `choice` judgment to decide between `"gui"` and `"headless"`
-        planes across English, Hindi, and Hinglish goals.
+        planes for English goals.
         """
         res = self.predict(
             state=goal,
@@ -602,6 +687,20 @@ class LayaSystem1Engine:
         if re.search(r"(?:^|\s)\*|\*untitled|\[modified\]|\bunsaved\b", evidence, re.IGNORECASE):
             if not any(neg in ev_lower for neg in ("no unsaved", "clean (no unsaved", "editor titles: clean")):
                 return 0.08
+
+        if _has_explicit_failure(ev_lower):
+            return 0.05
+
+        proof_markers = (
+            "file_verified", "actual disk verification: verified",
+            "verified file(s) on disk", "verified on disk",
+            "passed", "success", "succeeded", "exit 0", "200 ok",
+            "completed", "process is running",
+            "authenticated landing state observed",
+            "positive service state observed",
+        )
+        if not any(_contains_unnegated_marker(ev_lower, marker) for marker in proof_markers):
+            return 0.10
 
         # 3. For goals that require writing/saving files, creating services, or producing artifacts:
         creates_or_writes = any(

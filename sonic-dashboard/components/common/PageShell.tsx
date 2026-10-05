@@ -11,42 +11,31 @@ interface PageHeaderProps {
   accent?: "primary" | "secondary" | "accent" | "success";
 }
 
-const ACCENT_WRAP: Record<string, string> = {
-  primary: "from-primary-600 to-primary-700 shadow-glow",
-  secondary: "from-secondary-600 to-secondary-700 shadow-glow-cyan",
-  accent: "from-accent-600 to-accent-700 shadow-glow-violet",
-  success: "from-emerald-600 to-emerald-700",
-};
-
 export function PageHeader({ icon, title, badge, subtitle, actions, accent = "primary" }: PageHeaderProps) {
   return (
-    <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between glass-card rounded-2xl p-5 animate-fade-in-up">
-      <div className="flex items-center gap-4 min-w-0">
-        <div
-          className={`grid place-items-center w-12 h-12 rounded-xl bg-gradient-to-tr ${ACCENT_WRAP[accent]} text-white shrink-0`}
-        >
-          <div className="bg-ink-950/40 w-full h-full rounded-[10px] grid place-items-center">
-            {icon}
-          </div>
+    <div className="sonic-page-header flex flex-col gap-4 md:flex-row md:items-end md:justify-between animate-fade-in-up" data-accent={accent}>
+      <div className="flex items-center gap-3.5 min-w-0">
+        <div className="sonic-page-header-icon grid place-items-center w-10 h-10 rounded-xl shrink-0">
+          {icon}
         </div>
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h2 className="text-lg font-bold text-white tracking-wide truncate">{title}</h2>
+            <h1 className="text-xl md:text-2xl font-semibold text-white tracking-tight truncate">{title}</h1>
             {badge && (
-              <span className="chip bg-ink-800 text-muted-bright border border-ink-600">
+              <span className="chip bg-ink-850 text-muted-bright border border-ink-700">
                 {badge}
               </span>
             )}
           </div>
           {subtitle && (
-            <p className="text-xs text-muted mt-1 font-mono truncate">{subtitle}</p>
+            <p className="text-xs text-muted mt-1.5 truncate">{subtitle}</p>
           )}
         </div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
         <Link
-          href="/"
-          className="btn-ghost !px-2.5 !py-1 text-xs font-mono text-muted hover:text-white flex items-center gap-1 border border-ink-700/60 rounded-lg hover:bg-ink-800 transition"
+          href="/workstation"
+          className="btn-ghost !px-3 !py-2 text-xs text-muted hover:text-white flex items-center gap-1.5 border border-ink-700/60 rounded-lg hover:bg-ink-800 transition"
           title="Return to Workstation"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
@@ -65,9 +54,9 @@ interface PageShellProps {
 
 export function PageShell({ children, maxWidth = "max-w-7xl" }: PageShellProps) {
   return (
-    <div className={`min-h-screen bg-ink-950 bg-grid-glow ${maxWidth} mx-auto p-6 space-y-6`}>
+    <main className={`sonic-page-shell min-h-screen bg-ink-950 ${maxWidth} mx-auto p-5 sm:p-6 space-y-6`}>
       {children}
-    </div>
+    </main>
   );
 }
 

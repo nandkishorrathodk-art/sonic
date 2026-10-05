@@ -34,6 +34,12 @@ def get_database_url() -> str:
             return raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
         elif raw_url.startswith("postgresql://") and not raw_url.startswith("postgresql+asyncpg://"):
             return raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif raw_url.startswith("sqlite:///"):
+            return raw_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+        elif raw_url.startswith("sqlite://"):
+            return raw_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+        elif raw_url.startswith("sqlite+pysqlite://"):
+            return raw_url.replace("sqlite+pysqlite://", "sqlite+aiosqlite://", 1)
         return raw_url
     # Default to async SQLite for local/offline execution
     return "sqlite+aiosqlite:///./sonic_data.db"

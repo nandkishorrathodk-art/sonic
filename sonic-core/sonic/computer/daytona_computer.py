@@ -93,6 +93,7 @@ class DaytonaComputerProvider(ComputerProvider):
         self.sessions: dict[str, ComputerSession] = {}
         self.audit_log: list[ComputerAuditEvent] = []
         self._active_windows: dict[str, str] = {}
+        self._application_pids: dict[str, dict[str, set[int]]] = {}
         # Persistent Body (PLAN Phase 2): the home desktop ID survives a
         # backend restart so _resolve_sandbox can re-attach via client.get(id).
         self._state_path = os.environ.get(
@@ -479,32 +480,54 @@ class DaytonaComputerProvider(ComputerProvider):
         if ws:
             ws.status = ComputerWorkspaceStatus.DESTROYING
 
-        # Resolve via cloud so we can destroy sandboxes not in our in-memory cache
-        sandbox = await self._resolve_sandbox(workspace_id)
-        if sandbox:
-            try:
-                await sandbox.delete()
-            except Exception as e:
-                logger.warning("daytona_sandbox_delete_failed", error=str(e))
+        try:
+            sandbox = self._sandboxes.get(workspace_id)
+            if sandbox is None:
+                env_id = os.environ.get("DAYTONA_SANDBOX_ID", "")
+                target_id = (
+                    workspace_id
+                    if workspace_id and not workspace_id.startswith("ws-") and workspace_id != "default"
+                    else env_id or workspace_id
+                )
+                if target_id in (
+                    "sonic-desktop-workstation",
+                    "docker-workstation",
+                ) or (target_id or "").startswith("docker:"):
+                    container_name = (
+                        "sonic-desktop-workstation"
+                        if target_id in ("sonic-desktop-workstation", "docker-workstation")
+                        else target_id.split(":", 1)[1]
+                    )
+                    sandbox = DockerContainerSandbox(container_name)
+                elif target_id and (client := self._get_client()) is not None:
+                    sandbox = await client.get(target_id)
+            if sandbox is None:
+                if ws:
+                    ws.status = ComputerWorkspaceStatus.DEGRADED
+                return False
+            await sandbox.delete()
+        except Exception:
+            if ws:
+                ws.status = ComputerWorkspaceStatus.DEGRADED
+            logger.exception("daytona_sandbox_delete_failed", workspace_id=workspace_id)
+            raise
 
-        # Clean up in-memory tracking regardless of whether ws was cached
         self.workspaces.pop(workspace_id, None)
         self._sandboxes.pop(workspace_id, None)
         self._active_windows.pop(workspace_id, None)
+        self._application_pids.pop(workspace_id, None)
         self._persist_state()
 
-        if ws or sandbox:
-            self._record_audit(
-                session_id="system",
-                workspace_id=workspace_id,
-                tenant_id=ws.tenant_id if ws else "unknown",
-                actor="DaytonaComputerProvider",
-                action="DESTROY_GRAPHICAL_WORKSTATION",
-                resource=workspace_id,
-                result="SUCCESS",
-            )
-            return True
-        return False
+        self._record_audit(
+            session_id="system",
+            workspace_id=workspace_id,
+            tenant_id=ws.tenant_id if ws else "unknown",
+            actor="DaytonaComputerProvider",
+            action="DESTROY_GRAPHICAL_WORKSTATION",
+            resource=workspace_id,
+            result="SUCCESS",
+        )
+        return True
 
     async def get_stream_url(self, workspace_id: str) -> str | None:
         """Obtains the Daytona preview/public URL for the noVNC port (6080).
@@ -572,9 +595,9 @@ class DaytonaComputerProvider(ComputerProvider):
             if act_res.exit_code == 0 and act_res.stdout and act_res.stdout.strip():
                 active_app = act_res.stdout.strip()
             else:
-                active_app = self._active_windows.get(workspace_id) or (open_windows[0] if open_windows else "Desktop")
+                active_app = "UNKNOWN"
         except Exception:
-            active_app = self._active_windows.get(workspace_id) or (open_windows[0] if open_windows else "Desktop")
+            active_app = "UNKNOWN"
         # Derive real workspace status from the sandbox state.
         # Daytona returns a SandboxState enum whose str() includes the
         # enum name (e.g. "<SandboxState.STARTED: 'started'>"); normalize to
@@ -676,12 +699,22 @@ class DaytonaComputerProvider(ComputerProvider):
                     logger.warning("daytona_x11_screenshot_failed", error=str(e))
 
             if b64:
+                active_window = "UNKNOWN"
+                active_result = await sandbox.process.exec(
+                    f"DISPLAY={self._get_display(workspace_id)} "
+                    "xdotool getactivewindow getwindowname"
+                )
+                if (
+                    getattr(active_result, "exit_code", 1) == 0
+                    and str(getattr(active_result, "result", "") or "").strip()
+                ):
+                    active_window = str(active_result.result).strip()
                 visible_text, controls = await self._extract_visible_text(sandbox)
                 return ScreenObservation(
                     screenshot_base64=b64,
                     width=1280,
                     height=800,
-                    active_window=self._active_windows.get(workspace_id, "XFCE Desktop"),
+                    active_window=active_window,
                     visible_text=visible_text,
                     detected_controls=controls,
                     desktop_state="INTERACTIVE",
@@ -692,7 +725,7 @@ class DaytonaComputerProvider(ComputerProvider):
             screenshot_base64="",
             width=1280,
             height=800,
-            active_window=self._active_windows.get(workspace_id, "None"),
+            active_window="UNKNOWN",
             visible_text="",
             detected_controls=[],
             desktop_state="NO_DISPLAY",
@@ -836,12 +869,7 @@ class DaytonaComputerProvider(ComputerProvider):
         """
         sandbox = await self._resolve_sandbox(workspace_id)
         if not sandbox:
-            logger.warning(
-                "daytona_gui_action_no_sandbox",
-                workspace_id=workspace_id,
-                action=action.action.value if hasattr(action.action, "value") else str(action.action),
-            )
-            return await self.screenshot(workspace_id)
+            raise RuntimeError("GUI action cannot execute because no live sandbox is attached")
         action_type = action.action
 
         supported_actions = {
@@ -870,8 +898,7 @@ class DaytonaComputerProvider(ComputerProvider):
 
         if action_type in [GUIActionType.CLICK, GUIActionType.DOUBLE_CLICK, GUIActionType.RIGHT_CLICK]:
             if action.x is None or action.y is None:
-                logger.warning("daytona_gui_click_missing_coordinates", action=action_type.value, x=action.x, y=action.y)
-                return await self.screenshot(workspace_id)
+                raise ValueError(f"{action_type.value} requires explicit x and y coordinates")
 
         try:
             if hasattr(sandbox, "computer_use"):
@@ -950,14 +977,20 @@ class DaytonaComputerProvider(ComputerProvider):
                         await self._move_mouse_smoothly(
                             sandbox, workspace_id, int(action.x), int(action.y)
                         )
-                    await sandbox.process.exec(
+                    typed = await sandbox.process.exec(
                         f"{focus}DISPLAY={disp} xdotool type --delay {int(action.delay_ms)} "
                         f"--clearmodifiers -- {safe_text}"
                     )
+                    if getattr(typed, "exit_code", 1) != 0:
+                        raise RuntimeError("Text entry command failed")
                 elif action_type in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY) and (action.key or action.text):
                     norm_key = self._normalize_x11_keysym(action.key or action.text or "")
                     safe_key = shlex.quote(norm_key)
-                    await sandbox.process.exec(f"DISPLAY={disp} xdotool key --clearmodifiers {safe_key}")
+                    pressed = await sandbox.process.exec(
+                        f"DISPLAY={disp} xdotool key --clearmodifiers {safe_key}"
+                    )
+                    if getattr(pressed, "exit_code", 1) != 0:
+                        raise RuntimeError("Keyboard action failed")
 
             # Common handlers for SCROLL, APPS, WINDOWS
             disp = self._get_display(workspace_id)
@@ -971,7 +1004,9 @@ class DaytonaComputerProvider(ComputerProvider):
                 for _ in range(clicks):
                     cmd_parts.append(f"DISPLAY={disp} xdotool click {button}")
                 scroll_cmd = " && ".join(cmd_parts)
-                await sandbox.process.exec(scroll_cmd)
+                scrolled = await sandbox.process.exec(scroll_cmd)
+                if getattr(scrolled, "exit_code", 1) != 0:
+                    raise RuntimeError("Scroll action failed")
 
             elif action_type in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
                 raw_name = action.app_name.strip(" *_\n\r\t`\"'")
@@ -980,42 +1015,74 @@ class DaytonaComputerProvider(ComputerProvider):
                 clean_app = raw_name.strip()
                 if clean_app:
                     parts = shlex.split(clean_app)
-                    binary = parts[0] if parts else clean_app
-                    self._active_windows[workspace_id] = binary
+                    spawn_cmd = (
+                        f"DISPLAY={disp} nohup {shlex.join(parts)} "
+                        ">/dev/null 2>&1 </dev/null & app_pid=$!; "
+                        "printf '%s\\n' \"$app_pid\""
+                    )
+                    launch = await sandbox.process.exec(spawn_cmd)
+                    if getattr(launch, "exit_code", 1) != 0:
+                        raise RuntimeError("Application launch command failed")
+                    pid_lines = str(getattr(launch, "result", "") or "").strip().splitlines()
                     try:
-                        wm_check = await sandbox.process.exec(f"DISPLAY={disp} wmctrl -l")
-                        is_already_open = wm_check.result and binary.lower() in wm_check.result.lower()
-                        if is_already_open:
-                            await sandbox.process.exec(f"export DISPLAY={disp}; (wmctrl -a {shlex.quote(binary)} 2>/dev/null || xdotool search --onlyvisible --class {shlex.quote(binary)} windowactivate 2>/dev/null)")
-                        else:
-                            spawn_cmd = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/dev/null 2>&1 &"
-                            await sandbox.process.exec(spawn_cmd)
-                    except Exception:
-                        spawn_cmd = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/dev/null 2>&1 &"
-                        await sandbox.process.exec(spawn_cmd)
+                        app_pid = int(pid_lines[-1]) if pid_lines else 0
+                    except ValueError:
+                        app_pid = 0
+                    if app_pid <= 0:
+                        raise RuntimeError("Application launch returned no verifiable process ID")
+                    check = await sandbox.process.exec(f"ps -p {app_pid} -o pid=")
+                    if (
+                        getattr(check, "exit_code", 1) != 0
+                        or str(getattr(check, "result", "") or "").strip() != str(app_pid)
+                    ):
+                        raise RuntimeError("Launched application process is not running")
+                    self._application_pids.setdefault(workspace_id, {}).setdefault(
+                        parts[0], set()
+                    ).add(app_pid)
 
             elif action_type == GUIActionType.CLOSE_WINDOW:
                 target = action.window_id or action.app_name
                 if target:
                     safe_target = shlex.quote(target)
-                    await sandbox.process.exec(
-                        f"export DISPLAY={disp}; "
-                        f"wmctrl -c {safe_target} 2>/dev/null || "
-                        f"wmctrl -ic {safe_target} 2>/dev/null || "
-                        f"xdotool search --onlyvisible --name {safe_target} windowclose 2>/dev/null || "
-                        f"pkill -f -- {safe_target}"
+                    closed = await sandbox.process.exec(
+                        f"export DISPLAY={disp}; wmctrl -c {safe_target}"
                     )
-                    if self._active_windows.get(workspace_id) == target:
-                        self._active_windows[workspace_id] = "XFCE Desktop"
+                    if getattr(closed, "exit_code", 1) != 0:
+                        raise RuntimeError(f"Could not close window {target!r}")
                 else:
-                    await sandbox.process.exec(f"DISPLAY={disp} xdotool getactivewindow windowclose")
+                    closed = await sandbox.process.exec(
+                        f"DISPLAY={disp} xdotool getactivewindow windowclose"
+                    )
+                    if getattr(closed, "exit_code", 1) != 0:
+                        raise RuntimeError("Could not close the active window")
 
             elif action_type == GUIActionType.CLOSE_APP and action.app_name:
-                raw_name = action.app_name.strip(" *_\n\r\t`\"'")
-                clean_app = raw_name.split()[0].lower() if raw_name else action.app_name
-                await sandbox.process.exec(f"pkill -f -- {shlex.quote(clean_app)}")
-                if self._active_windows.get(workspace_id) in (clean_app, action.app_name):
-                    self._active_windows[workspace_id] = "XFCE Desktop"
+                process_map = self._application_pids.get(workspace_id, {})
+                app_parts = shlex.split(action.app_name)
+                app_key = app_parts[0] if app_parts else ""
+                process_ids = set(process_map.get(app_key, set()))
+                if not process_ids:
+                    raise RuntimeError("No tracked process is available to close this application")
+                for process_id in process_ids:
+                    stopped = await sandbox.process.exec(f"kill -TERM -- {process_id}")
+                    if getattr(stopped, "exit_code", 1) != 0:
+                        check = await sandbox.process.exec(f"ps -p {process_id} -o pid=")
+                        if (
+                            getattr(check, "exit_code", 1) == 0
+                            and str(getattr(check, "result", "") or "").strip()
+                        ):
+                            raise RuntimeError(f"Could not stop process {process_id}")
+                    for _ in range(20):
+                        check = await sandbox.process.exec(f"ps -p {process_id} -o pid=")
+                        if (
+                            getattr(check, "exit_code", 1) != 0
+                            or not str(getattr(check, "result", "") or "").strip()
+                        ):
+                            break
+                        await asyncio.sleep(0.1)
+                    else:
+                        raise RuntimeError(f"Process {process_id} is still running")
+                process_map.pop(app_key, None)
 
             elif action_type == GUIActionType.INSTALL_APP and (action.app_name or action.text):
                 pkg = action.app_name or action.text or ""
@@ -1030,11 +1097,20 @@ class DaytonaComputerProvider(ComputerProvider):
                 title = action.app_name or action.window_id or ""
                 if title:
                     safe = shlex.quote(title)
-                    await sandbox.process.exec(
-                        f"export DISPLAY={disp}; (wmctrl -a {safe} 2>/dev/null || "
-                        f"xdotool search --name {safe} windowactivate 2>/dev/null)"
+                    selected = await sandbox.process.exec(
+                        f"export DISPLAY={disp}; wmctrl -a {safe}"
                     )
-                    self._active_windows[workspace_id] = title
+                    if getattr(selected, "exit_code", 1) != 0:
+                        raise RuntimeError(f"Could not focus window {title!r}")
+                    active = await sandbox.process.exec(
+                        f"DISPLAY={disp} xdotool getactivewindow getwindowname"
+                    )
+                    actual_title = str(getattr(active, "result", "") or "").strip()
+                    if (
+                        getattr(active, "exit_code", 1) != 0
+                        or title.casefold() not in actual_title.casefold()
+                    ):
+                        raise RuntimeError(f"Window focus could not be verified for {title!r}")
 
             elif action_type in (GUIActionType.APP_MAXIMIZE, GUIActionType.WINDOW_MAXIMIZE):
                 target = (action.window_id or action.app_name or "").strip()
@@ -1050,19 +1126,17 @@ class DaytonaComputerProvider(ComputerProvider):
                         )
                 else:
                     max_cmd = f"export DISPLAY={disp}; wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz"
-                await sandbox.process.exec(max_cmd)
-                if target and not target.lower().startswith("0x"):
-                    self._active_windows[workspace_id] = target
+                maximized = await sandbox.process.exec(max_cmd)
+                if getattr(maximized, "exit_code", 1) != 0:
+                    raise RuntimeError("Window maximize command failed")
 
             elif action_type == GUIActionType.WINDOW_TILE:
-                await self.tile_workstation(workspace_id)
+                if not await self.tile_workstation(workspace_id):
+                    raise RuntimeError("Window tiling command failed")
 
         except Exception as e:
             logger.error("daytona_gui_action_dispatch_error", error=str(e))
             raise RuntimeError(f"Daytona GUI action failed: {e}") from e
-
-        if action.app_name and action.action not in (GUIActionType.CLOSE_APP, GUIActionType.CLOSE_WINDOW):
-            self._active_windows[workspace_id] = action.app_name
 
         ws = self.workspaces.get(workspace_id)
         self._record_audit(
@@ -1072,10 +1146,13 @@ class DaytonaComputerProvider(ComputerProvider):
             actor=actor,
             action=f"GUI_{action_type.value}",
             resource=action.app_name or "screen",
-            result="SUCCESS",
+            result="DISPATCHED",
             details=action.model_dump(),
         )
-        return await self.screenshot(workspace_id)
+        observation = await self.screenshot(workspace_id)
+        if observation.active_window != "UNKNOWN":
+            self._active_windows[workspace_id] = observation.active_window
+        return observation
 
     # -------------------------------------------------------------
     # 4. Real PTY Terminal & Command Execution (Sandbox-Bound)
@@ -1316,10 +1393,24 @@ class DaytonaComputerProvider(ComputerProvider):
             if not allowed:
                 return False
         disp = self._get_display(workspace_id)
-        spawn = f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/dev/null 2>&1 &"
-        self._active_windows[workspace_id] = parts[0]
+        spawn = (
+            f"DISPLAY={disp} nohup {shlex.join(parts)} "
+            ">/dev/null 2>&1 </dev/null & app_pid=$!; "
+            "sleep 0.1; kill -0 \"$app_pid\" || exit 1; "
+            "printf '%s\\n' \"$app_pid\""
+        )
         result = await self.terminal(workspace_id, spawn)
-        return result.exit_code == 0
+        pid_lines = result.stdout.strip().splitlines()
+        try:
+            app_pid = int(pid_lines[-1]) if pid_lines else 0
+        except ValueError:
+            app_pid = 0
+        if result.exit_code != 0 or app_pid <= 0:
+            return False
+        self._application_pids.setdefault(workspace_id, {}).setdefault(
+            parts[0], set()
+        ).add(app_pid)
+        return True
 
     async def tile_workstation(self, workspace_id: str) -> bool:
         """Executes wmctrl commands to tile windows side-by-side."""
@@ -1349,10 +1440,27 @@ class DaytonaComputerProvider(ComputerProvider):
 
     async def close_application(self, workspace_id: str, app_name: str, actor: str = "operator") -> bool:
         """Closes a running desktop application."""
-        result = await self.terminal(workspace_id, f"pkill -f -- {shlex.quote(app_name)}")
-        if self._active_windows.get(workspace_id) == app_name:
-            self._active_windows[workspace_id] = "XFCE Desktop"
-        return result.exit_code == 0
+        process_map = self._application_pids.get(workspace_id, {})
+        app_parts = shlex.split(app_name)
+        app_key = app_parts[0] if app_parts else ""
+        process_ids = set(process_map.get(app_key, set()))
+        if not process_ids:
+            return False
+        for process_id in process_ids:
+            stopped = await self.terminal(
+                workspace_id, f"kill -TERM -- {process_id}"
+            )
+            for _ in range(20):
+                check = await self.terminal(workspace_id, f"ps -p {process_id} -o pid=")
+                if check.exit_code != 0 or not check.stdout.strip():
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                return False
+            if stopped.exit_code != 0 and check.stdout.strip():
+                return False
+        process_map.pop(app_key, None)
+        return True
 
     async def install_application(self, workspace_id: str, package_name: str, actor: str = "operator") -> tuple[bool, str]:
         """Installs an application inside the sandbox."""

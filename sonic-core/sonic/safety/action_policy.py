@@ -33,7 +33,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -43,6 +43,17 @@ from sonic.safety.scope import RiskLevel, ScopeChecker
 from sonic.sandbox import egress
 
 logger = get_logger(__name__)
+
+_MANDATORY_EGRESS_BLOCKED_NETWORKS = tuple(
+    network
+    for network in egress.BLOCKED_NETWORKS
+    if str(network) not in {
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "fc00::/7",
+    }
+)
 
 
 def _now() -> str:
@@ -133,6 +144,7 @@ class ActionPolicy:
         self.scope_config = scope_config
         self.allow_private_networks = allow_private_networks
         self.tenant_id = tenant_id
+        self._blocked_networks_snapshot = tuple(egress.BLOCKED_NETWORKS)
         # The scope checker's check_action is fail-closed only when rules are
         # loaded; for the command-risk classifier we don't need rules loaded.
         self._rate = _RateWindow()
@@ -256,13 +268,21 @@ class ActionPolicy:
             if not verdict.allowed:
                 return verdict
 
-        # 4. Egress + target-allowlist for security tools, tool runs, method invent, and browser navigation.
+        # 4. Network boundaries.
         if action_type_name in ("SECURITY_TOOL", "TOOL_RUN", "METHOD_INVENT"):
             scan_target = payload.get("target") or payload.get("target_url") or target
-            if scan_target:
-                verdict = self._check_egress(scan_target, action_type_name.lower())
-                if not verdict.allowed:
-                    return verdict
+            if not scan_target:
+                return PolicyVerdict(False, f"{action_type_name.lower()} requires an explicit target")
+            if action_type_name == "SECURITY_TOOL" and not (
+                self.security_tool_targets or self._get_active_scope_config()
+            ):
+                return PolicyVerdict(
+                    False,
+                    "security tool target requires explicit operator authorization",
+                )
+            verdict = self._check_egress(scan_target, action_type_name.lower())
+            if not verdict.allowed:
+                return verdict
         elif action_type_name == "BROWSER_NAVIGATE":
             url = payload.get("url") or target
             parsed = urlparse(str(url).strip())
@@ -271,6 +291,16 @@ class ActionPolicy:
             if parsed.username or parsed.password:
                 return PolicyVerdict(False, "browser navigation forbids embedded URL credentials")
             verdict = self._check_egress(url, "browser")
+            if not verdict.allowed:
+                return verdict
+        elif action_type_name == "GIT_PUSH":
+            remote = payload.get("remote_url") or payload.get("url") or payload.get("remote") or target
+            if not remote or "://" not in str(remote):
+                return PolicyVerdict(
+                    False,
+                    "git push requires a resolvable remote URL for egress validation",
+                )
+            verdict = self._check_egress(str(remote), "git push")
             if not verdict.allowed:
                 return verdict
 
@@ -282,6 +312,10 @@ class ActionPolicy:
             clean_path = str(path or "").strip().replace("\\", "/")
             if not clean_path:
                 return PolicyVerdict(False, f"{action_name} empty path")
+            if os.name != "nt" and PureWindowsPath(clean_path).drive:
+                return PolicyVerdict(
+                    False, f"{action_name} escapes workspace: Windows drive path {path}"
+                )
             resolved = Path(clean_path).expanduser()
             # Resolve strictly=False so a not-yet-written path still confines.
             # On Windows, POSIX paths starting with / return is_absolute() == False.
@@ -429,23 +463,22 @@ class ActionPolicy:
         return cfg if has_rules else None
 
     def _check_egress(self, target: str, label: str) -> PolicyVerdict:
-        host = self._host_of(target).lower()
-        # Sandbox loopback and local container bindings are always permitted within the container
-        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "0") or host.startswith("127."):
-            return PolicyVerdict(True, "local sandbox loopback allowed")
-
         verdict = self._check_target_and_scope(target, label)
         if verdict is not None:
             return verdict
-        allow_private = False
-        host = self._host_of(target)
-        if (
-            getattr(self, "allow_private_networks", False)
-            or (self.security_tool_targets and (host in self.security_tool_targets or target in self.security_tool_targets))
-        ):
-            allow_private = True
+        allow_private = bool(getattr(self, "allow_private_networks", False))
+        if label == "security_tool" and self.security_tool_targets:
+            host = self._host_of(target)
+            allow_private = allow_private or host in self.security_tool_targets or target in self.security_tool_targets
         try:
-            ok, reason = egress.is_target_allowed(target, allow_private_for_tests=allow_private)
+            ok, reason = egress.is_target_allowed(
+                target,
+                blocked_networks=(
+                    _MANDATORY_EGRESS_BLOCKED_NETWORKS
+                    if allow_private
+                    else self._blocked_networks_snapshot
+                ),
+            )
         except Exception as e:
             return PolicyVerdict(False, f"egress check failed: {e}")
         if not ok:

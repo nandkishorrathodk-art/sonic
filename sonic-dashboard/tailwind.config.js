@@ -10,44 +10,44 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        // ── Surface scale (deep, layered dark) ──────────────────────
+        // ── Surface scale (quiet graphite layers) ───────────────────
         ink: {
-          950: "#070910",
-          900: "#0B0E16",
-          850: "#0F131C",
-          800: "#141823",
-          750: "#1A1F2B",
-          700: "#222835",
-          600: "#2D3444",
-          500: "#3A4255",
+          950: "#090c11",
+          900: "#0d1218",
+          850: "#111820",
+          800: "#161e27",
+          750: "#202a35",
+          700: "#293541",
+          600: "#354452",
+          500: "#495968",
         },
         // ── Text / muted ────────────────────────────────────────────
         slate: colors.slate,
         muted: {
-          DEFAULT: "#8B93A7",
-          dim: "#5B6477",
-          bright: "#C3CAD8",
+          DEFAULT: "#96a2ad",
+          dim: "#687681",
+          bright: "#d0d8dd",
         },
-        // ── Brand accents (Red Team + Cyber Cyan) ───────────────────
+        // ── Brand accent (measured mineral teal) ────────────────────
         primary: {
-          DEFAULT: "#FF3B5C",
-          400: "#FF6B85",
-          500: "#FF3B5C",
-          600: "#E5264A",
-          700: "#B81A38",
+          DEFAULT: "#8adfd2",
+          400: "#a8eee2",
+          500: "#8adfd2",
+          600: "#63c5b9",
+          700: "#419b92",
         },
         secondary: {
-          DEFAULT: "#22D3EE",
-          400: "#5AE6F7",
-          500: "#22D3EE",
-          600: "#06B6D4",
-          700: "#0E8FAB",
+          DEFAULT: "#a9b8c2",
+          400: "#c3d0d8",
+          500: "#a9b8c2",
+          600: "#8397a4",
+          700: "#61747f",
         },
         accent: {
-          DEFAULT: "#8B5CF6",
-          400: "#A78BFA",
-          500: "#8B5CF6",
-          600: "#7C3AED",
+          DEFAULT: "#91a8bc",
+          400: "#b0c1cf",
+          500: "#91a8bc",
+          600: "#70899e",
         },
         success: "#22E0A1",
         warning: "#FBBF24",
@@ -58,14 +58,14 @@ module.exports = {
         mono: ["var(--font-mono)", "ui-monospace", "monospace"],
       },
       boxShadow: {
-        glow: "0 0 24px rgba(255, 59, 92, 0.22)",
-        "glow-cyan": "0 0 24px rgba(34, 211, 238, 0.22)",
-        "glow-violet": "0 0 24px rgba(139, 92, 246, 0.22)",
-        "inner-glow": "inset 0 1px 0 0 rgba(255,255,255,0.04)",
+        glow: "0 0 20px rgba(138, 223, 210, 0.12)",
+        "glow-cyan": "0 0 20px rgba(138, 223, 210, 0.12)",
+        "glow-violet": "0 0 20px rgba(145, 168, 188, 0.12)",
+        "inner-glow": "inset 0 1px 0 0 rgba(255,255,255,0.035)",
       },
       backgroundImage: {
         "grid-glow":
-          "radial-gradient(circle at 20% 0%, rgba(255,59,92,0.10), transparent 40%), radial-gradient(circle at 80% 100%, rgba(34,211,238,0.10), transparent 45%)",
+          "radial-gradient(circle at 55% 0%, rgba(138,223,210,0.045), transparent 38%), linear-gradient(180deg, #090c11 0%, #0b0f14 100%)",
       },
       keyframes: {
         shimmer: {
@@ -90,4 +90,3 @@ module.exports = {
   },
   plugins: [],
 };
-

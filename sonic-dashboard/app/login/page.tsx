@@ -28,11 +28,13 @@ function LoginContent() {
     enabled: false,
     clientId: null,
   });
+  const [googleConfigError, setGoogleConfigError] = useState<string | null>(null);
   const [configChecked, setConfigChecked] = useState(false);
   const [localEmail, setLocalEmail] = useState("");
 
   // Check if returning from Google OAuth callback with a token in query params
   useEffect(() => {
+    const controller = new AbortController();
     const token = searchParams.get("token");
     if (token) {
       const email = searchParams.get("email") || "operator@local";
@@ -46,29 +48,35 @@ function LoginContent() {
         role,
         tenant_id: tenantId,
       });
-      router.push("/");
-      return;
+      router.replace("/workstation");
+      return () => controller.abort();
     }
 
     // Probe server Google OAuth configuration status
     const probeGoogleConfig = async () => {
       try {
-        const res = await fetch(`${API_BASE}/auth/google/config`);
-        if (res.ok) {
-          const data = await res.json();
-          setGoogleConfig({
-            enabled: Boolean(data?.enabled),
-            clientId: data?.client_id || null,
-          });
+        const res = await fetch(`${API_BASE}/auth/google/config`, { signal: controller.signal });
+        if (!res.ok) {
+          throw new Error(`Google OAuth configuration check failed (${res.status}).`);
         }
-      } catch {
-        setGoogleConfig({ enabled: false, clientId: null });
+        const data = await res.json();
+        setGoogleConfig({
+          enabled: Boolean(data?.enabled),
+          clientId: data?.client_id || null,
+        });
+        setGoogleConfigError(null);
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          console.error("Failed to check Google OAuth configuration:", err);
+          setGoogleConfigError("Cannot reach SONIC authentication service. Check the backend connection and try again.");
+        }
       } finally {
-        setConfigChecked(true);
+        if (!controller.signal.aborted) setConfigChecked(true);
       }
     };
 
     probeGoogleConfig();
+    return () => controller.abort();
   }, [searchParams, router]);
 
   // Real Google OAuth Flow — redirects browser directly to Google consent screen
@@ -77,7 +85,10 @@ function LoginContent() {
     setError(null);
 
     if (!googleConfig.enabled) {
-      setError("Google OAuth is not configured on the backend. Please configure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the environment.");
+      setError(
+        googleConfigError ||
+          "Google OAuth is not configured on the backend. Please configure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the environment.",
+      );
       setLoading(false);
       return;
     }
@@ -120,7 +131,7 @@ function LoginContent() {
           role: data.user?.role || "operator",
           tenant_id: data.user?.tenant_id || "default",
         });
-        router.push("/");
+        router.replace("/workstation");
       } else {
         throw new Error("No authorization token was issued by the workstation.");
       }
@@ -132,44 +143,42 @@ function LoginContent() {
   };
 
   return (
-    <div className="min-h-screen bg-ink-950 text-slate-200 flex flex-col justify-between font-sans relative overflow-hidden select-none">
+    <div className="sonic-auth min-h-screen bg-ink-950 text-slate-200 flex flex-col justify-between font-sans relative overflow-hidden">
       {/* Dynamic ambient cyber glow background */}
-      <div className="fixed inset-0 bg-grid-glow pointer-events-none opacity-80" />
-      <div className="absolute top-[-15%] left-[20%] w-[650px] h-[650px] bg-primary-600/10 rounded-full blur-[140px] pointer-events-none" />
-      <div className="absolute bottom-[-15%] right-[15%] w-[650px] h-[650px] bg-secondary-600/15 rounded-full blur-[160px] pointer-events-none" />
+      <div className="sonic-auth-ambient" aria-hidden="true" />
 
       {/* Top minimalistic header */}
       <header className="h-16 border-b border-ink-800/60 backdrop-blur-xl bg-ink-950/70 px-8 flex items-center justify-between z-10">
-        <BrandMark withWordmark href="/landing" />
+        <BrandMark withWordmark href="/" />
         <div className="flex items-center gap-4 text-xs font-mono">
-          <Link href="/landing" className="text-muted hover:text-white transition flex items-center gap-1.5">
+          <Link href="/" className="text-muted hover:text-white transition flex items-center gap-1.5">
             <span>Architecture Overview</span>
             <ExternalLink className="w-3 h-3 opacity-60" />
           </Link>
           <div className="h-4 w-[1px] bg-ink-750" />
-          <div className="inline-flex items-center gap-1.5 text-[11px] text-secondary-400 bg-secondary-500/10 px-2.5 py-1 rounded-full border border-secondary-500/20">
-            <span className="w-1.5 h-1.5 rounded-full bg-secondary-400 animate-pulse" />
-            <span>ASI System Online</span>
+          <div className="inline-flex items-center gap-1.5 text-[10px] text-muted-bright bg-white/[0.035] px-2.5 py-1 rounded-full border border-white/10">
+            <Lock className="w-3 h-3 text-primary-400" />
+            <span>SECURE SIGN-IN</span>
           </div>
         </div>
       </header>
 
       {/* Centerpiece Sign-In Card */}
       <main className="flex-1 flex items-center justify-center p-6 z-10">
-        <div className="w-full max-w-[440px] glass-card rounded-2xl p-8 sm:p-9 shadow-2xl border border-ink-700/60 bg-ink-900/80 backdrop-blur-2xl space-y-6 relative animate-fade-in-up">
+        <div className="sonic-auth-card w-full max-w-[440px] rounded-2xl p-6 sm:p-8 space-y-6 relative animate-fade-in-up">
           
           {/* Header */}
           <div className="space-y-3 text-center">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-ink-800/90 border border-ink-700 text-slate-300 text-[11px] font-mono shadow-sm">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/[0.035] border border-white/10 text-muted-bright text-[10px] tracking-[0.1em]">
               <Sparkles className="w-3.5 h-3.5 text-primary-400" />
-              <span>SONIC AUTONOMOUS WORKSTATION</span>
+              <span>YOUR COMPUTER-NATIVE AI</span>
             </div>
 
             <h1 className="text-2xl font-extrabold tracking-tight text-white">
               Sign in to SONIC
             </h1>
-            <p className="text-xs text-muted leading-relaxed font-mono">
-              Operate alongside your autonomous AI-Human digital colleague with full dual-plane computer workstation agency.
+            <p className="text-sm text-muted leading-relaxed">
+              Sign in to continue to your SONIC workstation.
             </p>
           </div>
 
@@ -186,7 +195,7 @@ function LoginContent() {
             {/* Primary Google OAuth Action */}
             <button
               onClick={handleRealGoogleSignIn}
-              disabled={loading || (!googleConfig.enabled && configChecked)}
+              disabled={loading || !configChecked || !googleConfig.enabled}
               className={`group relative w-full flex items-center justify-center gap-3.5 px-6 py-3.5 rounded-xl font-semibold text-sm shadow-lg transition-all duration-200 border cursor-pointer ${
                 googleConfig.enabled
                   ? "bg-white hover:bg-slate-50 text-slate-900 border-slate-200 active:scale-[0.99]"
@@ -220,7 +229,13 @@ function LoginContent() {
                     />
                   </svg>
                   <span className={`tracking-tight font-bold ${googleConfig.enabled ? "text-slate-800 group-hover:text-black" : "text-slate-400"}`}>
-                    {googleConfig.enabled ? "Continue with Google" : "Google OAuth (Not Configured)"}
+                    {googleConfig.enabled
+                      ? "Continue with Google"
+                      : googleConfigError
+                        ? "Google Sign-In Unavailable"
+                        : configChecked
+                          ? "Google OAuth (Not Configured)"
+                          : "Checking Google Sign-In..."}
                   </span>
                   {googleConfig.enabled && (
                     <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-slate-700 group-hover:translate-x-0.5 transition-transform ml-auto" />
@@ -232,51 +247,55 @@ function LoginContent() {
             {/* Google OAuth Status telemetry */}
             {configChecked && !googleConfig.enabled && (
               <div className="p-3 rounded-xl bg-ink-950/90 border border-ink-800 text-[11px] font-mono text-muted space-y-1">
-                <div className="flex items-center gap-1.5 text-amber-400/90 font-medium">
+                <div className={`flex items-center gap-1.5 font-medium ${googleConfigError ? "text-danger" : "text-amber-400/90"}`}>
                   <Info className="w-3.5 h-3.5 flex-shrink-0" />
-                  <span>Google OAuth Unconfigured</span>
+                  <span>{googleConfigError ? "Authentication Service Unavailable" : "Google OAuth Unconfigured"}</span>
                 </div>
                 <p className="text-[10px] text-muted-dim leading-relaxed">
-                  Set <code className="text-slate-300">GOOGLE_CLIENT_ID</code> and <code className="text-slate-300">GOOGLE_CLIENT_SECRET</code> in the backend environment to enable live Google Sign-In.
+                  {googleConfigError
+                    ? googleConfigError
+                    : <>Set <code className="text-slate-300">GOOGLE_CLIENT_ID</code> and <code className="text-slate-300">GOOGLE_CLIENT_SECRET</code> in the backend environment to enable live Google Sign-In.</>}
                 </p>
               </div>
             )}
 
             {/* Local Workstation Operator Section */}
-            <div className="pt-2">
-              <div className="relative flex items-center justify-center my-3">
-                <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-ink-800" />
+            {process.env.NODE_ENV !== "production" && (
+              <div className="pt-2">
+                <div className="relative flex items-center justify-center my-3">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-ink-800" />
+                  </div>
+                  <span className="relative px-3 bg-ink-900 text-[10px] uppercase tracking-wider font-mono text-muted-dim">
+                    Local Operator Access · Development Only
+                  </span>
                 </div>
-                <span className="relative px-3 bg-ink-900 text-[10px] uppercase tracking-wider font-mono text-muted-dim">
-                  Operator Direct Access
-                </span>
-              </div>
 
-              <form onSubmit={handleLocalSignIn} className="space-y-2.5">
-                <div>
-                  <label className="block text-[11px] font-mono text-muted mb-1">
-                    Operator Email
-                  </label>
-                  <input
-                    type="email"
-                    value={localEmail}
-                    onChange={(e) => setLocalEmail(e.target.value)}
-                    placeholder="operator@local"
-                    className="input-field !text-xs !py-2.5 font-mono w-full"
+                <form onSubmit={handleLocalSignIn} className="space-y-2.5">
+                  <div>
+                    <label className="block text-[11px] font-mono text-muted mb-1">
+                      Operator Email
+                    </label>
+                    <input
+                      type="email"
+                      value={localEmail}
+                      onChange={(e) => setLocalEmail(e.target.value)}
+                      placeholder="operator@local"
+                      className="input-field !text-xs !py-2.5 font-mono w-full"
+                      disabled={loading}
+                    />
+                  </div>
+                  <button
+                    type="submit"
                     disabled={loading}
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="btn-primary w-full !py-2.5 text-xs font-mono font-medium flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <Terminal className="w-3.5 h-3.5" />
-                  <span>Launch Workstation Session</span>
-                </button>
-              </form>
-            </div>
+                    className="btn-primary w-full !py-2.5 text-xs font-mono font-medium flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Terminal className="w-3.5 h-3.5" />
+                    <span>Launch Workstation Session</span>
+                  </button>
+                </form>
+              </div>
+            )}
 
           </div>
 
@@ -291,7 +310,7 @@ function LoginContent() {
           </div>
 
           {/* Key Value & Security Guarantees */}
-          <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
+          <div className="grid grid-cols-2 gap-2 text-[11px]">
             <div className="p-2.5 rounded-lg bg-ink-950/60 border border-ink-800/80 flex items-center gap-2">
               <Lock className="w-3.5 h-3.5 text-primary-400 flex-shrink-0" />
               <span className="text-muted-bright text-[10px] truncate">Zero Password Risk</span>
@@ -315,14 +334,14 @@ function LoginContent() {
         <div className="flex items-center gap-2">
           <span>SONIC OS v0.2.0</span>
           <span>•</span>
-          <span className="text-slate-400">AI-Human Digital Being & Workstation</span>
+          <span className="text-slate-400">Computer-native AI workstation</span>
         </div>
         <div className="flex items-center gap-4">
-          <Link href="/landing" className="hover:text-slate-300 transition">
-            Documentation
+          <Link href="/" className="hover:text-slate-300 transition">
+            Home
           </Link>
-          <Link href="/" className="text-primary-400 hover:text-primary-300 transition flex items-center gap-1">
-            <span>Direct Access</span>
+          <Link href="/workstation" className="text-primary-400 hover:text-primary-300 transition flex items-center gap-1">
+            <span>Workstation</span>
             <ArrowRight className="w-3 h-3" />
           </Link>
         </div>

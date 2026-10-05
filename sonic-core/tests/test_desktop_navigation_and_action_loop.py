@@ -1,7 +1,4 @@
-"""
-Tests for browser tab de-duplication, tab reuse, consecutive action loop breaker,
-and anti-loop prompt feedback in ComputerUseAgent.
-"""
+"""Tests for visible destination navigation and desktop action loop protection."""
 
 from __future__ import annotations
 
@@ -11,14 +8,14 @@ from sonic.computer.models import ComputerState, FileEntry, GitStatusInfo, Scree
 from sonic.computer.provider import ComputerProvider
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
-from sonic.sandbox.provider import ExecResult
 
 
 class _MockComputerProvider(ComputerProvider):
     def __init__(self):
         self.workspace_id = "ws-test"
         self.commands_executed: list[str] = []
-        self.is_chromium_running = False
+        self.gui_actions = []
+        self.display_available = True
 
     async def create(self, tenant_id, engagement_id, **kw):
         return type("W", (), {"id": self.workspace_id})()
@@ -30,27 +27,30 @@ class _MockComputerProvider(ComputerProvider):
         return ComputerState(
             workspace_id=workspace_id,
             tenant_id="test",
-            active_application="Desktop",
-            open_applications=["Desktop", "Chromium"] if self.is_chromium_running else ["Desktop"],
-            running_processes=["chromium"] if self.is_chromium_running else [],
+            active_application="Document Application",
+            active_window="Document Application",
+            open_applications=["Desktop", "Document Application"],
+            running_processes=[],
         )
 
     async def screenshot(self, workspace_id):
-        return ScreenObservation(visible_text="Desktop OpenSea", active_window="Chromium" if self.is_chromium_running else "Desktop")
+        return ScreenObservation(
+            screenshot_base64="c2NyZWVu" if self.display_available else "",
+            width=1280,
+            height=800,
+            visible_text="Desktop application",
+            active_window="Document Application",
+            capture_age_ms=0 if self.display_available else None,
+            controls_age_ms=0 if self.display_available else None,
+        )
 
-    async def gui_action(self, *a, **k):
-        return ScreenObservation()
+    async def gui_action(self, workspace_id, action, **kwargs):
+        self.gui_actions.append(action)
+        return await self.screenshot(workspace_id)
 
     async def terminal(self, workspace_id, command, timeout=60, actor="operator"):
         self.commands_executed.append(command)
-        if "pgrep -i chromium" in command:
-            if self.is_chromium_running:
-                return ExecResult(command=command, exit_code=0, stdout="1234\n", stderr="")
-            return ExecResult(command=command, exit_code=1, stdout="", stderr="")
-        if "nohup chromium" in command:
-            self.is_chromium_running = True
-            return ExecResult(command=command, exit_code=0, stdout="", stderr="")
-        return ExecResult(command=command, exit_code=0, stdout="", stderr="")
+        raise AssertionError("Visible desktop navigation must not use terminal application discovery")
 
     async def read_file(self, workspace_id, path):
         return ""
@@ -93,13 +93,11 @@ class _MockComputerProvider(ComputerProvider):
 
 
 @pytest.mark.asyncio
-async def test_browser_tab_dedup_first_open_then_refocus():
+async def test_destination_navigation_uses_visible_desktop_without_terminal_discovery():
     comp = _MockComputerProvider()
     agent = ComputerUseAgent(computer_provider=comp)
-    target = "https://" + "target"
+    target = "https://workspace.test"
 
-    # Navigation uses the already-visible application and never selects a
-    # vendor-specific browser binary.
     trace1 = await agent.execute_action(
         comp.workspace_id,
         ComputerActionType.BROWSER_NAVIGATE,
@@ -108,32 +106,20 @@ async def test_browser_tab_dedup_first_open_then_refocus():
         "open target",
     )
     assert trace1.status == ActionExecutionStatus.COMPLETED
-    assert "No application was selected or launched" in trace1.actual_observation
-    assert comp.is_chromium_running is False
-
-    # 2. Duplicate navigation to exact same URL focuses existing tab without opening a new one
-    trace2 = await agent.execute_action(
-        comp.workspace_id,
-        ComputerActionType.BROWSER_NAVIGATE,
-        target,
-        {"url": target},
-        "open target again",
-    )
-    assert trace2.status == ActionExecutionStatus.COMPLETED
-    assert "No application was selected or launched" in trace2.actual_observation
-    assert not any("chromium" in cmd.lower() for cmd in comp.commands_executed)
+    assert agent._last_gui_navigation_target == target
+    assert [action.key for action in comp.gui_actions if action.key] == ["ctrl+l", "Return"]
+    assert not comp.commands_executed
 
 
 @pytest.mark.asyncio
-async def test_browser_tab_reuse_via_address_bar():
+async def test_destination_navigation_fails_without_live_desktop_evidence():
     comp = _MockComputerProvider()
-    comp.is_chromium_running = True
+    comp.display_available = False
     agent = ComputerUseAgent(computer_provider=comp)
-    previous_target = "https://" + "previous-target"
-    next_target = "https://" + "next-target"
-    agent._last_navigated_url = previous_target
+    previous_target = "https://previous.test"
+    next_target = "https://next.test"
+    agent._last_gui_navigation_target = previous_target
 
-    # Navigate to a new domain without a hardcoded process/window lookup.
     trace = await agent.execute_action(
         comp.workspace_id,
         ComputerActionType.BROWSER_NAVIGATE,
@@ -141,15 +127,17 @@ async def test_browser_tab_reuse_via_address_bar():
         {"url": next_target},
         "open target",
     )
-    assert trace.status == ActionExecutionStatus.COMPLETED
-    assert "No application was selected or launched" in trace.actual_observation
-    assert not any("chromium" in cmd.lower() for cmd in comp.commands_executed)
+    assert trace.status in {ActionExecutionStatus.FAILED, ActionExecutionStatus.RECOVERED}
+    assert "could not be verified from a live screen" in trace.actual_observation
+    assert agent._last_gui_navigation_target == previous_target
+    assert not comp.commands_executed
 
 
 @pytest.mark.asyncio
 async def test_consecutive_action_loop_breaker():
     comp = _MockComputerProvider()
     agent = ComputerUseAgent(computer_provider=comp)
+    await agent.observe(comp.workspace_id)
 
     # Execute exact same action 3 times
     t1 = await agent.execute_action(
@@ -160,7 +148,13 @@ async def test_consecutive_action_loop_breaker():
         "click search",
     )
     assert t1.status == ActionExecutionStatus.BLOCKED
-    assert "visual grounding" in t1.actual_observation.lower()
+    assert any(
+        reason in t1.actual_observation.lower()
+        for reason in (
+            "no prior desktop observation",
+            "could not be resolved from visual grounding",
+        )
+    )
 
     t2 = await agent.execute_action(
         comp.workspace_id,
@@ -183,16 +177,13 @@ async def test_consecutive_action_loop_breaker():
 
 
 @pytest.mark.asyncio
-async def test_anti_loop_banner_in_reasoning_prompt():
+async def test_reasoning_context_uses_general_desktop_state():
     comp = _MockComputerProvider()
     agent = ComputerUseAgent(computer_provider=comp)
-    previous_target = "https://" + "previous-target"
-    agent._last_navigated_url = previous_target
 
     obs = await agent.observe(comp.workspace_id)
     sys_prompt, user_prompt = agent._build_reasoning_context("explore target", obs, 2, "main.py", "")
 
-    # Check active browser page and anti-loop progression rule
-    assert f"ACTIVE BROWSER PAGE: '{previous_target}'" in user_prompt
-    assert "ANTI-LOOP PROGRESSION RULE: Do NOT emit BROWSER_NAVIGATE" in user_prompt
-    assert f"Browser active URL: {previous_target}" in user_prompt
+    assert "Desktop Application State:" in user_prompt
+    assert "Browser State:" not in user_prompt
+    assert "BROWSER_" not in sys_prompt

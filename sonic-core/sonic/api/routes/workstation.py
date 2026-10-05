@@ -234,30 +234,43 @@ async def _run_prompt_reasoning_with_timeout(
 ) -> None:
     """Bound one-shot reasoning so a provider outage cannot strand a session."""
     state = _get_or_create_session(tenant_id, session_id)
+    task_key = (tenant_id, session_id)
     try:
-        # Dynamically scale timeout for complex/multi-phase missions (up to 900s)
-        timeout_sec = 900 if _is_complex_or_multi_part_objective(prompt) else 300
+        # Actionable computer tasks run through Boss planning, worker execution,
+        # and verification; allow the configured worker budget plus orchestration
+        # time to finish before cancelling the entire mission.
+        timeout_sec = (
+            1800
+            if _is_action_prompt(prompt) and not _is_observation_only_prompt(prompt)
+            else 300
+        )
         await asyncio.wait_for(
-            _run_prompt_reasoning(tenant_id, session_id, prompt),
+            _run_foreground_operator_task(
+                _run_prompt_reasoning(tenant_id, session_id, prompt)
+            ),
             timeout=timeout_sec,
         )
     except TimeoutError:
+        if _background_tasks.get(task_key) is not asyncio.current_task():
+            return
         state["status"] = "ERROR"
-        state["current_action"] = "Reasoning timed out; no desktop action was completed."
+        state["current_action"] = "Mission timed out; inspect the worklog and desktop before retrying."
         message = (
-            "The reasoning provider timed out. The workstation was not given another "
-            "action, and no target or result was invented."
+            "The mission exceeded its execution deadline. Earlier actions may have "
+            "completed; review the worklog and current desktop before retrying."
         )
         state["thought_summary"] = message
         _append_worklog(state, "error", "Reasoning Timeout", message)
         _persist_workstation_state()
     except Exception as exc:
+        if _background_tasks.get(task_key) is not asyncio.current_task():
+            return
         import traceback
         tb_str = traceback.format_exc()
         logger.error("workstation_reasoning_failed", exc=str(exc), traceback=tb_str)
         state["status"] = "ERROR"
-        state["current_action"] = "Reasoning failed; no desktop action was completed."
-        message = f"Reasoning failed before completion: {exc}"
+        state["current_action"] = "Reasoning failed; inspect the worklog and desktop before retrying."
+        message = f"Reasoning failed before completion: {exc}. Earlier actions may have completed."
         state["thought_summary"] = message
         _append_worklog(state, "error", "Reasoning Error", f"{message}\n\n{tb_str}")
         _persist_workstation_state()
@@ -441,6 +454,7 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
                 "scope_verified": False,
                 "created_at": "",
             },
+            "last_mission_outcome": None,
             "mission": {
                 "mission_id": "",
                 "objective": "",
@@ -925,12 +939,13 @@ async def get_workstation_state(
     state = _get_or_create_session(tenant_id, session_id)
     workspace_id = _session_workspace_id(user, session_id)
 
-    # 10.0s cache key per tenant and session to avoid overwhelming sandbox execution with rapid polls
+    # Cache expensive sandbox telemetry briefly, but refresh it during long missions too.
     cache_key = f"{tenant_id}:{session_id}"
     now = time.time()
+    telemetry_cache_ttl = 5.0
     cached = _workstation_state_cache.get(cache_key)
 
-    if cached and (now - cached[0] < 10.0):
+    if cached and (now - cached[0] < telemetry_cache_ttl):
         # Merge cached container telemetry into state
         cached_data = cached[1]
         state["git_branch"] = cached_data.get("git_branch", state.get("git_branch", ""))
@@ -938,7 +953,7 @@ async def get_workstation_state(
         return state
 
     # Avoid blocking on slow container calls during active runs if cached telemetry exists
-    if state.get("status") == "RUNNING" and cached:
+    if state.get("status") == "RUNNING" and cached and (now - cached[0] < telemetry_cache_ttl):
         cached_data = cached[1]
         state["git_branch"] = cached_data.get("git_branch", state.get("git_branch", ""))
         state["desktop"].update(cached_data.get("desktop", {}))
@@ -968,6 +983,7 @@ async def get_workstation_state(
             desktop_state = cstate.status.value if hasattr(cstate.status, "value") else str(cstate.status)
             desktop_telemetry = {
                 "status": desktop_state,
+                "perception_status": "UNAVAILABLE",
                 "active_window": cstate.active_window or "",
                 "running_apps": [p.name if hasattr(p, "name") else str(p) for p in (cstate.running_processes or [])],
                 "vnc_url": "",
@@ -979,13 +995,56 @@ async def get_workstation_state(
                     desktop_telemetry["vnc_url"] = vnc_url
                     desktop_telemetry["novnc_url"] = vnc_url
                     desktop_telemetry["status"] = "LIVE"
+                    try:
+                        observation = await comp.screenshot(target_id)
+                        age_ms = observation.capture_age_ms
+                        if age_ms is None and observation.capture_timestamp_ns:
+                            age_ms = (time.time_ns() - observation.capture_timestamp_ns) / 1_000_000
+                        fresh = (
+                            bool(observation.screenshot_base64)
+                            and observation.desktop_state != "NO_DISPLAY"
+                            and age_ms is not None
+                            and 0 <= age_ms <= 2000
+                        )
+                        desktop_telemetry.update({
+                            "perception_status": "FRESH" if fresh else "UNAVAILABLE",
+                            "capture_age_ms": age_ms if fresh else None,
+                            "capture_timestamp_ns": observation.capture_timestamp_ns,
+                            "perception_version": observation.perception_version,
+                            "perception_message": "" if fresh else "No fresh desktop observation is available.",
+                        })
+                    except Exception as exc:
+                        logger.warning(
+                            "workstation_desktop_perception_probe_failed",
+                            session_id=session_id,
+                            error=str(exc),
+                        )
+                        desktop_telemetry["perception_message"] = "No fresh desktop observation is available."
                 else:
                     desktop_telemetry["status"] = "ACTIVE_NO_DISPLAY"
             state["desktop"].update(desktop_telemetry)
             telemetry["desktop"] = desktop_telemetry
         elif not target_id:
-            state["desktop"]["status"] = "NO_ACTIVE_WORKSPACE"
-            telemetry["desktop"]["status"] = "NO_ACTIVE_WORKSPACE"
+            state["desktop"].update({
+                "status": "NO_ACTIVE_WORKSPACE",
+                "perception_status": "UNAVAILABLE",
+                "capture_age_ms": None,
+                "capture_timestamp_ns": None,
+                "perception_version": None,
+                "perception_message": "No workstation is attached to this session.",
+                "vnc_url": "",
+                "novnc_url": "",
+            })
+            telemetry["desktop"].update({
+                "status": "NO_ACTIVE_WORKSPACE",
+                "perception_status": "UNAVAILABLE",
+                "capture_age_ms": None,
+                "capture_timestamp_ns": None,
+                "perception_version": None,
+                "perception_message": "No workstation is attached to this session.",
+                "vnc_url": "",
+                "novnc_url": "",
+            })
     except Exception:
         pass
 
@@ -1101,6 +1160,7 @@ async def delete_workstation_session(
                     "scope_verified": False,
                     "created_at": "",
                 },
+                "last_mission_outcome": None,
                 "mission": {
                     "mission_id": "",
                     "objective": "",
@@ -1386,10 +1446,19 @@ async def interrupt_workstation_session(
     state["status"] = "PAUSED"
     if not state.get("paused_objective"):
         state["paused_objective"] = state.get("last_objective") or state.get("mission_name") or ""
+    task = _background_tasks.get((tenant_id, session_id))
+    if task and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    mission = state.get("mission", {})
+    if mission.get("status") in {"QUEUED", "RUNNING"}:
+        mission["status"] = "PAUSED"
+        mission["completed_at"] = _timestamp()
+        _mission_event(state, "mission", "Mission interrupted", "Execution was stopped at the operator's request.")
     state["current_action"] = "Paused by user (Takeover active)."
     _append_worklog(state, "response", "Agent Paused", "Autonomous execution paused by user. Direct control active.")
     _persist_workstation_state()
-    return {"status": "ok", "message": "Interrupt signal sent to agent."}
+    return {"status": "ok", "message": "Execution stopped; human control may proceed."}
 
 
 @router.get("/workstation/desktop/status")
@@ -1414,6 +1483,10 @@ async def get_desktop_status(
     desktop["status"] = "NO_ACTIVE_WORKSPACE"
     desktop["vnc_url"] = None
     desktop["novnc_url"] = None
+    desktop["perception_status"] = "UNAVAILABLE"
+    desktop["capture_age_ms"] = None
+    desktop["capture_timestamp_ns"] = None
+    desktop["perception_version"] = None
 
     if target_id:
         try:
@@ -1432,8 +1505,36 @@ async def get_desktop_status(
                     desktop["status"] = "LIVE"
                 else:
                     desktop["status"] = "ACTIVE_NO_DISPLAY"
+            if desktop.get("vnc_url"):
+                try:
+                    observation = await comp.screenshot(target_id)
+                    age_ms = observation.capture_age_ms
+                    if age_ms is None and observation.capture_timestamp_ns:
+                        age_ms = (time.time_ns() - observation.capture_timestamp_ns) / 1_000_000
+                    fresh = (
+                        bool(observation.screenshot_base64)
+                        and observation.desktop_state != "NO_DISPLAY"
+                        and age_ms is not None
+                        and 0 <= age_ms <= 2000
+                    )
+                    desktop["perception_status"] = "FRESH" if fresh else "UNAVAILABLE"
+                    desktop["capture_age_ms"] = age_ms if fresh else None
+                    desktop["capture_timestamp_ns"] = observation.capture_timestamp_ns
+                    desktop["perception_version"] = observation.perception_version
+                    if not fresh:
+                        desktop["perception_message"] = "No fresh desktop observation is available."
+                except Exception as exc:
+                    logger.warning(
+                        "workstation_desktop_perception_probe_failed",
+                        session_id=session_id,
+                        error=str(exc),
+                    )
+                    desktop["perception_status"] = "UNAVAILABLE"
+                    desktop["capture_age_ms"] = None
+                    desktop["perception_message"] = "No fresh desktop observation is available."
         except Exception:
             desktop["status"] = "ERROR_PROBING_COMPUTER"
+            desktop["perception_status"] = "UNAVAILABLE"
 
     return desktop
 
@@ -1464,11 +1565,21 @@ async def execute_desktop_action(
                 },
             }
         screen = await get_daytona_computer().screenshot(workspace_id=workspace_id)
+        observation = screen.model_dump()
+        capture_age_ms = screen.capture_age_ms
+        if capture_age_ms is None and screen.capture_timestamp_ns:
+            capture_age_ms = (time.time_ns() - screen.capture_timestamp_ns) / 1_000_000
+        has_fresh_pixels = bool(
+            screen.screenshot_base64
+            and screen.desktop_state != "NO_DISPLAY"
+            and capture_age_ms is not None
+            and 0 <= capture_age_ms <= 2000
+        )
         return {
-            "status": "success",
+            "status": "success" if has_fresh_pixels else "BLOCKED",
             "action": req.action,
             "active_window": screen.active_window or "None",
-            "observation": screen.model_dump(),
+            "observation": observation,
         }
     try:
         action_type = GUIActionType(req.action.strip().upper())
@@ -2464,6 +2575,13 @@ def _is_observation_only_prompt(prompt: str) -> bool:
     lower = re.sub(r"\s+", " ", prompt.strip().lower())
     if not _requires_desktop_observation(lower):
         return False
+    # Prohibitions describe actions to avoid, not actions to perform. Keep
+    # positive intents before/after those clauses available to the classifier.
+    positive_intent = re.sub(
+        r"\b(?:do not|don't|never)\b[^.!?]*(?:[.!?]|$)",
+        " ",
+        lower,
+    )
     observation_terms = (
         "analyze", "analyse", "analysis", "describe", "tell me", "what do you see",
         "what you see", "what is on", "what's on", "visible", "inspect", "observe",
@@ -2476,8 +2594,8 @@ def _is_observation_only_prompt(prompt: str) -> bool:
         "drag", "download", "close", "focus", "install", "run", "execute", "create", "write",
         "delete", "rm", "kill", "compile", "build", "exploit", "attack", "scan target",
     )
-    return any(term in lower for term in observation_terms) and not any(
-        term in lower for term in mutating_terms
+    return any(term in positive_intent for term in observation_terms) and not any(
+        term in positive_intent for term in mutating_terms
     )
 
 
@@ -2488,36 +2606,6 @@ def _is_research_prompt(prompt: str) -> bool:
     than a hidden keyword dispatch. Returning False prevents legacy callers
     from reactivating the retired shortcut.
     """
-    return False
-
-
-def _is_complex_or_multi_part_objective(prompt: str) -> bool:
-    """Check if an objective requests multi-step or Boss Agent subagent orchestration."""
-    p_lower = prompt.lower().strip()
-    if any(k in p_lower for k in ("[boss]", "subagent", "sub-agent", "multi-phase", "orchestrat", "swarm")):
-        return True
-    if re.search(r"\bdeep\s+dive\b", p_lower):
-        return True
-    words = p_lower.split()
-    if len(words) >= 25:
-        return True
-    if len(words) >= 8 and len(re.findall(r"\band\b", p_lower)) >= 2:
-        return True
-    profile = _infer_program_profile(prompt)
-    target_hint = str(profile.get("target") or "")
-    network_target = bool(re.search(
-        r"(?:https?://|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|ai|app)\b)",
-        target_hint,
-    ))
-    if profile["objective_present"] and (
-        network_target
-        or (
-            profile["modalities"] != ["UNKNOWN"]
-            and any(modality != "DATA_FORENSICS" for modality in profile["modalities"])
-        )
-        or re.search(r"\b(?:phase|recon|attack\s+surface)\b", p_lower)
-    ):
-        return True
     return False
 
 
@@ -2923,6 +3011,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
     observation_only = _is_observation_only_prompt(prompt)
     execution_prompt = action_prompt and not observation_only
     desktop_prompt = _requires_desktop_observation(prompt)
+    pipeline_failed = False
     program_profile = _infer_program_profile(prompt, state)
     state["program_profile"] = program_profile
     try:
@@ -2969,50 +3058,53 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
         if not desktop_id:
             desktop_id = str(state.get("desktop", {}).get("workspace_id") or state.get("desktop", {}).get("sandbox_id") or "")
 
-        # Always observe the live workstation desktop if desktop_id is available.
-        # A computer-use assistant must always see its current screen and active window.
+        # Capture pixels only when the prompt needs visual/application context.
+        # Ordinary chat should not depend on a vision-capable provider.
+        computer = None
         if desktop_id:
-            try:
-                computer = get_daytona_computer()
-                screen = await computer.screenshot(desktop_id)
-                desktop_screenshot_b64 = (
-                    getattr(screen, "screenshot_base64", "")
-                    or getattr(screen, "image_base64", "")
-                    or ""
-                )
-
-                ctx_parts = [
-                    f"CURRENT LIVE DESKTOP OBSERVATION (captured {screen.timestamp}): "
-                    f"state={screen.desktop_state}; resolution={screen.width}x{screen.height}; "
-                    f"active_window={screen.active_window!r}"
-                ]
-                if screen.visible_text:
-                    ctx_parts.append(f"window_info={screen.visible_text!r}")
-                if screen.detected_controls:
-                    ctx_parts.append(f"controls={screen.detected_controls!r}")
-                desktop_context = "; ".join(ctx_parts) + "."
-                state["last_desktop_observation"] = desktop_context
-                state["last_desktop_observation_at"] = screen.timestamp
-                _persist_workstation_state()
-                if execution_prompt or observation_only:
-                    _append_worklog(
-                        state,
-                        "action",
-                        "Agent Desktop Observation",
-                        "Agent inspected the live workstation via screenshot. " + desktop_context,
+            if desktop_prompt:
+                try:
+                    computer = get_daytona_computer()
+                    screen = await computer.screenshot(desktop_id)
+                    desktop_screenshot_b64 = (
+                        getattr(screen, "screenshot_base64", "")
+                        or getattr(screen, "image_base64", "")
                     )
-            except Exception as observation_err:
-                logger.warning("workstation_desktop_observation_failed", error=str(observation_err))
-                if state.get("last_desktop_observation"):
-                    desktop_context = str(state["last_desktop_observation"])
-                else:
-                    desktop_context = f"Workstation active ('{desktop_id}'), but screen capture returned: {observation_err}"
+
+                    ctx_parts = [
+                        f"CURRENT LIVE DESKTOP OBSERVATION (captured {screen.timestamp}): "
+                        f"state={screen.desktop_state}; resolution={screen.width}x{screen.height}; "
+                        f"active_window={screen.active_window!r}"
+                    ]
+                    if screen.visible_text:
+                        ctx_parts.append(f"window_info={screen.visible_text!r}")
+                    if screen.detected_controls:
+                        ctx_parts.append(f"controls={screen.detected_controls!r}")
+                    desktop_context = "; ".join(ctx_parts) + "."
+                    state["last_desktop_observation"] = desktop_context
+                    state["last_desktop_observation_at"] = screen.timestamp
+                    _persist_workstation_state()
+                    if execution_prompt or observation_only:
+                        _append_worklog(
+                            state,
+                            "action",
+                            "Agent Desktop Observation",
+                            "Agent inspected the live workstation via screenshot. " + desktop_context,
+                        )
+                except Exception as observation_err:
+                    logger.warning("workstation_desktop_observation_failed", error=str(observation_err))
+                    if state.get("last_desktop_observation"):
+                        desktop_context = str(state["last_desktop_observation"])
+                    else:
+                        desktop_context = f"Workstation active ('{desktop_id}'), but screen capture returned: {observation_err}"
 
             # Execute autonomous action loop if applicable
             if execution_prompt:
                 # --- Phase 8: Use ComputerUseAgent for visual computer use ---
                 if desktop_id:
                     try:
+                        if computer is None:
+                            computer = get_daytona_computer()
                         from sonic.computer_use.agent import ComputerUseAgent
                         from sonic.computer_use.models import (
                             ComputerAutonomyLevel,
@@ -3027,10 +3119,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             config_path = CONFIGS_DIR / "models.yaml"
 
                         # Use environment variables for agent configuration
-                        agent_api_key = os.environ.get("SONIC_AGENT_API_KEY") or os.environ.get("NVIDIA_API_KEY", "")
-                        agent_base_url = os.environ.get("SONIC_AGENT_BASE_URL") or os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-                        agent_provider_name = os.environ.get("SONIC_AGENT_PROVIDER", "nvidia")
-                        model_to_use = os.environ.get("SONIC_AGENT_MODEL", "meta/llama-3.2-90b-vision-instruct")
+                        agent_api_key = os.environ.get("SONIC_AGENT_API_KEY") or os.environ.get("GROQ_API_KEY", "")
+                        agent_base_url = os.environ.get("SONIC_AGENT_BASE_URL") or os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+                        agent_provider_name = os.environ.get("SONIC_AGENT_PROVIDER", "groq")
+                        model_to_use = os.environ.get("SONIC_AGENT_MODEL", "qwen/qwen3.8-27b")
 
                         if config_path.exists():
                             try:
@@ -3061,10 +3153,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             logger.info("workstation_preserving_desktop_provider", desktop_id=desktop_id)
                         else:
                             computer = resolved_comp
-                        # The visible X11 desktop is the only Computer surface.
-                        # Do not create a hidden Playwright browser with an
-                        # independent page state.
-                        browser_agent = None
                         from sonic.safety.sealed import seal_default
                         state["interrupted"] = False
 
@@ -3111,6 +3199,17 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 payload = trace.get("payload", "")
                                 sub_agent_id = str(trace.get("sub_agent_id") or "")
                                 sub_agent_name = str(trace.get("sub_agent_name") or "")
+                                sub_mission_id = str(trace.get("sub_mission_id") or "")
+                                worker_role = str(trace.get("worker_role") or "")
+                                execution_plane = str(trace.get("execution_plane") or "")
+                                perception_source = str(trace.get("perception_source", "unknown"))
+                                perception_version = trace.get("perception_version", 0)
+                                screen_age_ms = trace.get("screen_age_ms")
+                                controls_age_ms = trace.get("controls_age_ms")
+                                accessible_scene_fresh = trace.get("accessible_scene_fresh")
+                                image_attached = bool(trace.get("image_attached", False))
+                                visual_escalation_reason = str(trace.get("visual_escalation_reason", ""))
+                                image_escalation_count = trace.get("image_escalation_count", 0)
                             else:
                                 step_index = getattr(trace, "step_index", 1)
                                 act_type = getattr(trace, "action_type", "")
@@ -3122,17 +3221,69 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 duration_seconds = getattr(trace, "duration_seconds", 0)
                                 exit_code = getattr(trace, "exit_code", None)
                                 payload = getattr(trace, "payload", "")
+                                perception_source = str(getattr(trace, "perception_source", "unknown"))
+                                perception_version = getattr(trace, "perception_version", 0)
+                                screen_age_ms = getattr(trace, "screen_age_ms", None)
+                                controls_age_ms = getattr(trace, "controls_age_ms", None)
+                                accessible_scene_fresh = getattr(trace, "accessible_scene_fresh", None)
+                                image_attached = bool(getattr(trace, "image_attached", False))
+                                visual_escalation_reason = str(
+                                    getattr(trace, "visual_escalation_reason", "")
+                                )
+                                image_escalation_count = getattr(trace, "image_escalation_count", 0)
 
                                 sub_agent_id = ""
                                 sub_agent_name = ""
+                                sub_mission_id = ""
+                                worker_role = ""
+                                execution_plane = ""
                             worker_metadata = (
-                                {"sub_agent_id": sub_agent_id, "sub_agent_name": sub_agent_name}
+                                {
+                                    "sub_agent_id": sub_agent_id,
+                                    "sub_agent_name": sub_agent_name,
+                                    "sub_mission_id": sub_mission_id,
+                                    "worker_role": worker_role,
+                                    "execution_plane": execution_plane,
+                                }
                                 if sub_agent_id or sub_agent_name
                                 else {}
                             )
                             step_type = "action" if trace_status in ("COMPLETED", "SUCCESS", "RECOVERED", "VERIFIED") else "error"
+                            step_metadata = {
+                                "step_index": step_index,
+                                "action_type": action_val,
+                                "action_status": trace_status,
+                            }
                             worker_label = f"{sub_agent_name} ({sub_agent_id}): " if worker_metadata else ""
                             state["current_action"] = f"{worker_label}Step {step_index}: {action_val} on {target_resource}"
+                            perception_summary = ""
+                            if action_val.startswith(("GUI_", "APP_", "WINDOW_")) and perception_source != "unknown":
+                                scene_label = (
+                                    "fresh"
+                                    if accessible_scene_fresh is True
+                                    else "not-confirmed-fresh"
+                                )
+                                image_label = "attached" if image_attached else "omitted"
+                                age_label = (
+                                    f"{float(screen_age_ms):.1f}ms"
+                                    if isinstance(screen_age_ms, (int, float))
+                                    and not isinstance(screen_age_ms, bool)
+                                    else "unknown"
+                                )
+                                controls_age_label = (
+                                    f"{float(controls_age_ms):.1f}ms"
+                                    if isinstance(controls_age_ms, (int, float))
+                                    and not isinstance(controls_age_ms, bool)
+                                    else "unknown"
+                                )
+                                perception_summary = (
+                                    f"\nPerception: source={perception_source}, "
+                                    f"version={perception_version}, scene={scene_label}, "
+                                    f"image={image_label}, screen_age={age_label}, "
+                                    f"controls_age={controls_age_label}, "
+                                    f"image_escalations={image_escalation_count}, "
+                                    f"escalation_reason={visual_escalation_reason or 'none'}"
+                                )
 
                             # Real unmocked Thought emission matching Devin timeline
                             if thought:
@@ -3167,6 +3318,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     command=cmd, output=actual_observation,
                                     duration_seconds=duration_seconds,
                                     exit_code=exit_code,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
                             elif action_val == "FILE_READ":
@@ -3174,6 +3326,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     state, "read", f"Read {target_resource}", actual_observation,
                                     file=target_resource,
                                     duration_seconds=duration_seconds,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
                             elif action_val == "FILE_WRITE":
@@ -3181,6 +3334,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     state, "write", f"Write {target_resource}", actual_observation,
                                     file=target_resource,
                                     duration_seconds=duration_seconds,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
                             elif action_val in ("SCREENSHOT", "BROWSER_SCREENSHOT"):
@@ -3188,14 +3342,19 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     state, "screenshot", "Desktop Screenshot", actual_observation or "Captured desktop screenshot",
                                     image=actual_observation if (actual_observation and actual_observation.startswith("data:image")) else None,
                                     duration_seconds=duration_seconds,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
                             else:
                                 _append_worklog(
                                     state, step_type,
                                     f"Step {step_index}: {action_val}",
-                                    f"Target: {target_resource}\nResult: {actual_observation}\nStatus: {trace_status}",
+                                    (
+                                        f"Target: {target_resource}\nResult: {actual_observation}\n"
+                                        f"Status: {trace_status}{perception_summary}"
+                                    ),
                                     duration_seconds=duration_seconds,
+                                    **step_metadata,
                                     **worker_metadata,
                                 )
 
@@ -3240,6 +3399,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             llm=llm_router,
                             vector_memory=vec_mem,
                             toolsmith=toolsmith,
+                            tenant_id=tenant_id,
                         )
                         lessons_ledger = LessonsLedger(
                             tenant_id=tenant_id,
@@ -3247,7 +3407,10 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             semantic_memory=vec_mem,
                         )
 
-                        if _is_complex_or_multi_part_objective(prompt):
+                        # Every actionable workstation objective is planned and
+                        # delegated by Boss. Simple objectives naturally become
+                        # a single bounded worker instead of bypassing orchestration.
+                        if execution_prompt:
                             from sonic.computer_use.boss import BossAgent
 
                             boss = BossAgent(
@@ -3255,7 +3418,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 llm_router=llm_router,
                                 safety=safety_policy,
                                 security_tools=security_tools,
-                                browser=browser_agent,
                                 tenant_id=tenant_id,
                                 being=being,
                                 being_mind=mind,
@@ -3279,7 +3441,26 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
 
                             async def _on_boss_event(event_type: str, data: dict) -> None:
                                 data = data or {}
-                                if event_type == "boss_thinking":
+                                if event_type == "task_graph":
+                                    stats = data.get("stats", {})
+                                    tasks = data.get("tasks", [])
+                                    task_lines = [
+                                        f"{task.get('status', 'unknown')}: "
+                                        f"{task.get('name', task.get('task_id', 'task'))}"
+                                        for task in tasks[:20]
+                                        if isinstance(task, dict)
+                                    ]
+                                    _mission_event(
+                                        state,
+                                        "info",
+                                        f"TaskGraph — {data.get('stage', 'updated')}",
+                                        (
+                                            f"Counts: {json.dumps(stats, sort_keys=True)}\n"
+                                            + "\n".join(task_lines)
+                                        ),
+                                        task_graph=data,
+                                    )
+                                elif event_type == "boss_thinking":
                                     content = data.get("content", "")
                                     _mission_event(
                                         state,
@@ -3305,19 +3486,45 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         "action",
                                         title,
                                         f"Status: {data.get('status', 'RUNNING')}\nGoal: {data.get('goal')}\nMax Steps: {data.get('max_steps')}",
+                                        orchestration_event="sub_dispatch",
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
                                         agent_id=agent_id,
                                         agent_name=agent_name,
                                         status=data.get("status", "RUNNING"),
                                         goal=data.get("goal"),
+                                        worker_role=data.get("role", "subagent"),
+                                        execution_plane=data.get("plane", "gui"),
                                         max_steps=data.get("max_steps"),
                                     )
                                 elif event_type == "sub_step":
                                     trace_data = data.get("trace", {})
                                     trace_data["sub_agent_id"] = data.get("agent_id", "")
                                     trace_data["sub_agent_name"] = data.get("agent_name", "")
+                                    trace_data["sub_mission_id"] = data.get("sub_mission_id", "")
+                                    trace_data["worker_role"] = data.get("role", "")
+                                    trace_data["execution_plane"] = data.get("plane", "")
                                     await _record_step_trace(trace_data)
+                                elif event_type == "sub_heartbeat":
+                                    elapsed = data.get("elapsed_seconds", 0)
+                                    _mission_event(
+                                        state,
+                                        "thought",
+                                        f"Reasoning heartbeat — {data.get('agent_name') or data.get('agent_id') or 'SubAgent'}",
+                                        (
+                                            f"Step {data.get('step', '?')} still reasoning "
+                                            f"after {elapsed:.1f}s; observation version "
+                                            f"{data.get('last_observation_version', 0)}."
+                                        ),
+                                        orchestration_event="sub_heartbeat",
+                                        sub_mission_id=data.get("sub_mission_id"),
+                                        agent_id=data.get("agent_id"),
+                                        agent_name=data.get("agent_name"),
+                                        worker_role=data.get("role", "subagent"),
+                                        execution_plane=data.get("plane", "gui"),
+                                        elapsed_seconds=elapsed,
+                                        step=data.get("step"),
+                                    )
                                 elif event_type == "sub_report":
                                     sub_num = data.get("sub_agent_number")
                                     agent_id = str(data.get("agent_id") or "")
@@ -3335,12 +3542,15 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         "info",
                                         title,
                                         data.get("findings_summary", ""),
+                                        orchestration_event="sub_report",
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
                                         agent_id=agent_id,
                                         agent_name=agent_name,
                                         status=worker_status,
                                         goal=data.get("goal"),
+                                        worker_role=data.get("role", "subagent"),
+                                        execution_plane=data.get("plane", "gui"),
                                         success=data.get("success"),
                                         findings_summary=data.get("findings_summary"),
                                         key_discoveries=data.get("key_discoveries"),
@@ -3368,18 +3578,47 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     )
                                 _persist_workstation_state()
 
-                            try:
-                                boss_report = await boss.run(
-                                    workspace_id=desktop_id,
-                                    objective=effective_goal,
-                                    phase_callback=_on_boss_event,
-                                    interrupt_check=lambda: bool(state.get("interrupted")),
-                                )
-                                report = boss_report
-                            finally:
-                                if browser_agent is not None:
-                                    await browser_agent.close()
+                            boss_report = await boss.run(
+                                workspace_id=desktop_id,
+                                objective=effective_goal,
+                                phase_callback=_on_boss_event,
+                                interrupt_check=lambda: bool(state.get("interrupted")),
+                                requested_plane="gui" if desktop_prompt else None,
+                            )
+                            report = boss_report
                             summary_msg = report.findings_summary
+                            mission_outcome = {
+                                "status": str(
+                                    getattr(boss_report, "status", "INCOMPLETE")
+                                ).upper(),
+                                "completed_at": _timestamp(),
+                                "objective": clean_prompt,
+                                "summary": str(
+                                    summary_msg
+                                    or "Mission ended without a summary."
+                                ),
+                                "total_phases": int(
+                                    getattr(boss_report, "total_phases", 0) or 0
+                                ),
+                                "total_sub_agents": int(
+                                    getattr(boss_report, "total_sub_agents", 0)
+                                    or 0
+                                ),
+                                "total_actions": int(
+                                    getattr(boss_report, "total_actions", 0) or 0
+                                ),
+                            }
+                            state["last_mission_outcome"] = mission_outcome
+                            mission_state = state.get("mission")
+                            if (
+                                isinstance(mission_state, dict)
+                                and mission_state.get("status") == "RUNNING"
+                                and mission_state.get("objective") == clean_prompt
+                            ):
+                                mission_state.update(mission_outcome)
+                                mission_state["outcome_summary"] = (
+                                    mission_outcome["summary"]
+                                )
 
                             boss_waiting_human = (
                                 getattr(boss_report, "waiting_for_human", False) is True
@@ -3406,7 +3645,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 state["current_action"] = "Agent paused by user."
                             else:
                                 state["status"] = "IDLE"
-                                state["current_action"] = "Ready when you are."
+                                state["current_action"] = (
+                                    f"Mission {mission_outcome['status'].lower()}: "
+                                    f"{mission_outcome['summary'][:240]}"
+                                    if mission_outcome
+                                    else "Ready when you are."
+                                )
+                            _persist_workstation_state()
 
                             try:
                                 boss_success = str(getattr(boss_report, "status", "")).upper() == "COMPLETE"
@@ -3474,7 +3719,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 lessons_ledger=lessons_ledger,
                                 safety=safety_policy,
                                 self_host=True,
-                                browser=browser_agent,
                                 security_tools=security_tools,
                                 gui_only=False,
                                 compact_prompt=True,
@@ -3510,17 +3754,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 _persist_workstation_state()
 
                             agent._heartbeat_callback = _on_heartbeat
-                            try:
-                                traces = await agent.run_mission(
-                                    workspace_id=desktop_id,
-                                    goal=effective_goal,
-                                    steps=agent.max_actions,
-                                    step_callback=_on_step,
-                                    interrupt_check=lambda: bool(state.get("interrupted")),
-                                )
-                            finally:
-                                if browser_agent is not None:
-                                    await browser_agent.close()
+                            traces = await agent.run_mission(
+                                workspace_id=desktop_id,
+                                goal=effective_goal,
+                                steps=agent.max_actions,
+                                step_callback=_on_step,
+                                interrupt_check=lambda: bool(state.get("interrupted")),
+                            )
 
                             # Final summary
                             succeeded = sum(1 for t in traces if t.status in ("SUCCESS", "RECOVERED"))
@@ -3740,7 +3980,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             base64=desktop_screenshot_b64.split(",", 1)[-1],
                             media_type="image/png",
                         )]
-                        if desktop_screenshot_b64
+                        if desktop_prompt and desktop_screenshot_b64
                         else []
                     ),
                 ),
@@ -3752,7 +3992,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             messages=messages,
                             max_tokens=900,
                             temperature=0.2,
-                            task_type="vision" if desktop_screenshot_b64 else "reasoning",
+                            task_type="vision" if desktop_prompt and desktop_screenshot_b64 else "reasoning",
                         )
                     ),
                     timeout=25,
@@ -3807,30 +4047,37 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                 state["thought_summary"] = fallback_response
                 _append_worklog(state, "info", "LLM Response Unavailable", fallback_response)
     except Exception as general_err:
+        pipeline_failed = True
         logger.warning("workstation_reasoning_pipeline_error", error=str(general_err))
         err_msg = f"Reasoning pipeline error: {general_err}"
         state["thought_summary"] = err_msg
         _append_worklog(state, "error", "Execution Failed", err_msg)
     finally:
-        if state.get("interrupted"):
-            state["status"] = "PAUSED"
-            state["current_action"] = "Agent paused by user."
-        elif action_blocked:
-            state["status"] = "BLOCKED"
-            if (
-                not state.get("current_action")
-                or state["current_action"].startswith("Idle")
-                or "Thinking" in state["current_action"]
-                or "Reasoning" in state["current_action"]
-            ):
-                state["current_action"] = "Execution blocked — check workstation logs"
-        elif state.get("waiting_for_human") or state.get("status") == "WAITING_FOR_HUMAN":
-            state["status"] = "WAITING_FOR_HUMAN"
-            state["current_action"] = f"Paused for human assistance: {state.get('waiting_for_human_reason', 'Verification required')}"
-        else:
-            state["status"] = "IDLE"
-            state["current_action"] = "Ready when you are."
-        _persist_workstation_state()
+        current_task = asyncio.current_task()
+        tracked_task = _background_tasks.get((tenant_id, session_id))
+        if tracked_task is None or tracked_task is current_task:
+            if state.get("interrupted"):
+                state["status"] = "PAUSED"
+                state["current_action"] = "Agent paused by user."
+            elif action_blocked:
+                state["status"] = "BLOCKED"
+                if (
+                    not state.get("current_action")
+                    or state["current_action"].startswith("Idle")
+                    or "Thinking" in state["current_action"]
+                    or "Reasoning" in state["current_action"]
+                ):
+                    state["current_action"] = "Execution blocked — check workstation logs"
+            elif state.get("waiting_for_human") or state.get("status") == "WAITING_FOR_HUMAN":
+                state["status"] = "WAITING_FOR_HUMAN"
+                state["current_action"] = f"Paused for human assistance: {state.get('waiting_for_human_reason', 'Verification required')}"
+            elif pipeline_failed:
+                state["status"] = "ERROR"
+                state["current_action"] = "Reasoning failed; inspect the worklog before retrying."
+            else:
+                state["status"] = "IDLE"
+                state["current_action"] = "Ready when you are."
+            _persist_workstation_state()
 
 
 @router.post("/workstation/prompt")
@@ -3888,9 +4135,11 @@ async def send_workstation_prompt(
 
     # Never hold the HTTP request open on an external LLM.  The dashboard can
     # refresh workstation state while this task records the real result.
-    _track_background_task(tenant_id, session_id, asyncio.create_task(_run_foreground_operator_task(
-        _run_prompt_reasoning_with_timeout(tenant_id, session_id, prompt_text)
-    )))
+    _track_background_task(
+        tenant_id,
+        session_id,
+        asyncio.create_task(_run_prompt_reasoning_with_timeout(tenant_id, session_id, prompt_text)),
+    )
     return {
         "status": "accepted",
         "reasoning": "thinking",
@@ -4108,9 +4357,7 @@ async def resume_workstation_after_human(
             tenant_id,
             session_id,
             asyncio.create_task(
-                _run_foreground_operator_task(
-                    _run_prompt_reasoning_with_timeout(tenant_id, session_id, resume_prompt)
-                )
+                _run_prompt_reasoning_with_timeout(tenant_id, session_id, resume_prompt)
             ),
         )
     else:

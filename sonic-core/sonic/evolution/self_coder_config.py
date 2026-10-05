@@ -12,6 +12,7 @@ class SelfCoderConfig:
     enabled: bool
     every_ticks: int
     interval_seconds: int
+    agentic: bool = True
 
 
 def get_self_coder_config(environ: Mapping[str, str] | None = None) -> SelfCoderConfig:
@@ -44,8 +45,11 @@ def get_self_coder_config(environ: Mapping[str, str] | None = None) -> SelfCoder
         raise ValueError(
             "SONIC_SELF_CODER_INTERVAL_SECONDS must be an integer from 60 to 86400"
         )
+    raw_agentic = values.get("SONIC_SELF_CODER_AGENTIC", "true").strip().lower()
+    agentic = bool_values.get(raw_agentic, True)
     return SelfCoderConfig(
         enabled=bool_values[raw_enabled],
         every_ticks=every_ticks,
         interval_seconds=interval_seconds,
+        agentic=agentic,
     )

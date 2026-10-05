@@ -1,5 +1,4 @@
 import pytest
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 from sonic.computer_use.grounding import (
@@ -33,21 +32,24 @@ async def test_multimodal_image_auto_routes_to_vision():
     """Verify that requests carrying images automatically route to vision model."""
     router = ModelRouter.from_config("configs/models.yaml", env_vars={"NVIDIA_API_KEY": "test-key", "GROQ_API_KEY": "groq-key"})
     mock_provider = MagicMock()
-    mock_provider.name = "nvidia"
-    mock_provider.default_model = "moonshotai/kimi-k3"
+    mock_provider.name = "groq"
+    mock_provider.default_model = "qwen/qwen3.8-27b"
+    mock_provider.fallback_models = []
+    mock_provider._effective_max_tokens = lambda requested: requested
+    mock_provider.pricing_for_model = lambda model: (0.001, 0.001)
     mock_provider.complete_with_timing = AsyncMock()
     
     mock_response = MagicMock()
     mock_response.request_id = "test-123"
-    mock_response.provider = "nvidia"
-    mock_response.model = "moonshotai/kimi-k3"
+    mock_response.provider = "groq"
+    mock_response.model = "qwen/qwen3.8-27b"
     mock_response.content = "<|box_start|>(350, 160, 450, 200)<|box_end|>"
     mock_response.usage.prompt_tokens = 50
     mock_response.usage.completion_tokens = 10
     mock_response.cost_usd = 0.0001
     mock_provider.complete_with_timing.return_value = mock_response
 
-    router.providers["nvidia"] = mock_provider
+    router.providers["groq"] = mock_provider
 
     req = LLMRequest(
         messages=[
@@ -60,7 +62,8 @@ async def test_multimodal_image_auto_routes_to_vision():
         task_type="reasoning",
     )
     res = await router.complete(req)
-    assert req.task_type == "vision"
+    routed_request = mock_provider.complete_with_timing.await_args.args[0]
+    assert routed_request.task_type == "vision"
     assert res.content == "<|box_start|>(350, 160, 450, 200)<|box_end|>"
 
 

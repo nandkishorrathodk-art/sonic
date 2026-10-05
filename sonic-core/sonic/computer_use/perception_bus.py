@@ -12,6 +12,7 @@ The perception bus provides:
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -82,12 +83,29 @@ def _extract_control_data(control: Any) -> dict[str, Any] | None:
         name = str(control.get("name") or control.get("text") or "").strip()
         role = str(control.get("role") or control.get("tag") or "").strip()
         bbox = control.get("bbox")
+        bbox_format = str(control.get("bbox_format") or "xywh").strip().lower()
         raw_attrs = control.get("attributes")
         attrs: dict[str, Any] = dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
-        for k in ("placeholder", "aria-label", "aria_label", "id", "name", "type", "value", "title", "selector"):
-            if k in control and k not in attrs and control[k]:
-                attrs[k] = str(control[k])
+        for k in (
+            "placeholder",
+            "aria-label",
+            "aria_label",
+            "id",
+            "name",
+            "type",
+            "value",
+            "title",
+            "selector",
+            "editable",
+            "focused",
+            "window",
+            "freshness_ms",
+        ):
+            if k in control and k not in attrs and control[k] is not None:
+                attrs[k] = control[k]
         source = str(control.get("source") or "ui_control")
+        confidence = control.get("confidence")
+        confidence_provided = "confidence" in control
     else:
         visible = getattr(control, "visible", True)
         if visible is False:
@@ -95,19 +113,43 @@ def _extract_control_data(control: Any) -> dict[str, Any] | None:
         name = str(getattr(control, "name", "") or getattr(control, "text", "") or "").strip()
         role = str(getattr(control, "role", "") or getattr(control, "tag", "") or "").strip()
         bbox = getattr(control, "bbox", None)
+        bbox_format = str(getattr(control, "bbox_format", "xywh") or "xywh").strip().lower()
         raw_attrs = getattr(control, "attributes", None)
         attrs = dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
-        for k in ("placeholder", "aria-label", "aria_label", "id", "name", "type", "value", "title", "selector"):
+        for k in (
+            "placeholder",
+            "aria-label",
+            "aria_label",
+            "id",
+            "name",
+            "type",
+            "value",
+            "title",
+            "selector",
+            "editable",
+            "focused",
+            "window",
+            "freshness_ms",
+        ):
             val = getattr(control, k, None)
-            if val and k not in attrs:
-                attrs[k] = str(val)
+            if val is not None and k not in attrs:
+                attrs[k] = val
         source = str(getattr(control, "source", None) or type(control).__name__)
+        confidence = getattr(control, "confidence", None)
+        confidence_provided = confidence is not None
 
     if not bbox or len(bbox) < 4:
         return None
     try:
         clean_bbox = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
     except (ValueError, TypeError):
+        return None
+    if bbox_format == "xyxy":
+        x1, y1, x2, y2 = clean_bbox
+        clean_bbox = (x1, y1, x2 - x1, y2 - y1)
+    elif bbox_format != "xywh":
+        return None
+    if clean_bbox[2] <= 0 or clean_bbox[3] <= 0:
         return None
 
     # Must have at least some identifiable content
@@ -132,6 +174,9 @@ def _extract_control_data(control: Any) -> dict[str, Any] | None:
         "bbox": clean_bbox,
         "attributes": attrs,
         "source": source,
+        "confidence": confidence,
+        "confidence_provided": confidence_provided,
+        "freshness_ms": attrs.get("freshness_ms"),
     }
 
 
@@ -244,6 +289,7 @@ class SemanticTargetIndex:
         self._index: dict[str, TargetMatch] = {}
         self._confidences: dict[str, float] = {}
         self._matches: list[TargetMatch] = []
+        self._ambiguous_keys: set[str] = set()
 
     @property
     def version(self) -> int:
@@ -256,6 +302,7 @@ class SemanticTargetIndex:
             self._index.clear()
             self._confidences.clear()
             self._matches.clear()
+            self._ambiguous_keys.clear()
             if state_version is not None:
                 self._version = state_version
 
@@ -422,6 +469,12 @@ class SemanticTargetIndex:
                     key_clean = key_str.strip().lower()
                     if not key_clean:
                         continue
+                    existing_match = self._index.get(key_clean)
+                    if (
+                        existing_match is not None
+                        and existing_match.bbox != match.bbox
+                    ):
+                        self._ambiguous_keys.add(key_clean)
                     existing_conf = self._confidences.get(key_clean, -1.0)
                     if key_clean not in self._index or k_conf > existing_conf:
                         self._index[key_clean] = match
@@ -478,23 +531,47 @@ class SemanticTargetIndex:
             version = self._version if state_version is None else state_version
             source = source_override or c_data["source"]
             primary_name = c_data["name"] or c_data["attributes"].get("placeholder") or c_data["attributes"].get("aria-label") or c_data["role"]
+            raw_confidence = c_data["confidence"]
+            if c_data["confidence_provided"]:
+                try:
+                    confidence = float(raw_confidence)
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                if not math.isfinite(confidence) or confidence < 0.0 or confidence > 100.0:
+                    confidence = 0.0
+                elif confidence > 1.0:
+                    confidence /= 100.0
+            else:
+                confidence = 0.0 if source.lower() == "ocr" else 0.98
+            confidence = max(0.0, min(1.0, confidence))
             match = TargetMatch(
                 query=primary_name,
                 source=source,
                 bbox=c_data["bbox"],
-                confidence=0.98,
+                confidence=confidence,
                 state_version=version,
                 observed_at_ns=time.perf_counter_ns(),
                 role=c_data["role"],
                 attributes=c_data["attributes"],
             )
-            self.index_match(
-                match,
-                state_version=version,
-                query=primary_name,
-                role=c_data["role"],
-                attributes=c_data["attributes"],
-            )
+            freshness_ms = c_data["freshness_ms"]
+            try:
+                age = None if freshness_ms is None else float(freshness_ms)
+                is_fresh = age is None or (
+                    math.isfinite(age) and 0.0 <= age <= 250.0
+                )
+            except (TypeError, ValueError):
+                is_fresh = False
+            if confidence >= 0.6 and is_fresh:
+                self.index_match(
+                    match,
+                    state_version=version,
+                    query=primary_name,
+                    role=c_data["role"],
+                    attributes=c_data["attributes"],
+                )
+            else:
+                self._matches.append(match)
             return match
 
     def ingest(
@@ -541,37 +618,57 @@ class SemanticTargetIndex:
                 return None
 
             # 1. Exact query match
-            match = self._index.get(q)
+            match = None if q in self._ambiguous_keys else self._index.get(q)
             if match is not None:
                 return match
 
             # 2. Whitespace-normalized
             q_norm = re.sub(r"\s+", " ", q)
-            match = self._index.get(q_norm)
+            match = (
+                None
+                if q_norm in self._ambiguous_keys
+                else self._index.get(q_norm)
+            )
             if match is not None:
                 return match
 
             # 3. Slugs (kebab, snake, compact)
             q_kebab = re.sub(r"[\s_]+", "-", q_norm)
-            match = self._index.get(q_kebab)
+            match = (
+                None
+                if q_kebab in self._ambiguous_keys
+                else self._index.get(q_kebab)
+            )
             if match is not None:
                 return match
 
             q_snake = re.sub(r"[\s\-]+", "_", q_norm)
-            match = self._index.get(q_snake)
+            match = (
+                None
+                if q_snake in self._ambiguous_keys
+                else self._index.get(q_snake)
+            )
             if match is not None:
                 return match
 
             q_compact = re.sub(r"[^a-z0-9]", "", q_norm)
             if len(q_compact) >= 2:
-                match = self._index.get(q_compact)
+                match = (
+                    None
+                    if q_compact in self._ambiguous_keys
+                    else self._index.get(q_compact)
+                )
                 if match is not None:
                     return match
 
             # 4. Punctuation-stripped query (e.g. "Search...", "Submit!")
             q_clean_punct = re.sub(r"^[^\w]+|[^\w]+$", "", q_norm)
             if q_clean_punct and q_clean_punct != q_norm:
-                match = self._index.get(q_clean_punct)
+                match = (
+                    None
+                    if q_clean_punct in self._ambiguous_keys
+                    else self._index.get(q_clean_punct)
+                )
                 if match is not None:
                     return match
 
@@ -665,6 +762,15 @@ class SemanticTargetIndex:
     def __len__(self) -> int:
         with self._lock:
             return len(self._index)
+
+    def observed_matches(
+        self, *, state_version: int | None = None
+    ) -> tuple[TargetMatch, ...]:
+        """Return controls grounded in the current observation, without aliases."""
+        with self._lock:
+            if state_version is not None and state_version != self._version:
+                return ()
+            return tuple(self._matches)
 
     def __contains__(self, query: str) -> bool:
         return self.lookup(query) is not None

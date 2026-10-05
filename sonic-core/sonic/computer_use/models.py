@@ -278,12 +278,20 @@ class ComputerWorldObservation(BaseModel):
     processes: list[str] = Field(default_factory=list)
     terminal_output: str = ""
     working_directory: str = "/home/sonic/workspace"
-    browser_state: dict[str, Any] = Field(default_factory=lambda: {"url": "about:blank", "title": "New Tab"})
+    browser_state: dict[str, Any] = Field(default_factory=dict)
     ide_state: dict[str, Any] = Field(default_factory=lambda: {"active_file": "None", "cursor_line": 1})
     git_branch: str = "main"
     git_clean: bool = True
     perception_version: int = 0
     perception_latency_ns: int = 0
+    observation_age_ms: float | None = Field(default=None, ge=0)
+    observation_received_monotonic_ns: int | None = Field(default=None, exclude=True, ge=0)
+    perception_source: str = "unknown"
+    accessible_scene_fresh: bool | None = None
+    image_attached: bool = False
+    visual_escalation_reason: str = ""
+    image_escalation_count: int = Field(default=0, ge=0)
+    action_to_state_ms: float | None = Field(default=None, ge=0)
     timestamp: str = Field(default_factory=_now)
 
     @property
@@ -339,6 +347,15 @@ class ComputerDecisionTrace(BaseModel):
     state_changed: bool | None = None
     prediction_error: float | None = None
     graph_delta: str = ""
+    perception_source: str = "unknown"
+    perception_version: int = Field(default=0, ge=0)
+    screen_age_ms: float | None = Field(default=None, ge=0)
+    controls_age_ms: float | None = Field(default=None, ge=0)
+    accessible_scene_fresh: bool | None = None
+    image_attached: bool = False
+    visual_escalation_reason: str = ""
+    image_escalation_count: int = Field(default=0, ge=0)
+    action_to_state_ms: float | None = Field(default=None, ge=0)
     # Executor-produced contract evidence.  This is populated by
     # ComputerUseAgent from live before/after observations; it is never used
     # to authorize or dispatch an action.

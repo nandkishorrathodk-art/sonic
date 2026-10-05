@@ -173,6 +173,7 @@ def test_offline_fallback_is_generic_diagnostic_not_script():
     """Without an LLM, the agent probes (reads) — never writes a vuln-specific patch."""
     comp = _StubComputer()
     agent = ComputerUseAgent(computer_provider=comp)
+    agent.llm_router = None
     obs = _run(agent.observe(comp.workspace_id))
     action_type, target, payload, expected = _run(agent.choose_action("Fix JWT bug", obs, 1))
     from sonic.computer_use.models import ComputerActionType
@@ -227,12 +228,12 @@ def test_reasoning_contract_exposes_full_live_action_surface():
         "FILE_WRITE",
         "GIT_COMMIT",
         "APP_INSTALL",
-        "BROWSER_DOWNLOAD",
         "TOOL_AUTHOR",
         "METHOD_INVENT",
         "GOAL_COMPLETE",
     ):
         assert action in prompt
+    assert "BROWSER_DOWNLOAD" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +250,8 @@ def test_screen_observation_used_in_reasoning():
     prompt = llm.received_prompts[0]
     assert "ERROR: alg=none accepted on /token" in prompt, "screen visible_text not fed to LLM"
     assert "2 failed, 1 passed" in prompt, "terminal_output not fed to LLM"
-    assert "Screen visible text" in prompt
-    assert "Terminal output" in prompt
+    assert "Screen Visible Content" in prompt
+    assert "Last Command Output" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -350,3 +351,21 @@ def test_goal_complete_terminates_loop_early():
     assert traces[0].action_type == ComputerActionType.VERIFY_PROBE
     assert traces[0].exit_code == 0
     assert len(llm.received_prompts) == 1, "Loop must stop after GOAL_COMPLETE"
+
+
+def test_gui_goal_complete_hands_off_without_claiming_verification():
+    comp = _StubComputer()
+    llm = _StubLLM([_action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL)])
+    agent = ComputerUseAgent(
+        computer_provider=comp,
+        llm_router=llm,
+        execution_plane="gui",
+    )
+    agent._bootstrap_performed = True
+
+    traces = _run(agent.run_mission(comp.workspace_id, "Open the requested application", steps=5))
+
+    assert traces == []
+    assert agent.goal_reached is False
+    assert len(llm.received_prompts) == 1
+    assert any("awaiting independent Judge" in item["action"] for item in agent.history)

@@ -102,6 +102,9 @@ def test_is_transient_transport_error():
 def test_non_transient_errors_not_flagged():
     # Auth / bad request / model-not-found must NOT be retried.
     assert _is_transient_error(RuntimeError("401 Unauthorized")) is False
+    oversized = RuntimeError("Rate limit exceeded: input token limit")
+    oversized.status_code = 413
+    assert _is_transient_error(oversized) is False
     assert _is_transient_error(RuntimeError("model not found: foo-3")) is False
     assert _is_transient_error(ValueError("invalid api key")) is False
 
@@ -349,12 +352,29 @@ class _StubComputer(ComputerProvider):
     async def create(self, *a, **k): return type("W", (), {"id": self.workspace_id})()
     async def destroy(self, *a, **k): return True
     async def status(self, workspace_id):
-        return ComputerState(workspace_id=workspace_id, tenant_id="t", active_application="x")
+        return ComputerState(
+            workspace_id=workspace_id,
+            tenant_id="t",
+            active_application="x",
+        )
     async def screenshot(self, workspace_id):
-        return ScreenObservation(width=self.width, height=self.height, visible_text="ui")
+        return ScreenObservation(
+            width=self.width,
+            height=self.height,
+            visible_text="ui",
+            active_window="x",
+            capture_age_ms=0,
+            controls_age_ms=0,
+        )
     async def gui_action(self, workspace_id, action, actor="operator"):
         self.gui_calls.append((action.action, action.x or 0, action.y or 0))
-        return ScreenObservation(width=self.width, height=self.height)
+        return ScreenObservation(
+            width=self.width,
+            height=self.height,
+            active_window="x",
+            capture_age_ms=0,
+            controls_age_ms=0,
+        )
     async def terminal(self, workspace_id, command, timeout=60, actor="operator"):
         return ExecResult(command=command, exit_code=0, stdout="", stderr="")
     async def read_file(self, *a, **k): return ""
@@ -579,6 +599,36 @@ async def test_heartbeat_callback_failure_does_not_discard_llm_action(monkeypatc
     assert payload["command"] == "hostname"
 
 
+@pytest.mark.asyncio
+async def test_gui_reasoning_timeout_returns_explicit_blocked_result(monkeypatch):
+    import sonic.computer_use.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "_GUI_REASONING_TIMEOUT_SECONDS", 0.01)
+
+    class HangingRouter(_StubRouter):
+        async def complete(self, request):
+            await asyncio.Event().wait()
+
+    agent = ComputerUseAgent(
+        computer_provider=_StubComputer(),
+        llm_router=HangingRouter(),
+        execution_plane="gui",
+    )
+
+    action_type, target, _, expected = await agent._llm_choose_action(
+        goal="Use the visible desktop",
+        observation=ComputerWorldObservation(),
+        step_index=1,
+        primary_file="",
+        test_file="",
+    )
+
+    assert action_type == ActionExecutionStatus.BLOCKED
+    assert target == "reasoning-unavailable"
+    assert "timed out after 0.01 seconds" in expected
+    assert "no action was dispatched" in expected
+
+
 def test_multimodal_computer_use_does_not_send_reasoning_effort():
     router = _RecordingRouter()
     agent = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=router)
@@ -708,9 +758,20 @@ def test_action_parser_prevents_exec_command_not_found():
 
 
 def test_clean_terminal_command_strips_exec():
-    """Verify _clean_terminal_command strips spurious _EXEC or EXEC prefixes."""
+    """Verify wrapper markers are removed without inventing successful commands."""
     from sonic.computer_use.agent import ComputerUseAgent
-    assert ComputerUseAgent._clean_terminal_command("_EXEC") == "echo 'ERROR: Empty command' >&2; exit 1"
+
+    assert ComputerUseAgent._clean_terminal_command("_EXEC") == ""
     assert ComputerUseAgent._clean_terminal_command("_EXEC ls -la") == "ls -la"
     assert ComputerUseAgent._clean_terminal_command("EXEC ps aux") == "ps aux"
 
+
+def test_clean_terminal_command_preserves_shell_arguments_and_trailing_operators():
+    from sonic.computer_use.agent import ComputerUseAgent
+
+    command = "printf '%s\\n' 'two words';"
+    assert ComputerUseAgent._clean_terminal_command(command) == command
+    assert ComputerUseAgent._clean_terminal_command(
+        json.dumps({"command": command})
+    ) == command
+    assert ComputerUseAgent._clean_terminal_command(None) == ""

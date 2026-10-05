@@ -41,6 +41,10 @@ def test_ai_human_being_identity_and_vault_persistence(tmp_path, monkeypatch):
     """Being and BeingVault persist accounts and persona across restarts using RFC 2606 .test domains."""
     db_file = tmp_path / "being_vault_test.db"
     monkeypatch.setenv("SONIC_BEING_DB_PATH", str(db_file))
+    monkeypatch.setenv(
+        "SONIC_BEING_VAULT_KEY",
+        base64.urlsafe_b64encode(b"test-only-key-material-32-bytes!").decode("ascii"),
+    )
     reset_being_singleton()
 
     being = get_or_create_being(tenant_id="tenant-human-1", name="SONIC")
@@ -92,7 +96,6 @@ def test_14_artificial_blocks_removed():
         ("GIT_DIFF", "repo", {}),
         ("GIT_BRANCH", "main", {"branch": "main"}),
         ("GIT_COMMIT", "repo", {"message": "feat: add SONIC README and don't break 'x' support"}),
-        ("GIT_PUSH", "origin", {"remote": "origin", "branch": "main"}),
         ("BROWSER_NAVIGATE", "https://git.sonic.test/signup", {"url": "https://git.sonic.test/signup"}),
         ("BROWSER_NAVIGATE", "https://social.sonic.test/signup", {"url": "https://social.sonic.test/signup"}),
         ("BROWSER_SELECT", "select#month", {"selector": "select#month", "value": "5"}),
@@ -102,6 +105,22 @@ def test_14_artificial_blocks_removed():
     ]:
         verdict = policy.evaluate(action_type, target, payload)
         assert verdict.allowed, f"Expected {action_type} ({target}) to be allowed, got: {verdict.reason}"
+
+    unresolved_push = policy.evaluate(
+        "GIT_PUSH", "origin", {"remote": "origin", "branch": "main"}
+    )
+    assert not unresolved_push.allowed
+    assert "resolvable remote URL" in unresolved_push.reason
+
+    validated_push = policy.evaluate(
+        "GIT_PUSH",
+        "origin",
+        {
+            "remote_url": "https://git.sonic.test/sonic/project.git",
+            "branch": "main",
+        },
+    )
+    assert validated_push.allowed, validated_push.reason
 
     # 2. Normal shell app management and build commands are L0_SAFE
     assert classify_command_risk("pkill -9 x-www-browser") == RiskLevel.L0_SAFE
@@ -144,6 +163,7 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
     from sonic.computer.models import ScreenObservation
 
     visual_revision = {"value": 0}
+    focus_state = {"focused": False}
 
     def _make_screen(active_window: str, open_windows: list[str]) -> ScreenObservation:
         image = Image.new("RGB", (1, 1), (18, 22, 31))
@@ -159,11 +179,22 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
             detected_controls=(
                 [
                     {"name": active_window, "role": "window", "bbox": (0, 0, 1280, 800)},
-                    {"name": "editor", "role": "textbox", "bbox": (100, 120, 600, 400)},
+                    {
+                        "name": "editor",
+                        "role": "textbox",
+                        "bbox": (100, 120, 600, 400),
+                        "source": "atspi",
+                        "editable": True,
+                        "focused": focus_state["focused"],
+                        "confidence": 0.95,
+                        "freshness_ms": 0,
+                    },
                 ]
                 if active_window != "Desktop"
                 else []
             ),
+            capture_age_ms=0,
+            controls_age_ms=0,
             desktop_state="INTERACTIVE",
         )
 
@@ -224,11 +255,13 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
             if atype == "SELECT_WINDOW":
                 target = action.app_name or action.window_id or ""
                 self.active_window = target
+                focus_state["focused"] = False
                 self.gui_events.append(("FOCUS", target))
             elif atype == "TYPE":
                 self.gui_events.append(("TYPE", f"{self.active_window}:{action.text}"))
                 visual_revision["value"] = 1
             elif atype == "CLICK":
+                focus_state["focused"] = True
                 self.gui_events.append(("CLICK", f"{self.active_window}:({action.x},{action.y})"))
             elif atype in ("KEYPRESS", "HOTKEY"):
                 self.gui_events.append(("KEY", f"{self.active_window}:{action.key}"))
@@ -302,7 +335,7 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
         payload={"text": "SONIC multi-window note"},
         predicted_outcome="Type note in App #1",
     )
-    assert t4.status == ActionExecutionStatus.COMPLETED
+    assert t4.status == ActionExecutionStatus.COMPLETED, t4.actual_observation
 
     # 5. Switch focus to App #2 (APP_FOCUS), click canvas, then switch BACK to App #1 within 4 steps!
     t5 = await agent.execute_action(
@@ -352,4 +385,76 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
     assert t8.status == ActionExecutionStatus.COMPLETED
     assert ("KEY", "text-editor-app:ctrl+s") in ws.gui_events
     assert ("TERMINAL", "ls -la /home/sonic/workspace") in ws.gui_events
+
+    assert ComputerUseAgent._window_matches_application(
+        "some-editor /home/sonic/workspace/notes.txt",
+        "New Document - Some Editor",
+    )
+    assert not ComputerUseAgent._window_matches_application(
+        "missing-application",
+        ws.active_window,
+    )
+
+    async def report_launch_without_opening_window(workspace_id, app_request):
+        return True
+
+    ws.launch_application = report_launch_without_opening_window
+    failed_launch = await agent.execute_action(
+        workspace_id="ws-1",
+        action_type=ComputerActionType.APP_LAUNCH,
+        target_resource="missing-application",
+        payload={"app_name": "missing-application"},
+        predicted_outcome="A new GUI application window opens and receives focus",
+    )
+    assert failed_launch.status in (
+        ActionExecutionStatus.FAILED,
+        ActionExecutionStatus.RECOVERED,
+    )
+    assert failed_launch.status != ActionExecutionStatus.COMPLETED
+    assert "did not produce a verified, focused GUI window" in failed_launch.actual_observation
+
+    async def launch_unrelated_window(workspace_id, app_request):
+        ws.open_windows.append("unrelated-helper")
+        ws.active_window = "unrelated-helper"
+        return True
+
+    ws.launch_application = launch_unrelated_window
+    unrelated_launch = await agent.execute_action(
+        workspace_id="ws-1",
+        action_type=ComputerActionType.APP_LAUNCH,
+        target_resource="missing-application",
+        payload={"app_name": "missing-application"},
+        predicted_outcome="The requested application opens and receives focus",
+    )
+    assert unrelated_launch.status in (
+        ActionExecutionStatus.FAILED,
+        ActionExecutionStatus.RECOVERED,
+    )
+    assert "did not produce a verified, focused GUI window" in unrelated_launch.actual_observation
+
+    async def report_unresolved_application(workspace_id, app_request):
+        return False
+
+    ws.launch_application = report_unresolved_application
+    unresolved_launches = []
+    for app_name in ("missing-application-a", "missing-application-b", "missing-application-c"):
+        unresolved_launches.append(
+            await agent.execute_action(
+                workspace_id="ws-1",
+                action_type=ComputerActionType.APP_LAUNCH,
+                target_resource=app_name,
+                payload={"app_name": app_name},
+                predicted_outcome="A discovered GUI application opens",
+            )
+        )
+    next_app_launch = await agent.execute_action(
+        workspace_id="ws-1",
+        action_type=ComputerActionType.APP_LAUNCH,
+        target_resource="different-application",
+        payload={"app_name": "different-application"},
+        predicted_outcome="A discovered GUI application opens",
+    )
+    assert all(trace.status == ActionExecutionStatus.FAILED for trace in unresolved_launches)
+    assert "application launch failed" in next_app_launch.actual_observation
+    assert "Strategy exhausted" not in next_app_launch.actual_observation
     reset_being_singleton()

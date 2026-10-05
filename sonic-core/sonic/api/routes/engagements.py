@@ -45,7 +45,6 @@ def get_engagement_manager():
     if _engagement_manager is None:
         from sonic.agents.engagement import EngagementManager
         from sonic.config import CONFIGS_DIR
-        from sonic.integrations.bugbounty import BugBountyClient
         from sonic.llm.router import ModelRouter
         from sonic.memory.router import get_memory_sync
         from sonic.safety.scope import get_scope_checker
@@ -76,11 +75,6 @@ def get_engagement_manager():
         except Exception:
             pass
 
-        # Wire bug bounty client
-        h1_key = os.environ.get("HACKERONE_API_KEY", "")
-        bc_key = os.environ.get("BUGCROWD_API_KEY", "")
-        bugbounty_client = BugBountyClient(hackerone_api_key=h1_key, bugcrowd_api_key=bc_key)
-
         _engagement_manager = EngagementManager(
             model_router=router_instance,
             graph_memory=memory,
@@ -88,7 +82,6 @@ def get_engagement_manager():
             sandbox_provider=compute_provider,
             compute_provider=compute_provider,
             computer_provider=computer_provider,
-            bug_bounty_client=bugbounty_client,
         )
     return _engagement_manager
 
@@ -204,35 +197,6 @@ async def get_engagement_findings(
 
     report = await manager.get_findings_report(engagement_id, tenant_id=user.tenant_id)
     return report
-
-
-class PrepareReportsRequest(BaseModel):
-    platform: str = "hackerone"  # "hackerone" or "bugcrowd"
-
-
-@router.post("/{engagement_id}/submit-report")
-async def prepare_bug_bounty_reports(
-    engagement_id: str,
-    request: PrepareReportsRequest = PrepareReportsRequest(),
-    user: User = Depends(require_operator),
-):
-    """Render every VERIFIED finding into a platform-ready draft report.
-
-    The (previously unwired) BugBountyClient is now reachable from the
-    engagement pipeline. Draft reports are returned for operator review;
-    actual submission to HackerOne/Bugcrowd still requires API keys and an
-    explicit operator action — this never auto-discloses a finding.
-    """
-    manager = get_engagement_manager()
-    status_data = await manager.get_engagement_status(engagement_id, tenant_id=user.tenant_id)
-    if "error" in status_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Engagement not found or unauthorized",
-        )
-    return await manager.prepare_bug_bounty_reports(
-        engagement_id, platform=request.platform, tenant_id=user.tenant_id
-    )
 
 
 @router.get("/")

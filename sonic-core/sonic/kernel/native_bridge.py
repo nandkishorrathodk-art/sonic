@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -143,7 +144,19 @@ class NativeKernelClient:
                 try:
                     daemon.stdin.write(payload + "\n")
                     daemon.stdin.flush()
-                    line = daemon.stdout.readline()
+                    response_lines: queue.Queue[str] = queue.Queue(maxsize=1)
+
+                    def read_response() -> None:
+                        try:
+                            response_lines.put(daemon.stdout.readline())
+                        except (OSError, ValueError):
+                            response_lines.put("")
+
+                    threading.Thread(target=read_response, daemon=True).start()
+                    try:
+                        line = response_lines.get(timeout=3.0)
+                    except queue.Empty:
+                        raise TimeoutError("Native kernel daemon response timed out")
                     if line and line.strip():
                         data = json.loads(line.strip())
                         if "result" in data:
@@ -151,10 +164,12 @@ class NativeKernelClient:
                         if "error" in data:
                             logger.warning("Native kernel returned RPC error: %s", data["error"])
                             return None
+                    raise RuntimeError("Native kernel daemon returned an empty response")
                 except Exception as pipe_err:
                     logger.debug("Persistent pipe streaming failed, restarting daemon: %s", pipe_err)
                     try:
                         daemon.kill()
+                        daemon.wait(timeout=1.0)
                     except Exception:
                         pass
                     self._daemon_proc = None

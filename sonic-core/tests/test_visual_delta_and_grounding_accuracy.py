@@ -2,6 +2,8 @@
 Unit tests for Visual Delta Verification, Grounding Accuracy, and Screen Scaling.
 """
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from sonic.computer_use.grounding import (
@@ -9,7 +11,7 @@ from sonic.computer_use.grounding import (
     resolve_ui_target,
 )
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ComputerActionType, ActionExecutionStatus
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
 from sonic.computer.models import ScreenObservation
 
 
@@ -34,6 +36,14 @@ def test_extract_bbox_midpoint_formats():
     assert mid_scale[1] == int(((900 + 950) / 2.0 / 1000.0) * 800)
 
 
+def test_grounding_rejects_offscreen_points_instead_of_clamping():
+    assert extract_bbox_midpoint((1280, 400), width=1280, height=800) is None
+    assert extract_bbox_midpoint((400, 800), width=1280, height=800) is None
+    assert extract_bbox_midpoint((1300, 400), width=1280, height=800) is None
+    assert extract_bbox_midpoint("-10, 400", width=1280, height=800) is None
+    assert extract_bbox_midpoint("<|box_start|>(800, 500, 1000, 700)<|box_end|>", width=1280, height=800) == (1152, 480)
+
+
 def test_landmark_substring_collision_prevention():
     # Without coordinates or vision grounding, text queries fail closed to None (no blind clicking)
     assert resolve_ui_target("token", width=1280, height=800) is None
@@ -54,34 +64,40 @@ async def test_visual_verification_detects_unchanged_screen():
         screenshot_base64=same_b64,
         width=1280,
         height=800,
+        desktop_state="INTERACTIVE",
+        active_window="Desktop",
+        capture_age_ms=0,
+        controls_age_ms=0,
     )
     mock_computer.gui_action = AsyncMock(return_value=mock_obs)
     mock_computer.execute = AsyncMock(return_value=MagicMock(exit_code=0, stdout="ok", stderr=""))
+    mock_computer.screenshot = AsyncMock(return_value=mock_obs)
+    mock_computer.status = AsyncMock(return_value=MagicMock(
+        active_application="Desktop",
+        active_window="Desktop",
+        open_applications=["Desktop"],
+        running_processes=[],
+    ))
 
-    agent = ComputerUseAgent.__new__(ComputerUseAgent)
-    agent.computer = mock_computer
-    agent._screen_width = 1280
-    agent._screen_height = 800
+    agent = ComputerUseAgent(computer_provider=mock_computer)
     agent._last_screenshot_b64 = same_b64
-    agent._recent_action_signatures = []
-    agent.action_counter = 0
-    agent.max_actions = 10
-    agent.traces = []
-    agent.history = []
-    agent.safety = None
-    agent.self_host = False
-    agent.autonomy_level = None
-    agent.browser = None
-    agent.security_tools = {}
-    agent.recovery_events = 0
-    agent.max_recovery_attempts = 2
+    agent._last_observed_screen = mock_obs
+    agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+    agent.perception_bus.publish(
+        screenshot_base64=same_b64,
+        width=1280,
+        height=800,
+        active_window="Desktop",
+    )
 
     trace = await agent.execute_action(
         workspace_id="ws-test",
         action_type=ComputerActionType.GUI_CLICK,
-        target_resource="search button",
+        target_resource="500,300",
         payload={"x": 500, "y": 300},
         predicted_outcome="search bar clicked",
     )
 
     assert "[VISUAL VERIFICATION]: Screen state unchanged" in trace.actual_observation
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert trace.recovery_attempted is False

@@ -46,10 +46,14 @@ class StateDelta:
 
     changed: Mapping[str, Any] = field(default_factory=dict)
     removed: tuple[str, ...] = ()
+    confidence: float = 1.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "changed", _frozen(self.changed))
         object.__setattr__(self, "removed", tuple(sorted(set(self.removed))))
+        if not 0.0 <= float(self.confidence) <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        object.__setattr__(self, "confidence", float(self.confidence))
 
     @classmethod
     def from_states(
@@ -155,9 +159,17 @@ class ActionContractValidator:
             ActionExecutionStatus.VERIFIED,
         ):
             reasons.append(f"receipt status is not successful: {receipt.status}")
+        if receipt.exit_code not in (None, 0):
+            reasons.append(f"receipt exit code is not successful: {receipt.exit_code}")
+        evidence = receipt.evidence.strip() if isinstance(receipt.evidence, str) else ""
+        if receipt.exit_code is None and not evidence:
+            reasons.append("receipt has neither a successful exit code nor evidence")
         expected_delta = StateDelta.from_states(receipt.before, receipt.after)
         if expected_delta != receipt.state_delta:
             reasons.append("receipt state_delta does not match before/after state")
+        for key, expected in contract.preconditions.items():
+            if key not in receipt.before or receipt.before[key] != expected:
+                reasons.append(f"precondition failed in receipt: {key}")
         for key, expected in contract.postconditions.items():
             if key not in receipt.after or receipt.after[key] != expected:
                 reasons.append(f"postcondition failed: {key}")

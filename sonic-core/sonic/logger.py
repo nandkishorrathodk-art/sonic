@@ -33,17 +33,28 @@ except ImportError:
                 return f"{event} | {extra}"
             return event
 
-        def info(self, event: str, **kwargs: Any):
-            self._logger.info(self._format_msg(event, kwargs))
+        def _emit(self, method: Any, event: str, *args: Any, **kwargs: Any):
+            message = event % args if args else event
+            extra = {key: value for key, value in kwargs.items() if key not in {"exc_info", "stack_info", "stacklevel"}}
+            method(self._format_msg(message, extra), **{
+                key: value for key, value in kwargs.items()
+                if key in {"exc_info", "stack_info", "stacklevel"}
+            })
 
-        def warning(self, event: str, **kwargs: Any):
-            self._logger.warning(self._format_msg(event, kwargs))
+        def info(self, event: str, *args: Any, **kwargs: Any):
+            self._emit(self._logger.info, event, *args, **kwargs)
 
-        def error(self, event: str, **kwargs: Any):
-            self._logger.error(self._format_msg(event, kwargs))
+        def warning(self, event: str, *args: Any, **kwargs: Any):
+            self._emit(self._logger.warning, event, *args, **kwargs)
 
-        def debug(self, event: str, **kwargs: Any):
-            self._logger.debug(self._format_msg(event, kwargs))
+        def error(self, event: str, *args: Any, **kwargs: Any):
+            self._emit(self._logger.error, event, *args, **kwargs)
+
+        def critical(self, event: str, *args: Any, **kwargs: Any):
+            self._emit(self._logger.critical, event, *args, **kwargs)
+
+        def debug(self, event: str, *args: Any, **kwargs: Any):
+            self._emit(self._logger.debug, event, *args, **kwargs)
 
     def get_logger(name: str = "sonic"):
         return FallbackLogger(name)

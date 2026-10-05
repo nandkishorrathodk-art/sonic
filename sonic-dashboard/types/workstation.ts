@@ -20,9 +20,21 @@ export interface WorklogItem {
   role?: "user" | "assistant" | "system" | string;
   proposed_actions?: any[];
   sub_agent_number?: number;
+  sub_agent_id?: string;
+  sub_agent_name?: string;
   sub_mission_id?: string;
+  agent_id?: string;
+  agent_name?: string;
+  orchestration_event?: "sub_dispatch" | "sub_report";
+  worker_role?: string;
+  execution_plane?: "gui" | "headless" | string;
+  action_type?: string;
+  action_status?: string;
+  step_index?: number;
+  status?: string;
   goal?: string;
   success?: boolean;
+  actions_taken?: number;
   findings_summary?: string;
   key_discoveries?: string[];
 }
@@ -37,6 +49,11 @@ export interface DesktopState {
   os_name: string;
   display: string;
   status: string;
+  perception_status?: "FRESH" | "UNAVAILABLE" | string;
+  capture_age_ms?: number | null;
+  capture_timestamp_ns?: number | null;
+  perception_version?: number | null;
+  perception_message?: string;
   active_window?: string;
   running_apps: DesktopApp[];
   vnc_url?: string;
@@ -97,6 +114,7 @@ export interface CommandResult {
   command: string;
   exit_code: number;
   output: string;
+  stderr?: string;
   execution_environment?: string;
 }
 

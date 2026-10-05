@@ -149,6 +149,11 @@ class SafetyKernel:
 
         # 1. Seal Integrity Check
         if isinstance(self.policy, SealedActionPolicy) and not self.is_seal_valid():
+            logger.error(
+                "safety_policy_tampered",
+                tenant_id=self.tenant_id,
+                action_type=action_type,
+            )
             logger.critical(
                 "safety_kernel_tamper_detected",
                 tenant_id=self.tenant_id,

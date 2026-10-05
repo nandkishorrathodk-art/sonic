@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from sonic.auth.middleware import require_admin, require_auth
+from sonic.auth.middleware import require_admin, require_auth, require_operator
 from sonic.auth.models import User
 from sonic.api.routes.workstation import _tenant_workstations
 from sonic.computer.daytona_computer import DaytonaComputerProvider
@@ -174,7 +174,7 @@ class ScanRequest(BaseModel):
 
 
 @router.post("/scan")
-async def launch_scan(request: ScanRequest, user: User = Depends(require_auth)):
+async def launch_scan(request: ScanRequest, user: User = Depends(require_operator)):
     """
     Launch an engagement scan (Authenticated).
     Executes within the target scope and binds findings to user identity.
@@ -240,7 +240,7 @@ async def launch_scan(request: ScanRequest, user: User = Depends(require_auth)):
         scan["status"] = "failed"
         for name, atype, _ in agent_names:
             register_agent(name, atype, "Configured LLM", "error", str(e)[:100], tenant_id=getattr(user, "tenant_id", None) or "default")
-        return {"status": "error", "error": str(e)}
+        raise HTTPException(status_code=500, detail="Scan execution failed") from e
 
 
 @router.get("/scan/status")
@@ -523,7 +523,7 @@ async def get_live_experiments(user: User = Depends(require_auth)):
 
 
 @router.post("/experiments/benchmark")
-async def run_benchmark(user: User = Depends(require_auth)):
+async def run_benchmark(user: User = Depends(require_operator)):
     """Run self-developer regression commands in a disposable Daytona lab.
 
     The previous endpoint inferred vulnerability findings from fixture URL

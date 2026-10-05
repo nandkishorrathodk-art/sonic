@@ -5,7 +5,7 @@ Before this change the EngagementManager built its agents with ONLY
 (router, memory, scope) — so the dynamic agent never received a sandbox
 provider (probes ran from the host) and the verifier never received a
 reproduction engine (findings were never reproduced in-sandbox). The
-BugBountyClient existed but was unreachable from any path.
+shared execution resources were not wired into the engagement agents.
 
 These tests prove the wiring now injects the shared resources into the
 real agent instances, against a stub ComputeProvider (not a mock of the
@@ -18,18 +18,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-import pytest
-
 from sonic.agents.dynamic_execution import DynamicExecutionAgent
 from sonic.agents.engagement import EngagementManager
 from sonic.agents.verifier import VerifierAgent
-from sonic.integrations.bugbounty import BugBountyClient
 from sonic.memory.inmemory import InMemoryGraph
-from sonic.memory.schemas import (
-    FindingNode,
-    FindingSeverity,
-    FindingStatus,
-)
 from sonic.safety.scope import ScopeChecker
 from sonic.sandbox.provider import ExecResult
 
@@ -67,7 +59,7 @@ class StubComputeProvider:
         )
 
 
-def _make_manager(*, provider=None, engine=None, bbc=None) -> EngagementManager:
+def _make_manager(*, provider=None, engine=None) -> EngagementManager:
     memory = InMemoryGraph()
     memory._connected = True
     scope = ScopeChecker()
@@ -78,25 +70,7 @@ def _make_manager(*, provider=None, engine=None, bbc=None) -> EngagementManager:
         scope_checker=scope,
         sandbox_provider=provider,
         reproduction_engine=engine,
-        bug_bounty_client=bbc,
     )
-
-
-def _seed_verified_finding(manager: EngagementManager, engagement_id: str) -> str:
-    finding = FindingNode(
-        title="Reflected XSS in search",
-        description="<script> reflected in /search?q=",
-        vulnerability_class="XSS",
-        severity=FindingSeverity.HIGH,
-        status=FindingStatus.VERIFIED,
-        confidence_score=90,
-        poc="GET /search?q=<script>alert(1)</script>",
-        impact="Account takeover via crafted link",
-        remediation="Encode user input on output.",
-        engagement_id=engagement_id,
-    )
-    uid = asyncio.run(manager.memory.create_finding(finding))
-    return uid or finding.uid
 
 
 # --------------------------------------------
@@ -109,7 +83,6 @@ def test_engagement_manager_accepts_optional_resources():
     manager = _make_manager()
     assert manager.sandbox_provider is None
     assert manager.reproduction_engine is None
-    assert manager.bug_bounty_client is None
 
 
 def test_dynamic_agent_receives_sandbox_provider():
@@ -201,32 +174,6 @@ def test_ensure_sandbox_is_idempotent():
     # A second call must not rebuild (and not call the factory at all).
     asyncio.run(manager.ensure_sandbox(lambda: (_ for _ in ()).throw(AssertionError("rebuild!"))))
     assert manager.sandbox_provider is first
-
-
-def test_prepare_bug_bounty_reports_renders_verified_findings():
-    """Gap 4 fix: the BugBountyClient is now reachable from the engagement path."""
-    bbc = BugBountyClient()
-    manager = _make_manager(bbc=bbc)
-    _seed_verified_finding(manager, "eng-3")
-
-    out = asyncio.run(
-        manager.prepare_bug_bounty_reports("eng-3", platform="hackerone")
-    )
-
-    assert out["engagement_id"] == "eng-3"
-    assert out["platform"] == "hackerone"
-    assert out["total_verified"] == 1
-    assert len(out["draft_reports"]) == 1
-    draft = out["draft_reports"][0]
-    assert draft["title"] == "Reflected XSS in search"
-    assert "alert(1)" in draft["poc"]
-
-
-def test_prepare_bug_bounty_reports_empty_when_no_verified_findings():
-    manager = _make_manager()
-    out = asyncio.run(manager.prepare_bug_bounty_reports("no-eng"))
-    assert out["total_verified"] == 0
-    assert out["draft_reports"] == []
 
 
 def test_workspace_for_returns_empty_without_provider():

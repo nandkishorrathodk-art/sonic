@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from sonic.computer_use.models_boss import SubMission
+from sonic.llm import laya_engine
 from sonic.llm.laya_engine import (
     LayaSystem1Engine,
     _detect_script_and_model,
@@ -24,6 +25,14 @@ def test_laya_language_and_checkpoint_routing():
     assert lang_other == "en"
     assert model_other == "english"
 
+
+@pytest.mark.no_live_infra
+def test_laya_english_only_language_and_capability_reporting():
+    engine = LayaSystem1Engine(enable_local_model=False)
+
+    assert _detect_script_and_model("Run the tests in the terminal") == ("en", "english")
+    assert engine.status()["languages"] == ["en"]
+    assert engine.status()["language_support"] == ["en"]
 
 @pytest.mark.no_live_infra
 def test_laya_english_plane_decision():
@@ -87,3 +96,142 @@ def test_laya_curiosity_affect_and_ram_guard():
     assert 0.0 <= res["worth_learning_prob"] <= 1.0
     assert isinstance(_has_sufficient_ram_gb(0.1), bool)
 
+
+@pytest.mark.no_live_infra
+def test_laya_verification_requires_positive_non_negated_evidence():
+    engine = LayaSystem1Engine(enable_local_model=False)
+
+    assert engine.verify_execution_receipt("Complete the task", "done") < 0.30
+    assert engine.verify_execution_receipt(
+        "Run tests", "Tests did not pass; no test output"
+    ) < 0.30
+    assert engine.verify_execution_receipt(
+        "Run tests", "Tests passed: 5 passed, 0 failed"
+    ) >= 0.65
+    assert engine.verify_execution_receipt(
+        "Run tests", "Tests passed, but 1 failed"
+    ) < 0.30
+
+
+@pytest.mark.no_live_infra
+def test_laya_guard_respects_negated_destructive_actions():
+    engine = LayaSystem1Engine(enable_local_model=False)
+    result = engine.predict_preset("Do not delete or destroy any files", preset="guard")
+
+    assert result.get_noul("is_dangerous") < 0.30
+    assert result.get_choice("risk_tier") == "l0"
+
+
+@pytest.mark.no_live_infra
+def test_laya_ram_probe_fails_closed_when_measurement_is_unavailable(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        laya_engine,
+        "os",
+        SimpleNamespace(name="unsupported", path=SimpleNamespace(exists=lambda _path: False)),
+    )
+
+    assert _has_sufficient_ram_gb(1.5) is False
+
+
+@pytest.mark.no_live_infra
+def test_laya_status_reports_last_successful_backend(monkeypatch):
+    engine = LayaSystem1Engine(enable_local_model=True)
+    monkeypatch.setattr(laya_engine, "_has_sufficient_ram_gb", lambda _minimum: True)
+
+    status_before_prediction = engine.status()
+    assert status_before_prediction["backend"] == "laya_vector_projection"
+    assert status_before_prediction["configured_backend"] == "laya_local"
+
+    class _LocalRouter:
+        def predict(self, *_args, **_kwargs):
+            return {"answers": {"score": {"score": 0.7}}, "routing": {}}
+
+    engine._local_router = _LocalRouter()
+    result = engine.predict(
+        state="measured state",
+        questions={"score": {"type": "score", "criteria": ["low", "high"]}},
+    )
+
+    assert result.routing["backend"] == "laya_local"
+    assert engine.status()["backend"] == "laya_local"
+
+
+@pytest.mark.no_live_infra
+def test_laya_local_router_auto_routes_language_when_model_is_not_explicit():
+    class _AutoRoutingRouter:
+        received_options: dict[str, object] = {}
+
+        def predict(self, _state, _questions, **options):
+            self.received_options = options
+            return {
+                "answers": {"choice": {"choice": "yes", "probability": 0.8}},
+                "routing": {"model": "multilingual"},
+            }
+
+    router = _AutoRoutingRouter()
+    engine = LayaSystem1Engine(enable_local_model=True)
+    engine._local_router = router
+
+    result = engine.predict(
+        state="texto de teste",
+        questions={
+            "choice": {
+                "type": "choice",
+                "criteria": {"yes": "affirmative", "no": "negative"},
+            }
+        },
+    )
+
+    assert "model" not in router.received_options
+    assert router.received_options["max_len"] == 1024
+    assert result.routing["model"] == "multilingual"
+
+
+@pytest.mark.no_live_infra
+def test_laya_remote_api_receives_no_forced_english_model(monkeypatch):
+    request_payload: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "answers": {"choice": {"choice": "yes", "probability": 0.8}},
+                "routing": {"model": "multilingual", "language": "pt"},
+            }
+
+    class _Client:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, _url, json):
+            request_payload.update(json)
+            return _Response()
+
+    monkeypatch.setattr(laya_engine.httpx, "Client", _Client)
+    engine = LayaSystem1Engine(
+        api_url="http://laya.example.test",
+        enable_local_model=False,
+    )
+
+    result = engine.predict(
+        state="texto de teste",
+        questions={
+            "choice": {
+                "type": "choice",
+                "criteria": {"yes": "affirmative", "no": "negative"},
+            }
+        },
+    )
+
+    assert request_payload["model"] is None
+    assert result.routing["model"] == "multilingual"

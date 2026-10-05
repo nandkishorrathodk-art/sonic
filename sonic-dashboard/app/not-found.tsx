@@ -10,7 +10,7 @@ export default function NotFound() {
           The route you requested does not exist in the SONIC workstation.
         </p>
         <Link href="/" className="btn-primary !px-6 !py-2.5 text-xs inline-flex">
-          Return to Workstation
+          Return home
         </Link>
       </div>
     </main>

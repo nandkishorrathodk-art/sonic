@@ -28,6 +28,7 @@ interface WorkstationSidebarProps {
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
   sessions: SessionItem[];
+  sessionsError?: string | null;
   currentSessionId: string;
   onSelectSession: (sessionId: string) => void;
   onNewSession: () => void;
@@ -46,6 +47,7 @@ export function WorkstationSidebar({
   sidebarOpen,
   setSidebarOpen,
   sessions,
+  sessionsError,
   currentSessionId,
   onSelectSession,
   onNewSession,
@@ -55,8 +57,8 @@ export function WorkstationSidebar({
 
   return (
     <aside
-      className={`${
-        sidebarOpen ? "w-[260px]" : "w-0"
+      className={`sonic-workstation-sidebar ${
+        sidebarOpen ? "w-[224px]" : "w-0"
       } transition-all duration-200 ease-in-out border-r border-ink-800 bg-ink-900 flex flex-col flex-shrink-0 z-30 overflow-hidden`}
     >
       {/* Workspace Header */}
@@ -73,7 +75,7 @@ export function WorkstationSidebar({
 
       {/* Primary Nav */}
       <nav className="p-2 space-y-0.5 text-xs font-medium border-b border-ink-800/60">
-        <Link href="/" className="nav-link nav-link-active">
+        <Link href="/workstation" className="nav-link nav-link-active">
           <MessageSquare className="w-4 h-4 text-secondary-400" />
           <span>Workstation</span>
         </Link>
@@ -94,8 +96,8 @@ export function WorkstationSidebar({
         return (
           <>
             <div className="px-3 pt-3 pb-1 flex items-center justify-between text-xs text-muted">
-              <span className="font-semibold text-[11px] uppercase tracking-wider text-muted-dim font-mono">
-                Missions ({safeSessions.length})
+              <span className="font-medium text-[10px] uppercase tracking-[0.12em] text-muted-dim">
+                Recent sessions ({safeSessions.length})
               </span>
               <button
                 onClick={onNewSession}
@@ -109,7 +111,11 @@ export function WorkstationSidebar({
 
             {/* Session list */}
             <div className="px-2 flex-1 overflow-y-auto space-y-1.5 font-sans text-xs pt-1">
-              {safeSessions.length === 0 ? (
+              {sessionsError ? (
+                <div role="alert" className="p-3 text-center text-rose-300 font-mono text-[11px]">
+                  {sessionsError}
+                </div>
+              ) : safeSessions.length === 0 ? (
                 <div className="p-3 text-center text-muted-dim font-mono text-[11px]">
                   No active sessions.
                 </div>
@@ -123,6 +129,14 @@ export function WorkstationSidebar({
                     <div
                       key={sessId}
                       onClick={() => onSelectSession(sessId)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onSelectSession(sessId);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
                       className={`group p-2.5 rounded-lg border cursor-pointer transition relative flex flex-col gap-1 ${
                         isActive
                           ? "bg-ink-800 border-primary-500/50 shadow-glow text-white"

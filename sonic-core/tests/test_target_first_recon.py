@@ -18,6 +18,7 @@ import asyncio
 import json
 import socket
 import ssl
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -66,8 +67,11 @@ class _MockProbe:
         return _MockResponse()
 
 
+@contextmanager
 def _patch_probe_with_dispatcher(dispatch_fn):
-    return patch.object(http_probe, "HTTPProbe", return_value=_MockProbe(dispatch_fn))
+    with patch.object(http_probe, "HTTPProbe", return_value=_MockProbe(dispatch_fn)):
+        with patch.object(http_probe, "is_target_allowed", return_value=(True, "Allowed")):
+            yield
 
 
 # ============================================================================

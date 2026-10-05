@@ -70,7 +70,7 @@ async def test_terminal_exec_strips_trailing_commas_and_semicolons():
         tenant_id="test-tenant",
     )
 
-    # Command with trailing comma and semicolon and whitespace
+    # Preserve punctuation rather than silently rewriting the requested command.
     result = await agent.execute_action(
         "test-ws",
         ComputerActionType.TERMINAL_EXEC,
@@ -79,7 +79,7 @@ async def test_terminal_exec_strips_trailing_commas_and_semicolons():
         "Get hostname",
     )
 
-    mock_comp.terminal.assert_awaited_once_with("test-ws", "hostname")
+    mock_comp.terminal.assert_awaited_once_with("test-ws", "hostname,;")
     assert result.status == ActionExecutionStatus.COMPLETED
     assert "sandbox-host" in result.actual_observation
 
@@ -115,9 +115,16 @@ async def test_terminal_exec_empty_command_returns_agent_step_result():
 
 
 @pytest.mark.asyncio
-async def test_terminal_exec_punctuation_only_returns_agent_step_result():
+async def test_terminal_exec_punctuation_only_is_not_replaced_with_success_command():
     mock_comp = MagicMock()
-    mock_comp.terminal = AsyncMock()
+    mock_comp.terminal = AsyncMock(
+        return_value=ExecResult(
+            command=", ;, ;",
+            exit_code=2,
+            stdout="",
+            stderr="syntax error",
+        )
+    )
 
     agent = ComputerUseAgent(
         computer_provider=mock_comp,
@@ -126,7 +133,7 @@ async def test_terminal_exec_punctuation_only_returns_agent_step_result():
         tenant_id="test-tenant",
     )
 
-    # Command consisting only of commas, semicolons, and whitespace
+    # Preserve non-empty shell syntax; never replace it with a successful no-op.
     result = await agent.execute_action(
         "test-ws",
         ComputerActionType.TERMINAL_EXEC,
@@ -135,11 +142,9 @@ async def test_terminal_exec_punctuation_only_returns_agent_step_result():
         "Run punctuation command",
     )
 
-    mock_comp.terminal.assert_not_awaited()
-    assert isinstance(result, AgentStepResult)
-    assert result.success is False
-    assert result.message == "Empty command provided"
-    success, msg = result
-    assert success is False
-    assert msg == "Empty command provided"
-
+    assert mock_comp.terminal.await_args_list[0].args == ("test-ws", ", ;, ;")
+    assert all(
+        call.args[1] not in {"echo OK", "true"}
+        for call in mock_comp.terminal.await_args_list
+    )
+    assert result.action_type == ComputerActionType.TERMINAL_EXEC

@@ -188,8 +188,12 @@ def test_failed_security_tool_does_not_succeed_job(monkeypatch):
         }
         monkeypatch.setattr(
             "sonic.safety.scope.get_scope_checker",
-            lambda: SimpleNamespace(kill_switch_enabled=True),
+            lambda: SimpleNamespace(
+                kill_switch_enabled=True,
+                is_target_in_scope=lambda target, scope: True,
+            ),
         )
+        monkeypatch.setattr("sonic.sandbox.egress.is_target_allowed", lambda target: (True, ""))
         monkeypatch.setattr(
             "sonic.safety.runtime_stop.get_runtime_stop_state",
             lambda: SimpleNamespace(is_stopped=lambda tenant_id: False, reason=lambda tenant_id: ""),
@@ -198,7 +202,7 @@ def test_failed_security_tool_does_not_succeed_job(monkeypatch):
             tenant_id="tenant-worker-failure",
             engagement_id="eng-failure",
             job_type=JobType.TOOL_EXECUTION,
-            payload={"tool_name": "failing", "target": "target"},
+            payload={"tool_name": "failing", "target": "target", "scope": {"targets": ["target"]}},
             max_retries=0,
         )
         result = await worker.execute_job(job)
@@ -211,6 +215,35 @@ def test_failed_security_tool_does_not_succeed_job(monkeypatch):
             error_message="exit code 1",
             raw_stderr="failed",
         )
+
+    asyncio.run(_run())
+
+
+def test_failed_agent_step_does_not_succeed_job(monkeypatch):
+    async def _run():
+        queue = RedisJobQueue()
+        worker = SonicWorker(queue=queue, provider=LocalDevProvider(allow_host_execution=False))
+        worker._run_agent_step = lambda job: _failed_agent_result()
+        monkeypatch.setattr(
+            "sonic.safety.scope.get_scope_checker",
+            lambda: SimpleNamespace(kill_switch_enabled=True),
+        )
+        monkeypatch.setattr(
+            "sonic.safety.runtime_stop.get_runtime_stop_state",
+            lambda: SimpleNamespace(is_stopped=lambda tenant_id: False, reason=lambda tenant_id: ""),
+        )
+        job = Job(
+            tenant_id="tenant-agent-failure",
+            engagement_id="eng-agent-failure",
+            job_type=JobType.AGENT_STEP,
+            max_retries=0,
+        )
+        result = await worker.execute_job(job)
+        assert result.status == JobStatus.FAILED
+        assert "Agent step failed" in result.error_message
+
+    async def _failed_agent_result():
+        return {"status": "failed", "error": "Agent step failed"}
 
     asyncio.run(_run())
 
@@ -312,12 +345,37 @@ def test_redis_dequeue_recovers_expired_job_and_acknowledges(monkeypatch):
 # 5. Multi-Tenant Job API Endpoints
 # ==========================================================
 
-def test_job_api_multi_tenant_isolation():
+def test_job_api_multi_tenant_isolation(monkeypatch):
     """Verify Job API endpoints enforce authentication and tenant isolation."""
     headers_alpha = get_test_auth_headers(tenant_id="tenant-alpha-jobs")
     headers_beta = get_test_auth_headers(tenant_id="tenant-beta-jobs")
+    queue = RedisJobQueue()
+    queue.register_workspace("workspace-alpha", "tenant-alpha-jobs")
+    monkeypatch.setattr("sonic.api.routes.jobs.get_job_queue", lambda: queue)
 
-    # 1. Tenant Alpha submits job
+    class EngagementManagerStub:
+        async def get_engagement_status(self, engagement_id, tenant_id=None):
+            if engagement_id != "eng-alpha" or tenant_id != "tenant-alpha-jobs":
+                return {"error": "Engagement not found"}
+            return {
+                "id": engagement_id,
+                "tenant_id": tenant_id,
+                "scope": {"targets": ["alpha-target.com"]},
+            }
+
+    monkeypatch.setattr(
+        "sonic.api.routes.engagements.get_engagement_manager",
+        lambda: EngagementManagerStub(),
+    )
+    monkeypatch.setattr(
+        "sonic.api.routes.jobs.get_scope_checker",
+        lambda: SimpleNamespace(
+            is_target_in_scope=lambda target, scope: target in scope["targets"]
+        ),
+    )
+    monkeypatch.setattr("sonic.api.routes.jobs.is_target_allowed", lambda target: (True, ""))
+
+    # Tenant Alpha submits a job to its provisioned workspace and scoped target.
     res_submit = client.post(
         "/jobs/",
         json={
@@ -325,6 +383,7 @@ def test_job_api_multi_tenant_isolation():
             "job_type": "tool_execution",
             "priority": "high",
             "payload": {"tool_name": "nmap", "target": "alpha-target.com"},
+            "workspace_id": "workspace-alpha",
         },
         headers=headers_alpha,
     )
@@ -339,3 +398,28 @@ def test_job_api_multi_tenant_isolation():
     # 3. Tenant Beta direct query -> MUST return 404 Not Found
     res_get_beta = client.get(f"/jobs/{job_id}", headers=headers_beta)
     assert res_get_beta.status_code == 404
+
+    # Tenant Beta cannot submit work to Alpha's registered workspace.
+    res_cross_tenant_submit = client.post(
+        "/jobs/",
+        json={
+            "engagement_id": "eng-alpha",
+            "job_type": "tool_execution",
+            "payload": {"tool_name": "nmap", "target": "alpha-target.com"},
+            "workspace_id": "workspace-alpha",
+        },
+        headers=headers_beta,
+    )
+    assert res_cross_tenant_submit.status_code == 403
+
+    # A legacy/default workspace ID is not treated as proof of provisioning.
+    res_unprovisioned = client.post(
+        "/jobs/",
+        json={
+            "engagement_id": "eng-alpha",
+            "job_type": "tool_execution",
+            "payload": {"tool_name": "nmap", "target": "alpha-target.com"},
+        },
+        headers=headers_alpha,
+    )
+    assert res_unprovisioned.status_code == 400

@@ -8,12 +8,18 @@ Specialists, Safety Kernel, and Observation feeds.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import threading
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
+
+from sonic.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class EventTopic(StrEnum):
@@ -46,39 +52,55 @@ class EventBus:
     def __init__(self):
         self._subscribers: dict[EventTopic, list[EventHandler]] = defaultdict(list)
         self._event_log: list[Event] = []
+        self._lock = threading.RLock()
 
     def subscribe(self, topic: EventTopic, handler: EventHandler) -> None:
-        if handler not in self._subscribers[topic]:
-            self._subscribers[topic].append(handler)
+        with self._lock:
+            if handler not in self._subscribers[topic]:
+                self._subscribers[topic].append(handler)
 
     def unsubscribe(self, topic: EventTopic, handler: EventHandler) -> None:
-        if handler in self._subscribers[topic]:
-            self._subscribers[topic].remove(handler)
+        with self._lock:
+            if handler in self._subscribers[topic]:
+                self._subscribers[topic].remove(handler)
 
     def publish(self, topic: EventTopic, sender: str, payload: dict[str, Any]) -> Event:
         """Publishes an event synchronously to all registered handlers."""
         event = Event(topic=topic, sender=sender, payload=payload)
-        self._event_log.append(event)
-        for handler in list(self._subscribers[topic]):
+        with self._lock:
+            self._event_log.append(event)
+            handlers = list(self._subscribers[topic])
+        for handler in handlers:
             try:
                 res = handler(event)
-                # If handler returns a coroutine in an active loop, schedule it
-                if asyncio.iscoroutine(res):
+                if inspect.isawaitable(res):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(res)
+                        task = asyncio.ensure_future(res, loop=loop)
+                        task.add_done_callback(self._log_async_handler_failure)
                     except RuntimeError:
-                        pass
-            except Exception:
-                # Handlers must not break publishing flow
-                pass
+                        async def await_handler() -> Any:
+                            return await res
+
+                        asyncio.run(await_handler())
+            except Exception as exc:
+                logger.error("event_handler_failed", topic=topic.value, sender=sender, error=str(exc))
         return event
 
     def get_events(self, topic: EventTopic | None = None) -> list[Event]:
-        if topic:
-            return [e for e in self._event_log if e.topic == topic]
-        return list(self._event_log)
+        with self._lock:
+            if topic:
+                return [e for e in self._event_log if e.topic == topic]
+            return list(self._event_log)
 
     def clear(self) -> None:
-        self._subscribers.clear()
-        self._event_log.clear()
+        with self._lock:
+            self._subscribers.clear()
+            self._event_log.clear()
+
+    @staticmethod
+    def _log_async_handler_failure(task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except Exception as exc:
+            logger.error("async_event_handler_failed", error=str(exc))

@@ -113,8 +113,8 @@ async def test_custom_provider_uses_reasoning_content_when_content_empty():
 
 
 @pytest.mark.asyncio
-async def test_agent_captures_reasoning_content_in_last_thought():
-    """Verify ComputerUseAgent extracts reasoning_content directly into _last_thought."""
+async def test_agent_does_not_surface_private_reasoning_content():
+    """Private provider reasoning must not be exposed in agent telemetry."""
     mock_computer = MagicMock()
     mock_router = MagicMock()
 
@@ -140,7 +140,7 @@ async def test_agent_captures_reasoning_content_in_last_thought():
         step_index=1,
     )
 
-    assert agent._last_thought == "Deconstructing goal into sub-steps: 1. Echo probe. 2. Verify response."
+    assert agent._last_thought == ""
     assert payload.get("command") == "echo 1"
 
 
@@ -189,5 +189,4 @@ async def test_agent_history_preserves_and_feeds_back_thoughts():
     )
     assert "Your Immediate Prior Thought was:" in obs_summary
     assert "Target seems to have an active HTTP service; checking ping" in obs_summary
-
 

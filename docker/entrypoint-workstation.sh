@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+if ! command -v tesseract >/dev/null 2>&1; then
+    echo "[!] tesseract-ocr is unavailable; OCR controls will be omitted while other workstation perception continues." >&2
+fi
+
 # Remove any stale X locks
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 
@@ -30,27 +34,15 @@ if [ -x /usr/bin/python3 ]; then
     ln -sf /usr/bin/python3 /usr/local/bin/python
 fi
 
-# Ensure container web browser wrapper has --no-sandbox, CDP port 9222, and First Run state initialized
-if [ -x /usr/bin/google-chrome-stable ]; then
-    mkdir -p /root/.config/google-chrome
-    touch "/root/.config/google-chrome/First Run"
-    rm -f /root/.config/google-chrome/Singleton* 2>/dev/null || true
-    cat << 'EOF' > /usr/local/bin/chrome
-#!/bin/bash
-mkdir -p /root/.config/google-chrome
-touch "/root/.config/google-chrome/First Run"
-rm -f /root/.config/google-chrome/Singleton* 2>/dev/null
-exec /usr/bin/google-chrome-stable --no-sandbox --disable-dev-shm-usage --no-first-run --disable-fre --no-default-browser-check --remote-debugging-port=9222 "$@"
-EOF
-    chmod +x /usr/local/bin/chrome
-fi
-
 # Ensure smooth human-like mouse cursor glide helper exists for visible VNC cursor movement
 cat << 'EOF' > /usr/local/bin/sonic_cursor.py
-import sys, subprocess, time, math
+import sys, os, subprocess, time, math
+
+DISPLAY = os.environ.get('DISPLAY', ':99')
+ENV = {**os.environ, 'DISPLAY': DISPLAY}
 
 def get_mouse():
-    out = subprocess.check_output(['xdotool', 'getmouselocation'], env={'DISPLAY': ':99'}).decode()
+    out = subprocess.check_output(['xdotool', 'getmouselocation'], env=ENV).decode()
     parts = dict(p.split(':') for p in out.strip().split() if ':' in p)
     return int(parts['x']), int(parts['y'])
 
@@ -62,11 +54,11 @@ def smooth_move(tx, ty, steps=25, duration=0.25):
         ease = 0.5 - 0.5 * math.cos(t * math.pi)
         cx = int(sx + (tx - sx) * ease)
         cy = int(sy + (ty - sy) * ease)
-        subprocess.run(['xdotool', 'mousemove', str(cx), str(cy)], env={'DISPLAY': ':99'}, check=True)
+        subprocess.run(['xdotool', 'mousemove', str(cx), str(cy)], env=ENV, check=True)
         time.sleep(dt)
 
 def click(button=1, repeat=1):
-    subprocess.run(['xdotool', 'click', '--repeat', str(repeat), str(button)], env={'DISPLAY': ':99'}, check=True)
+    subprocess.run(['xdotool', 'click', '--repeat', str(repeat), str(button)], env=ENV, check=True)
 
 def move_and_click(tx, ty, button=1, repeat=1, steps=25, duration=0.25):
     smooth_move(tx, ty, steps, duration)
@@ -75,17 +67,17 @@ def move_and_click(tx, ty, button=1, repeat=1, steps=25, duration=0.25):
 
 def drag(sx, sy, tx, ty):
     smooth_move(sx, sy)
-    subprocess.run(['xdotool', 'mousedown', '1'], env={'DISPLAY': ':99'}, check=True)
+    subprocess.run(['xdotool', 'mousedown', '1'], env=ENV, check=True)
     try:
         smooth_move(tx, ty)
     finally:
-        subprocess.run(['xdotool', 'mouseup', '1'], env={'DISPLAY': ':99'}, check=True)
+        subprocess.run(['xdotool', 'mouseup', '1'], env=ENV, check=True)
 
 def type_text(text, delay=40):
-    subprocess.run(['xdotool', 'type', '--delay', str(delay), text], env={'DISPLAY': ':99'}, check=True)
+    subprocess.run(['xdotool', 'type', '--delay', str(delay), text], env=ENV, check=True)
 
 def key(k):
-    subprocess.run(['xdotool', 'key', k], env={'DISPLAY': ':99'}, check=True)
+    subprocess.run(['xdotool', 'key', k], env=ENV, check=True)
 
 if __name__ == '__main__':
     cmd = sys.argv[1] if len(sys.argv) > 1 else 'help'
@@ -119,6 +111,31 @@ ln -sfn /workspace /home/sonic/workspace
 echo "[*] Starting XFCE4 desktop session..."
 startxfce4 &
 sleep 2
+
+# Keep browser rendering in a dedicated unprivileged account.
+echo "[*] Starting Firefox ESR..."
+xhost +SI:localuser:sonic-browser
+HOME=/home/sonic-browser su -p -s /bin/sh sonic-browser -c \
+    'firefox-esr --no-remote --new-instance about:blank' \
+    >/tmp/sonic-firefox.log 2>&1 &
+FIREFOX_LAUNCH_PID=$!
+for _ in $(seq 1 20); do
+    if xdotool search --onlyvisible --class firefox >/dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 "$FIREFOX_LAUNCH_PID" 2>/dev/null; then
+        cat /tmp/sonic-firefox.log >&2
+        echo "[!] Firefox ESR exited before opening a desktop window." >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+if ! xdotool search --onlyvisible --class firefox >/dev/null 2>&1; then
+    cat /tmp/sonic-firefox.log >&2
+    echo "[!] Firefox ESR did not open a visible desktop window." >&2
+    exit 1
+fi
+xdg-settings set default-web-browser firefox-esr.desktop
 
 # Start x11vnc server on port 5900.  Passwordless VNC is never acceptable:
 # the compose stack must provide a secret explicitly.

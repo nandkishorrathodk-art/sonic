@@ -9,6 +9,7 @@ Targeted tests for puppet remediation and control fixes:
 - SubMissionResult semantic success evaluation
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
@@ -23,9 +24,9 @@ from sonic.computer_use.models import (
     ComputerDecisionTrace,
     ComputerWorldObservation,
 )
-from sonic.computer_use.models_boss import SubMission, SubMissionResult
+from sonic.computer_use.models_boss import SubMission
 from sonic.computer.daytona_computer import DaytonaComputerProvider
-from sonic.computer.models import GUIAction, ScreenObservation
+from sonic.computer.models import ScreenObservation
 
 
 def test_extract_bbox_midpoint_rejects_zero_zero():
@@ -101,9 +102,32 @@ async def test_visual_verification_records_clean_pre_screenshot():
         active_window="Browser",
     )
     computer.gui_action = AsyncMock(return_value=obs_after)
+    computer.status = AsyncMock(
+        return_value=MagicMock(
+            active_application="Browser",
+            active_window="Browser",
+        )
+    )
 
     agent = ComputerUseAgent(computer_provider=computer)
     agent._last_screenshot_b64 = clean_screenshot
+    screen = ScreenObservation(
+        screenshot_base64=clean_screenshot,
+        width=1280,
+        height=800,
+        active_window="Browser",
+        capture_age_ms=0,
+        controls_age_ms=0,
+    )
+    agent._last_world_observation = ComputerWorldObservation(
+        screen=screen,
+        active_application="Browser",
+        perception_version=0,
+        observation_age_ms=0,
+    )
+    agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+    agent._screen_width = screen.width
+    agent._screen_height = screen.height
 
     trace = await agent.execute_action(
         workspace_id="ws-1",
@@ -129,16 +153,14 @@ async def test_daytona_burpsuite_unblocked():
 
 @pytest.mark.asyncio
 async def test_boss_subagent_feature_forwarding_and_context():
-    """BossAgent forwards browser, toolsmith, and accumulated discoveries."""
+    """BossAgent forwards shared-computer capabilities and accumulated discoveries."""
     computer = AsyncMock()
     llm = AsyncMock()
-    mock_browser = MagicMock()
     mock_toolsmith = MagicMock()
 
     boss = BossAgent(
         computer_provider=computer,
         llm_router=llm,
-        browser=mock_browser,
         toolsmith=mock_toolsmith,
     )
     boss._accumulated_context.append("Found port 8080 open on 10.0.0.5")
@@ -159,7 +181,6 @@ async def test_boss_subagent_feature_forwarding_and_context():
         result = await boss._dispatch_sub_agent("ws-1", sub)
 
         _, kwargs = MockAgentClass.call_args
-        assert kwargs["browser"] == mock_browser
         assert kwargs["toolsmith"] == mock_toolsmith
 
         run_kwargs = mock_instance.run_mission.call_args[1]
@@ -209,7 +230,6 @@ def test_boss_parallel_worker_budget_is_explicit_and_bounded():
 
 def test_replan_trigger_negation_awareness():
     """Verify that negated vulnerability claims do NOT trigger NEW_HIGH_CONFIDENCE_FINDING."""
-    from sonic.agents.replan import ReplanTrigger
     from sonic.computer_use.boss import BossAgent
     from sonic.computer_use.models_boss import SubMissionResult
 

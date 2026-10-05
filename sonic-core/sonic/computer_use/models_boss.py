@@ -27,6 +27,7 @@ class SubMission(BaseModel):
     """A focused task assigned to a SubAgent or Sub-Planner."""
 
     id: str = Field(default_factory=lambda: _new_id("sub"))
+    name: str = ""
     goal: str
     role: str = "subagent"
     owned_paths: list[str] = Field(default_factory=list)
@@ -35,7 +36,7 @@ class SubMission(BaseModel):
     max_steps: int = 5
     priority: int = 1  # Higher = execute first within a phase
     depends_on: list[str] = Field(default_factory=list)
-    plane: str = "gui"  # "gui" (dual-plane desktop + terminal) | "headless" (CLI-only)
+    plane: str = "gui"  # "gui" (visible desktop actions) | "headless" (terminal/file actions)
     process_mode: str = "deep"
     evidence_context: dict[str, Any] = Field(default_factory=dict)
     status: str = "PENDING"  # PENDING -> RUNNING -> COMPLETED -> FAILED
@@ -43,10 +44,14 @@ class SubMission(BaseModel):
 
     @model_validator(mode="after")
     def _infer_plane_from_goal(self) -> SubMission:
-        # Preserve explicit plane ("gui" or "headless") when provided by caller.
+        # Accept previously serialized plane values while routing all visual work
+        # to the ordinary shared-desktop worker.
         if "plane" in self.model_fields_set and self.plane:
             plane_lower = str(self.plane).lower().strip()
-            if plane_lower in ("gui", "headless", "browser"):
+            if plane_lower == "browser":
+                self.plane = "gui"
+                return self
+            if plane_lower in ("gui", "headless"):
                 self.plane = plane_lower
                 return self
 
@@ -64,6 +69,8 @@ class SubMissionResult(BaseModel):
     """Output collected from a completed SubAgent or Sub-Planner."""
 
     sub_mission_id: str
+    agent_id: str = ""
+    agent_name: str = ""
     goal: str
     role: str = "worker"
     owned_paths: list[str] = Field(default_factory=list)
