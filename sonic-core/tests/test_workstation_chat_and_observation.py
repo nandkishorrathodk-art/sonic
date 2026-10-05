@@ -17,6 +17,7 @@ from sonic.api.routes.workstation import (
     _append_worklog,
     _extract_recent_conversation_messages,
     _is_action_prompt,
+    _is_observation_only_prompt,
     _get_or_create_session,
     _run_prompt_reasoning,
 )
@@ -52,6 +53,13 @@ def test_is_action_prompt_recognizes_common_computer_and_hindi_actions():
     assert _is_action_prompt("file banao test.py")
     assert _is_action_prompt("desktop pe application chalao")
     assert _is_action_prompt("terminal chalao")
+    cursor_test = (
+        "Minimal cursor-movement test only. From a fresh live observation of the "
+        "1280x800 desktop, move the visible mouse pointer to exact screen pixel "
+        "x=1100, y=700. Do not click, type, or launch applications."
+    )
+    assert not _is_observation_only_prompt(cursor_test)
+    assert _is_action_prompt(cursor_test)
 
     # Pure greetings remain conversational (not 50-step autonomous loops)
     assert not _is_action_prompt("hi sonic")
