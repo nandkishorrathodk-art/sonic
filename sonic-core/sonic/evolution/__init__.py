@@ -21,9 +21,11 @@ from sonic.evolution.strategy import (
     StrategyAdaptationPlan,
     TargetFeedbackSignal,
 )
+from sonic.evolution.continuous_runner import ContinuousAutoEvolutionRunner
 from sonic.evolution.version_tracker import VersionRecord, VersionTracker
 
 __all__ = [
+    "ContinuousAutoEvolutionRunner",
     "CodebaseEvolver",
     "CodebaseAuditor",
     "AuditFinding",

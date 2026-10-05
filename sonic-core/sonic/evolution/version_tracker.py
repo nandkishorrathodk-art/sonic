@@ -137,6 +137,8 @@ class VersionTracker:
             row = cursor.fetchone()
             return row["version"] if row else self.INITIAL_VERSION
 
+    current_version_str = current_version
+
     def get_latest_record(self) -> VersionRecord | None:
         with self._get_connection() as conn:
             cursor = conn.cursor()
