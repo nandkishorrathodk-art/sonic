@@ -254,6 +254,7 @@ class EvolutionJournal:
             logger.info("evolution_md_appended", goal_id=entry.goal_id, path=str(self.evolution_md_path))
         except Exception as e:
             logger.error("evolution_md_append_failed", error=str(e), file=str(self.evolution_md_path))
+            raise
 
     def get_entries(self, limit: int = 50) -> list[JournalEntry]:
         """Retrieves recent journal entries ordered by timestamp descending."""

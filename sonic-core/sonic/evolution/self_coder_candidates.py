@@ -159,12 +159,14 @@ class SelfCoderCandidateStore:
         tenant_id: str,
         max_cycles: int,
         coder_factory: Callable[[Path], Any],
+        *,
+        auto_commit: bool = False,
     ) -> dict[str, Any]:
         lock = self._repo_lock()
         await asyncio.to_thread(lock.acquire)
         try:
             return await self._run_candidate_unlocked(
-                tenant_id, max_cycles, coder_factory
+                tenant_id, max_cycles, coder_factory, auto_commit=auto_commit
             )
         finally:
             lock.release()
@@ -174,6 +176,8 @@ class SelfCoderCandidateStore:
         tenant_id: str,
         max_cycles: int,
         coder_factory: Callable[[Path], Any],
+        *,
+        auto_commit: bool = False,
     ) -> dict[str, Any]:
         if not 1 <= max_cycles <= 10:
             raise ValueError("max_cycles must be between 1 and 10")
@@ -374,7 +378,13 @@ class SelfCoderCandidateStore:
         for record in persisted:
             if record["status"] == "verified":
                 try:
-                    applied_candidates.append(self.auto_promote(record["candidate_id"], tenant_id))
+                    applied_candidates.append(
+                        self.auto_promote(
+                            record["candidate_id"],
+                            tenant_id,
+                            auto_commit=auto_commit,
+                        )
+                    )
                 except Exception as exc:
                     latest = self.get(record["candidate_id"], tenant_id) or record
                     if latest["status"] not in {
@@ -392,6 +402,20 @@ class SelfCoderCandidateStore:
         for record in applied_candidates:
             record["report"] = report_text
             self.save(record)
+
+        from sonic.evolution.graph_recorder import record_verified_candidate
+
+        for record in applied_candidates:
+            try:
+                await record_verified_candidate(record, self.repo_root)
+            except Exception as exc:
+                record["graph_record_error"] = (
+                    f"Candidate reached status {record.get('status')}, but verified graph "
+                    f"persistence failed: {exc}"
+                )
+                self.save(record)
+                raise CandidateWorkflowError(record["graph_record_error"]) from exc
+
         return {"candidates": applied_candidates, "report": report_text}
 
     @staticmethod
@@ -409,7 +433,23 @@ class SelfCoderCandidateStore:
                 f"  - Verification: {record.get('verification', {})}",
             ])
             if record.get("status") == "applied":
-                lines.append("  - Verified patch applied to the active working tree; no commit or push was made")
+                if "commit failed" in str(record.get("promotion", "")).lower():
+                    lines.append(
+                        "  - Verified patch is applied, but the requested local commit failed; "
+                        "nothing was pushed"
+                    )
+                else:
+                    lines.append(
+                        "  - Verified patch applied to the active working tree; "
+                        "no commit or push was made"
+                    )
+            elif record.get("status") == "promoted":
+                lines.append("  - Verified patch was committed locally; nothing was pushed")
+            elif record.get("status") == "committed_metadata_failed":
+                lines.append(
+                    "  - Verified patch was committed locally, but version/journal metadata "
+                    "did not fully record; nothing was pushed"
+                )
             if record.get("working_tree_changes_excluded"):
                 lines.append(
                     "  - Uncommitted active-checkout changes were excluded from "
@@ -548,8 +588,6 @@ class SelfCoderCandidateStore:
                             record["commit_branch"] = self._git(["branch", "--show-current"])
                         except Exception:
                             record["commit_branch"] = ""
-                        record["status"] = "promoted"
-                        record["promotion"] = f"verified patch committed to git: {new_commit[:8]}"
 
                         try:
                             tracker = VersionTracker(repo_root=self.repo_root)
@@ -576,8 +614,23 @@ class SelfCoderCandidateStore:
                                     commit_hash=new_commit,
                                 )
                             )
-                        except Exception:
-                            pass
+                            record["version_before"] = ver_before
+                            record["version_after"] = new_version
+                            record["journal_recorded"] = True
+                            record["status"] = "promoted"
+                            record["promotion"] = (
+                                f"verified patch committed locally: {new_commit[:8]}; "
+                                f"version {ver_before} -> {new_version}; journal recorded"
+                            )
+                        except Exception as exc:
+                            record["status"] = "committed_metadata_failed"
+                            record["journal_recorded"] = False
+                            record["promotion_error"] = (
+                                f"Commit {new_commit[:8]} succeeded, but version/journal "
+                                f"recording failed: {exc}"
+                            )
+                            record["error"] = record["promotion_error"]
+                            record["promotion"] = record["promotion_error"]
                     else:
                         record["status"] = "applied"
                         record["commit"] = ""

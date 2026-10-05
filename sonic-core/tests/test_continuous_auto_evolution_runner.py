@@ -5,9 +5,7 @@ Belongs to Department: cognitive_systems, Team: identity_evolution, Subsystem: e
 
 from __future__ import annotations
 
-import asyncio
 import subprocess
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,12 +22,14 @@ def test_continuous_runner_initialization(tmp_path):
         tenant_id="tenant-test",
         max_cycles=5,
         interval_seconds=2,
+        auto_commit=False,
         on_event=lambda ev: events.append(ev),
     )
     assert runner.repo_root == tmp_path.resolve()
     assert runner.tenant_id == "tenant-test"
     assert runner.max_cycles == 5
     assert runner.interval_seconds == 2
+    assert runner.auto_commit is False
     assert runner.is_running is False
 
 
@@ -174,24 +174,22 @@ async def test_continuous_runner_unverified_candidate_discarded(tmp_path):
 
 @pytest.mark.asyncio
 async def test_continuous_runner_successful_cycle_promoted(tmp_path):
-    """Test full cycle: signal -> candidate verified -> auto-promote with commit -> success."""
+    """Test the runner requests committed promotion from the candidate workflow."""
     events = []
     mock_store = MagicMock(spec=SelfCoderCandidateStore)
     mock_store.run_candidate = AsyncMock(return_value={
         "candidates": [
             {
                 "candidate_id": "c1a2b3c4d5e6f708192a3b4c5d6e7f80",
-                "status": "verified",
+                "status": "promoted",
                 "target_file": "sonic/core.py",
+                "commit": "deadbeef1234567890abcdef",
+                "version_after": "0.1.1",
             }
         ],
         "report": "Verification succeeded in worktree",
     })
-    mock_store.auto_promote = MagicMock(return_value={
-        "candidate_id": "c1a2b3c4d5e6f708192a3b4c5d6e7f80",
-        "status": "promoted",
-        "commit": "deadbeef1234567890abcdef",
-    })
+    mock_store.auto_promote = MagicMock()
 
     runner = ContinuousAutoEvolutionRunner(
         repo_root=tmp_path,
@@ -216,33 +214,32 @@ async def test_continuous_runner_successful_cycle_promoted(tmp_path):
     assert "promoting" in types
     assert "cycle_success" in types
 
-    mock_store.auto_promote.assert_called_once_with(
-        "c1a2b3c4d5e6f708192a3b4c5d6e7f80",
-        "default",
-        auto_commit=True,
-    )
+    mock_store.run_candidate.assert_awaited_once()
+    assert mock_store.run_candidate.await_args.kwargs["auto_commit"] is True
+    mock_store.auto_promote.assert_not_called()
 
     success_ev = next(e for e in events if e.get("type") == "cycle_success")
     assert "deadbeef" in success_ev["message"]
     assert success_ev["commit"] == "deadbeef1234567890abcdef"
+    assert success_ev["version"] == "0.1.1"
 
 
 @pytest.mark.asyncio
 async def test_continuous_runner_promote_error(tmp_path):
-    """Test handling when auto_promote raises an error."""
+    """Test that failed commit/version/journal promotion is reported, not success."""
     events = []
     mock_store = MagicMock(spec=SelfCoderCandidateStore)
     mock_store.run_candidate = AsyncMock(return_value={
         "candidates": [
             {
                 "candidate_id": "c1a2b3c4d5e6f708192a3b4c5d6e7f80",
-                "status": "verified",
+                "status": "applied",
                 "target_file": "sonic/core.py",
+                "promotion": "verified patch applied; commit failed: Git index locked",
             }
         ],
         "report": "Verification succeeded",
     })
-    mock_store.auto_promote = MagicMock(side_effect=RuntimeError("Git index locked"))
 
     runner = ContinuousAutoEvolutionRunner(
         repo_root=tmp_path,
@@ -265,10 +262,40 @@ async def test_continuous_runner_promote_error(tmp_path):
     assert "promote_error" in types
     err_ev = next(e for e in events if e.get("type") == "promote_error")
     assert "Git index locked" in err_ev["message"]
+    assert "cycle_success" not in types
 
 
-def test_candidate_store_auto_promote_with_commit_and_journal(tmp_path):
+@pytest.mark.asyncio
+async def test_continuous_runner_respects_auto_commit_option(tmp_path):
+    events = []
+    mock_store = MagicMock(spec=SelfCoderCandidateStore)
+    mock_store.run_candidate = AsyncMock(return_value={"candidates": []})
+
+    runner = ContinuousAutoEvolutionRunner(
+        repo_root=tmp_path,
+        max_cycles=1,
+        interval_seconds=0,
+        auto_commit=False,
+        candidate_store=mock_store,
+        on_event=lambda ev: events.append(ev),
+    )
+
+    with patch("sonic.evolution.continuous_runner.SelfCoder") as mock_coder_cls:
+        mock_coder = MagicMock()
+        mock_coder.discover_signals.return_value = [
+            ("Fix null ref", "sonic/core.py", "defect")
+        ]
+        mock_coder_cls.return_value = mock_coder
+
+        await runner.run()
+
+    mock_store.run_candidate.assert_awaited_once()
+    assert mock_store.run_candidate.await_args.kwargs["auto_commit"] is False
+
+
+def test_candidate_store_auto_promote_with_commit_and_journal(tmp_path, monkeypatch):
     """Verify that SelfCoderCandidateStore.auto_promote with auto_commit=True commits and logs."""
+    monkeypatch.setenv("SONIC_EVOLUTION_DB_PATH", str(tmp_path / "evolution.db"))
     repo = tmp_path / "repo"
     repo.mkdir()
 
@@ -327,7 +354,9 @@ def test_candidate_store_auto_promote_with_commit_and_journal(tmp_path):
 
     assert promoted["status"] == "promoted"
     assert promoted["commit"] != ""
-    assert "verified patch committed to git" in promoted["promotion"]
+    assert promoted["version_after"]
+    assert promoted["journal_recorded"] is True
+    assert "verified patch committed locally" in promoted["promotion"]
 
     # Verify git log shows the commit
     log_proc = subprocess.run(["git", "log", "-n", "1", "--oneline"], cwd=str(repo), check=True, capture_output=True, text=True)

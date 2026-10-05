@@ -31,6 +31,7 @@ class ContinuousAutoEvolutionRunner:
         tenant_id: str = "default",
         max_cycles: int = 10,
         interval_seconds: int = 5,
+        auto_commit: bool = True,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         candidate_store: SelfCoderCandidateStore | None = None,
     ) -> None:
@@ -38,6 +39,7 @@ class ContinuousAutoEvolutionRunner:
         self.tenant_id = tenant_id
         self.max_cycles = max_cycles
         self.interval_seconds = interval_seconds
+        self.auto_commit = auto_commit
         self.on_event = on_event or (lambda ev: None)
         self.candidate_store = candidate_store or SelfCoderCandidateStore(repo_root=self.repo_root)
         self._stop = asyncio.Event()
@@ -138,6 +140,7 @@ class ContinuousAutoEvolutionRunner:
                     self.tenant_id,
                     1,
                     coder_factory,
+                    auto_commit=self.auto_commit,
                 )
             except Exception as exc:
                 self._emit("cycle_error", f"Candidate execution error: {exc}", error=str(exc))
@@ -160,7 +163,26 @@ class ContinuousAutoEvolutionRunner:
             cand_id = candidate.get("candidate_id", "")
             cand_status = candidate.get("status", "")
 
-            if cand_status != "verified":
+            if cand_status != "promoted":
+                if cand_status in {"applied", "committed_metadata_failed"}:
+                    message = candidate.get("promotion_error") or candidate.get("promotion")
+                    self._emit(
+                        "promote_error",
+                        f"[Cycle {self._current_cycle}] Candidate {cand_id[:8]} "
+                        f"was verified but did not complete commit/version/journal promotion: "
+                        f"{message or cand_status}",
+                        candidate_id=cand_id,
+                        status=cand_status,
+                        commit=candidate.get("commit", ""),
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            self._stop.wait(), timeout=self.interval_seconds
+                        )
+                    except TimeoutError:
+                        pass
+                    continue
+
                 self._emit(
                     "candidate_unverified",
                     f"[Cycle {self._current_cycle}] Patch failed verification in worktree ({cand_status}). Discarded.",
@@ -172,32 +194,23 @@ class ContinuousAutoEvolutionRunner:
                     pass
                 continue
 
-            # 3. Promote, commit, and advance HEAD
+            # run_candidate applies, verifies, commits, versions, and journals before returning.
             self._emit(
                 "promoting",
-                f"[Cycle {self._current_cycle}] ✓ Candidate {cand_id[:8]} verified! Committing to git & logging...",
+                f"[Cycle {self._current_cycle}] Candidate {cand_id[:8]} verified, committed, versioned, and journaled.",
                 candidate_id=cand_id,
             )
 
-            try:
-                promoted = self.candidate_store.auto_promote(
-                    cand_id,
-                    self.tenant_id,
-                    auto_commit=True,
-                )
-                commit_hash = promoted.get("commit", "")
-                self._emit(
-                    "cycle_success",
-                    f"[Cycle {self._current_cycle}] 🟢 Successfully evolved! Commit: {commit_hash[:8]} | Logged to evolution.md",
-                    candidate_id=cand_id,
-                    commit=commit_hash,
-                )
-            except Exception as exc:
-                self._emit(
-                    "promote_error",
-                    f"[Cycle {self._current_cycle}] Promotion/Commit failed: {exc}",
-                    error=str(exc),
-                )
+            commit_hash = candidate.get("commit", "")
+            self._emit(
+                "cycle_success",
+                f"[Cycle {self._current_cycle}] Successfully evolved! "
+                f"Commit: {commit_hash[:8]} | Version: "
+                f"{candidate.get('version_after', 'unknown')} | Logged to evolution.md",
+                candidate_id=cand_id,
+                commit=commit_hash,
+                version=candidate.get("version_after", ""),
+            )
 
             if self._stop.is_set():
                 break
