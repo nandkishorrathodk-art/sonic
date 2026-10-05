@@ -81,6 +81,9 @@ async def test_docker_computer_injects_root_sandbox_flags():
     """Ensure launch_application preserves the discovered app and target arguments."""
     provider = DockerComputerProvider(container_name="test-container")
     provider._docker_exec = AsyncMock(return_value=(0, "", ""))
+    # Binary discovery is mocked to a real resolved path; a generic (0, "", "")
+    # exec cannot resolve a binary because `which` returns empty output.
+    provider._resolve_app_binary = AsyncMock(return_value="/usr/bin/google-chrome")
 
     success = await provider.launch_application("ws-1", "google-chrome https://198.51.100.10")
     assert success is True

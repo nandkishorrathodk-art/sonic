@@ -1634,6 +1634,18 @@ class ComputerUseAgent:
         }
         payload = dict(parsed[2])
         target_coordinates = _parse_pixel_coordinate_target(parsed[1])
+        # A TARGET expressed as a JSON object is only an explicit screen-pixel
+        # point when it is exactly an integer x/y pair. Any extra field (e.g.
+        # coordinate_space) or non-integer value means the coordinate space is
+        # unknown, so fail closed rather than guess pixels.
+        target_text = str(parsed[1]).strip()
+        if target_text.startswith("{") and target_coordinates is None:
+            return (
+                ActionExecutionStatus.BLOCKED,
+                "gui-invalid-response",
+                {},
+                "GUI TARGET coordinate object must be an exact integer x/y screen-pixel point.",
+            )
         has_payload_coordinates = "x" in payload or "y" in payload
         payload_coordinates = None
         if has_payload_coordinates:
@@ -4611,6 +4623,17 @@ class ComputerUseAgent:
                         != self._screen_state_signature(previous_screen)
                     ):
                         raise RuntimeError("desktop screenshot changed since the action was reasoned")
+                    if fresh_pixels != previous_pixels:
+                        # A differing frame that carries no stable semantic evidence
+                        # cannot be distinguished from a real UI change, so fail
+                        # closed. Identical non-empty controls/text confirm that only
+                        # transient pixel noise (cursor blink, clock tick) changed.
+                        has_semantic_evidence = bool(
+                            getattr(previous_screen, "detected_controls", None)
+                            or str(getattr(previous_screen, "visible_text", "") or "").strip()
+                        )
+                        if not has_semantic_evidence:
+                            raise RuntimeError("desktop screenshot changed since the action was reasoned")
                 if requested_window:
                     if active_window.casefold() != str(requested_window).strip().casefold():
                         focus_result = await self._dispatch_gui_action(
