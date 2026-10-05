@@ -284,9 +284,11 @@ def test_vision_routes_configure_distinct_multimodal_fallbacks():
 
     assert router.routing_rules["vision"]["fallback"] == [
         "openrouter/openai/gpt-4o",
+        "nvidia/meta/llama-3.2-11b-vision-instruct",
     ]
     assert router.routing_rules["computer_use"]["fallback"] == [
         "openrouter/openai/gpt-4o",
+        "nvidia/meta/llama-3.2-11b-vision-instruct",
     ]
     vision_provider, vision_model = router._resolve_provider(task_type="vision")
     computer_use_provider, computer_use_model = router._resolve_provider(

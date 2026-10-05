@@ -55,6 +55,8 @@ from sonic.logger import get_logger
 from sonic.research.failure_budget import FailureBudgetTracker
 from sonic.research.failure_classifier import classify_failure
 
+_GUI_REASONING_TIMEOUT_SECONDS = 60.0
+
 
 def _extract_command_from_sig(sig_payload_str: str) -> str:
     """Extract the normalized ``command`` value from a stored action signature.
@@ -482,6 +484,7 @@ class ComputerUseAgent:
         self.goal_reached: bool = False
         self._consecutive_failures: int = 0
         self._consecutive_unchanged_screens: int = 0
+        self._consecutive_stale_gui_blocks: int = 0
         self._goal_complete_declared: bool = False
         self._replan_count: int = 0
         self._last_gui_navigation_target: str = ""
@@ -2762,19 +2765,6 @@ class ComputerUseAgent:
             raw_b64 = raw_b64.strip()
             if raw_b64:
                 images = [ImageContent(base64=raw_b64, media_type="image/png")]
-                active_geom = (
-                    getattr(observation, "active_window_geometry", None)
-                    or getattr(getattr(observation, "screen", None), "active_window_geometry", None)
-                    or getattr(self, "_last_active_window_geometry", None)
-                )
-                if active_geom:
-                    try:
-                        from sonic.computer_use.grounding import crop_active_window_region
-                        crop_b64, _ = crop_active_window_region(raw_b64, active_geom)
-                        if crop_b64:
-                            images.append(ImageContent(base64=crop_b64, media_type="image/png"))
-                    except Exception:
-                        pass
                 user_text = (
                     f"{obs_summary}\n\nBased on the live desktop pixels and "
                     "observation above, choose the next action."
@@ -3017,7 +3007,15 @@ class ComputerUseAgent:
 
             heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
-            response = await self.llm_router.complete(request)
+            reasoning_timeout = (
+                _GUI_REASONING_TIMEOUT_SECONDS
+                if self._gui_action_contract_active()
+                else 120.0
+            )
+            response = await asyncio.wait_for(
+                self.llm_router.complete(request),
+                timeout=reasoning_timeout,
+            )
             self._last_thought_duration = round(time.perf_counter() - t_thought_start, 2)
             content_str = getattr(response, "content", "") or ""
             tool_calls = list(getattr(response, "tool_calls", []) or [])
@@ -3190,8 +3188,14 @@ class ComputerUseAgent:
                 getattr(self, "gui_only", False)
                 or getattr(self, "execution_plane", "") == "gui"
             ):
+                reason = (
+                    f"GUI reasoning timed out after "
+                    f"{_GUI_REASONING_TIMEOUT_SECONDS:g} seconds; no action was dispatched."
+                    if isinstance(e, TimeoutError)
+                    else f"GUI reasoning failed: {e}"
+                )
                 return self._reasoning_unavailable_action(
-                    f"GUI reasoning failed: {e}"
+                    reason
                 )
             return self._diagnostic_fallback(primary_file)
         finally:
@@ -4335,6 +4339,7 @@ class ComputerUseAgent:
         visual_stall_detected = False
         action_exit_code: int | None = None
         action_stderr: str = ""
+        app_launch_failed = False
         typing_validation_error = ""
         typing_match = None
         self._last_gui_state_delta = None
@@ -4969,6 +4974,12 @@ class ComputerUseAgent:
                 command_tokens = []
             if command_tokens:
                 tool_name = os.path.basename(command_tokens[0]) or command_tokens[0]
+        if action_type == ComputerActionType.APP_LAUNCH:
+            app_target = str(
+                payload.get("app_name") or target_resource or ""
+            ).strip()
+            if app_target:
+                tool_name = f"{action_type.value}:{app_target.casefold()}"
         if self.failure_budget.substrate_outage:
             diag_info = self.failure_budget.diagnose_substrate_health()
             actual_obs_str = (
@@ -5895,15 +5906,10 @@ class ComputerUseAgent:
                     app_request = app_name
                     if extra_arg:
                         app_request = f"{app_request} {str(extra_arg).strip()}"
-                    before_status = await self.computer.status(workspace_id)
-                    windows_before = {
-                        str(window).strip()
-                        for window in (getattr(before_status, "open_applications", None) or [])
-                        if str(window).strip()
-                    }
                     if hasattr(self.computer, "launch_application"):
                         launched = await self.computer.launch_application(workspace_id, app_request)
                         if not launched:
+                            app_launch_failed = True
                             raise RuntimeError(f"application launch failed for '{app_name}'")
                     else:
                         await self._dispatch_gui_action(
@@ -5935,7 +5941,6 @@ class ComputerUseAgent:
                         for window in (getattr(after_status, "open_applications", None) or [])
                         if str(window).strip()
                     }
-                    newly_focused_window = active_w in windows_after and active_w not in windows_before
                     if (
                         screen_state == "NO_DISPLAY"
                         or not self._last_screenshot_b64
@@ -5946,7 +5951,6 @@ class ComputerUseAgent:
                                 app_name,
                                 active_window_class,
                             )
-                            or newly_focused_window
                         )
                     ):
                         raise RuntimeError(
@@ -7057,7 +7061,7 @@ class ComputerUseAgent:
 
         except Exception as e:
             actual_obs_str = f"Error: {str(e)}"
-            recovery_needed = True
+            recovery_needed = not app_launch_failed
             status = ActionExecutionStatus.FAILED
             err_class, _ = classify_failure(
                 exit_code=1,
@@ -7868,6 +7872,7 @@ class ComputerUseAgent:
         t_start = time.perf_counter()
         self._interrupted = False
         self._watchdog_aborted = False
+        self._consecutive_stale_gui_blocks = 0
         goal_reached = False
         self._last_tool_result = None
         requires_external_gui_judge = (
@@ -8094,6 +8099,34 @@ class ComputerUseAgent:
             # turn a real safety decision into scripted retry noise. The
             # operator can change scope/approval and start a fresh attempt.
             trace_observation = str(getattr(trace, "actual_observation", "") or "")
+            stale_gui_block = (
+                trace.status == ActionExecutionStatus.BLOCKED
+                and action_type in getattr(self, "_GUI_ONLY_ACTIONS", set())
+                and trace_observation.startswith("GUI action blocked before dispatch:")
+                and any(
+                    marker in trace_observation.lower()
+                    for marker in (
+                        "changed since the action was reasoned",
+                        "stale accessibility state",
+                        "desktop state could not be verified",
+                        "fresh screenshot evidence could not be verified",
+                    )
+                )
+            )
+            if stale_gui_block:
+                self._consecutive_stale_gui_blocks += 1
+                if self._consecutive_stale_gui_blocks >= 2:
+                    self.history.append({
+                        "action": "STALE_GUI_LOOP_ABORT",
+                        "result": (
+                            "Stopped after repeated pre-dispatch freshness blocks. "
+                            "No stale GUI action was executed; obtain a stable fresh "
+                            "observation before starting another attempt."
+                        ),
+                    })
+                    break
+            elif action_type != ComputerActionType.GUI_SCREENSHOT:
+                self._consecutive_stale_gui_blocks = 0
             prediction_error = float(getattr(trace, "prediction_error", 0.0) or 0.0)
             action_type_val = getattr(action_type, "value", str(action_type))
             if not is_observation_only and prediction_error >= 0.75 and trace.status not in (

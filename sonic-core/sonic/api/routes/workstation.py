@@ -3505,6 +3505,26 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     trace_data["worker_role"] = data.get("role", "")
                                     trace_data["execution_plane"] = data.get("plane", "")
                                     await _record_step_trace(trace_data)
+                                elif event_type == "sub_heartbeat":
+                                    elapsed = data.get("elapsed_seconds", 0)
+                                    _mission_event(
+                                        state,
+                                        "thought",
+                                        f"Reasoning heartbeat — {data.get('agent_name') or data.get('agent_id') or 'SubAgent'}",
+                                        (
+                                            f"Step {data.get('step', '?')} still reasoning "
+                                            f"after {elapsed:.1f}s; observation version "
+                                            f"{data.get('last_observation_version', 0)}."
+                                        ),
+                                        orchestration_event="sub_heartbeat",
+                                        sub_mission_id=data.get("sub_mission_id"),
+                                        agent_id=data.get("agent_id"),
+                                        agent_name=data.get("agent_name"),
+                                        worker_role=data.get("role", "subagent"),
+                                        execution_plane=data.get("plane", "gui"),
+                                        elapsed_seconds=elapsed,
+                                        step=data.get("step"),
+                                    )
                                 elif event_type == "sub_report":
                                     sub_num = data.get("sub_agent_number")
                                     agent_id = str(data.get("agent_id") or "")

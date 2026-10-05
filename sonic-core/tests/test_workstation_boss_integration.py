@@ -165,6 +165,17 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
                     "plane": "headless",
                     "max_steps": 5,
                 })
+                await phase_callback("sub_heartbeat", {
+                    "sub_agent_number": 1,
+                    "sub_mission_id": "sub-discover-endpoints",
+                    "agent_id": "sub-agent-1",
+                    "agent_name": "Endpoint Scout",
+                    "role": "terminal_auditor",
+                    "plane": "headless",
+                    "step": 2,
+                    "elapsed_seconds": 4.5,
+                    "last_observation_version": 7,
+                })
                 await phase_callback("sub_step", {"trace": {
                     "step_index": 1,
                     "action_type": "TERMINAL_EXEC",
@@ -207,6 +218,7 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
         titles = [w.get("title") for w in state.get("worklog", [])]
         assert any("Boss Thinking" in t for t in titles)
         assert any("Dispatching Endpoint Scout (sub-agent-1)" in t for t in titles)
+        assert any("Reasoning heartbeat — Endpoint Scout" in t for t in titles)
         assert any("Endpoint Scout (sub-agent-1) Report — SUCCESS" in t for t in titles)
         dispatch = next(w for w in state["worklog"] if "Dispatching Endpoint Scout" in w.get("title", ""))
         assert dispatch["status"] == "RUNNING"

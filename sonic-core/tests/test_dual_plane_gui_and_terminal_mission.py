@@ -412,4 +412,49 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
     )
     assert failed_launch.status != ActionExecutionStatus.COMPLETED
     assert "did not produce a verified, focused GUI window" in failed_launch.actual_observation
+
+    async def launch_unrelated_window(workspace_id, app_request):
+        ws.open_windows.append("unrelated-helper")
+        ws.active_window = "unrelated-helper"
+        return True
+
+    ws.launch_application = launch_unrelated_window
+    unrelated_launch = await agent.execute_action(
+        workspace_id="ws-1",
+        action_type=ComputerActionType.APP_LAUNCH,
+        target_resource="missing-application",
+        payload={"app_name": "missing-application"},
+        predicted_outcome="The requested application opens and receives focus",
+    )
+    assert unrelated_launch.status in (
+        ActionExecutionStatus.FAILED,
+        ActionExecutionStatus.RECOVERED,
+    )
+    assert "did not produce a verified, focused GUI window" in unrelated_launch.actual_observation
+
+    async def report_unresolved_application(workspace_id, app_request):
+        return False
+
+    ws.launch_application = report_unresolved_application
+    unresolved_launches = []
+    for app_name in ("missing-application-a", "missing-application-b", "missing-application-c"):
+        unresolved_launches.append(
+            await agent.execute_action(
+                workspace_id="ws-1",
+                action_type=ComputerActionType.APP_LAUNCH,
+                target_resource=app_name,
+                payload={"app_name": app_name},
+                predicted_outcome="A discovered GUI application opens",
+            )
+        )
+    next_app_launch = await agent.execute_action(
+        workspace_id="ws-1",
+        action_type=ComputerActionType.APP_LAUNCH,
+        target_resource="different-application",
+        payload={"app_name": "different-application"},
+        predicted_outcome="A discovered GUI application opens",
+    )
+    assert all(trace.status == ActionExecutionStatus.FAILED for trace in unresolved_launches)
+    assert "application launch failed" in next_app_launch.actual_observation
+    assert "Strategy exhausted" not in next_app_launch.actual_observation
     reset_being_singleton()

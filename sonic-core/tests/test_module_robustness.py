@@ -597,6 +597,105 @@ class TestVerifyAndReplan:
         await agent.run_mission("ws", "do something", steps=4)
         # After 3 consecutive failures, a replan must have been injected.
 
+    @pytest.mark.asyncio
+    async def test_run_mission_stops_after_repeated_stale_gui_blocks(self):
+        """Refresh once, then stop rather than looping on stale GUI proposals."""
+        from sonic.computer_use.agent import ComputerUseAgent
+        from sonic.computer_use.models import (
+            ActionExecutionStatus,
+            ComputerActionType,
+            ComputerDecisionTrace,
+        )
+
+        class _FakeComputer:
+            async def terminal(self, ws, cmd):
+                return type("R", (), {"stdout": "ok", "exit_code": 0})()
+            async def screenshot(self, ws):
+                from sonic.computer.models import ScreenObservation
+                return ScreenObservation(
+                    screenshot_base64="",
+                    width=1920,
+                    height=1080,
+                    visible_text="",
+                )
+            async def status(self, ws):
+                return type(
+                    "St",
+                    (),
+                    {
+                        "active_application": "Application",
+                        "open_applications": ["Application"],
+                        "running_processes": [],
+                    },
+                )()
+            async def list_files(self, ws, path):
+                return []
+            async def git_action(self, ws, action):
+                return type("G", (), {"branch": "main", "is_clean": True})()
+
+        agent = ComputerUseAgent.__new__(ComputerUseAgent)
+        agent.computer = _FakeComputer()
+        agent.llm_router = None
+        agent.traces = []
+        agent.history = []
+        agent.recovery_events = 0
+        agent.action_counter = 0
+        agent.max_actions = 100
+        agent.max_recovery_attempts = 0
+        agent.metrics = type("M", (), {})()
+        agent._last_screenshot_b64 = ""
+        agent._last_tool_result = None
+        agent.security_tools = {}
+        agent.safety = None
+        agent._consecutive_failures = 0
+        agent._replan_count = 0
+        agent.toolsmith = None
+        agent.method_lab = None
+        agent.lessons_ledger = None
+        agent._files_cache = []
+        agent.execution_plane = "gui"
+        agent.gui_only = True
+        proposal_count = 0
+
+        async def _choose(goal, obs, step):
+            nonlocal proposal_count
+            proposal_count += 1
+            return (
+                ComputerActionType.GUI_CLICK,
+                "100,100",
+                {"x": 100, "y": 100},
+                "Click the observed control",
+            )
+
+        async def _stale_block(ws, action_type, target, payload, expected):
+            agent.action_counter += 1
+            trace = ComputerDecisionTrace(
+                step_index=agent.action_counter,
+                action_type=action_type,
+                target_resource=target,
+                payload=str(payload),
+                predicted_outcome=expected,
+                actual_observation=(
+                    "GUI action blocked before dispatch: desktop screenshot "
+                    "changed since the action was reasoned"
+                ),
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+            )
+            agent.traces.append(trace)
+            return trace
+
+        agent.choose_action = _choose
+        agent.execute_action = _stale_block
+
+        await agent.run_mission("ws", "click the observed control", steps=8)
+
+        assert proposal_count == 2
+        assert len(agent.traces) == 2
+        assert agent.history[-1]["action"] == "STALE_GUI_LOOP_ABORT"
+
 
 # =====================================================================
 # Self-improvement: cross-mission lessons ledger (learn → apply loop)

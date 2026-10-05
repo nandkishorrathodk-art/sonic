@@ -102,6 +102,9 @@ def test_is_transient_transport_error():
 def test_non_transient_errors_not_flagged():
     # Auth / bad request / model-not-found must NOT be retried.
     assert _is_transient_error(RuntimeError("401 Unauthorized")) is False
+    oversized = RuntimeError("Rate limit exceeded: input token limit")
+    oversized.status_code = 413
+    assert _is_transient_error(oversized) is False
     assert _is_transient_error(RuntimeError("model not found: foo-3")) is False
     assert _is_transient_error(ValueError("invalid api key")) is False
 
@@ -594,6 +597,36 @@ async def test_heartbeat_callback_failure_does_not_discard_llm_action(monkeypatc
     assert action_type == ComputerActionType.TERMINAL_EXEC
     assert target == "hostname"
     assert payload["command"] == "hostname"
+
+
+@pytest.mark.asyncio
+async def test_gui_reasoning_timeout_returns_explicit_blocked_result(monkeypatch):
+    import sonic.computer_use.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "_GUI_REASONING_TIMEOUT_SECONDS", 0.01)
+
+    class HangingRouter(_StubRouter):
+        async def complete(self, request):
+            await asyncio.Event().wait()
+
+    agent = ComputerUseAgent(
+        computer_provider=_StubComputer(),
+        llm_router=HangingRouter(),
+        execution_plane="gui",
+    )
+
+    action_type, target, _, expected = await agent._llm_choose_action(
+        goal="Use the visible desktop",
+        observation=ComputerWorldObservation(),
+        step_index=1,
+        primary_file="",
+        test_file="",
+    )
+
+    assert action_type == ActionExecutionStatus.BLOCKED
+    assert target == "reasoning-unavailable"
+    assert "timed out after 0.01 seconds" in expected
+    assert "no action was dispatched" in expected
 
 
 def test_multimodal_computer_use_does_not_send_reasoning_effort():
