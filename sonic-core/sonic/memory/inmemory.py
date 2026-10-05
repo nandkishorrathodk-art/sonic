@@ -281,6 +281,24 @@ class InMemoryGraph:
     async def add_node(self, label: str, data: dict[str, Any]) -> str | None:
         return await self._create_node(label, data)
 
+    async def list_nodes(
+        self,
+        label: str,
+        tenant_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not label.isidentifier():
+            raise ValueError("Graph node label must be an identifier")
+        if limit < 1:
+            raise ValueError("Graph node limit must be positive")
+        nodes = [
+            {key: value for key, value in node.items() if key != "_label"}
+            for node in self._nodes.values()
+            if node.get("_label") == label and _in_scope(node, tenant_id)
+        ]
+        nodes.sort(key=lambda node: node.get("recorded_at", ""), reverse=True)
+        return nodes[:limit]
+
     async def query(self, query_str: str, params: dict[str, Any] | None = None, tenant_id: str | None = None) -> list[dict]:
         results = []
         for n in self._nodes.values():

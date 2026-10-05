@@ -16,8 +16,10 @@ push is performed.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -250,6 +252,47 @@ async def self_coder_status(user: User = Depends(require_operator)):
 @router.get("/candidates")
 async def self_coder_candidates(user: User = Depends(require_operator)):
     return {"candidates": _candidate_store().list(_tenant_id(user))}
+
+
+@router.get("/verified-history")
+async def self_coder_verified_history(
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    user: User = Depends(require_operator),
+):
+    """List only self-evolution outcomes whose verification receipts passed."""
+    from sonic.evolution.codebase_evolver import CodebaseEvolver
+    from sonic.memory.router import get_smart_memory
+
+    root = CodebaseEvolver().repo_root
+    memory = await get_smart_memory(
+        sqlite_db_path=str(root / "sonic_data.db")
+    )
+    nodes = await memory.list_nodes(
+        "SelfEvolutionCandidate",
+        tenant_id=_tenant_id(user),
+        limit=limit,
+    )
+    for node in nodes:
+        node["verification"] = {
+            "full_test_suite": node.pop("full_test_suite", False),
+            "security_regression": node.pop("security_regression", False),
+            "active_worktree_full_test_suite": node.pop(
+                "active_worktree_full_test_suite", False
+            ),
+            "active_worktree_security_regression": node.pop(
+                "active_worktree_security_regression", False
+            ),
+            "test_count": node.pop("test_count", 0),
+            "passed_tests": node.pop("passed_tests", 0),
+            "failed_tests": node.pop("failed_tests", 0),
+        }
+        try:
+            node["verification"]["import_check"] = json.loads(
+                node.pop("import_check", '""')
+            )
+        except (TypeError, json.JSONDecodeError):
+            node["verification"]["import_check"] = ""
+    return {"candidates": nodes, "count": len(nodes)}
 
 
 @router.get("/candidates/{candidate_id}")

@@ -418,6 +418,20 @@ class SqliteGraph:
     async def add_node(self, label: str, data: dict[str, Any]) -> str | None:
         return await self._create_node(label, data)
 
+    async def list_nodes(
+        self,
+        label: str,
+        tenant_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not label.isidentifier():
+            raise ValueError("Graph node label must be an identifier")
+        if limit < 1:
+            raise ValueError("Graph node limit must be positive")
+        nodes = await self._list_nodes(label, tenant_id=tenant_id)
+        nodes.sort(key=lambda node: node.get("recorded_at", ""), reverse=True)
+        return nodes[:limit]
+
     async def _list_nodes(
         self,
         label: str,
