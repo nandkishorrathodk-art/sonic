@@ -26,44 +26,48 @@ class LocalWorkspaceContext:
     is_git: bool
 
 
-def resolve_local_context(cwd: Path | str | None = None) -> LocalWorkspaceContext:
-    """Dynamically infer local workspace and tenant parameters from git/filesystem."""
-    working_dir = Path(cwd or Path.cwd()).resolve()
-
-    # 1. Resolve repo root
-    is_git = True
+def _git_root(directory: Path) -> Path | None:
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(working_dir),
+            ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        if proc.returncode == 0 and proc.stdout.strip():
-            repo_root = Path(proc.stdout.strip()).resolve()
-        else:
-            is_git = False
-            repo_root = working_dir
-    except Exception:
-        is_git = False
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return Path(proc.stdout.strip()).resolve()
+
+
+def resolve_local_context(cwd: Path | str | None = None) -> LocalWorkspaceContext:
+    """Infer workspace context from cwd, falling back to the installed source checkout."""
+    working_dir = Path(cwd or Path.cwd()).resolve()
+
+    configured_root = os.environ.get("SONIC_REPO_ROOT", "").strip()
+    source_checkout = Path(__file__).resolve().parents[2]
+    if configured_root:
+        repo_root = _git_root(Path(configured_root).expanduser().resolve())
+        if repo_root is None:
+            raise ValueError("SONIC_REPO_ROOT must point to an existing Git checkout")
+    else:
+        repo_root = _git_root(working_dir) or _git_root(source_checkout)
+    is_git = repo_root is not None
+    if repo_root is None:
         repo_root = working_dir
 
     # 2. Resolve branch
     branch = "main"
     if is_git:
-        try:
-            b_proc = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if b_proc.returncode == 0 and b_proc.stdout.strip():
-                branch = b_proc.stdout.strip()
-        except Exception:
-            branch = "main"
+        b_proc = subprocess.run(
+            ["git", "-C", str(repo_root), "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if b_proc.returncode == 0 and b_proc.stdout.strip():
+            branch = b_proc.stdout.strip()
 
     # 3. Infer tenant_id (Zero hardcoded values!)
     tenant_id = ""

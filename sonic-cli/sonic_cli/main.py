@@ -100,7 +100,7 @@ def main_callback(
         srv = server if isinstance(server, str) else "http://localhost:12000"
         tok = token if isinstance(token, str) else ""
         from sonic_cli.repl import run_repl
-        run_repl(server=srv, token=tok)
+        run_repl(server_url=srv, token=tok)
 
 
 # ============================================
