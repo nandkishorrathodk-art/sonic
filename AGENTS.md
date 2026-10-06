@@ -63,6 +63,17 @@ SONIC has two complementary execution planes and should select the appropriate c
     - Keystroke typing (`GUI_TYPE`) must always focus the target element (`x, y`) before typing to ensure the cursor actively interacts with the intended field.
     - Tasks involving visual applications, browsing, or desktop UI must actively dispatch to the desktop GUI plane rather than taking silent headless terminal shortcuts.
 
+### 4. Dual Topology & Connection: Standalone Being vs. Autonomous Developer CLI
+SONIC operates across two cleanly delineated manifestations with an explicit Client-Server connection contract:
+- **SONIC Core (`sonic-core` / `sonic-dashboard`) — The Autonomous AI-Human Digital Being**:
+  - Hosts the complete cognitive mind (Boss, Judge, Task Planner), persistent graph & vector memory (`sqlite_graph.py`), Docker graphical workstation (`sonic-desktop-workstation`), and live visible desktop stream (noVNC on port 12001).
+  - **Standalone Independence**: SONIC Core is 100% complete and self-contained; it does NOT require `sonic-cli` to operate. It runs as an autonomous background service / API (`http://localhost:12000`) and web dashboard.
+  - Department: Managed under Department `cognitive_systems` (branch: `departments/cognitive-systems`).
+- **SONIC CLI (`sonic-cli`) — The Autonomous Software Engineer & Developer Interface**:
+  - Devin-style terminal interface (`sonic > `) dedicated to code engineering, repository inspection, diff reviews (`/diff`), and continuous autonomous self-evolution (`/auto`).
+  - **Client-Server Connection**: The CLI is a remote controller / client to SONIC Core. All runtime subcommands (`sonic status`, `sonic mission`, `sonic computer`, `sonic prompt`, `sonic graph`) connect directly via HTTP/REST to the Core backend at `http://localhost:12000`. In `/auto` mode, it analyzes the `sonic-core` codebase, tests safe AST mutations in isolated Git worktrees, and pushes verified candidate upgrades to the core engine.
+  - Department: Managed under Department `platform_systems` (branch: `departments/platform-systems`).
+
 ## Historical engineering record
 
 The phase-by-phase notes below preserve implementation history, prior test
@@ -2469,4 +2480,27 @@ regression tests):
 
 Also refreshed `docs/SELF_EVOLUTION_ARCHITECTURE.md` (it still documented the
 300 s discovery timeout). Evolution regression set: 154 passed, 0 failures.
+
+## Core Self-Evolution Safety Envelope & Department Realignment (2026-10-06)
+
+Third-pass hardening across `sonic-core` (Department `cognitive_systems`) and `sonic-cli` (Department `platform_systems`):
+
+1. **Safety Envelope Path Normalization & Protected Component Expansion** (`evolution/pipeline.py` & `evolution/codebase_evolver.py`):
+   - Added segmented boundary path matching (`_check_path_match`, `is_protected_component`) preventing false positive blocks on paths like `sonic/authoring`.
+   - Stripped repository prefixes (`sonic-core/`, `sonic-cli/`) before boundary checks so worktree-relative paths match reliably.
+   - Expanded `_PROTECTED_COMPONENTS` to protect critical runtime gates: `sonic/agents/judge.py`, `sonic/evidence`, `sonic-core/tests/test_safety_sealed_policy.py`, `sonic/evolution/self_coder_candidates.py`, `sonic/evolution/continuous_runner.py`, and `sonic/sandbox/factory.py`.
+2. **Persistent Graph Memory Hook for Candidate Approvals** (`evolution/self_coder_candidates.py` & `memory/router.py`):
+   - Operator approvals (`POST /candidates/{id}/approve`) now record verified candidates directly to persistent Graph Memory via `record_verified_candidate()`, queryable via `GET /verified-history`.
+   - Fixed SQLite fallback in `memory/router.py` to respect explicit `sqlite_db_path`.
+3. **Subprocess Secret Scrubbing & Falsification Integrity** (`evolution/codebase_evolver.py`):
+   - Scrubbed sensitive API tokens, secrets, and keys from test subprocess environments.
+   - Enforced safe timeout bounds: `min(1800, max(120, value))` on `SONIC_EVOLUTION_TEST_TIMEOUT`.
+   - Required both `test_p0_security_hardening.py` and `test_safety_sealed_policy.py` to exist on disk during security regression verification.
+4. **General Computer Agency Alignment** (`evolution/strategy.py`):
+   - Realigned strategic postures and docstrings to general computer agency and software engineering (`REQUEST_FILTER_ADAPTATION`, `PROCESS_FAULT_DIAGNOSIS`).
+5. **Standardized Backend Port 12000 & Workstation Identity** (`sonic-cli`):
+   - Updated all subcommands (`computer.py`, `mission.py`, `evolution.py`, `status.py`, etc.) from port 8000 to port 12000.
+   - Standardized CLI branding to `Autonomous AI-Human Digital Being` and default profile to `STANDARD_WORKSTATION`.
+   - Pushed to `origin/departments/platform-systems` (commit `4c71039`) and `origin/departments/cognitive-systems` (commit `3ac2740`).
+
 
