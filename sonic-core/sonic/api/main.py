@@ -4,7 +4,7 @@ SONIC-REDA — FastAPI Application Entry Point
 Main API server with auth middleware, CORS, and route mounting.
 
 Run:
-    uvicorn sonic.api.main:app --reload --host 0.0.0.0 --port 8000
+    uvicorn sonic.api.main:app --reload --host 0.0.0.0 --port 12000
 """
 
 from __future__ import annotations
@@ -409,7 +409,6 @@ app.include_router(workstation.router, tags=["Workstation"])
 app.include_router(checkpoints.router, tags=["Workstation Checkpoints"])
 app.include_router(security.router, prefix="/security", tags=["Self-Security Lab"])
 app.include_router(self_coder.router, prefix="/self-coder", tags=["Self-Coder"])
-app.include_router(organization.router, prefix="/organization", tags=["Organization"])
 
 
 

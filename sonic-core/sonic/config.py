@@ -23,7 +23,7 @@ class AuthSettings(BaseSettings):
 
     google_client_id: str = ""
     google_client_secret: str = ""
-    google_redirect_uri: str = "http://localhost:8000/auth/google/callback"
+    google_redirect_uri: str = "http://localhost:12000/auth/google/callback"
     allowed_emails: list[str] = Field(default_factory=list)
     allowed_domains: list[str] = Field(default_factory=list)
     jwt_secret: str = "CHANGE-ME"
@@ -60,10 +60,10 @@ class AppSettings(BaseSettings):
 
     app_env: str = "development"
     app_host: str = "0.0.0.0"
-    app_port: int = 8000
+    app_port: int = 12000
     log_level: str = "INFO"
     cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://localhost:8000"]
+        default_factory=lambda: ["http://localhost:3000", "http://localhost:12000", "http://localhost:12001"]
     )
 
 
@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     # -- Auth --
     google_client_id: str = ""
     google_client_secret: str = ""
-    google_redirect_uri: str = "http://localhost:8000/auth/google/callback"
+    google_redirect_uri: str = "http://localhost:12000/auth/google/callback"
     allowed_emails: str = ""  # Comma-separated in env
     allowed_domains: str = ""  # Comma-separated in env
     super_admin_emails: str = ""  # Comma-separated super-admin email addresses
@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     # -- App --
     app_env: str = "development"
     app_host: str = "0.0.0.0"
-    app_port: int = 8000
+    app_port: int = 12000
     log_level: str = "INFO"
     cors_origins: str = (
         "http://localhost:3000,http://127.0.0.1:3000,"

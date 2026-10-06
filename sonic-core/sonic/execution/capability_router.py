@@ -195,7 +195,8 @@ class CapabilityRouter:
             if str(chosen_plane).strip().lower() == "headless":
                 return ExecutionSubstrate.HEADLESS
             return ExecutionSubstrate.COMPUTER
-        except Exception:
+        except Exception as exc:
+            logger.warning("laya_plane_resolution_failed_defaulting_to_computer", error=str(exc))
             return ExecutionSubstrate.COMPUTER
 
     # -------------------------------------------------------------
