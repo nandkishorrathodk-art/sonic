@@ -2541,5 +2541,26 @@ Complete separation of `sonic-cli` (Department `platform_systems`) from `BossAge
      - `test_developer_agent.py` (28 passed): Direct tool execution, tool loop, zero-boss isolation.
      - `test_developer_agent_safety.py` (17 passed): Path traversal protection, timeout process termination, secret sanitization, error feedback.
 
+## Department Platform Systems & Laya System-1 Engine Hardening (2026-10-06)
 
+Fourth-pass audit and remediation across Department `platform_systems` (`sonic-core/sonic/api/`, `config.py`, `logger.py`, `computer/headless.py`, `execution/capability_router.py`) and the Laya System-1 Non-Autoregressive Decision Engine (`sonic/llm/laya_engine.py`):
 
+1. **Structured Logger Secret Scrubbing (P0 Security)** (`sonic/logger.py`):
+   - Added regex-based key (`_SENSITIVE_KEY_PATTERN`) and value (`_SECRET_VALUE_PATTERN`) sanitization filters.
+   - Redacts authentication tokens, API keys (`gsk_`, `sk-`, `nvapi-`, `Bearer`), passwords, and private keys into `[REDACTED]` across both `structlog` events and standard library `FallbackLogger` formatting.
+2. **Laya System-1 Preset Resolution & Telemetry (P0 Bug Fix)** (`api/routes/llm.py`):
+   - Fixed dead-code bug in `predict_sync`: preset question expansion is now executed whenever `request.preset` is provided, preventing structured goal dictionaries from being dropped.
+   - Updated `/laya/status` endpoint to dynamically list all valid registered presets and aliases.
+3. **Laya Engine HTTP Connection Pooling & Hardware Resilience** (`llm/laya_engine.py`):
+   - Replaced ephemeral per-request `httpx.Client()` creation with a thread-safe connection-pooled client (`_get_http_client()` with keep-alive limits) to eliminate TCP socket exhaustion under high inference frequency.
+   - Added Darwin macOS physical RAM inspection via `sysctl -n hw.memsize` to prevent false-negative fail-closed rejections on macOS platforms.
+   - Supported mock HTTP client fallback for test suites without `limits` kwargs.
+4. **Headless Execution Plane Hardening** (`computer/headless.py`):
+   - Scrubbed sensitive host environment variables (`GROQ_API_KEY`, `OPENAI_API_KEY`, `JWT_SECRET`, etc.) before spawning child shell commands, preventing credential leakage to untrusted tools.
+   - Enforced process-tree termination on Windows (`taskkill /F /T /PID`) on subprocess timeout, eliminating orphaned background processes.
+5. **Capability Router Observability** (`execution/capability_router.py`):
+   - Replaced silent bare exception swallowing in Laya plane routing with explicit structured logging (`logger.warning("laya_plane_resolution_failed_defaulting_to_computer")`).
+6. **Configuration & Mount Cleanliness** (`config.py` & `api/main.py`):
+   - Standardized default `app_port` to 12000 in `AppSettings` and `Settings`.
+   - Removed redundant duplicate route mount of `organization.router` in `main.py`.
+   - Purged dead 0-byte orphan file `api/routes/hikko.py` and obsolete `__pycache__` artifacts.

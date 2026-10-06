@@ -278,7 +278,13 @@ async def laya_status(user: User = Depends(require_auth)):
             "api_url_configured": bool(engine.api_url),
             "local_model_enabled": bool(engine.enable_local_model),
             "sufficient_ram": ram_ok,
-            "supported_presets": ["triage", "guard", "verification", "curiosity"],
+            "supported_presets": sorted(
+                set(
+                    list(getattr(engine, "PRESET_QUESTIONS", {}).keys())
+                    + list(LAYA_PRESETS.keys())
+                    + list(LAYA_PRESET_ALIASES.keys())
+                )
+            ),
         }
 
     # Ensure all telemetry & alias keys are present for caller compatibility
@@ -296,7 +302,7 @@ async def laya_status(user: User = Depends(require_auth)):
             "min_free_gb": 1.5,
         }
     if "presets" not in st:
-        st["presets"] = st.get("supported_presets", ["triage", "guard", "verification", "curiosity"])
+        st["presets"] = list(st.get("supported_presets", []))
     if "has_ram_headroom" not in st:
         st["has_ram_headroom"] = bool(st.get("sufficient_ram", True))
 
@@ -315,17 +321,26 @@ async def laya_predict(
     state_val = request.state if request.state is not None else ""
 
     def predict_sync():
-        if request.preset and not request.questions:
+        if request.preset:
             preset_raw = request.preset.strip().lower()
             preset_resolved = LAYA_PRESET_ALIASES.get(preset_raw, preset_raw)
 
-            if isinstance(state_val, dict):
-                state_str = str(state_val.get("evidence") or state_val.get("command") or state_val.get("goal") or state_val)
-            else:
-                state_str = str(state_val)
+            # 1. If preset is in LAYA_PRESETS (handles dict state adaptation like {"goal": ..., "evidence": ...})
+            if preset_raw in LAYA_PRESETS or preset_resolved in LAYA_PRESETS:
+                actual_preset = preset_raw if preset_raw in LAYA_PRESETS else preset_resolved
+                actual_state, questions = _resolve_preset_questions(actual_preset, state_val)
+                return engine.predict(state=actual_state, questions=questions, model=request.model)
 
+            # 2. Check engine's internal PRESET_QUESTIONS
             preset_questions_map = getattr(engine, "PRESET_QUESTIONS", {})
             if preset_resolved in preset_questions_map:
+                if isinstance(state_val, dict):
+                    g = state_val.get("goal")
+                    e = state_val.get("evidence") or state_val.get("command") or state_val
+                    state_str = f"Goal: {g}\nEvidence: {e}" if g else str(e)
+                else:
+                    state_str = str(state_val)
+
                 if request.model:
                     return engine.predict(
                         state=state_str,
@@ -338,9 +353,6 @@ async def laya_predict(
                     state=state_str,
                     questions=preset_questions_map[preset_resolved],
                 )
-            if preset_raw in LAYA_PRESETS:
-                actual_state, questions = _resolve_preset_questions(preset_raw, state_val)
-                return engine.predict(state=actual_state, questions=questions, model=request.model)
 
             available = sorted(
                 set(

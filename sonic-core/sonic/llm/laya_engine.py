@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -152,6 +153,14 @@ def _has_sufficient_ram_gb(min_free_gb: float = 1.5) -> bool:
                     if line.startswith("MemAvailable:"):
                         kb = int(line.split()[1])
                         return (kb / (1024 ** 2)) >= min_free_gb
+        elif sys.platform == "darwin":
+            try:
+                import subprocess
+                out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip()
+                total_gb = int(out) / (1024 ** 3)
+                return total_gb >= (min_free_gb + 2.0)
+            except Exception:
+                return True
         raise OSError("No supported physical-memory source is available")
     except Exception as exc:
         logger.warning("laya_ram_check_failed_closed", error=str(exc))
@@ -178,8 +187,23 @@ class LayaSystem1Engine:
         self.enable_local_model = enable_local_model
         self.preload = preload or (os.environ.get("LAYA_PRELOAD", "0") == "1")
         self._local_router: Any = None
+        self._http_client: httpx.Client | None = None
         self._lock = threading.Lock()
         self._active_backend = "laya_vector_projection"
+
+    def _get_http_client(self) -> Any:
+        """Return or lazily create a thread-safe connection-pooled HTTP client."""
+        if self._http_client is None:
+            with self._lock:
+                if self._http_client is None:
+                    try:
+                        self._http_client = httpx.Client(
+                            timeout=2.5,
+                            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+                        )
+                    except TypeError:
+                        self._http_client = httpx.Client(timeout=2.5)
+        return self._http_client
 
     def _get_local_router(self) -> Any:
         """Lazily load `laya.Router` only if enabled and RAM >= 1.5 GB."""
@@ -221,30 +245,30 @@ class LayaSystem1Engine:
         # 1. Remote HTTP `laya-serve` endpoint (0 MB Laptop RAM)
         if self.api_url:
             try:
-                with httpx.Client(timeout=2.5) as client:
-                    resp = client.post(
-                        f"{self.api_url}/predict",
-                        json={
-                            "state": state,
-                            "questions": questions,
-                            "model": model,
-                            "max_len": max_len,
-                        },
+                client = self._get_http_client()
+                resp = client.post(
+                    f"{self.api_url}/predict",
+                    json={
+                        "state": state,
+                        "questions": questions,
+                        "model": model,
+                        "max_len": max_len,
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    result = self._validate_backend_result(
+                        data, questions, chosen_model, "laya_remote"
                     )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        result = self._validate_backend_result(
-                            data, questions, chosen_model, "laya_remote"
-                        )
-                        if result is not None:
-                            self._active_backend = "laya_remote"
-                            return result
-                        logger.warning("laya_remote_invalid_response")
-                    else:
-                        logger.warning(
-                            "laya_remote_non_success_status",
-                            status_code=resp.status_code,
-                        )
+                    if result is not None:
+                        self._active_backend = "laya_remote"
+                        return result
+                    logger.warning("laya_remote_invalid_response")
+                else:
+                    logger.warning(
+                        "laya_remote_non_success_status",
+                        status_code=resp.status_code,
+                    )
             except Exception as exc:
                 logger.warning("laya_remote_call_failed", error=str(exc))
 
