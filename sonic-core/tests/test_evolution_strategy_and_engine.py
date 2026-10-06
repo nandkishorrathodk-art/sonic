@@ -104,6 +104,7 @@ class TestDynamicStrategyEngine:
         assert sig == TargetFeedbackSignal.WAF_BLOCK
 
         plan = engine.adapt_strategy(sig, target="https://target.com/search?q=test")
+        assert plan.posture == StrategicPosture.REQUEST_FILTER_ADAPTATION
         assert plan.posture == StrategicPosture.WAF_EVASION_MUTATION
         assert "chunking" in plan.action_mutation.lower() or "encoding" in plan.action_mutation.lower()
         assert plan.synthesize_novel_method is True
@@ -239,11 +240,27 @@ class TestCTFStrategyFeedback:
         assert "flag" in plan.rationale.lower()
         assert "avoid redundant scanning" in plan.avoid_directive.lower()
 
+    def test_flag_detection_dominates_incidental_error_text(self):
+        """A captured flag must not be shadowed by co-occurring error output.
+
+        Regression: a response that contains BOTH a flag and an incidental
+        error signal (403/WAF/syntax) previously returned the error signal, so
+        the being kept probing instead of extracting the already-captured flag.
+        """
+        engine = DynamicStrategyEngine()
+        combined_403_waf = "HTTP/1.1 403 Forbidden\nserver: cloudflare\nflag{abc123}"
+        assert engine.analyze_feedback(stdout=combined_403_waf) == TargetFeedbackSignal.FLAG_DISCOVERED
+        combined_syntax = "flag{abc123}\nSyntaxError: invalid syntax"
+        assert engine.analyze_feedback(stdout=combined_syntax) == TargetFeedbackSignal.FLAG_DISCOVERED
+        # Error signals still classify correctly when no flag is present.
+        assert engine.analyze_feedback(stdout="HTTP/1.1 403 Forbidden\nserver: cloudflare") == TargetFeedbackSignal.WAF_BLOCK
+
     def test_binary_crash_triggers_exploit_payload_mutation(self):
         engine = DynamicStrategyEngine()
         sig = engine.analyze_feedback(stdout="Running binary...\nSegmentation fault (core dumped)", exit_code=139)
         assert sig == TargetFeedbackSignal.BINARY_CRASH_OR_SEGFAULT
         plan = engine.adapt_strategy(sig, target="./vuln_binary")
+        assert plan.posture == StrategicPosture.PROCESS_FAULT_DIAGNOSIS
         assert plan.posture == StrategicPosture.EXPLOIT_PAYLOAD_MUTATION
         assert plan.synthesize_novel_method is True
         assert plan.author_custom_tool is True

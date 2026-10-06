@@ -225,9 +225,20 @@ class VersionTracker:
         tag: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        git_tag_name = f"v{new_version}" if tag else ""
+        # Only claim a git tag in the persisted record when the tag was actually
+        # created. Previously the version record always stored `v<new_version>`
+        # whenever `tag=True`, even when there was no commit to tag or the tag
+        # command failed — a false provenance claim.
+        git_tag_name = ""
         if tag and git_commit:
-            self.create_git_tag(git_tag_name, git_commit, f"Release {git_tag_name}: {title}")
+            if self.create_git_tag(f"v{new_version}", git_commit, f"Release v{new_version}: {title}"):
+                git_tag_name = f"v{new_version}"
+            else:
+                logger.warning(
+                    "evolution_git_tag_not_recorded",
+                    version=new_version,
+                    git_commit=git_commit,
+                )
 
         record = VersionRecord(
             version=new_version,

@@ -14,6 +14,7 @@ persistent SQLite backend.
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from sonic.logger import get_logger
@@ -45,10 +46,19 @@ async def get_smart_memory(*, sqlite_db_path: str | None = None) -> MemoryBacken
     """
     global _active_memory
     if _active_memory is not None and not isinstance(_active_memory, InMemoryGraph):
-        return _active_memory
+        if hasattr(_active_memory, "_db") and _active_memory._db is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                conn_loop = getattr(_active_memory._db, "_loop", None)
+                if conn_loop is not None and (conn_loop.is_closed() or conn_loop != loop):
+                    _active_memory = None
+            except RuntimeError:
+                pass
+        if _active_memory is not None:
+            return _active_memory
 
     # If explicitly forced to SQLite via environment or an explicit SQLite DB path is provided
-    if os.environ.get("SONIC_FORCE_SQLITE_MEMORY") == "1" or os.environ.get("SONIC_MEMORY_DB_PATH"):
+    if os.environ.get("SONIC_FORCE_SQLITE_MEMORY") == "1" or os.environ.get("SONIC_MEMORY_DB_PATH") or sqlite_db_path is not None:
         sqlite_mem = SqliteGraph(
             db_path=os.environ.get("SONIC_MEMORY_DB_PATH") or sqlite_db_path
         )

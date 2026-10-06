@@ -82,6 +82,40 @@ async def test_run_uses_pinned_signals_without_rediscovery(tmp_path: Path) -> No
     coder.run_cycle.assert_awaited_once_with(*pinned)
 
 
+def test_signal_discovery_uses_configurable_timeout(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signal discovery must honour SONIC_EVOLUTION_TEST_TIMEOUT.
+
+    Regression: discovery hardcoded a 300s pytest timeout while the verification
+    gate used a configurable (default 600s) budget, so a slow suite could abort
+    discovery and stall self-evolution.
+    """
+    import subprocess as _sp
+
+    captured: dict[str, object] = {}
+
+    class _Res:
+        returncode = 0
+        stdout = "no tests ran\n"
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        captured["timeout"] = kwargs.get("timeout")
+        return _Res()
+
+    monkeypatch.setattr(_sp, "run", _fake_run)
+    monkeypatch.setenv("SONIC_EVOLUTION_TEST_TIMEOUT", "742")
+    coder = SelfCoder(repo_root=repo, agentic=False)
+    coder.discover_signals(limit=1)
+    assert captured["timeout"] == 742
+
+    # Even if the evolver attribute is unavailable, the env value is honoured.
+    monkeypatch.setenv("SONIC_EVOLUTION_TEST_TIMEOUT", "500")
+    coder2 = SelfCoder(repo_root=repo, agentic=False)
+    coder2.evolver._test_timeout_seconds = None  # type: ignore[attr-defined]
+    coder2.discover_signals(limit=1)
+    assert captured["timeout"] == 500
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"

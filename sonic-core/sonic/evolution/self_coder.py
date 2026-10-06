@@ -360,12 +360,23 @@ class SelfCoder:
             if inherited_pythonpath:
                 source_paths.append(inherited_pythonpath)
             env["PYTHONPATH"] = os.pathsep.join(source_paths)
+            # Discovery runs the full suite; use the same env-overridable budget
+            # as the verification gate so a slow suite cannot silently abort
+            # signal discovery (which would stall self-evolution).
+            timeout = getattr(
+                getattr(self, "evolver", None), "_test_timeout_seconds", None
+            )
+            if not isinstance(timeout, int) or timeout < 120:
+                try:
+                    timeout = max(120, int(os.environ.get("SONIC_EVOLUTION_TEST_TIMEOUT", "600")))
+                except (TypeError, ValueError):
+                    timeout = 600
             res = subprocess.run(
                 cmd,
                 cwd=str(self.repo_root),
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=timeout,
                 env=env,
             )
             out = (res.stdout or "") + (res.stderr or "")

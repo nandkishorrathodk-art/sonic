@@ -76,6 +76,15 @@ def candidate_repo(tmp_path: Path) -> tuple[Path, Path]:
         '    assert allowed("blocked") is False\n',
         encoding="utf-8",
     )
+    (tests / "test_safety_sealed_policy.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parents[1]))\n"
+        "from security_gate import allowed\n"
+        "def test_safety_sealed_policy():\n"
+        '    assert allowed("sealed") is True\n',
+        encoding="utf-8",
+    )
     _git(root, "init")
     _git(root, "checkout", "-b", "feature")
     _git(root, "config", "user.name", "Test Operator")
@@ -353,6 +362,53 @@ def test_candidate_store_passes_pinned_signal_to_coder(candidate_repo):
     assert result["candidates"][0]["status"] == "no_candidate"
 
 
+def test_pinned_signal_bypasses_no_candidate_short_circuit(candidate_repo):
+    """A prior empty discovery must not permanently block pinned-signal retries.
+
+    Regression: a single ``no_candidate`` record at a commit short-circuited
+    every later run at that same commit, so the continuous runner could never
+    retry a pinned signal and self-evolution stalled.
+    """
+    root, storage = candidate_repo
+    store = SelfCoderCandidateStore(root, storage_dir=storage)
+    base_commit = _git(root, "rev-parse", "HEAD")
+    store.save({
+        "candidate_id": "0" * 32,
+        "tenant_id": "tenant-a",
+        "status": "no_candidate",
+        "base_commit": base_commit,
+        "base_branch": "feature",
+        "target_file": "",
+        "description": "",
+        "diff": "",
+        "files": [],
+        "test_paths": [],
+        "verification": {},
+        "cycle_stage": "no_candidate",
+        "cycle_reason": "No actionable signal produced a verified patch",
+        "report": "empty discovery",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "commit": "",
+        "commit_branch": "",
+        "error": "",
+    })
+    captured = {}
+    pinned = ("Fix the requested defect", "sonic-core/app.py", "bug_fix")
+
+    class CapturingCoder:
+        async def run(self, max_cycles: int, excluded_signals=None, signals=None):
+            captured["signals"] = signals
+            return SimpleNamespace(cycles=[], to_text=lambda: "No new signal")
+
+    result = asyncio.run(
+        store.run_candidate(
+            "tenant-a", 1, lambda _wt: CapturingCoder(), signals=[pinned]
+        )
+    )
+    assert captured.get("signals") == [pinned]
+    assert result.get("status") != "no_actionable_signal"
+
+
 def test_rejection_and_stale_revalidation_do_not_commit(candidate_repo):
     root, storage = candidate_repo
     store, rejected = _new_candidate(root, storage)
@@ -583,3 +639,97 @@ def test_self_coder_interval_rejects_invalid_values(value):
 def test_self_coder_interval_seconds_rejects_invalid_values(value):
     with pytest.raises(ValueError, match="SONIC_SELF_CODER_INTERVAL_SECONDS"):
         get_self_coder_config({"SONIC_SELF_CODER_INTERVAL_SECONDS": value})
+
+
+def test_manual_candidate_approval_records_to_graph_memory(candidate_repo, monkeypatch):
+    root, storage = candidate_repo
+    monkeypatch.setenv("SONIC_EVOLUTION_DB_PATH", str(storage.parent / "evolution.db"))
+    store, candidate = _new_candidate(root, storage)
+    (root / "sonic-core" / "app.py").write_text(
+        'def value():\n    return "base"\n', encoding="utf-8"
+    )
+    candidate["status"] = "verified"
+    candidate["commit"] = ""
+    candidate["commit_branch"] = ""
+    candidate.pop("promotion", None)
+    store.save(candidate)
+
+    # Approve manually (automatic=False)
+    approved = store.approve(candidate["candidate_id"], "tenant-a")
+    assert approved["status"] == "applied"
+
+    from sonic.memory.router import get_smart_memory
+    monkeypatch.setattr("sonic.memory.router._active_memory", None)
+
+    async def _verify():
+        memory = await get_smart_memory(sqlite_db_path=str(root / "sonic_data.db"))
+        nodes = await memory.list_nodes("SelfEvolutionCandidate", tenant_id="tenant-a")
+        matching = [n for n in nodes if n.get("candidate_id") == candidate["candidate_id"]]
+        assert len(matching) == 1
+        assert matching[0]["status"] == "verified_applied"
+        assert matching[0]["security_regression"] is True
+
+    asyncio.run(_verify())
+
+
+@pytest.mark.asyncio
+async def test_router_respects_sqlite_db_path_not_none(tmp_path, monkeypatch):
+    from sonic.memory.router import get_smart_memory
+    from sonic.memory.sqlite_graph import SqliteGraph
+
+    monkeypatch.setattr("sonic.memory.router._active_memory", None)
+    monkeypatch.delenv("SONIC_FORCE_SQLITE_MEMORY", raising=False)
+    monkeypatch.delenv("SONIC_MEMORY_DB_PATH", raising=False)
+
+    db_file = str(tmp_path / "custom_test.db")
+    memory = await get_smart_memory(sqlite_db_path=db_file)
+    assert isinstance(memory, SqliteGraph)
+    assert memory.db_path == db_file
+
+
+def test_manual_candidate_approval_preserves_worktree_and_raises_when_graph_recording_fails(candidate_repo, monkeypatch):
+    from unittest.mock import patch
+    from sonic.evolution.self_coder_candidates import CandidateWorkflowError
+
+    root, storage = candidate_repo
+    monkeypatch.setenv("SONIC_EVOLUTION_DB_PATH", str(storage.parent / "evolution.db"))
+    store, candidate = _new_candidate(root, storage)
+    app_py = root / "sonic-core" / "app.py"
+    app_py.write_text('def value():\n    return "base"\n', encoding="utf-8")
+    candidate["status"] = "verified"
+    candidate["commit"] = ""
+    candidate["commit_branch"] = ""
+    candidate.pop("promotion", None)
+    store.save(candidate)
+
+    with patch("sonic.evolution.graph_recorder.record_verified_candidate", side_effect=RuntimeError("Graph storage unreachable")):
+        with pytest.raises(CandidateWorkflowError, match="verified graph persistence failed"):
+            store.approve(candidate["candidate_id"], "tenant-a")
+
+    # Verify worktree was NOT rolled back - the patch remains applied!
+    assert "candidate" in app_py.read_text(encoding="utf-8")
+    # Verify candidate record retains applied status and records graph_record_error
+    rec = store.get(candidate["candidate_id"], "tenant-a")
+    assert rec["status"] == "applied"
+    assert "Graph storage unreachable" in rec["graph_record_error"]
+
+
+
+
+@pytest.mark.asyncio
+async def test_router_respects_custom_sqlite_paths(tmp_path, monkeypatch):
+    from sonic.memory.router import get_smart_memory, reset_memory_singleton
+
+    reset_memory_singleton()
+    monkeypatch.delenv("SONIC_FORCE_SQLITE_MEMORY", raising=False)
+    monkeypatch.delenv("SONIC_MEMORY_DB_PATH", raising=False)
+
+    db1 = str(tmp_path / "first.db")
+    mem1 = await get_smart_memory(sqlite_db_path=db1)
+    assert mem1.db_path == db1
+
+    reset_memory_singleton()
+    db2 = str(tmp_path / "second.db")
+    mem2 = await get_smart_memory(sqlite_db_path=db2)
+    assert mem2.db_path == db2
+

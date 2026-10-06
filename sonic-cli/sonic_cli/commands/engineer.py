@@ -22,7 +22,7 @@ def run_mission(
     autonomy: str = typer.Option("L3_AUTONOMOUS", "--autonomy", "-a", help="Autonomy level (L0-L3)"),
     mode: str = typer.Option("ENGINEERING_MODE", "--mode", "-m", help="Mission mode"),
     steps: int = typer.Option(5, "--steps", "-s", help="Max mission steps"),
-    server: str = typer.Option("http://localhost:8000", "--server", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Run an autonomous closed-loop computer engineering mission.
@@ -66,7 +66,7 @@ def run_mission(
 
 @app.command("benchmark")
 def run_benchmark(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Run the self-developer regression benchmark in an isolated lab."""
@@ -103,3 +103,19 @@ def run_benchmark(
         console.print(f"[red]❌ Backend server unreachable at {server}[/red]")
     except Exception as e:
         console.print(f"[red]❌ Error running benchmark: {e}[/red]")
+
+
+@app.command("local")
+def run_local(
+    prompt: str = typer.Argument(..., help="Engineering task or goal to execute locally"),
+    model: str = typer.Option("qwen/qwen3.8-27b", "--model", "-m", help="LLM model name"),
+    provider: str = typer.Option("groq", "--provider", "-p", help="LLM provider name (groq, openai, openrouter, deepseek, local)"),
+    steps: int = typer.Option(25, "--steps", "-s", help="Max steps for developer agent"),
+):
+    """Run the autonomous AI Software Engineer engine directly on the local workspace repository."""
+    from sonic_cli.developer_agent import DeveloperAgent, LLMConfig
+
+    config = LLMConfig.from_env(provider=provider, model=model)
+    agent = DeveloperAgent(config=config, max_steps=steps)
+    agent.run(prompt)
+

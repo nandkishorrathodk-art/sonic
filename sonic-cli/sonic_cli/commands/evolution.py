@@ -57,7 +57,7 @@ def _call(client: httpx.Client, method: str, path: str, **kwargs) -> dict | None
 
 @app.command(name="status")
 def evolution_status(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Display active self-dev experiments and benchmark challenges."""
@@ -78,7 +78,7 @@ def evolution_status(
 
 @app.command(name="weaknesses")
 def list_weaknesses(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List weaknesses and failure patterns mined from historical executions."""
@@ -112,7 +112,7 @@ def list_weaknesses(
 
 @app.command(name="proposals")
 def list_proposals(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List active self-development experiment proposals."""
@@ -143,7 +143,7 @@ def list_proposals(
 
 @app.command(name="candidates")
 def list_candidates(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List evolution candidates and their current status."""
@@ -175,7 +175,7 @@ def list_candidates(
 @app.command(name="benchmark")
 def benchmark_candidate(
     candidate_id: str = typer.Argument(..., help="Candidate ID to benchmark in Evolution Lab"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Run the self-developer regression benchmark in an isolated lab."""
@@ -202,7 +202,7 @@ def benchmark_candidate(
 @app.command(name="approve")
 def approve_candidate(
     candidate_id: str = typer.Argument(..., help="Candidate ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Human approval to advance an experiment to canary testing (Operator only)."""
@@ -217,7 +217,7 @@ def approve_candidate(
 def reject_candidate(
     candidate_id: str = typer.Argument(..., help="Candidate ID"),
     reason: str = typer.Option("Operator rejected", "--reason", "-r", help="Reason for rejection"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Reject and archive an evolution candidate (Operator only)."""
@@ -231,7 +231,7 @@ def reject_candidate(
 @app.command(name="promote")
 def promote_candidate(
     candidate_id: str = typer.Argument(..., help="Candidate ID to promote to production"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Promote a verified/canary experiment to the active production version (Operator only)."""
@@ -246,7 +246,7 @@ def promote_candidate(
 def rollback_candidate(
     candidate_id: str = typer.Argument(..., help="Candidate ID to rollback"),
     reason: str = typer.Option("Manual rollback", "--reason", "-r", help="Rollback justification"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Execute emergency rollback of an experiment to baseline."""
@@ -259,7 +259,7 @@ def rollback_candidate(
 
 @app.command(name="history")
 def evolution_history(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Display the multi-generation evolution progression timeline."""

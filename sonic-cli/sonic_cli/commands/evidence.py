@@ -14,7 +14,7 @@ import typer
 from rich.console import Console
 
 console = Console()
-API_BASE = "http://localhost:8000"
+API_BASE = "http://localhost:12000"
 
 
 def evidence_command(

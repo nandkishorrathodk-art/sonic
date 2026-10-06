@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -311,12 +313,28 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
 
         start_time = datetime.now(UTC)
         try:
+            sub_env = {**os.environ, **(env or {})}
+            # Scrub sensitive host credentials from subprocess environment unless explicitly passed in env
+            for sensitive_key in (
+                "GROQ_API_KEY",
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "NVIDIA_API_KEY",
+                "OPENROUTER_API_KEY",
+                "JWT_SECRET",
+                "SECRET_KEY",
+                "SONIC_TOKEN",
+            ):
+                if env is None or sensitive_key not in env:
+                    sub_env.pop(sensitive_key, None)
+
             process = await asyncio.create_subprocess_shell(
                 cmd_str,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=effective_cwd,
-                env={**os.environ, **(env or {})},
+                env=sub_env,
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
@@ -325,7 +343,15 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
                 )
             except TimeoutError:
                 with suppress(Exception):
-                    process.kill()
+                    if sys.platform == "win32":
+                        subprocess.run(
+                            f"taskkill /F /T /PID {process.pid}",
+                            shell=True,
+                            capture_output=True,
+                            timeout=5,
+                        )
+                    else:
+                        process.kill()
                 return ExecResult(
                     command=cmd_str,
                     exit_code=124,

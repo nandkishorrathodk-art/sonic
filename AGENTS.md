@@ -63,6 +63,21 @@ SONIC has two complementary execution planes and should select the appropriate c
     - Keystroke typing (`GUI_TYPE`) must always focus the target element (`x, y`) before typing to ensure the cursor actively interacts with the intended field.
     - Tasks involving visual applications, browsing, or desktop UI must actively dispatch to the desktop GUI plane rather than taking silent headless terminal shortcuts.
 
+### 4. Dual Topology & Connection: Standalone Being vs. Autonomous Developer CLI
+SONIC operates across two cleanly delineated manifestations with an explicit Client-Server connection contract:
+- **SONIC Core (`sonic-core` / `sonic-dashboard`) — The Autonomous AI-Human Digital Being**:
+  - Hosts the complete cognitive mind (Boss, Judge, Task Planner), persistent graph & vector memory (`sqlite_graph.py`), Docker graphical workstation (`sonic-desktop-workstation`), and live visible desktop stream (noVNC on port 12001).
+  - **Standalone Independence**: SONIC Core is 100% complete and self-contained; it does NOT require `sonic-cli` to operate. It runs as an autonomous background service / API (`http://localhost:12000`) and web dashboard.
+  - Department: Managed under Department `cognitive_systems` (branch: `departments/cognitive-systems`).
+- **SONIC CLI (`sonic-cli`) — The Autonomous AI Software Engineer (Zero Boss / Workstation)**:
+  - Devin/Antigravity-style terminal interface (`sonic > `) operating directly on the local repository codebase.
+  - **Zero Boss / Swarm / Workstation in CLI**: BossAgent, sub-agent swarms, and Docker graphical desktop workstations (`GUI_SCREENSHOT`, `xdotool`, etc.) belong 100% to `sonic-core` and the Web Dashboard (`sonic-dashboard`). They are completely eliminated from `sonic-cli`.
+  - **Local Agentic Coding Loop (`DeveloperAgent`)**: Natural language prompts (`> fix test in ...`, `> explain architecture`) enter a local observe-reason-act tool execution loop (`view_file`, `write_file`, `edit_file`, `run_command`, `git_diff`, `run_pytest`) powered by fast local/cloud LLMs (Groq `qwen/qwen3.8-27b`, OpenAI, Claude, Gemini) with workspace path confinement and secret sanitization.
+  - **Instant Conversational Greetings**: Simple greetings (`hi`, `hello`, `hii`) return immediate human-like responses in < 5ms without tool calls, worker spawning, or desktop screenshots.
+  - **Developer Slash Commands & Subcommands**: Fast developer controls (`/auto`, `/diff`, `/journal`, `/test`, `/status`, `/help`, `/clear`, `/exit`) and subcommands (`sonic status`, `sonic diff`, `sonic test`, `sonic auto`, `sonic journal`, `sonic auth`, `sonic version`).
+  - In `/auto` mode, it continuously triggers `ContinuousAutoEvolutionRunner` in isolated Git worktrees, tests candidates, and logs to `evolution.md`.
+  - Department: Managed under Department `platform_systems` (branch: `departments/platform-systems`).
+
 ## Historical engineering record
 
 The phase-by-phase notes below preserve implementation history, prior test
@@ -2433,3 +2448,119 @@ Verified end-to-end: a stub candidate diff applied to `logger.py` promoted to
 1872 passed / 0 failed, both in the detached worktree and after applying to the
 active checkout. Full `sonic-core/tests` baseline after the fix: **1859 passed,
 41 skipped, 0 failures**.
+
+
+## Self-evolution logical-bug pass (2026-10-05)
+
+Second-pass audit of the self-evolution / self-improver department after the
+verification-gate fix. Five more real logic bugs were found and fixed (all with
+regression tests):
+
+1. **Flag capture was shadowed by incidental errors** (`evolution/strategy.py`).
+   `DynamicStrategyEngine.analyze_feedback` checked 403/WAF/syntax/error signals
+   *before* the CTF flag regex, so output that contained BOTH a captured flag and
+   any error text (e.g. a 403 from the same response) returned the error signal
+   and the being kept probing instead of extracting the flag. Flag detection is
+   now step 0 (terminal evidence dominates).
+2. **Self-coder signal discovery used a hardcoded 300 s pytest timeout**
+   (`evolution/self_coder.py`) while the verification gate used the configurable
+   `SONIC_EVOLUTION_TEST_TIMEOUT` (default 600 s). A slow suite aborted discovery
+   silently (the `except` returned `[]`), so no signals and no evolution. Discovery
+   now reuses the evolver's budget (env-overridable).
+3. **`no_candidate` permanently short-circuited pinned retries**
+   (`evolution/self_coder_candidates.py`). A single empty discovery at a commit
+   caused every later `run_candidate` at that same commit to return
+   `no_actionable_signal` immediately — even when the caller passed an explicit
+   pinned signal. The continuous runner pins one signal per cycle, so after the
+   first empty discovery the loop could never retry. The short-circuit now applies
+   only to automatic discovery (`signals is None`).
+4. **Version tracker recorded git tags that were never created**
+   (`evolution/version_tracker.py`). `_apply_bump` persisted `v<version>` whenever
+   `tag=True`, even with no commit to tag or a failed tag command — a false
+   provenance claim. The tag is recorded only after `create_git_tag` succeeds.
+5. **CLI printed `0.0%%`** (`evolution/cli.py`). `%%` inside an f-string is a
+   literal double percent (not a format escape); two status/journal lines now
+   print `0.0%`.
+
+Also refreshed `docs/SELF_EVOLUTION_ARCHITECTURE.md` (it still documented the
+300 s discovery timeout). Evolution regression set: 154 passed, 0 failures.
+
+## Core Self-Evolution Safety Envelope & Department Realignment (2026-10-06)
+
+Third-pass hardening across `sonic-core` (Department `cognitive_systems`) and `sonic-cli` (Department `platform_systems`):
+
+1. **Safety Envelope Path Normalization & Protected Component Expansion** (`evolution/pipeline.py` & `evolution/codebase_evolver.py`):
+   - Added segmented boundary path matching (`_check_path_match`, `is_protected_component`) preventing false positive blocks on paths like `sonic/authoring`.
+   - Stripped repository prefixes (`sonic-core/`, `sonic-cli/`) before boundary checks so worktree-relative paths match reliably.
+   - Expanded `_PROTECTED_COMPONENTS` to protect critical runtime gates: `sonic/agents/judge.py`, `sonic/evidence`, `sonic-core/tests/test_safety_sealed_policy.py`, `sonic/evolution/self_coder_candidates.py`, `sonic/evolution/continuous_runner.py`, and `sonic/sandbox/factory.py`.
+2. **Persistent Graph Memory Hook for Candidate Approvals** (`evolution/self_coder_candidates.py` & `memory/router.py`):
+   - Operator approvals (`POST /candidates/{id}/approve`) now record verified candidates directly to persistent Graph Memory via `record_verified_candidate()`, queryable via `GET /verified-history`.
+   - Fixed SQLite fallback in `memory/router.py` to respect explicit `sqlite_db_path`.
+3. **Subprocess Secret Scrubbing & Falsification Integrity** (`evolution/codebase_evolver.py`):
+   - Scrubbed sensitive API tokens, secrets, and keys from test subprocess environments.
+   - Enforced safe timeout bounds: `min(1800, max(120, value))` on `SONIC_EVOLUTION_TEST_TIMEOUT`.
+   - Required both `test_p0_security_hardening.py` and `test_safety_sealed_policy.py` to exist on disk during security regression verification.
+4. **General Computer Agency Alignment** (`evolution/strategy.py`):
+   - Realigned strategic postures and docstrings to general computer agency and software engineering (`REQUEST_FILTER_ADAPTATION`, `PROCESS_FAULT_DIAGNOSIS`).
+5. **Standardized Backend Port 12000 & Workstation Identity** (`sonic-cli`):
+   - Updated all subcommands (`computer.py`, `mission.py`, `evolution.py`, `status.py`, etc.) from port 8000 to port 12000.
+   - Standardized CLI branding to `Autonomous AI-Human Digital Being` and default profile to `STANDARD_WORKSTATION`.
+   - Pushed to `origin/departments/platform-systems` (commit `4c71039`) and `origin/departments/cognitive-systems` (commit `3ac2740`).
+
+## Autonomous AI Software Engineer CLI: Pure Devin/Antigravity Engine & Zero-Boss Decoupling (2026-10-06)
+
+Complete separation of `sonic-cli` (Department `platform_systems`) from `BossAgent` and the graphical Docker workstation:
+
+1. **Zero-Boss CLI Decoupling**:
+   - Purged all `/workstation/prompt`, `BossAgent`, and Docker desktop workstation dependencies from `sonic-cli`.
+   - Removed 14 legacy workstation and swarm subcommands (`computer`, `mission`, `agents`, `engage`, `finding`, `evidence`, `research`, `security`, `experiment`, `graph`, `prompt`, `missions`, `hypotheses`, `kill`).
+   - BossAgent and Docker graphical desktop workstation remain 100% isolated to `sonic-core` and the Next.js web dashboard (`sonic-dashboard`).
+
+2. **Standalone Local `DeveloperAgent` Engine (`sonic-cli/sonic_cli/developer_agent.py`)**:
+   - Implemented an agentic observe-reason-act coding engine with 6 native tools:
+     - `view_file(path, start_line, end_line)`: Inspect file contents or list directories with 1-indexed line numbers.
+     - `write_file(path, content)`: Safely write or overwrite files with automatic parent directory creation.
+     - `edit_file(path, target_content, replacement_content)`: Precise replacement of unique target content blocks with CRLF/LF resilience and helpful context guidance.
+     - `run_command(command, timeout)`: Safe local subprocess execution with process group / tree termination (`taskkill` on Windows, `os.killpg` on POSIX) and UTF-8 encoding protection.
+     - `git_diff()`: Colored, line-numbered git diff inspection.
+     - `run_pytest(test_path)`: Direct pytest runner with stdout/stderr capture.
+   - Configured with fast Groq `qwen/qwen3.8-27b` by default (`.env` or system environment), with seamless multi-provider fallback.
+   - Path confinement (`_resolve_workspace_path`): Blocks directory traversal (`../../`) escaping the workspace root.
+   - Secret sanitization (`sanitize_secrets`): Automatically masks API tokens (`GROQ_API_KEY`, `JWT_SECRET`, `SONIC_TOKEN`, etc.) in console output and tool arguments.
+   - Signal safety: Clean `KeyboardInterrupt` / Ctrl+C handling returning `DeveloperAgentResult(interrupted=True)`.
+
+3. **Streamlined REPL & Command Surface (`sonic-cli/sonic_cli/repl.py` & `main.py`)**:
+   - Free-form natural language inputs route directly to the local `DeveloperAgent` without network hops to Boss.
+   - Instant Conversational Greetings: Basic greetings (`hi`, `hello`, `hii`, `hey`, etc.) respond conversationally in < 5ms without tool invocations or desktop screenshots.
+   - Developer Slash Commands: `/auto [N]`, `/diff`, `/journal`, `/test [path]`, `/status`, `/help`, `/clear`, `/exit`.
+   - Clean Subcommands: `sonic status`, `sonic diff`, `sonic test`, `sonic auto`, `sonic journal`, `sonic auth`, `sonic version`.
+
+4. **100% Green Verification Suite**:
+   - 66/66 tests passing in `sonic-cli/tests/`:
+     - `test_cli_devin_mode.py` (21 passed): REPL slash commands, interactive banner, zero-arg invocation.
+     - `test_developer_agent.py` (28 passed): Direct tool execution, tool loop, zero-boss isolation.
+     - `test_developer_agent_safety.py` (17 passed): Path traversal protection, timeout process termination, secret sanitization, error feedback.
+
+## Department Platform Systems & Laya System-1 Engine Hardening (2026-10-06)
+
+Fourth-pass audit and remediation across Department `platform_systems` (`sonic-core/sonic/api/`, `config.py`, `logger.py`, `computer/headless.py`, `execution/capability_router.py`) and the Laya System-1 Non-Autoregressive Decision Engine (`sonic/llm/laya_engine.py`):
+
+1. **Structured Logger Secret Scrubbing (P0 Security)** (`sonic/logger.py`):
+   - Added regex-based key (`_SENSITIVE_KEY_PATTERN`) and value (`_SECRET_VALUE_PATTERN`) sanitization filters.
+   - Redacts authentication tokens, API keys (`gsk_`, `sk-`, `nvapi-`, `Bearer`), passwords, and private keys into `[REDACTED]` across both `structlog` events and standard library `FallbackLogger` formatting.
+2. **Laya System-1 Preset Resolution & Telemetry (P0 Bug Fix)** (`api/routes/llm.py`):
+   - Fixed dead-code bug in `predict_sync`: preset question expansion is now executed whenever `request.preset` is provided, preventing structured goal dictionaries from being dropped.
+   - Updated `/laya/status` endpoint to dynamically list all valid registered presets and aliases.
+3. **Laya Engine HTTP Connection Pooling & Hardware Resilience** (`llm/laya_engine.py`):
+   - Replaced ephemeral per-request `httpx.Client()` creation with a thread-safe connection-pooled client (`_get_http_client()` with keep-alive limits) to eliminate TCP socket exhaustion under high inference frequency.
+   - Added Darwin macOS physical RAM inspection via `sysctl -n hw.memsize` to prevent false-negative fail-closed rejections on macOS platforms.
+   - Supported mock HTTP client fallback for test suites without `limits` kwargs.
+4. **Headless Execution Plane Hardening** (`computer/headless.py`):
+   - Scrubbed sensitive host environment variables (`GROQ_API_KEY`, `OPENAI_API_KEY`, `JWT_SECRET`, etc.) before spawning child shell commands, preventing credential leakage to untrusted tools.
+   - Enforced process-tree termination on Windows (`taskkill /F /T /PID`) on subprocess timeout, eliminating orphaned background processes.
+5. **Capability Router Observability** (`execution/capability_router.py`):
+   - Replaced silent bare exception swallowing in Laya plane routing with explicit structured logging (`logger.warning("laya_plane_resolution_failed_defaulting_to_computer")`).
+6. **Configuration & Mount Cleanliness** (`config.py` & `api/main.py`):
+   - Standardized default `app_port` to 12000 in `AppSettings` and `Settings`.
+   - Removed redundant duplicate route mount of `organization.router` in `main.py`.
+   - Purged dead 0-byte orphan file `api/routes/hikko.py` and obsolete `__pycache__` artifacts.
