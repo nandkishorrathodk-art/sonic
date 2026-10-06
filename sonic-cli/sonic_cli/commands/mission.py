@@ -39,7 +39,7 @@ def _get_client(server: str, token: str) -> httpx.Client:
 @app.command(name="inspect")
 def inspect_mission(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Inspect cognitive mission overview, confidence, and metrics."""
@@ -68,7 +68,7 @@ def inspect_mission(
 @app.command(name="state")
 def mission_state(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Display the cognitive state world model (Facts, Hypotheses, Unknowns)."""
@@ -105,7 +105,7 @@ def mission_state(
 @app.command(name="hypotheses")
 def mission_hypotheses(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List competing hypotheses, confidence scores, and counter-evidence."""
@@ -141,7 +141,7 @@ def mission_hypotheses(
 @app.command(name="unknowns")
 def mission_unknowns(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Display first-class uncertainty questions driving investigation."""
@@ -179,7 +179,7 @@ def mission_unknowns(
 @app.command(name="decisions")
 def mission_decisions(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Display 'Why this action?' structured decision traces."""
@@ -214,7 +214,7 @@ def mission_decisions(
 @app.command(name="next-action")
 def mission_next_action(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Show the top-ranked next-best action and utility score breakdown."""
@@ -249,7 +249,7 @@ def mission_next_action(
 @app.command(name="tasks")
 def mission_tasks(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Display the DAG Task Graph and dependency execution status."""
@@ -276,7 +276,7 @@ def mission_tasks(
 def mission_replan(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
     reason: str = typer.Option("Manual operator trigger", "--reason", "-r", help="Reason for replanning"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Trigger an on-demand replan evaluation for a mission."""
@@ -294,7 +294,7 @@ def mission_replan(
 @app.command(name="pause")
 def mission_pause(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Pause an in-flight mission safely."""
@@ -312,7 +312,7 @@ def mission_pause(
 @app.command(name="resume")
 def mission_resume(
     engagement_id: str = typer.Argument(..., help="Engagement / Mission ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Resume a paused mission."""
@@ -336,7 +336,7 @@ def create_mission(
     goal: str = typer.Option(..., "--goal", "-g", help="High-level mission objective"),
     target: str = typer.Option(..., "--target", help="Authorized target URL/asset"),
     name: str = typer.Option("autonomous-mission", "--name", "-n", help="Engagement name"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Create a new security engagement (autonomous mission)."""
@@ -368,7 +368,7 @@ def create_mission(
 
 @app.command(name="list")
 def list_missions(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List all engagements for the caller's tenant."""
@@ -404,7 +404,7 @@ def list_missions(
 @app.command(name="summary")
 def mission_summary(
     mission_id: str = typer.Argument(..., help="Mission / Engagement ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """View a structured knowledge summary for a mission (engagement + decisions + next-action)."""
@@ -446,7 +446,7 @@ def mission_summary(
 @app.command(name="deliverables")
 def mission_deliverables(
     mission_id: str = typer.Argument(..., help="Mission / Engagement ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """View validated deliverables (verified findings) for a mission."""
@@ -482,7 +482,7 @@ def mission_deliverables(
 
 @app.command(name="benchmark")
 def mission_benchmark(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Run the self-developer regression benchmark in an isolated lab."""

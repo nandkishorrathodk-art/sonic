@@ -23,7 +23,7 @@ def sonic_banner():
     banner.append("  ╚════██║██║   ██║██║╚██╗██║██║██║     \n", style="bold cyan")
     banner.append("  ███████║╚██████╔╝██║ ╚████║██║╚██████╗\n", style="bold blue")
     banner.append("  ╚══════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝ ╚═════╝\n", style="bold blue")
-    banner.append("  R E D A  — Red Team Agent\n", style="dim")
+    banner.append("  Autonomous AI-Human Digital Being\n", style="dim")
 
     console.print(Panel(banner, border_style="red", padding=(0, 2)))
 

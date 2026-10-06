@@ -56,7 +56,7 @@ def _get_json(client: httpx.Client, path: str) -> dict | None:
 @app.command(name="status")
 def research_status(
     mission_id: str = typer.Option(..., "--mission", "-m", help="Mission / Engagement ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """View high-level autonomous researcher mission status + next-best action."""
@@ -82,7 +82,7 @@ def research_status(
 @app.command(name="tracks")
 def list_tracks(
     mission_id: str = typer.Option(..., "--mission", "-m", help="Mission / Engagement ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List the task-graph investigation tracks for a mission."""
@@ -113,7 +113,7 @@ def list_tracks(
 @app.command(name="questions")
 def list_questions(
     mission_id: str = typer.Option(..., "--mission", "-m", help="Mission / Engagement ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List active and resolved research questions (= epistemic unknowns)."""
@@ -146,7 +146,7 @@ def list_questions(
 @app.command(name="hypotheses")
 def list_hypotheses(
     mission_id: str = typer.Option(..., "--mission", "-m", help="Mission / Engagement ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """View the competing hypothesis portfolio with confidence and falsification status."""
@@ -185,7 +185,7 @@ def list_hypotheses(
 @app.command(name="leads")
 def list_leads(
     mission_id: str = typer.Option(..., "--mission", "-m", help="Mission / Engagement ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Inspect discovered opportunity and serendipity leads (observations)."""
@@ -220,7 +220,7 @@ def list_leads(
 @app.command(name="anomalies")
 def list_anomalies(
     mission_id: str = typer.Option(..., "--mission", "-m", help="Mission / Engagement ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """View prediction deviations and novel anomalies (prediction vs reality)."""
@@ -253,7 +253,7 @@ def list_anomalies(
 @app.command(name="report")
 def export_report(
     mission_id: str = typer.Option(..., "--mission", "-m", help="Mission / Engagement ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Export the structured research notebook report (decision traces + next-action)."""

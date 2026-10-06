@@ -13,7 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
-API_BASE = "http://localhost:8000"
+API_BASE = "http://localhost:12000"
 
 
 def experiment_command(

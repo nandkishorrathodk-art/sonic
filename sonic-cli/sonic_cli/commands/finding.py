@@ -66,7 +66,7 @@ def _call(client: httpx.Client, method: str, path: str, **kwargs) -> dict | None
 @app.command(name="verify")
 def verify_finding(
     finding_id: str = typer.Argument(..., help="Finding ID to verify independently"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Trigger an independent verification pass with an alternative verifier agent."""
@@ -90,7 +90,7 @@ def verify_finding(
 @app.command(name="challenge")
 def challenge_finding(
     finding_id: str = typer.Argument(..., help="Finding ID to challenge"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Trigger an adversarial falsification challenge to eliminate confirmation bias."""
@@ -115,7 +115,7 @@ def challenge_finding(
 @app.command(name="reproduce")
 def reproduce_finding(
     finding_id: str = typer.Argument(..., help="Finding ID to reproduce"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Execute a controlled HTTP reproduction, re-firing the original request."""
@@ -138,7 +138,7 @@ def reproduce_finding(
 @app.command(name="evidence")
 def list_finding_evidence(
     finding_id: str = typer.Argument(..., help="Finding ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List all attached immutable evidence items with SHA-256 hashes."""
@@ -167,7 +167,7 @@ def list_finding_evidence(
 @app.command(name="provenance")
 def inspect_provenance(
     finding_id: str = typer.Argument(..., help="Finding ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Inspect complete WHO/WHAT/WHERE provenance for a finding."""
@@ -198,7 +198,7 @@ def inspect_provenance(
 @app.command(name="confidence")
 def inspect_confidence(
     finding_id: str = typer.Argument(..., help="Finding ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Display transparent confidence breakdown and reasons."""
@@ -224,7 +224,7 @@ def inspect_confidence(
 def review_finding(
     finding_id: str = typer.Argument(..., help="Finding ID"),
     action: str = typer.Option("approve", "--action", "-a", help="Action: 'approve' or 'reject'"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Submit human review decision for findings flagged for review."""

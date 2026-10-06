@@ -13,7 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
-API_BASE = "http://localhost:8000"
+API_BASE = "http://localhost:12000"
 
 
 def status_command(
@@ -47,7 +47,7 @@ def status_command(
             Panel(
                 f"{status_emoji} System: [bold]{status.upper()}[/bold]\n"
                 f"Version: {data.get('version', 'unknown')}",
-                title="🔴 SONIC-REDA",
+                title="⚡ SONIC",
                 border_style="cyan",
             )
         )
@@ -59,7 +59,7 @@ def status_command(
                 f"[bold red]❌ Cannot connect to backend[/bold red]\n\n"
                 f"[dim]Server: {server}[/dim]\n"
                 f"[dim]Make sure the backend is running:[/dim]\n"
-                f"  cd sonic-core && uvicorn sonic.api.main:app --reload",
+                f"  APP_ENV=development python -m uvicorn sonic.api.main:app --port 12000",
                 title="Connection Error",
                 border_style="red",
             )

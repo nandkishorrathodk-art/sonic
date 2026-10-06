@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 console = Console()
-API_BASE = "http://localhost:8000"
+API_BASE = "http://localhost:12000"
 
 
 def agents_command(
@@ -38,7 +38,7 @@ def agents_command(
             console.print("[yellow]No agents currently active in the swarm.[/yellow]")
             return
 
-        table = Table(title="🤖 Active Agent Swarm", border_style="cyan")
+        table = Table(title="Active Agent Swarm", border_style="cyan")
         table.add_column("Agent ID", style="bold cyan")
         table.add_column("Agent Name", style="bold")
         table.add_column("Status", justify="center")
