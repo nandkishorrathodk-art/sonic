@@ -104,6 +104,7 @@ class TestDynamicStrategyEngine:
         assert sig == TargetFeedbackSignal.WAF_BLOCK
 
         plan = engine.adapt_strategy(sig, target="https://target.com/search?q=test")
+        assert plan.posture == StrategicPosture.REQUEST_FILTER_ADAPTATION
         assert plan.posture == StrategicPosture.WAF_EVASION_MUTATION
         assert "chunking" in plan.action_mutation.lower() or "encoding" in plan.action_mutation.lower()
         assert plan.synthesize_novel_method is True
@@ -259,6 +260,7 @@ class TestCTFStrategyFeedback:
         sig = engine.analyze_feedback(stdout="Running binary...\nSegmentation fault (core dumped)", exit_code=139)
         assert sig == TargetFeedbackSignal.BINARY_CRASH_OR_SEGFAULT
         plan = engine.adapt_strategy(sig, target="./vuln_binary")
+        assert plan.posture == StrategicPosture.PROCESS_FAULT_DIAGNOSIS
         assert plan.posture == StrategicPosture.EXPLOIT_PAYLOAD_MUTATION
         assert plan.synthesize_novel_method is True
         assert plan.author_custom_tool is True

@@ -40,7 +40,63 @@ _PROTECTED_COMPONENTS = frozenset([
     "sonic/evolution/self_coder",
     "sonic/evolution/coding_agent",
     "sonic-core/tests/test_p0_security_hardening.py",
+    "sonic/agents/judge.py",
+    "sonic/evidence",
+    "sonic-core/tests/test_safety_sealed_policy.py",
+    "sonic/evolution/self_coder_candidates.py",
+    "sonic/evolution/continuous_runner.py",
+    "sonic/sandbox/factory.py",
 ])
+
+
+def _check_path_match(candidate_path: str, protected_path: str) -> bool:
+    """Helper to check if candidate_path matches protected_path with segmented slash boundaries."""
+    if candidate_path == protected_path:
+        return True
+    if candidate_path.startswith(protected_path + "/"):
+        return True
+    if candidate_path.startswith(protected_path + "."):
+        return True
+    if f"/{protected_path}/" in f"/{candidate_path}/":
+        return True
+    if f"/{protected_path}." in f"/{candidate_path}":
+        return True
+    if candidate_path.endswith("/" + protected_path):
+        return True
+    return False
+
+
+def get_protected_component(component_path: str) -> str | None:
+    """
+    Returns the protected component matched if component_path touches any protected safety component,
+    or None otherwise.
+    Normalizes path and strips repo prefixes (sonic-core/, sonic-cli/) with segmented boundary checks.
+    """
+    raw_path = str(component_path or "").replace("\\", "/").strip()
+    collapsed = re.sub(r"/+", "/", raw_path)
+    normalized = posixpath.normpath(collapsed).strip("/").lower()
+    if not normalized or normalized == ".":
+        return None
+
+    norm_unprefixed = normalized.removeprefix("sonic-core/").removeprefix("sonic-cli/")
+
+    for protected in _PROTECTED_COMPONENTS:
+        p = posixpath.normpath(protected.replace("\\", "/").strip()).strip("/").lower()
+        p_unprefixed = p.removeprefix("sonic-core/").removeprefix("sonic-cli/")
+
+        for target in (normalized, norm_unprefixed):
+            for prot in (p, p_unprefixed):
+                if _check_path_match(target, prot):
+                    return protected
+    return None
+
+
+def is_protected_component(component_path: str) -> bool:
+    """
+    Enforces strict safety envelope immutability.
+    Returns True if the target path touches any protected safety component.
+    """
+    return get_protected_component(component_path) is not None
 
 
 class EvolutionStage(StrEnum):
@@ -86,43 +142,27 @@ class EvolutionPipeline:
         pid = f"evo-{uuid.uuid4().hex[:8]}"
 
         # Invariant 1: AI cannot propose modifications to safety kernel or policy
-        # Ensure target_component path is normalized (collapse //, /./, ..) before checking against _PROTECTED_COMPONENTS
-        raw_path = str(target_component or "").replace("\\", "/").strip()
-        collapsed = re.sub(r"/+", "/", raw_path)
-        normalized = posixpath.normpath(collapsed)
-        norm_clean = normalized.lstrip("./").lstrip("/")
-
-        for protected in _PROTECTED_COMPONENTS:
-            p = protected.lower()
-            p_unprefixed = p.removeprefix("sonic-core/").removeprefix("sonic-cli/")
-            norm_lower = normalized.lower()
-            norm_clean_lower = norm_clean.lower()
-            if (
-                p in norm_lower
-                or p in norm_clean_lower
-                or p_unprefixed in norm_clean_lower
-                or norm_lower == p
-                or norm_clean_lower == p_unprefixed
-            ):
-                logger.critical(
-                    "evolution_rejected_safety_violation",
-                    component=target_component,
-                    proposal_id=pid,
-                )
-                proposal = ImprovementProposal(
-                    proposal_id=pid,
-                    target_component=target_component,
-                    description=description,
-                    code_diff=code_diff,
-                    stage=EvolutionStage.REJECTED,
-                )
-                proposal.stage_history.append((
-                    EvolutionStage.REJECTED,
-                    f"Forbidden: Self-modification of protected safety kernel '{protected}' is strictly denied.",
-                    datetime.now(UTC).isoformat(),
-                ))
-                self._proposals[pid] = proposal
-                return proposal, "Rejected: Cannot self-modify safety kernel."
+        protected = get_protected_component(target_component)
+        if protected:
+            logger.critical(
+                "evolution_rejected_safety_violation",
+                component=target_component,
+                proposal_id=pid,
+            )
+            proposal = ImprovementProposal(
+                proposal_id=pid,
+                target_component=target_component,
+                description=description,
+                code_diff=code_diff,
+                stage=EvolutionStage.REJECTED,
+            )
+            proposal.stage_history.append((
+                EvolutionStage.REJECTED,
+                f"Forbidden: Self-modification of protected safety kernel '{protected}' is strictly denied.",
+                datetime.now(UTC).isoformat(),
+            ))
+            self._proposals[pid] = proposal
+            return proposal, "Rejected: Cannot self-modify safety kernel."
 
         proposal = ImprovementProposal(
             proposal_id=pid,

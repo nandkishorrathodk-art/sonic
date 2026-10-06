@@ -24,7 +24,7 @@ from sonic.evolution.codebase_evolver import (
     SafetyInvariantViolation,
     TestExecutionResult,
 )
-from sonic.evolution.pipeline import EvolutionStage
+from sonic.evolution.pipeline import EvolutionPipeline, EvolutionStage
 
 
 @pytest.fixture
@@ -78,8 +78,16 @@ class TestSafetyInvariants:
             "sonic/evolution/goal_director.py",
             "sonic/evolution/pipeline.py",
             "sonic/evolution/self_coder.py",
-            "sonic/evolution/coding_agent.py",
+            "sonic/evolution/coding_agent",
             "sonic-core/tests/test_p0_security_hardening.py",
+            "sonic/agents/judge.py",
+            "sonic/evidence/collector.py",
+            "sonic-core/tests/test_safety_sealed_policy.py",
+            "sonic/evolution/self_coder_candidates.py",
+            "sonic/evolution/continuous_runner.py",
+            "sonic/sandbox/factory.py",
+            "tests/test_p0_security_hardening.py",
+            "tests/test_safety_sealed_policy.py",
         ]
 
         for target in protected_targets:
@@ -404,3 +412,96 @@ class TestCodebaseEvolverBugFixes:
         assert report.git_committed is False
         assert "commit denied" in report.error_reason
         assert (temp_repo / target).read_text(encoding="utf-8") == original
+
+    def test_legitimate_authoring_module_not_blocked_by_auth_substring(self, temp_repo):
+        evolver = CodebaseEvolver(repo_root=temp_repo)
+        # sonic/authoring/generator.py must NOT be blocked because sonic/auth is only a substring
+        assert evolver.is_protected("sonic/authoring/generator.py") is False
+        assert evolver.is_protected("sonic-core/sonic/authoring/generator.py") is False
+
+        pipeline = EvolutionPipeline()
+        prop, msg = pipeline.submit_proposal(
+            target_component="sonic/authoring/generator.py",
+            description="Add prompt template generator",
+            code_diff="def generate(): pass\n",
+        )
+        assert prop.stage != EvolutionStage.REJECTED
+        assert "Cannot self-modify" not in msg
+
+    def test_timeout_ceiling_and_floor(self, monkeypatch):
+        monkeypatch.setenv("SONIC_EVOLUTION_TEST_TIMEOUT", "30")
+        assert CodebaseEvolver._resolve_test_timeout() == 120
+
+        monkeypatch.setenv("SONIC_EVOLUTION_TEST_TIMEOUT", "3600")
+        assert CodebaseEvolver._resolve_test_timeout() == 1800
+
+        monkeypatch.setenv("SONIC_EVOLUTION_TEST_TIMEOUT", "600")
+        assert CodebaseEvolver._resolve_test_timeout() == 600
+
+    def test_security_regression_requires_both_suites_on_disk(self, temp_repo):
+        evolver = CodebaseEvolver(repo_root=temp_repo)
+        p0_path = temp_repo / "sonic-core" / "tests" / "test_p0_security_hardening.py"
+        safety_path = temp_repo / "sonic-core" / "tests" / "test_safety_sealed_policy.py"
+        p0_path.parent.mkdir(parents=True, exist_ok=True)
+        p0_path.write_text("def test_p0(): pass\n", encoding="utf-8")
+
+        # Missing test_safety_sealed_policy.py -> must fail closed
+        if safety_path.exists():
+            safety_path.unlink()
+        assert evolver.run_security_regression() is False
+
+        # Create both -> should run tests
+        safety_path.write_text("def test_safety(): pass\n", encoding="utf-8")
+        with patch.object(evolver, "run_tests", return_value=TestExecutionResult(passed=True)):
+            assert evolver.run_security_regression() is True
+
+    def test_test_subprocess_env_scrubs_secrets(self):
+        from sonic.evolution.codebase_evolver import _scrub_env_secrets
+
+        dirty_env = {
+            "PATH": "/usr/bin:/bin",
+            "PYTHONPATH": "/repo/sonic-core",
+            "JWT_SECRET": "super_secret_jwt",
+            "SECRET_KEY": "super_secret_key",
+            "OPENAI_API_KEY": "sk-1234567890",
+            "ANTHROPIC_API_KEY": "ant-key-123",
+            "DATABASE_URL": "postgresql://user:pass@localhost/db",
+            "NEO4J_PASSWORD": "mypassword",
+            "GH_TOKEN": "ghp_abcdef",
+            "MY_SERVICE_TOKEN": "tok-123",
+            "APP_ENV": "test",
+        }
+        clean_env = _scrub_env_secrets(dirty_env)
+        assert "PATH" in clean_env
+        assert "PYTHONPATH" in clean_env
+        assert "APP_ENV" in clean_env
+        assert "JWT_SECRET" not in clean_env
+        assert "SECRET_KEY" not in clean_env
+        assert "OPENAI_API_KEY" not in clean_env
+        assert "ANTHROPIC_API_KEY" not in clean_env
+        assert "DATABASE_URL" not in clean_env
+        assert "NEO4J_PASSWORD" not in clean_env
+        assert "GH_TOKEN" not in clean_env
+        assert "MY_SERVICE_TOKEN" not in clean_env
+
+    def test_protected_component_in_nested_worktree_path_matches(self):
+        from sonic.evolution.pipeline import is_protected_component
+
+        assert is_protected_component("worktrees/evo-123/sonic/kernel/action_broker.py") is True
+        assert is_protected_component("worktrees/evo-123/sonic/sandbox/egress.py") is True
+        assert is_protected_component("worktrees/evo-123/sonic/safety/sealed.py") is True
+        assert is_protected_component("worktrees/evo-123/sonic/agents/judge.py") is True
+        assert is_protected_component("worktrees/evo-123/sonic/authoring/generator.py") is False
+
+    def test_security_regression_resolves_when_repo_root_is_sonic_core(self, tmp_path):
+        # When repo_root is already inside sonic-core
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir(parents=True)
+        (tests_dir / "test_p0_security_hardening.py").write_text("def test_p0(): pass\n", encoding="utf-8")
+        (tests_dir / "test_safety_sealed_policy.py").write_text("def test_safety(): pass\n", encoding="utf-8")
+
+        evolver = CodebaseEvolver(repo_root=tmp_path)
+        with patch.object(evolver, "run_tests", return_value=TestExecutionResult(passed=True)) as mock_run:
+            assert evolver.run_security_regression() is True
+            mock_run.assert_called_once_with(["tests/test_p0_security_hardening.py", "tests/test_safety_sealed_policy.py"])
+

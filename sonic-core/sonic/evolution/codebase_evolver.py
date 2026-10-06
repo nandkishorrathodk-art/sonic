@@ -36,10 +36,39 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sonic.evolution.pipeline import _PROTECTED_COMPONENTS, EvolutionPipeline, EvolutionStage
+from sonic.evolution.pipeline import (
+    _PROTECTED_COMPONENTS,
+    EvolutionPipeline,
+    EvolutionStage,
+    is_protected_component,
+)
 from sonic.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Module-level alias for backward compatibility
+is_protected = is_protected_component
+
+
+def _scrub_env_secrets(env: dict[str, str]) -> dict[str, str]:
+    """Scrub sensitive secrets from environment to prevent secret leakage to test subprocesses."""
+    secret_patterns = (
+        "SECRET", "TOKEN", "PASSWORD", "PASSWD", "API_KEY",
+        "PRIVATE_KEY", "CREDENTIAL", "ACCESS_KEY", "AUTH_KEY",
+    )
+    specific_sensitive = {
+        "JWT_SECRET", "SECRET_KEY", "DATABASE_URL", "NEO4J_PASSWORD",
+        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+        "GH_TOKEN", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY",
+    }
+    scrubbed = {}
+    for k, v in env.items():
+        k_upper = k.upper()
+        if k_upper in specific_sensitive or any(p in k_upper for p in secret_patterns):
+            continue
+        scrubbed[k] = v
+    return scrubbed
+
 
 class SafetyInvariantViolation(Exception):
     """Raised when an evolution proposal attempts to modify a protected safety module."""
@@ -169,13 +198,13 @@ class CodebaseEvolver:
 
     @staticmethod
     def _resolve_test_timeout() -> int:
-        """Resolve the verification subprocess timeout (env-overridable, >=120s)."""
+        """Resolve the verification subprocess timeout (env-overridable, 120s <= timeout <= 1800s)."""
         raw = os.environ.get("SONIC_EVOLUTION_TEST_TIMEOUT", "")
         try:
             value = int(raw)
         except (TypeError, ValueError):
             value = 600
-        return max(120, value)
+        return min(1800, max(120, value))
 
     # ------------------------------------------------------------------
     # 1. Safety Envelope Invariant Check
@@ -184,21 +213,10 @@ class CodebaseEvolver:
         """
         Enforces strict safety envelope immutability.
         Returns True if the target path touches any protected safety component.
-
-        H5 audit fix: normalize with os.path.normpath to collapse //, /./, /../
-        before checking, preventing path-spelling bypasses.
+        Normalizes paths, collapses redundant segments, and strips repository prefixes
+        identical to pipeline.py, so relative or worktree paths evaluate correctly.
         """
-        normalized = os.path.normpath(component_path).replace("\\", "/").strip("/").lower()
-        for protected in _PROTECTED_COMPONENTS:
-            protected_path = protected.replace("\\", "/").strip("/").lower()
-            if (
-                normalized == protected_path
-                or normalized.startswith(protected_path + "/")
-                or normalized.startswith(protected_path + ".")
-                or f"/{protected_path}/" in f"/{normalized}/"
-            ):
-                return True
-        return False
+        return is_protected_component(component_path)
 
     def _resolve_repo_path(self, relative_path: str, *, check_protected: bool = True) -> Path:
         """Resolve a patch path and reject absolute paths and repository escapes."""
@@ -466,7 +484,7 @@ class CodebaseEvolver:
         cmd = [sys.executable, "-m", "pytest"] + test_paths + ["-q", "--tb=short"]
         start_time = time.time()
         try:
-            env = os.environ.copy()
+            env = _scrub_env_secrets(os.environ.copy())
             source_paths = [
                 str(path)
                 for path in (self.repo_root / "sonic-core", self.repo_root)
@@ -526,16 +544,32 @@ class CodebaseEvolver:
 
     def run_security_regression(self) -> bool:
         """Verifies that no security invariants are broken by the proposed change."""
-        required = "sonic-core/tests/test_p0_security_hardening.py"
-        sec_tests = [
-            required,
-            "sonic-core/tests/test_safety_sealed_policy.py",
-        ]
-        existing = [t for t in sec_tests if (self.repo_root / t).exists()]
-        if required not in existing:
-            logger.critical("evolution_security_regression_suite_missing", repo_root=str(self.repo_root))
+        required_p0 = "sonic-core/tests/test_p0_security_hardening.py"
+        required_safety = "sonic-core/tests/test_safety_sealed_policy.py"
+
+        def _resolve_required_test(rel: str) -> str | None:
+            if (self.repo_root / rel).is_file():
+                return rel
+            unprefixed = rel.removeprefix("sonic-core/").removeprefix("sonic-cli/")
+            if (self.repo_root / unprefixed).is_file():
+                return unprefixed
+            return None
+
+        p0_path = _resolve_required_test(required_p0)
+        safety_path = _resolve_required_test(required_safety)
+        if not p0_path or not safety_path:
+            missing = []
+            if not p0_path:
+                missing.append(required_p0)
+            if not safety_path:
+                missing.append(required_safety)
+            logger.critical(
+                "evolution_security_regression_suite_missing",
+                repo_root=str(self.repo_root),
+                missing_tests=missing,
+            )
             return False
-        res = self.run_tests(existing)
+        res = self.run_tests([p0_path, safety_path])
         return res.passed
 
     # ------------------------------------------------------------------
