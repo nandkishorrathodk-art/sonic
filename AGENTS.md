@@ -69,9 +69,13 @@ SONIC operates across two cleanly delineated manifestations with an explicit Cli
   - Hosts the complete cognitive mind (Boss, Judge, Task Planner), persistent graph & vector memory (`sqlite_graph.py`), Docker graphical workstation (`sonic-desktop-workstation`), and live visible desktop stream (noVNC on port 12001).
   - **Standalone Independence**: SONIC Core is 100% complete and self-contained; it does NOT require `sonic-cli` to operate. It runs as an autonomous background service / API (`http://localhost:12000`) and web dashboard.
   - Department: Managed under Department `cognitive_systems` (branch: `departments/cognitive-systems`).
-- **SONIC CLI (`sonic-cli`) — The Autonomous Software Engineer & Developer Interface**:
-  - Devin-style terminal interface (`sonic > `) dedicated to code engineering, repository inspection, diff reviews (`/diff`), and continuous autonomous self-evolution (`/auto`).
-  - **Client-Server Connection**: The CLI is a remote controller / client to SONIC Core. All runtime subcommands (`sonic status`, `sonic mission`, `sonic computer`, `sonic prompt`, `sonic graph`) connect directly via HTTP/REST to the Core backend at `http://localhost:12000`. In `/auto` mode, it analyzes the `sonic-core` codebase, tests safe AST mutations in isolated Git worktrees, and pushes verified candidate upgrades to the core engine.
+- **SONIC CLI (`sonic-cli`) — The Autonomous AI Software Engineer (Zero Boss / Workstation)**:
+  - Devin/Antigravity-style terminal interface (`sonic > `) operating directly on the local repository codebase.
+  - **Zero Boss / Swarm / Workstation in CLI**: BossAgent, sub-agent swarms, and Docker graphical desktop workstations (`GUI_SCREENSHOT`, `xdotool`, etc.) belong 100% to `sonic-core` and the Web Dashboard (`sonic-dashboard`). They are completely eliminated from `sonic-cli`.
+  - **Local Agentic Coding Loop (`DeveloperAgent`)**: Natural language prompts (`> fix test in ...`, `> explain architecture`) enter a local observe-reason-act tool execution loop (`view_file`, `write_file`, `edit_file`, `run_command`, `git_diff`, `run_pytest`) powered by fast local/cloud LLMs (Groq `qwen/qwen3.8-27b`, OpenAI, Claude, Gemini) with workspace path confinement and secret sanitization.
+  - **Instant Conversational Greetings**: Simple greetings (`hi`, `hello`, `hii`) return immediate human-like responses in < 5ms without tool calls, worker spawning, or desktop screenshots.
+  - **Developer Slash Commands & Subcommands**: Fast developer controls (`/auto`, `/diff`, `/journal`, `/test`, `/status`, `/help`, `/clear`, `/exit`) and subcommands (`sonic status`, `sonic diff`, `sonic test`, `sonic auto`, `sonic journal`, `sonic auth`, `sonic version`).
+  - In `/auto` mode, it continuously triggers `ContinuousAutoEvolutionRunner` in isolated Git worktrees, tests candidates, and logs to `evolution.md`.
   - Department: Managed under Department `platform_systems` (branch: `departments/platform-systems`).
 
 ## Historical engineering record
@@ -2502,5 +2506,40 @@ Third-pass hardening across `sonic-core` (Department `cognitive_systems`) and `s
    - Updated all subcommands (`computer.py`, `mission.py`, `evolution.py`, `status.py`, etc.) from port 8000 to port 12000.
    - Standardized CLI branding to `Autonomous AI-Human Digital Being` and default profile to `STANDARD_WORKSTATION`.
    - Pushed to `origin/departments/platform-systems` (commit `4c71039`) and `origin/departments/cognitive-systems` (commit `3ac2740`).
+
+## Autonomous AI Software Engineer CLI: Pure Devin/Antigravity Engine & Zero-Boss Decoupling (2026-10-06)
+
+Complete separation of `sonic-cli` (Department `platform_systems`) from `BossAgent` and the graphical Docker workstation:
+
+1. **Zero-Boss CLI Decoupling**:
+   - Purged all `/workstation/prompt`, `BossAgent`, and Docker desktop workstation dependencies from `sonic-cli`.
+   - Removed 14 legacy workstation and swarm subcommands (`computer`, `mission`, `agents`, `engage`, `finding`, `evidence`, `research`, `security`, `experiment`, `graph`, `prompt`, `missions`, `hypotheses`, `kill`).
+   - BossAgent and Docker graphical desktop workstation remain 100% isolated to `sonic-core` and the Next.js web dashboard (`sonic-dashboard`).
+
+2. **Standalone Local `DeveloperAgent` Engine (`sonic-cli/sonic_cli/developer_agent.py`)**:
+   - Implemented an agentic observe-reason-act coding engine with 6 native tools:
+     - `view_file(path, start_line, end_line)`: Inspect file contents or list directories with 1-indexed line numbers.
+     - `write_file(path, content)`: Safely write or overwrite files with automatic parent directory creation.
+     - `edit_file(path, target_content, replacement_content)`: Precise replacement of unique target content blocks with CRLF/LF resilience and helpful context guidance.
+     - `run_command(command, timeout)`: Safe local subprocess execution with process group / tree termination (`taskkill` on Windows, `os.killpg` on POSIX) and UTF-8 encoding protection.
+     - `git_diff()`: Colored, line-numbered git diff inspection.
+     - `run_pytest(test_path)`: Direct pytest runner with stdout/stderr capture.
+   - Configured with fast Groq `qwen/qwen3.8-27b` by default (`.env` or system environment), with seamless multi-provider fallback.
+   - Path confinement (`_resolve_workspace_path`): Blocks directory traversal (`../../`) escaping the workspace root.
+   - Secret sanitization (`sanitize_secrets`): Automatically masks API tokens (`GROQ_API_KEY`, `JWT_SECRET`, `SONIC_TOKEN`, etc.) in console output and tool arguments.
+   - Signal safety: Clean `KeyboardInterrupt` / Ctrl+C handling returning `DeveloperAgentResult(interrupted=True)`.
+
+3. **Streamlined REPL & Command Surface (`sonic-cli/sonic_cli/repl.py` & `main.py`)**:
+   - Free-form natural language inputs route directly to the local `DeveloperAgent` without network hops to Boss.
+   - Instant Conversational Greetings: Basic greetings (`hi`, `hello`, `hii`, `hey`, etc.) respond conversationally in < 5ms without tool invocations or desktop screenshots.
+   - Developer Slash Commands: `/auto [N]`, `/diff`, `/journal`, `/test [path]`, `/status`, `/help`, `/clear`, `/exit`.
+   - Clean Subcommands: `sonic status`, `sonic diff`, `sonic test`, `sonic auto`, `sonic journal`, `sonic auth`, `sonic version`.
+
+4. **100% Green Verification Suite**:
+   - 66/66 tests passing in `sonic-cli/tests/`:
+     - `test_cli_devin_mode.py` (21 passed): REPL slash commands, interactive banner, zero-arg invocation.
+     - `test_developer_agent.py` (28 passed): Direct tool execution, tool loop, zero-boss isolation.
+     - `test_developer_agent_safety.py` (17 passed): Path traversal protection, timeout process termination, secret sanitization, error feedback.
+
 
 
