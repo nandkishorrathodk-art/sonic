@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -291,13 +292,110 @@ GREETINGS = {
     "hola",
     "yo",
     "sup",
+    "wassup",
+    "what's up",
+    "whats up",
+    "hlo",
+    "helo",
+    "namaste",
+    "namaskar",
+    "salaam",
+    "pranam",
+    "gm",
+    "gn",
+    "good morning",
+    "good evening",
+    "good afternoon",
+    "good night",
+}
+
+FAREWELLS = {
+    "by",
+    "bye",
+    "byee",
+    "byeee",
+    "bye bye",
+    "byebye",
+    "goodbye",
+    "good bye",
+    "cya",
+    "see ya",
+    "see you",
+    "tata",
+    "alvida",
+    "catch you later",
+    "ttyl",
 }
 
 
 def _is_greeting(prompt: str) -> bool:
-    """Check if the prompt is a simple greeting."""
+    """Check if the prompt is a greeting (including typos and letter repetitions)."""
     cleaned = prompt.strip().lower().rstrip("!.,?~ ")
-    return cleaned in GREETINGS
+    if cleaned in GREETINGS:
+        return True
+    # Matches variations like hhi, hhii, hiiii, heyyy, heeeey, etc.
+    if re.match(r"^h+[iey]+$", cleaned):
+        return True
+    if re.match(r"^h+e+l+o+$", cleaned):
+        return True
+    return False
+
+
+def _is_farewell(prompt: str) -> bool:
+    """Check if the prompt is a farewell or exit intent."""
+    cleaned = prompt.strip().lower().rstrip("!.,?~ ")
+    if cleaned in FAREWELLS:
+        return True
+    if re.match(r"^b+y+e*$", cleaned):
+        return True
+    return False
+
+
+def _is_identity_query(prompt: str) -> bool:
+    """Check if the user is asking who/what SONIC is or why it is here."""
+    cleaned = re.sub(r"[^\w\s]", "", prompt.lower()).strip()
+    patterns = [
+        "who are you",
+        "why you are hear",
+        "why are you here",
+        "why you are here",
+        "what are you doing here",
+        "what is your purpose",
+        "what is your job",
+        "what can you do",
+        "what do you do",
+        "what is sonic",
+        "who is sonic",
+        "tell me about yourself",
+        "introduce yourself",
+    ]
+    return any(p in cleaned for p in patterns)
+
+
+def _is_casual_or_playful(prompt: str) -> bool:
+    """Detect non-coding casual chitchat or playful inquiries."""
+    lowered = prompt.lower().strip()
+    triggers = [
+        "can you suck",
+        "tell me a joke",
+        "sing a song",
+        "are you alive",
+        "do you love me",
+        "marry me",
+    ]
+    return any(t in lowered for t in triggers)
+
+
+def _is_short_noise(prompt: str) -> bool:
+    """Detect short non-actionable keyboard smash or gibberish (e.g. 'kjn', 'asdf')."""
+    cleaned = prompt.strip().lower()
+    if len(cleaned) <= 4 and re.match(r"^[a-z]+$", cleaned):
+        vowels = set("aeiou")
+        if not any(c in vowels for c in cleaned):
+            return True
+        if cleaned in {"asdf", "qwe", "qwer", "zxc", "jkl"}:
+            return True
+    return False
 
 
 def _handle_greeting() -> None:
@@ -320,11 +418,34 @@ def _dispatch_prompt(
         _handle_greeting()
         return
 
-    lowered = prompt.strip().lower().rstrip("!?.")
-    if lowered in {"who are you", "what is sonic", "what can you do"}:
+    if _is_farewell(prompt):
         console.print(
-            "I am SONIC, an Autonomous AI Software Engineer operating directly on your local workspace.\n"
-            "I use native tool calling to inspect files, edit code, run tests, and evolve this repository."
+            "👋 Goodbye! Have a great time coding. Type [cyan]/exit[/cyan] or press Ctrl+D whenever you're ready to exit."
+        )
+        return
+
+    if prompt.strip().lower() in {"exit", "quit"}:
+        console.print("👋 Exiting SONIC CLI. Goodbye!")
+        sys.exit(0)
+
+    if _is_identity_query(prompt):
+        console.print(
+            "⚡ I am SONIC, an Autonomous AI Software Engineer operating directly on your local workspace.\n"
+            "I use native tool calling to inspect files, edit code, run tests, and evolve this repository.\n"
+            "Tell me what file or task you'd like to work on, or type [cyan]/help[/cyan] to see available commands."
+        )
+        return
+
+    if _is_casual_or_playful(prompt):
+        console.print(
+            "🤖 I am an AI software engineer focused strictly on reading, writing, and testing code in this workspace.\n"
+            "Please provide a software development task, or type [cyan]/help[/cyan] for available commands."
+        )
+        return
+
+    if _is_short_noise(prompt):
+        console.print(
+            "💬 I didn't recognize that command or task. If you'd like to start, tell me what file or feature to work on (e.g. [italic]'explain main.py'[/italic] or [italic]'run tests'[/italic]), or type [cyan]/help[/cyan]."
         )
         return
 

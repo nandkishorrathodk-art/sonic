@@ -379,6 +379,26 @@ class TestDeveloperAgentToolLoop:
         assert result.success is False
         assert result.error == "API quota exceeded"
 
+    def test_llm_rate_limit_failover(self, tmp_path: Path):
+        """Verify _step_llm automatically fails over to fallback models on HTTP 429 rate limits."""
+        call_models = []
+
+        def mock_call_single(messages, model=None):
+            active_m = model or "primary-model"
+            call_models.append(active_m)
+            if active_m == "primary-model":
+                raise RuntimeError("LLM API error (HTTP 429): rate_limit_exceeded (TPD limit reached)")
+            return {"role": "assistant", "content": "Fallback model response"}, []
+
+        cfg = LLMConfig(provider="groq", model="primary-model", fallback_models=["fallback-model-120b"])
+        agent = DeveloperAgent(workspace_dir=tmp_path, config=cfg)
+        agent._call_single_llm = mock_call_single
+
+        assistant_msg, tool_calls = agent._step_llm([{"role": "user", "content": "test"}])
+        assert call_models == ["primary-model", "fallback-model-120b"]
+        assert assistant_msg["content"] == "Fallback model response"
+        assert agent.config.model == "fallback-model-120b"
+
     def test_sse_streaming_response_parser(self, tmp_path: Path):
         """Test _step_llm streaming parser extracting reasoning, content, and tool calls from SSE chunks."""
         sse_lines = [
@@ -506,18 +526,43 @@ class TestReplSlashCommands:
             repl._handle_help()
 
     def test_greeting_detection_and_conversational_response(self):
-        """Verify greetings ('hi', 'hello', 'hii') are detected and answered conversationally."""
+        """Verify greetings ('hi', 'hello', 'hii', 'hhi') and casual inputs are handled conversationally."""
         assert repl._is_greeting("hi") is True
         assert repl._is_greeting("Hello!") is True
         assert repl._is_greeting("hii") is True
+        assert repl._is_greeting("hhi") is True
         assert repl._is_greeting("hey there") is True
         assert repl._is_greeting("write a quicksort function") is False
+
+        assert repl._is_farewell("by") is True
+        assert repl._is_farewell("bye") is True
+        assert repl._is_farewell("goodbye") is True
+
+        assert repl._is_identity_query("why you are hear") is True
+        assert repl._is_identity_query("who are you") is True
+        assert repl._is_casual_or_playful("can you suck some things ?") is True
+        assert repl._is_short_noise("kjn") is True
 
         with patch.object(repl.console, "print") as mock_print:
             repl._handle_greeting()
             output = "".join(str(c) for c in mock_print.call_args_list)
             assert "SONIC" in output
             assert "autonomous software engineer" in output
+
+    def test_dispatch_prompt_filters_conversational_inputs(self):
+        """Verify conversational prompts never spin up DeveloperAgent."""
+        ctx = resolve_local_context()
+        conversational_inputs = [
+            "hhi",
+            "by",
+            "why you are hear",
+            "can you suck some things ?",
+            "kjn",
+        ]
+        for prompt in conversational_inputs:
+            with patch("sonic_cli.developer_agent.DeveloperAgent") as mock_agent:
+                repl._dispatch_prompt(prompt, ctx)
+                mock_agent.assert_not_called()
 
 
 # ==============================================================================

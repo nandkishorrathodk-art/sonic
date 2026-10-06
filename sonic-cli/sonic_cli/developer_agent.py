@@ -52,8 +52,9 @@ except ImportError:
     pass
 
 # Default system prompt for the autonomous developer agent
-DEFAULT_DEVELOPER_SYSTEM_PROMPT = """You are SONIC Developer Agent, an autonomous AI Software Engineer operating directly on the local repository workspace.
+DEFAULT_DEVELOPER_SYSTEM_PROMPT = f"""You are SONIC Developer Agent, an autonomous AI Software Engineer operating directly on the local repository workspace.
 You solve coding, debugging, refactoring, and engineering tasks with rigor, precision, and verification.
+Current OS: {sys.platform} ({'Windows' if sys.platform == 'win32' else 'Linux/POSIX'})
 
 You have access to the following local tools:
 1. view_file(path, start_line=None, end_line=None): View contents of a file or list directory contents.
@@ -66,6 +67,7 @@ You have access to the following local tools:
 Operational Guidelines:
 - Grounding First: Always inspect files (`view_file`) or search the workspace before modifying code. Never guess contents.
 - Surgical Edits: When editing files, view the exact lines first. Ensure `target_content` has exact indentation and whitespace.
+- Platform Awareness: Use `view_file` to list directories and view files. On Windows, do NOT use Linux commands like `ls`, `grep`, or `find`; use python, git, or pytest commands.
 - Test and Verify: Run relevant tests or pytest (`run_pytest`, `run_command`) after making changes to verify correctness.
 - Diff Verification: Review `git_diff()` before concluding your task.
 - Conclude Cleanly: Once the objective is completed and verified, summarize what was achieved without making further tool calls.
@@ -196,8 +198,28 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
 
 
 # ==============================================================================
-# Security & Path Confinement Helpers
+# Output Formatting & Security Helpers
 # ==============================================================================
+
+
+def _truncate_output(text: str, max_lines: int = 150, max_chars: int = 12000) -> str:
+    """Safely truncate excessive tool output to prevent LLM context window overflow."""
+    if not text or not isinstance(text, str):
+        return text
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        keep_head = max(10, max_lines - 40)
+        keep_tail = 30
+        truncated_count = len(lines) - (keep_head + keep_tail)
+        trimmed = (
+            lines[:keep_head]
+            + [f"\n... (+{truncated_count} lines truncated for context budget) ...\n"]
+            + lines[-keep_tail:]
+        )
+        text = "\n".join(trimmed)
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n... (+{len(text) - max_chars} characters truncated) ..."
+    return text
 
 
 def sanitize_secrets(text: str, extra_secrets: list[str] | None = None) -> str:
@@ -486,9 +508,9 @@ def run_command(
 
         parts = [f"Exit code: {proc.returncode}"]
         if stdout:
-            parts.append(f"STDOUT:\n{stdout}")
+            parts.append(f"STDOUT:\n{_truncate_output(stdout)}")
         if stderr:
-            parts.append(f"STDERR:\n{stderr}")
+            parts.append(f"STDERR:\n{_truncate_output(stderr)}")
         if not stdout and not stderr:
             parts.append("(No command output)")
         return "\n".join(parts)
@@ -597,6 +619,7 @@ class LLMConfig:
     temperature: float = 0.2
     max_tokens: int = 4096
     timeout: float = 60.0
+    fallback_models: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(
@@ -608,6 +631,7 @@ class LLMConfig:
         temperature: float | None = None,
         max_tokens: int | None = None,
         timeout: float | None = None,
+        fallback_models: list[str] | None = None,
     ) -> LLMConfig:
         """Resolve LLM configuration from environment variables with defaults."""
         prov = (
@@ -635,6 +659,15 @@ class LLMConfig:
             "nvidia": "nvidia/nemotron-3-super-120b-a12b",
             "local": "qwen2.5-coder:7b",
             "ollama": "qwen2.5-coder:7b",
+        }
+        default_fallback_models = {
+            "groq": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+            "openai": ["gpt-4o-mini"],
+            "openrouter": ["qwen/qwen3.8-27b"],
+            "deepseek": [],
+            "nvidia": [],
+            "local": [],
+            "ollama": [],
         }
 
         # Resolve API key
@@ -678,6 +711,16 @@ class LLMConfig:
             or default_models.get(prov, "qwen/qwen3.8-27b")
         )
 
+        # Resolve Fallback Models
+        if fallback_models is not None:
+            resolved_fallbacks = fallback_models
+        else:
+            env_fallbacks = os.environ.get("SONIC_FALLBACK_MODELS", "")
+            if env_fallbacks:
+                resolved_fallbacks = [m.strip() for m in env_fallbacks.split(",") if m.strip()]
+            else:
+                resolved_fallbacks = default_fallback_models.get(prov, [])
+
         return cls(
             provider=prov,
             model=resolved_model,
@@ -686,6 +729,7 @@ class LLMConfig:
             temperature=temperature if temperature is not None else 0.2,
             max_tokens=max_tokens if max_tokens is not None else 4096,
             timeout=timeout if timeout is not None else 60.0,
+            fallback_models=resolved_fallbacks,
         )
 
 
@@ -806,9 +850,9 @@ class DeveloperAgent:
                 res = self.run_pytest(test_path=args.get("test_path"))
             else:
                 res = f"Error: Unknown tool '{tool_name}'."
-            return sanitize_secrets(res, [self.config.api_key])
+            return _truncate_output(sanitize_secrets(res, [self.config.api_key]))
         except Exception as exc:
-            return sanitize_secrets(f"Error executing tool '{tool_name}': {exc}", [self.config.api_key])
+            return _truncate_output(sanitize_secrets(f"Error executing tool '{tool_name}': {exc}", [self.config.api_key]))
 
     # ---- Rich Display Helpers ----
 
@@ -857,26 +901,25 @@ class DeveloperAgent:
 
     # ---- LLM Step & Streaming Execution ----
 
-    def _step_llm(
+    def _call_single_llm(
         self,
         messages: list[dict[str, Any]],
+        model: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Perform one LLM turn with SSE streaming for thoughts and tool calls."""
-        if self._llm_client is not None:
-            return self._llm_client(messages, TOOLS_SCHEMA)
-
         if not self.config.api_key:
             raise ValueError(
                 f"Missing API key for provider '{self.config.provider}'. "
                 f"Please set GROQ_API_KEY in your .env or system environment."
             )
 
+        active_model = model or self.config.model
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self.config.model,
+            "model": active_model,
             "messages": messages,
             "tools": TOOLS_SCHEMA,
             "tool_choice": "auto",
@@ -1008,6 +1051,56 @@ class DeveloperAgent:
 
         return assistant_msg, parsed_tool_calls
 
+    def _step_llm(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Perform one LLM turn with automatic failover to fallback models if rate-limited."""
+        if self._llm_client is not None:
+            return self._llm_client(messages, TOOLS_SCHEMA)
+
+        models_to_try = [self.config.model] + [
+            m for m in self.config.fallback_models if m != self.config.model
+        ]
+
+        last_error: Exception | None = None
+        for i, candidate_model in enumerate(models_to_try):
+            try:
+                return self._call_single_llm(messages, model=candidate_model)
+            except RuntimeError as exc:
+                err_text = str(exc)
+                is_rate_limit = (
+                    "429" in err_text
+                    or "rate_limit" in err_text.lower()
+                    or "tpd" in err_text.lower()
+                    or "tokens per day" in err_text.lower()
+                    or "503" in err_text
+                )
+                last_error = exc
+                if is_rate_limit and i + 1 < len(models_to_try):
+                    next_model = models_to_try[i + 1]
+                    self.console.print(
+                        f"\n[bold yellow]⚠️ Model '{candidate_model}' rate-limited ({self.config.provider} HTTP 429). "
+                        f"Failing over to fallback model '{next_model}'...[/bold yellow]"
+                    )
+                    self.config.model = next_model
+                    continue
+                raise last_error from None
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("No models available.")
+
+    def _prune_messages(self, messages: list[dict[str, Any]], max_history: int = 12) -> list[dict[str, Any]]:
+        """Keep system prompt, initial user prompt, and recent turns to prevent context window overflow."""
+        if len(messages) <= max_history + 2:
+            return messages
+        prefix = messages[:2]
+        suffix = messages[-max_history:]
+        while suffix and suffix[0].get("role") == "tool":
+            suffix = suffix[1:]
+        return prefix + suffix
+
     # ---- Main Observe-Reason-Act Execution Loop ----
 
     def run(self, prompt: str) -> DeveloperAgentResult:
@@ -1041,7 +1134,8 @@ class DeveloperAgent:
                 self.console.print(f"\n[bold blue]━━━ Cycle {step}/{self.max_steps} ━━━[/bold blue]")
 
                 # LLM Step (Stream reasoning and extract tool calls)
-                assistant_msg, tool_calls = self._step_llm(messages)
+                step_messages = self._prune_messages(messages)
+                assistant_msg, tool_calls = self._step_llm(step_messages)
                 messages.append(assistant_msg)
 
                 # Termination: No tool calls requested by model
@@ -1120,7 +1214,22 @@ class DeveloperAgent:
             )
         except Exception as exc:
             err_msg = sanitize_secrets(str(exc), [self.config.api_key])
-            self.console.print(f"\n[bold red]❌ Developer agent error: {err_msg}[/bold red]")
+            if "429" in err_msg or "rate_limit" in err_msg.lower() or "tpd" in err_msg.lower():
+                self.console.print(
+                    Panel(
+                        f"[bold yellow]⚠️ LLM API Daily Token / Rate Limit Reached[/bold yellow]\n\n"
+                        f"The API quota for [cyan]{self.config.provider}[/cyan] ({self.config.model}) has been reached.\n"
+                        f"[dim]{err_msg}[/dim]\n\n"
+                        "[bold]How to continue:[/bold]\n"
+                        "• Switch models in [green].env[/green]: `GROQ_MODEL=openai/gpt-oss-120b`\n"
+                        "• Or configure an alternative API key: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.\n"
+                        "• Or wait for the token replenishment window to clear.",
+                        border_style="yellow",
+                        title="API Quota / Rate Limit Notice",
+                    )
+                )
+            else:
+                self.console.print(f"\n[bold red]❌ Developer agent error: {err_msg}[/bold red]")
             return DeveloperAgentResult(
                 success=False,
                 steps=step,
