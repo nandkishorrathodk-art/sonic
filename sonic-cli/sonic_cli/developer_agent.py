@@ -387,7 +387,7 @@ def edit_file(
         elif count > 1:
             return (
                 f"Error: target_content occurs {count} times in '{path}'. "
-                f"Please include more surrounding lines to provide unique surrounding context. "
+                f"Please include more surrounding context lines to provide unique surrounding context. "
                 f"Use view_file('{path}') to inspect surrounding lines."
             )
 
@@ -405,7 +405,7 @@ def edit_file(
         elif count_lf > 1:
             return (
                 f"Error: target_content occurs {count_lf} times in '{path}'. "
-                f"Please include more surrounding lines to provide unique surrounding context. "
+                f"Please include more surrounding context lines to provide unique surrounding context. "
                 f"Use view_file('{path}') to inspect surrounding lines."
             )
 

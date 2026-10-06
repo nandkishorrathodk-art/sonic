@@ -146,7 +146,7 @@ class TestToolExecution:
         # Ambiguous target (occurs twice)
         dup_res = edit_file("code.py", "x = 1", "x = 10", workspace_dir=tmp_path)
         assert "occurs 2 times" in dup_res
-        assert "Please include more surrounding lines" in dup_res
+        assert "surrounding context lines" in dup_res
 
         # Target not found
         missing_target = edit_file("code.py", "z = 99", "z = 100", workspace_dir=tmp_path)
