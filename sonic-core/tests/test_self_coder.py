@@ -20,13 +20,14 @@ import asyncio
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from sonic.evolution.codebase_evolver import CodebaseEvolver
 from sonic.evolution.patch_synthesizer import PatchSynthesizer, _extract_diff, _files_touched
 from sonic.evolution.pipeline import EvolutionStage
-from sonic.evolution.self_coder import SelfCoder
+from sonic.evolution.self_coder import SelfCoder, SelfCoderCycle
 
 
 class _StubLLM:
@@ -52,6 +53,33 @@ class _StubLLM:
 
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
+
+
+def test_close_is_safe_for_regular_self_coder(tmp_path: Path) -> None:
+    coder = SelfCoder(repo_root=tmp_path)
+
+    coder.close()
+    coder.close()
+
+
+@pytest.mark.asyncio
+async def test_run_uses_pinned_signals_without_rediscovery(tmp_path: Path) -> None:
+    coder = SelfCoder(repo_root=tmp_path, agentic=False)
+    pinned = ("Fix the requested issue", "sonic-core/example.py", "bug_fix")
+    expected_cycle = SelfCoderCycle(
+        signal=pinned[0],
+        target_file=pinned[1],
+        category=pinned[2],
+        stage="rejected",
+    )
+    coder.discover_signals = MagicMock(side_effect=AssertionError("must not rescan"))
+    coder.run_cycle = AsyncMock(return_value=expected_cycle)
+
+    report = await coder.run(max_cycles=1, signals=[pinned])
+
+    assert report.cycles == [expected_cycle]
+    coder.discover_signals.assert_not_called()
+    coder.run_cycle.assert_awaited_once_with(*pinned)
 
 
 @pytest.fixture

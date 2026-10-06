@@ -16,6 +16,7 @@ from sonic.api.routes.self_coder import (
     _build_coder,
     self_coder_approve_candidate,
     self_coder_status,
+    self_coder_verified_history,
 )
 from sonic.api.routes.self_coder import (
     router as self_coder_router,
@@ -26,6 +27,8 @@ from sonic.evolution.codebase_evolver import CodebaseEvolver
 from sonic.evolution.pipeline import EvolutionStage
 from sonic.evolution.self_coder_candidates import SelfCoderCandidateStore
 from sonic.evolution.self_coder_config import get_self_coder_config
+from sonic.evolution.graph_recorder import record_verified_candidate
+from sonic.memory.sqlite_graph import SqliteGraph
 
 DIFF = """diff --git a/sonic-core/app.py b/sonic-core/app.py
 --- a/sonic-core/app.py
@@ -149,6 +152,92 @@ def test_verified_candidate_is_applied_to_active_worktree_without_branch_or_comm
     assert store.get(candidate["candidate_id"], "tenant-a")["diff"] == DIFF
 
 
+@pytest.mark.asyncio
+async def test_verified_candidate_is_recorded_in_tenant_graph(candidate_repo, monkeypatch):
+    root, storage = candidate_repo
+    monkeypatch.setenv("SONIC_EVOLUTION_DB_PATH", str(storage.parent / "evolution.db"))
+    graph = SqliteGraph(db_path=str(storage.parent / "graph.db"))
+    await graph.connect()
+    monkeypatch.setattr("sonic.memory.router._active_memory", graph)
+
+    store = SelfCoderCandidateStore(root, storage)
+    result = await store.run_candidate(
+        "tenant-a", 1, lambda worktree: _coder_factory(worktree), auto_commit=True
+    )
+    candidate = result["candidates"][0]
+
+    nodes = await graph.query("", tenant_id="tenant-a")
+    recorded = [
+        node for node in nodes
+        if node.get("candidate_id") == candidate["candidate_id"]
+    ]
+    other_tenant_nodes = await graph.query("", tenant_id="tenant-b")
+
+    assert candidate["status"] == "promoted"
+    assert len(recorded) == 1
+    assert recorded[0]["node_type"] == "SelfEvolutionCandidate"
+    assert recorded[0]["status"] == "verified_promoted"
+    assert recorded[0]["security_regression"] is True
+    assert recorded[0]["commit"] == candidate["commit"]
+    assert recorded[0]["version_after"] == candidate["version_after"]
+    assert recorded[0]["journal_recorded"] is True
+    assert other_tenant_nodes == []
+    history = await self_coder_verified_history(
+        user=User(
+            email="operator@example.test",
+            name="Operator",
+            tenant_id="tenant-a",
+            role=UserRole.OPERATOR,
+        )
+    )
+    assert history["count"] == 1
+    assert history["candidates"][0]["candidate_id"] == candidate["candidate_id"]
+    await graph.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_graph_recorder_ignores_candidate_not_finally_applied(tmp_path):
+    assert await record_verified_candidate(
+        {"candidate_id": "candidate-1", "tenant_id": "tenant-a", "status": "verified"},
+        tmp_path,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_graph_recorder_rejects_applied_candidate_without_all_verification(tmp_path):
+    candidate = {
+        "candidate_id": "candidate-1",
+        "tenant_id": "tenant-a",
+        "status": "applied",
+        "verification": {
+            "full_test_suite": True,
+            "security_regression": True,
+            "active_worktree": {
+                "full_test_suite": True,
+                "security_regression": False,
+            },
+        },
+    }
+
+    with pytest.raises(ValueError, match="complete passing verification"):
+        await record_verified_candidate(candidate, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_graph_fallback_path_uses_repository_storage(monkeypatch, tmp_path):
+    import sonic.memory.router as memory_router
+
+    monkeypatch.setattr(memory_router, "_active_memory", None)
+    monkeypatch.setenv("SONIC_FORCE_SQLITE_MEMORY", "1")
+    monkeypatch.delenv("SONIC_MEMORY_DB_PATH", raising=False)
+    graph_path = tmp_path / "sonic_data.db"
+
+    graph = await memory_router.get_smart_memory(sqlite_db_path=str(graph_path))
+
+    assert graph.db_path == str(graph_path)
+    await graph.disconnect()
+
+
 def test_candidate_run_preserves_unrelated_dirty_active_checkout(candidate_repo):
     root, storage = candidate_repo
     (root / "operator-work.txt").write_text("keep this change\n", encoding="utf-8")
@@ -235,6 +324,32 @@ def test_handled_signal_is_excluded_from_later_candidate_runs(candidate_repo):
     assert captured["excluded_signals"] == {
         ("sonic-core/app.py", "Verify candidate behavior")
     }
+    assert result["candidates"][0]["status"] == "no_candidate"
+
+
+def test_candidate_store_passes_pinned_signal_to_coder(candidate_repo):
+    root, storage = candidate_repo
+    store = SelfCoderCandidateStore(root, storage_dir=storage)
+    captured = {}
+    pinned_signal = ("Fix the requested defect", "sonic-core/app.py", "bug_fix")
+
+    class CapturingCoder:
+        async def run(self, max_cycles: int, excluded_signals=None, signals=None):
+            captured["max_cycles"] = max_cycles
+            captured["signals"] = signals
+            return SimpleNamespace(cycles=[], to_text=lambda: "No new signal")
+
+    result = asyncio.run(
+        store.run_candidate(
+            "tenant-a",
+            1,
+            lambda _worktree: CapturingCoder(),
+            signals=[pinned_signal],
+        )
+    )
+
+    assert captured["max_cycles"] == 1
+    assert captured["signals"] == [pinned_signal]
     assert result["candidates"][0]["status"] == "no_candidate"
 
 

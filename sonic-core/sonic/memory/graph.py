@@ -145,6 +145,32 @@ class GraphMemory:
         """Create a generic labelled node (used by BaseAgent.remember)."""
         return await self._create_node(label, data)
 
+    async def list_nodes(
+        self,
+        label: str,
+        tenant_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List generic nodes by label without allowing cross-tenant reads."""
+        if not label.isidentifier():
+            raise ValueError("Graph node label must be an identifier")
+        if limit < 1:
+            raise ValueError("Graph node limit must be positive")
+        if not self._driver:
+            return []
+        scope = _tenant_scope(tenant_id)
+        if scope is None:
+            return []
+        async with self._driver.session() as session:
+            result = await session.run(
+                f"MATCH (n:{label}) WHERE n.tenant_id = $tenant_id "
+                "RETURN properties(n) AS props "
+                "ORDER BY n.recorded_at DESC LIMIT $limit",
+                tenant_id=scope,
+                limit=limit,
+            )
+            return [record["props"] async for record in result]
+
     async def _get_node(self, label: str, uid: str, tenant_id: str | None = None) -> dict | None:
         """Get a node by uid, optionally filtered by tenant_id."""
         if not self._driver:

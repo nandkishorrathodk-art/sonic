@@ -35,7 +35,7 @@ def set_active_memory(mem: MemoryBackend) -> None:
     _active_memory = mem
 
 
-async def get_smart_memory() -> MemoryBackend:
+async def get_smart_memory(*, sqlite_db_path: str | None = None) -> MemoryBackend:
     """
     Get the best available memory backend.
 
@@ -49,7 +49,9 @@ async def get_smart_memory() -> MemoryBackend:
 
     # If explicitly forced to SQLite via environment or an explicit SQLite DB path is provided
     if os.environ.get("SONIC_FORCE_SQLITE_MEMORY") == "1" or os.environ.get("SONIC_MEMORY_DB_PATH"):
-        sqlite_mem = SqliteGraph()
+        sqlite_mem = SqliteGraph(
+            db_path=os.environ.get("SONIC_MEMORY_DB_PATH") or sqlite_db_path
+        )
         await sqlite_mem.connect()
         _active_memory = sqlite_mem
         logger.info("memory_backend_selected", backend="sqlite_persistent (configured)")
@@ -70,7 +72,7 @@ async def get_smart_memory() -> MemoryBackend:
 
     # Persistent fallback: SQLite-backed graph (survives restart)
     logger.warning("neo4j_unavailable_using_sqlite_persistent")
-    sqlite_mem = SqliteGraph()
+    sqlite_mem = SqliteGraph(db_path=sqlite_db_path)
     await sqlite_mem.connect()
     _active_memory = sqlite_mem
     logger.info("memory_backend_selected", backend="sqlite_persistent")
@@ -107,4 +109,3 @@ def reset_memory_singleton() -> None:
             except Exception:
                 pass
         _active_memory = None
-
