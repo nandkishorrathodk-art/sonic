@@ -52,7 +52,7 @@ def _call(client: httpx.Client, method: str, path: str, **kwargs) -> dict | None
 
 @app.command(name="audit")
 def security_audit(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Execute the automated adversarial self-security test suite."""
@@ -85,7 +85,7 @@ def security_audit(
 
 @app.command(name="attack-surface")
 def attack_surface(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Enumerate the deployed attack surface of SONIC-REDA."""
@@ -120,7 +120,7 @@ def attack_surface(
 
 @app.command(name="tests")
 def list_tests(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List all available adversarial self-security test suites."""
@@ -150,7 +150,7 @@ def list_tests(
 
 @app.command(name="findings")
 def list_findings(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List any discovered self-security vulnerabilities or weaknesses."""
@@ -180,7 +180,7 @@ def list_findings(
 
 @app.command(name="release-gate")
 def release_gate(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Evaluate release-gate certification status."""
@@ -203,7 +203,7 @@ def release_gate(
 @app.command(name="reproduce")
 def reproduce_test(
     test_id: str = typer.Argument(..., help="Security Test ID to reproduce (e.g. SEC-HOST-01)"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Reproduce a specific self-security test deterministically."""

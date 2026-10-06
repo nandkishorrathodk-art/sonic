@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 console = Console()
-API_BASE = "http://localhost:8000"
+API_BASE = "http://localhost:12000"
 
 
 def agents_command(

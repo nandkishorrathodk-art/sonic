@@ -60,7 +60,7 @@ def _call(client: httpx.Client, method: str, path: str, **kwargs) -> dict | None
 
 @app.command(name="list")
 def list_computers(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List all active computer workspace sessions."""
@@ -91,9 +91,9 @@ def list_computers(
 
 @app.command(name="create")
 def create_computer(
-    profile: str = typer.Option("KALI_SECURITY", "--profile", "-p", help="Profile (KALI_SECURITY, DEBIAN_ENGINEERING)"),
+    profile: str = typer.Option("STANDARD_WORKSTATION", "--profile", "-p", help="Profile (STANDARD_WORKSTATION, DEBIAN_ENGINEERING)"),
     session: str = typer.Option("default", "--session", help="Workspace session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Provision a new persistent engineering computer sandbox (desktop)."""
@@ -114,7 +114,7 @@ def create_computer(
 @app.command(name="status")
 def computer_status(
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """View detailed status and running processes of the computer."""
@@ -139,7 +139,7 @@ def computer_status(
 def open_app(
     app_name: str = typer.Argument(..., help="Application name to open (e.g. code-server, chromium)"),
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Launch an application on the computer desktop."""
@@ -156,7 +156,7 @@ def open_app(
 @app.command(name="screenshot")
 def screenshot(
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Capture a live screenshot of the computer desktop."""
@@ -186,7 +186,7 @@ def screenshot(
 @app.command(name="apps")
 def list_apps(
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List running applications (surfaced via desktop status)."""
@@ -207,7 +207,7 @@ def list_apps(
 def install_app(
     package_name: str = typer.Argument(..., help="Package name to install (e.g. ffuf, jq)"),
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Install a package by running an install command in the sandbox."""
@@ -232,7 +232,7 @@ def install_app(
 def uninstall_app(
     package_name: str = typer.Argument(..., help="Package name to uninstall"),
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Uninstall a package by running a remove command in the sandbox."""
@@ -257,7 +257,7 @@ def uninstall_app(
 def run_terminal(
     command: str = typer.Argument(..., help="Command to run"),
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Execute a shell command inside the computer sandbox."""
@@ -280,7 +280,7 @@ def run_terminal(
 def list_files(
     path: str = typer.Option(".", "--path", "-p", help="Directory path"),
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List files in the computer workspace tree."""
@@ -300,7 +300,7 @@ def list_files(
 @app.command(name="processes")
 def list_processes(
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """View active running processes (surfaced via desktop status)."""
@@ -322,7 +322,7 @@ def list_processes(
 @app.command(name="services")
 def list_services(
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """List background services managed inside the computer."""
@@ -349,7 +349,7 @@ def list_services(
 @app.command(name="git")
 def git_status(
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """View the Git repository working-tree diff for the workspace."""
@@ -369,7 +369,7 @@ def git_status(
 def snapshot_workspace(
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
     name: str = typer.Option("baseline", "--name", "-n", help="Snapshot name"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Create a persistent snapshot of the workstation session state."""
@@ -385,7 +385,7 @@ def snapshot_workspace(
 @app.command(name="reset")
 def reset_workspace(
     workspace_id: str = typer.Option("default", "--workspace", "-w", help="Workspace / session ID"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Reset workspace state to a clean initial baseline."""
@@ -399,7 +399,7 @@ def reset_workspace(
 @app.command(name="destroy")
 def destroy_computer(
     workspace_id: str = typer.Argument(..., help="Workspace / session ID to destroy"),
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Safely terminate and destroy a computer workspace session."""

@@ -22,7 +22,7 @@ def run_mission(
     autonomy: str = typer.Option("L3_AUTONOMOUS", "--autonomy", "-a", help="Autonomy level (L0-L3)"),
     mode: str = typer.Option("ENGINEERING_MODE", "--mode", "-m", help="Mission mode"),
     steps: int = typer.Option(5, "--steps", "-s", help="Max mission steps"),
-    server: str = typer.Option("http://localhost:8000", "--server", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Run an autonomous closed-loop computer engineering mission.
@@ -66,7 +66,7 @@ def run_mission(
 
 @app.command("benchmark")
 def run_benchmark(
-    server: str = typer.Option("http://localhost:8000", "--server", "-s", help="Backend server URL"),
+    server: str = typer.Option("http://localhost:12000", "--server", "-s", help="Backend server URL"),
     token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
 ):
     """Run the self-developer regression benchmark in an isolated lab."""
