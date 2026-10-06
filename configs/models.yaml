@@ -6,8 +6,8 @@
 # ============================================
 
 # Default provider and model when no task-specific rule matches
-default_provider: nvidia
-default_model: nvidia/nemotron-3-super-120b-a12b
+default_provider: groq
+default_model: qwen/qwen3.8-27b
 
 # ---- Provider Definitions ----
 providers:
@@ -172,68 +172,68 @@ providers:
 routing_rules:
   planning:
     description: 'High-level planning, task decomposition, strategy'
-    provider: nvidia
-    model: nvidia/nemotron-3-ultra-550b-a55b
-    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/openai/gpt-oss-120b]
 
   reasoning:
     description: 'Code analysis, dataflow tracing, pattern matching'
-    provider: nvidia
-    model: nvidia/nemotron-3-super-120b-a12b
-    fallback: [nvidia/nvidia/nemotron-3-ultra-550b-a55b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/openai/gpt-oss-120b]
 
   fast_recon:
     description: 'Quick environment discovery, system inspection, tech detection'
-    provider: nvidia
-    model: nvidia/nemotron-3-super-120b-a12b
-    fallback: [nvidia/nvidia/nemotron-3-ultra-550b-a55b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/openai/gpt-oss-20b]
 
   coding:
     description: 'Code generation, fix generation, test writing'
-    provider: nvidia
-    model: nvidia/nemotron-3-ultra-550b-a55b
-    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/openai/gpt-oss-120b]
 
   verification:
     description: 'Evidence checking, confidence scoring, FP filtering'
-    provider: nvidia
-    model: nvidia/nemotron-3-super-120b-a12b
-    fallback: [nvidia/nvidia/nemotron-3-ultra-550b-a55b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/openai/gpt-oss-120b]
 
   hypothesis:
     description: 'Novel architecture ideation, creative reasoning'
-    provider: nvidia
-    model: nvidia/nemotron-3-ultra-550b-a55b
-    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/openai/gpt-oss-120b]
 
   classification:
     description: 'Quick labeling, triage, categorization'
-    provider: nvidia
-    model: nvidia/nemotron-3-super-120b-a12b
-    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
+    provider: groq
+    model: qwen/qwen3.8-27b
+    fallback: [groq/openai/gpt-oss-20b]
 
   vision:
     description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
     provider: groq
     model: qwen/qwen3.8-27b
-    fallback: [openrouter/openai/gpt-4o, nvidia/meta/llama-3.2-11b-vision-instruct]
+    fallback: [groq/openai/gpt-oss-120b]
 
   computer_use:
     description: 'Autonomous computer vision and desktop interaction'
     provider: groq
     model: qwen/qwen3.8-27b
-    fallback: [openrouter/openai/gpt-4o, nvidia/meta/llama-3.2-11b-vision-instruct]
+    fallback: [groq/openai/gpt-oss-120b]
 
 
 # ---- Global Fallback Chain ----
 # If the preferred provider for a task fails, try these in order
 global_fallback_chain:
+  - groq
   - nvidia
   - openrouter
   - deepseek
   - claude
   - openai
-  - groq
   - local
 
 # ---- Cost Controls ----
