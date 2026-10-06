@@ -38,7 +38,7 @@ def agents_command(
             console.print("[yellow]No agents currently active in the swarm.[/yellow]")
             return
 
-        table = Table(title="🤖 Active Agent Swarm", border_style="cyan")
+        table = Table(title="Active Agent Swarm", border_style="cyan")
         table.add_column("Agent ID", style="bold cyan")
         table.add_column("Agent Name", style="bold")
         table.add_column("Status", justify="center")
