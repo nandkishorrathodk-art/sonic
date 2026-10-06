@@ -196,7 +196,11 @@ class SelfCoderCandidateStore:
             line[3:].strip() for line in working_tree_changes.splitlines()
         ]
         tenant_records = self.list(tenant_id)
-        if any(
+        # Skip redundant automatic discovery only when the caller has NOT pinned
+        # explicit signals. A pinned signal must always be attempted: otherwise a
+        # single empty discovery result at a commit would permanently short-circuit
+        # every later run (including the continuous runner's pinned retries).
+        if signals is None and any(
             record.get("base_commit") == base_commit
             and record.get("status") == "no_candidate"
             for record in tenant_records

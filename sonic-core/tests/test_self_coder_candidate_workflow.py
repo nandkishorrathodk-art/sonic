@@ -353,6 +353,53 @@ def test_candidate_store_passes_pinned_signal_to_coder(candidate_repo):
     assert result["candidates"][0]["status"] == "no_candidate"
 
 
+def test_pinned_signal_bypasses_no_candidate_short_circuit(candidate_repo):
+    """A prior empty discovery must not permanently block pinned-signal retries.
+
+    Regression: a single ``no_candidate`` record at a commit short-circuited
+    every later run at that same commit, so the continuous runner could never
+    retry a pinned signal and self-evolution stalled.
+    """
+    root, storage = candidate_repo
+    store = SelfCoderCandidateStore(root, storage_dir=storage)
+    base_commit = _git(root, "rev-parse", "HEAD")
+    store.save({
+        "candidate_id": "0" * 32,
+        "tenant_id": "tenant-a",
+        "status": "no_candidate",
+        "base_commit": base_commit,
+        "base_branch": "feature",
+        "target_file": "",
+        "description": "",
+        "diff": "",
+        "files": [],
+        "test_paths": [],
+        "verification": {},
+        "cycle_stage": "no_candidate",
+        "cycle_reason": "No actionable signal produced a verified patch",
+        "report": "empty discovery",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "commit": "",
+        "commit_branch": "",
+        "error": "",
+    })
+    captured = {}
+    pinned = ("Fix the requested defect", "sonic-core/app.py", "bug_fix")
+
+    class CapturingCoder:
+        async def run(self, max_cycles: int, excluded_signals=None, signals=None):
+            captured["signals"] = signals
+            return SimpleNamespace(cycles=[], to_text=lambda: "No new signal")
+
+    result = asyncio.run(
+        store.run_candidate(
+            "tenant-a", 1, lambda _wt: CapturingCoder(), signals=[pinned]
+        )
+    )
+    assert captured.get("signals") == [pinned]
+    assert result.get("status") != "no_actionable_signal"
+
+
 def test_rejection_and_stale_revalidation_do_not_commit(candidate_repo):
     root, storage = candidate_repo
     store, rejected = _new_candidate(root, storage)

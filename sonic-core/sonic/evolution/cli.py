@@ -236,7 +236,7 @@ def main() -> int:
         print(f"Queued Goals:       {len(director.list_goals(status=GoalStatus.QUEUED))}")
         metrics = journal.fitness_metrics()
         print(f"Total Cycles:       {metrics['total_cycles']} (Promoted: {metrics['promoted']}, Rollbacks: {metrics['rolled_back']})")
-        print(f"Evolution Fitness:  {metrics['success_rate'] * 100:.1f}%%")
+        print(f"Evolution Fitness:  {metrics['success_rate'] * 100:.1f}%")
         print("\nProtected Safety Components (AI Self-Modification FORBIDDEN):")
         from sonic.evolution.codebase_evolver import _PROTECTED_COMPONENTS
         for c in sorted(_PROTECTED_COMPONENTS):
@@ -259,7 +259,7 @@ def main() -> int:
     if args.command == "journal":
         entries = journal.get_entries(limit=args.limit)
         metrics = journal.fitness_metrics()
-        print(f"\n📜 SONIC Evolution Journal (Fitness: {metrics['success_rate'] * 100:.1f}%% | Total: {metrics['total_cycles']})")
+        print(f"\n📜 SONIC Evolution Journal (Fitness: {metrics['success_rate'] * 100:.1f}% | Total: {metrics['total_cycles']})")
         print(f"Notes file: {journal.evolution_md_path}\n" + "-" * 70)
         for e in entries:
             st_badge = "🟢" if e.status == "promoted" else ("🔴" if e.status == "rolled_back" else "⛔")

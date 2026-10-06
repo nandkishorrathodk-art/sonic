@@ -2433,3 +2433,40 @@ Verified end-to-end: a stub candidate diff applied to `logger.py` promoted to
 1872 passed / 0 failed, both in the detached worktree and after applying to the
 active checkout. Full `sonic-core/tests` baseline after the fix: **1859 passed,
 41 skipped, 0 failures**.
+
+
+## Self-evolution logical-bug pass (2026-10-05)
+
+Second-pass audit of the self-evolution / self-improver department after the
+verification-gate fix. Five more real logic bugs were found and fixed (all with
+regression tests):
+
+1. **Flag capture was shadowed by incidental errors** (`evolution/strategy.py`).
+   `DynamicStrategyEngine.analyze_feedback` checked 403/WAF/syntax/error signals
+   *before* the CTF flag regex, so output that contained BOTH a captured flag and
+   any error text (e.g. a 403 from the same response) returned the error signal
+   and the being kept probing instead of extracting the flag. Flag detection is
+   now step 0 (terminal evidence dominates).
+2. **Self-coder signal discovery used a hardcoded 300 s pytest timeout**
+   (`evolution/self_coder.py`) while the verification gate used the configurable
+   `SONIC_EVOLUTION_TEST_TIMEOUT` (default 600 s). A slow suite aborted discovery
+   silently (the `except` returned `[]`), so no signals and no evolution. Discovery
+   now reuses the evolver's budget (env-overridable).
+3. **`no_candidate` permanently short-circuited pinned retries**
+   (`evolution/self_coder_candidates.py`). A single empty discovery at a commit
+   caused every later `run_candidate` at that same commit to return
+   `no_actionable_signal` immediately — even when the caller passed an explicit
+   pinned signal. The continuous runner pins one signal per cycle, so after the
+   first empty discovery the loop could never retry. The short-circuit now applies
+   only to automatic discovery (`signals is None`).
+4. **Version tracker recorded git tags that were never created**
+   (`evolution/version_tracker.py`). `_apply_bump` persisted `v<version>` whenever
+   `tag=True`, even with no commit to tag or a failed tag command — a false
+   provenance claim. The tag is recorded only after `create_git_tag` succeeds.
+5. **CLI printed `0.0%%`** (`evolution/cli.py`). `%%` inside an f-string is a
+   literal double percent (not a format escape); two status/journal lines now
+   print `0.0%`.
+
+Also refreshed `docs/SELF_EVOLUTION_ARCHITECTURE.md` (it still documented the
+300 s discovery timeout). Evolution regression set: 154 passed, 0 failures.
+

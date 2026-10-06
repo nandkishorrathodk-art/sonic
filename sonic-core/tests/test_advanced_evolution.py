@@ -114,6 +114,30 @@ def test_version_tracker_initial_and_semantic_bumps(temp_evolution_env):
     assert [h.version for h in hist] == ["0.1.0", "0.1.1", "0.2.0", "1.0.0"]
 
 
+def test_version_tracker_does_not_record_failed_git_tag(temp_evolution_env, monkeypatch):
+    """A tag that was never created must not be claimed in the version record."""
+    vt: VersionTracker = temp_evolution_env["version_tracker"]
+    # Request a tag with no commit: nothing can be tagged, so no tag is recorded.
+    vt.bump_patch(goal_id="g-notag", title="No commit to tag", git_commit="", tag=True)
+    record = vt.get_latest_record()
+    assert record is not None
+    assert record.git_tag == ""
+
+    # Request a tag with a commit but force tag creation to fail: still no claim.
+    monkeypatch.setattr(vt, "create_git_tag", lambda *a, **k: False)
+    vt.bump_patch(goal_id="g-tagfail", title="Tag command fails", git_commit="deadbeef", tag=True)
+    record = vt.get_latest_record()
+    assert record is not None
+    assert record.git_tag == ""
+
+    # A successful tag creation is recorded.
+    monkeypatch.setattr(vt, "create_git_tag", lambda *a, **k: True)
+    vt.bump_patch(goal_id="g-tagok", title="Tag succeeds", git_commit="deadbeef", tag=True)
+    record = vt.get_latest_record()
+    assert record is not None
+    assert record.git_tag == f"v{record.version}"
+
+
 def test_evolution_journal_and_evolution_md_live_logging(temp_evolution_env):
     """Verifies that entries are saved in SQLite and appended to evolution.md."""
     journal: EvolutionJournal = temp_evolution_env["journal"]

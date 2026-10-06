@@ -125,6 +125,13 @@ class DynamicStrategyEngine:
         combined = f"{stderr}\n{stdout}".strip()
         combined_lower = combined.lower()
 
+        # 0. CTF flag capture dominates every other signal. A discovered flag is
+        # terminal evidence and must not be shadowed by incidental error text in
+        # the same output (e.g. a 403 or a syntax warning alongside the flag),
+        # which would otherwise trigger more probing instead of extraction.
+        if re.search(r"\b(?:flag|ctf|picoctf|htb)\{[^\}]+\}", combined, re.IGNORECASE):
+            return TargetFeedbackSignal.FLAG_DISCOVERED
+
         # 1. Check explicit or parsed HTTP status codes
         if status_code == 403 or "403 forbidden" in combined_lower or "status: 403" in combined_lower or "http/1.1 403" in combined_lower or "http/2 403" in combined_lower:
             # Distinguish WAF block returning 403 from pure application ACL 403
@@ -171,23 +178,19 @@ class DynamicStrategyEngine:
         if any(term in combined_lower for term in ("invalid syntax", "syntax error", "bad request", "400 bad request", "unrecognized option")):
             return TargetFeedbackSignal.PAYLOAD_SYNTAX_REJECTED
 
-        # 8. CTF Flag Detection (immediate capture signal)
-        if re.search(r"\b(?:flag|ctf|picoctf|htb)\{[^\}]+\}", stdout + stderr, re.IGNORECASE):
-            return TargetFeedbackSignal.FLAG_DISCOVERED
-
-        # 9. Binary Exploitation & Pwn (segfault / memory crash)
+        # 8. Binary Exploitation & Pwn (segfault / memory crash)
         if any(term in combined_lower for term in ("segmentation fault", "core dumped", "sigsegv", "signal 11", "sigill", "illegal instruction")):
             return TargetFeedbackSignal.BINARY_CRASH_OR_SEGFAULT
 
-        # 10. Cryptography Oracle Failures
+        # 9. Cryptography Oracle Failures
         if any(term in combined_lower for term in ("padding error", "bad padding", "decryption failed", "mac check failed", "invalid key length", "rsa key error")):
             return TargetFeedbackSignal.CRYPTO_ORACLE_FAILURE
 
-        # 11. Reverse Engineering & Binary Packing
+        # 10. Reverse Engineering & Binary Packing
         if any(term in combined_lower for term in ("stripped binary", "upx compressed", "ptrace: operation not permitted", "anti-debug")):
             return TargetFeedbackSignal.BINARY_OBFUSCATION
 
-        # 12. Forensics & File Corruption
+        # 11. Forensics & File Corruption
         if any(term in combined_lower for term in ("not a valid png", "corrupt header", "magic bytes mismatch", "unrecognized archive", "damaged zip")):
             return TargetFeedbackSignal.FORENSIC_CORRUPT_HEADER
 
