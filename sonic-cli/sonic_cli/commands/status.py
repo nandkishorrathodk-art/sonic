@@ -1,68 +1,135 @@
 """
-SONIC-REDA CLI — Status Command
-===================================
-Check system health and display status overview.
+SONIC CLI — Status Command
+==========================
+Local workspace git status & environment check.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
 import httpx
 import typer
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
-console = Console()
-API_BASE = "http://localhost:12000"
+from sonic_cli.context import get_token, resolve_local_context
+
+console = Console(legacy_windows=False)
+API_BASE = os.environ.get("SONIC_SERVER_URL", "http://localhost:12000")
+
+
+def check_git_status(repo_root: Path) -> dict[str, object]:
+    """Inspect local git branch and dirty status."""
+    try:
+        p = subprocess.run(
+            ["git", "status", "-s"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        lines = [line.strip() for line in p.stdout.splitlines() if line.strip()]
+        return {"dirty": len(lines) > 0, "dirty_count": len(lines), "summary": lines[:5]}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"dirty": False, "dirty_count": 0, "error": str(exc)}
+
+
+def check_git_version() -> str:
+    """Get git CLI version if installed."""
+    if not shutil.which("git"):
+        return "not installed"
+    try:
+        p = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=5)
+        return p.stdout.strip()
+    except Exception:
+        return "installed (unknown version)"
+
+
+def check_backend_health(server_url: str, token: str = "") -> dict[str, object]:
+    """Ping backend /health endpoint."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        with httpx.Client(timeout=3.0, headers=headers) as client:
+            resp = client.get(f"{server_url.rstrip('/')}/health")
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"online": True, "status": data.get("status", "healthy"), "data": data}
+            return {"online": False, "status": f"HTTP {resp.status_code}", "error": resp.text}
+    except Exception as exc:
+        return {"online": False, "status": "offline", "error": str(exc)}
 
 
 def status_command(
     server: str = typer.Option(API_BASE, "--server", "-s", help="Backend server URL"),
+    token: str = typer.Option("", "--token", "-t", help="JWT Auth token"),
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON"),
 ):
-    """📊 Show system health and status."""
-    try:
-        response = httpx.get(f"{server}/health", timeout=5)
-        data = response.json()
+    """📊 Local workspace git status & environment check."""
+    ctx = resolve_local_context()
+    resolved_token = get_token(token)
 
-        if json_output:
-            import json
-            console.print(json.dumps(data, indent=2))
-            return
+    git_info = check_git_status(ctx.repo_root) if ctx.is_git else {"dirty": False, "dirty_count": 0}
+    git_ver = check_git_version()
+    backend_info = check_backend_health(server, resolved_token)
 
-        # Rich formatted output. Use .get() with defaults so a partial payload
-        # from the backend (e.g. missing "status") never raises KeyError.
-        status = data.get("status", "unknown")
-        status_emoji = "🟢" if status == "healthy" else "🟡"
+    py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    is_venv = sys.prefix != sys.base_prefix
+    env_data = {
+        "workspace": {
+            "root": str(ctx.repo_root),
+            "is_git": ctx.is_git,
+            "branch": ctx.branch if ctx.is_git else None,
+            "dirty_files": git_info.get("dirty_count", 0),
+            "tenant_id": ctx.tenant_id,
+            "workspace_id": ctx.workspace_id,
+        },
+        "environment": {
+            "python": py_version,
+            "executable": sys.executable,
+            "virtual_env": is_venv,
+            "git": git_ver,
+            "backend_url": server,
+            "backend_online": backend_info.get("online", False),
+            "backend_status": backend_info.get("status"),
+        },
+    }
 
-        table = Table(title="Service Status", border_style="cyan")
-        table.add_column("Service", style="bold")
-        table.add_column("Status", justify="center")
+    if json_output:
+        console.print(json.dumps(env_data, indent=2))
+        return
 
-        for service, healthy in data.get("services", {}).items():
-            status_icon = "✅" if healthy else "❌"
-            table.add_row(service, status_icon)
+    # Rich formatted output
+    branch_display = f"[cyan]{ctx.branch}[/cyan]" if ctx.is_git else "[dim]non-git[/dim]"
+    dirty_count = git_info.get("dirty_count", 0)
+    dirty_display = f"[yellow]{dirty_count} modified files[/yellow]" if dirty_count else "[green]clean[/green]"
 
-        console.print(
-            Panel(
-                f"{status_emoji} System: [bold]{status.upper()}[/bold]\n"
-                f"Version: {data.get('version', 'unknown')}",
-                title="⚡ SONIC",
-                border_style="cyan",
-            )
-        )
-        console.print(table)
+    ws_table = Table(title="Local Workspace Status", border_style="cyan")
+    ws_table.add_column("Property", style="bold")
+    ws_table.add_column("Value")
+    ws_table.add_row("Root", str(ctx.repo_root))
+    ws_table.add_row("Branch", branch_display)
+    ws_table.add_row("Git Status", dirty_display)
+    ws_table.add_row("Workspace ID", f"[dim]{ctx.workspace_id}[/dim]")
+    ws_table.add_row("Tenant ID", f"[dim]{ctx.tenant_id}[/dim]")
 
-    except httpx.ConnectError:
-        console.print(
-            Panel(
-                f"[bold red]❌ Cannot connect to backend[/bold red]\n\n"
-                f"[dim]Server: {server}[/dim]\n"
-                f"[dim]Make sure the backend is running:[/dim]\n"
-                f"  APP_ENV=development python -m uvicorn sonic.api.main:app --port 12000",
-                title="Connection Error",
-                border_style="red",
-            )
-        )
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
+    env_table = Table(title="Environment Check", border_style="magenta")
+    env_table.add_column("Component", style="bold")
+    env_table.add_column("Status")
+    env_table.add_row("Python", f"{py_version} ({'venv' if is_venv else 'global'})")
+    env_table.add_row("Git", git_ver)
+
+    be_status = (
+        "[green]🟢 online (ready)[/green]"
+        if backend_info.get("online")
+        else f"[yellow]🟡 {backend_info.get('status')}[/yellow]"
+    )
+    env_table.add_row("Backend API", f"{server} ({be_status})")
+
+    console.print(ws_table)
+    console.print(env_table)
