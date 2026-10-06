@@ -1,18 +1,18 @@
 """SONIC Interactive Terminal REPL.
 
 Belongs to Department: platform_systems, Team: api_services, Subsystem: cli.
-Provides a clean, zero-flag interactive prompt for the SONIC Autonomous AI-Human
-Digital Being workstation.
+Provides a clean, zero-flag interactive prompt for the SONIC Autonomous AI
+Software Engineer operating directly on the local workspace repository.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-import httpx
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.syntax import Syntax
@@ -60,7 +60,7 @@ def _print_welcome_banner(ctx: LocalWorkspaceContext) -> None:
 
 
 def _handle_diff(ctx: LocalWorkspaceContext) -> None:
-    """Display git diff of active repository."""
+    """Display colored syntax-highlighted git diff of active repository."""
     if not ctx.is_git:
         console.print("[yellow]Not in a git repository; no git diff available.[/yellow]")
         return
@@ -74,8 +74,19 @@ def _handle_diff(ctx: LocalWorkspaceContext) -> None:
         )
         diff_text = proc.stdout.strip()
         if not diff_text:
+            proc_unstaged = subprocess.run(
+                ["git", "diff"],
+                cwd=str(ctx.repo_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            diff_text = proc_unstaged.stdout.strip()
+
+        if not diff_text:
             console.print("[dim]Working directory clean. No uncommitted diffs.[/dim]")
             return
+
         syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=True)
         console.print(syntax)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -106,15 +117,59 @@ def _handle_journal(ctx: LocalWorkspaceContext) -> None:
     console.print("[dim]No evolution.md or candidate records found in workspace yet.[/dim]")
 
 
+def _handle_test(ctx: LocalWorkspaceContext, test_path: str = "") -> None:
+    """Run pytest directly with formatted output."""
+    cmd = [sys.executable, "-m", "pytest"]
+    clean_path = test_path.strip()
+    if clean_path:
+        cmd.extend(clean_path.split())
+    else:
+        # Default test discovery if path not provided
+        if (ctx.repo_root / "sonic-cli" / "tests").exists():
+            cmd.append("sonic-cli/tests")
+        elif (ctx.repo_root / "tests").exists():
+            cmd.append("tests")
+
+    target_display = " ".join(cmd[3:]) if len(cmd) > 3 else "workspace"
+    console.print(f"[bold cyan]🧪 Running pytest directly ({target_display})...[/bold cyan]")
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(ctx.repo_root),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        output = proc.stdout.strip()
+        err = proc.stderr.strip()
+        if output:
+            console.print(output)
+        if err and proc.returncode != 0:
+            console.print(f"[yellow]{err}[/yellow]")
+
+        if proc.returncode == 0:
+            console.print("[bold green]✓ Pytest passed successfully.[/bold green]")
+        else:
+            console.print(f"[bold red]✗ Pytest exited with code {proc.returncode}.[/bold red]")
+    except subprocess.TimeoutExpired:
+        console.print("[red]Pytest execution timed out after 180 seconds.[/red]")
+    except Exception as exc:
+        console.print(f"[red]Failed to run pytest: {exc}[/red]")
+
+
 def _handle_status(
     ctx: LocalWorkspaceContext,
     server_url: str = "http://127.0.0.1:12000",
     token: str = "",
 ) -> None:
-    """Display workspace status, branch, and backend connectivity."""
+    """Display workspace status, branch, dirty files, repo root, and environment keys."""
     branch_display = ctx.branch if ctx.is_git else "non-git"
     console.print(f"[bold]Root:[/bold] {ctx.repo_root}")
-    console.print(f"[bold]Branch:[/bold] [cyan]{branch_display}[/cyan]  |  [bold]Tenant:[/bold] {ctx.tenant_id}  |  [bold]Workspace:[/bold] {ctx.workspace_id}")
+    console.print(
+        f"[bold]Branch:[/bold] [cyan]{branch_display}[/cyan]  |  "
+        f"[bold]Tenant:[/bold] {ctx.tenant_id}  |  "
+        f"[bold]Workspace:[/bold] {ctx.workspace_id}"
+    )
 
     # Check uncommitted git status
     if ctx.is_git:
@@ -126,35 +181,51 @@ def _handle_status(
                 text=True,
                 timeout=5,
             )
-            dirty_count = len([line for line in p.stdout.splitlines() if line.strip()])
-            console.print(f"[bold]Dirty files:[/bold] {dirty_count}")
+            dirty_lines = [line for line in p.stdout.splitlines() if line.strip()]
+            console.print(f"[bold]Dirty files:[/bold] {len(dirty_lines)}")
+            for line in dirty_lines[:5]:
+                console.print(f"  [dim]{line}[/dim]")
+            if len(dirty_lines) > 5:
+                console.print(f"  [dim]... and {len(dirty_lines) - 5} more[/dim]")
         except (OSError, subprocess.SubprocessError) as exc:
             console.print(f"[yellow]Could not inspect Git status: {exc}[/yellow]")
 
-    # Backend ping
-    backend_status = "[yellow]offline[/yellow]"
-    try:
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        with httpx.Client(timeout=2.0, headers=headers) as client:
-            resp = client.get(f"{server_url}/health")
-            if resp.status_code == 200:
-                backend_status = "[green]online (ready)[/green]"
-    except httpx.HTTPError as exc:
-        backend_status = f"[red]unavailable ({exc})[/red]"
+    # Check environment keys
+    keys_to_check = [
+        "GROQ_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "NVIDIA_API_KEY",
+        "OPENROUTER_API_KEY",
+    ]
+    key_statuses: list[str] = []
+    for k in keys_to_check:
+        val = os.environ.get(k, "")
+        if val:
+            masked = val[:4] + "..." + val[-4:] if len(val) > 8 else "***"
+            key_statuses.append(f"[green]{k}[/green]: [dim]set ({masked})[/dim]")
+        else:
+            key_statuses.append(f"[dim]{k}: not set[/dim]")
 
-    console.print(f"[bold]Backend API:[/bold] {server_url} ({backend_status})")
+    console.print(f"[bold]Environment Keys:[/bold] {', '.join(key_statuses[:2])}")
+    if len(key_statuses) > 2:
+        console.print(f"                  {', '.join(key_statuses[2:])}")
 
 
 def _handle_help() -> None:
     """Display interactive commands help."""
     console.print("[bold]Available commands:[/bold]")
-    console.print("  [cyan]/auto [N][/cyan]    - Run until stopped, or for N cycles")
-    console.print("  [cyan]/diff[/cyan]        - Inspect git diff in current repository")
-    console.print("  [cyan]/journal[/cyan]     - View evolution journal and verification receipts")
-    console.print("  [cyan]/status[/cyan]      - Show workspace status, branch, and backend health")
-    console.print("  [cyan]/clear[/cyan]       - Clear terminal screen")
-    console.print("  [cyan]/help[/cyan]        - Show this help")
-    console.print("  [cyan]/exit[/cyan]        - Exit SONIC CLI")
+    console.print("  [cyan]/auto [N][/cyan]     - Run continuous auto-evolution in isolated worktrees (or for N cycles)")
+    console.print("  [cyan]/diff[/cyan]         - Inspect git diff in current repository")
+    console.print("  [cyan]/journal[/cyan]      - View evolution journal and verification receipts")
+    console.print("  [cyan]/test [path][/cyan]  - Run pytest directly with formatted output")
+    console.print("  [cyan]/status[/cyan]       - Show git branch, dirty files, repo root, and environment keys")
+    console.print("  [cyan]/clear[/cyan]        - Clear terminal screen")
+    console.print("  [cyan]/help[/cyan]         - Show this command guide")
+    console.print("  [cyan]/exit[/cyan]         - Exit SONIC CLI")
+    console.print()
+    console.print("[dim]Enter any natural language coding prompt to inspect, edit, or fix files directly.[/dim]")
 
 
 async def _run_continuous_auto_evolution(
@@ -208,103 +279,71 @@ async def _run_continuous_auto_evolution(
         console.print(f"[red]Error during auto-evolution: {exc}[/red]")
 
 
+GREETINGS = {
+    "hi",
+    "hello",
+    "hey",
+    "hii",
+    "hiii",
+    "heyy",
+    "hey there",
+    "hello there",
+    "hola",
+    "yo",
+    "sup",
+}
+
+
+def _is_greeting(prompt: str) -> bool:
+    """Check if the prompt is a simple greeting."""
+    cleaned = prompt.strip().lower().rstrip("!.,?~ ")
+    return cleaned in GREETINGS
+
+
+def _handle_greeting() -> None:
+    """Respond conversationally as a helpful software engineer without unnecessary tool calls."""
+    console.print(
+        "👋 Hello! I am SONIC, your autonomous software engineer.\n"
+        "I can inspect code, write and edit files, run tests, fix bugs, and evolve this codebase.\n"
+        "Tell me what you'd like to build or fix, or type [cyan]/help[/cyan] to see available commands."
+    )
+
+
 def _dispatch_prompt(
     prompt: str,
     ctx: LocalWorkspaceContext,
     server_url: str = "http://127.0.0.1:12000",
     token: str = "",
 ) -> None:
-    """Dispatch a goal to the backend, with local handling for simple greetings."""
-    lowered = prompt.strip().lower()
-
-    if lowered in {"hi", "hello", "hey", "hi!", "hello!"}:
-        console.print("Hi! How can I help you today?")
+    """Dispatch user prompt to the local DeveloperAgent, with conversational handling for greetings."""
+    if _is_greeting(prompt):
+        _handle_greeting()
         return
-    if lowered in {"who are you", "who are you?", "what is sonic", "what is sonic?"}:
+
+    lowered = prompt.strip().lower().rstrip("!?.")
+    if lowered in {"who are you", "what is sonic", "what can you do"}:
         console.print(
-            "I am SONIC, an Autonomous AI-Human Digital Being that can help with "
-            "computer-use and software tasks."
+            "I am SONIC, an Autonomous AI Software Engineer operating directly on your local workspace.\n"
+            "I use native tool calling to inspect files, edit code, run tests, and evolve this repository."
         )
         return
-
-    token = get_token(token)
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    payload = {
-        "prompt": prompt,
-        "session_id": ctx.session_id,
-        "mode": "autonomous",
-        "target_repo": str(ctx.repo_root),
-    }
 
     try:
-        with httpx.Client(base_url=server_url, timeout=60.0) as client:
-            resp = client.post("/workstation/prompt", json=payload, headers=headers)
-            if resp.status_code != 200:
-                console.print(f"[yellow]Backend responded with status {resp.status_code}: {resp.text}[/yellow]")
-                return
-
-            data = resp.json()
-            status = str(data.get("status", "")).upper()
-            if status not in {"ACCEPTED", "RUNNING", "QUEUED"}:
-                console.print(data.get("response") or data.get("message") or str(data))
-                return
-
-        last_log_count = 0
-        deadline = time.monotonic() + 1800
-        while time.monotonic() < deadline:
-            with httpx.Client(base_url=server_url, timeout=5.0) as client:
-                state_resp = client.get(
-                    "/workstation/state",
-                    params={"session_id": ctx.session_id},
-                    headers=headers,
-                )
-            if state_resp.status_code != 200:
-                console.print(
-                    f"[yellow]Could not read task progress "
-                    f"(HTTP {state_resp.status_code}): {state_resp.text}[/yellow]"
-                )
-                return
-            state = state_resp.json()
-            worklog = state.get("worklog", [])
-            for item in worklog[last_log_count:]:
-                title = item.get("title", "Update")
-                content = (item.get("content") or "").strip()
-                console.print(f"[yellow]›[/yellow] [bold]{title}:[/bold] {content}")
-            last_log_count = len(worklog)
-            task_status = str(state.get("status", "")).upper()
-            if task_status not in {"RUNNING", "QUEUED"}:
-                console.print(f"[bold]Task status: {task_status or 'unknown'}[/bold]")
-                return
-            time.sleep(0.5)
-        console.print("[yellow]Stopped waiting for task progress after 30 minutes.[/yellow]")
-    except httpx.ConnectError:
+        from sonic_cli.developer_agent import DeveloperAgent
+    except ImportError as exc:
         console.print(
-            f"[dim]Backend server is not running on {server_url}.[/dim]\n"
-            f"[dim]To start the backend server, run in another terminal:[/dim]\n"
-            f"  [cyan]APP_ENV=development python -m uvicorn sonic.api.main:app --port 12000[/cyan]\n"
-            f"[dim]Or run autonomous self-evolution directly with: [cyan]/auto[/cyan][/dim]"
+            f"[red]Could not import DeveloperAgent from sonic_cli.developer_agent: {exc}[/red]\n"
+            "[yellow]Please verify sonic_cli is properly installed.[/yellow]"
         )
+        return
+
+    try:
+        agent = DeveloperAgent(workspace_dir=ctx.repo_root, console=console)
+        agent.run(prompt)
     except KeyboardInterrupt:
-        try:
-            with httpx.Client(base_url=server_url, timeout=5.0) as client:
-                response = client.post(
-                    "/workstation/session/interrupt",
-                    params={"session_id": ctx.session_id},
-                    headers=headers,
-                )
-            if response.status_code == 200:
-                console.print("[yellow]Interrupt sent to the active workstation task.[/yellow]")
-            else:
-                console.print(
-                    f"[yellow]Task observation stopped; interrupt returned "
-                    f"HTTP {response.status_code}: {response.text}[/yellow]"
-                )
-        except httpx.HTTPError as exc:
-            console.print(f"[yellow]Task observation stopped; interrupt failed: {exc}[/yellow]")
-    except httpx.HTTPError as exc:
-        console.print(f"[red]Failed to dispatch task: {exc}[/red]")
-    except (ValueError, KeyError) as exc:
-        console.print(f"[red]Failed to dispatch task: {exc}[/red]")
+        console.print("\n[yellow]Task interrupted by operator (Ctrl+C).[/yellow]")
+    except Exception as exc:
+        console.print(f"[red]Task execution failed: {exc}[/red]")
 
 
 def run_repl(
@@ -312,7 +351,6 @@ def run_repl(
     token: str = "",
 ) -> None:
     """Start the interactive terminal REPL."""
-    import asyncio
 
     ctx = resolve_local_context()
     resolved_token = get_token(token)
@@ -330,7 +368,7 @@ def run_repl(
     history_file.parent.mkdir(parents=True, exist_ok=True)
     if PromptSession is not None:
         commands_completer = WordCompleter(
-            ["/auto", "/diff", "/journal", "/status", "/clear", "/help", "/exit", "/quit"],
+            ["/auto", "/diff", "/journal", "/test", "/status", "/clear", "/help", "/exit", "/quit"],
             ignore_case=True,
         )
         style = Style.from_dict({"prompt": "bold", "bottom-toolbar": "dim"})
@@ -341,12 +379,12 @@ def run_repl(
             style=style,
         )
         placeholder_text = (
-            "Ask SONIC to build features, evolve codebase, operate desktop, or run /auto"
+            "Ask SONIC to inspect code, fix tests, implement features, or run /auto, /test"
         )
 
         def bottom_toolbar() -> str:
             branch = ctx.branch if ctx.is_git else "non-git workspace"
-            return f"Branch: {branch} · Backend: {server_url} · /help"
+            return f"Branch: {branch} · Local AI Developer · /help"
     else:
         session = None
         placeholder_text = ""
@@ -384,6 +422,9 @@ def run_repl(
             _handle_diff(ctx)
         elif cmd == "/journal":
             _handle_journal(ctx)
+        elif cmd == "/test" or cmd.startswith("/test "):
+            test_path = cmd[5:].strip() if cmd.startswith("/test ") else ""
+            _handle_test(ctx, test_path=test_path)
         elif cmd == "/status":
             _handle_status(ctx, server_url=server_url, token=resolved_token)
         elif cmd == "/help":
