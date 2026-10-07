@@ -37,7 +37,6 @@ from pathlib import Path
 from typing import Any
 
 from sonic.evolution.pipeline import (
-    _PROTECTED_COMPONENTS,
     EvolutionPipeline,
     EvolutionStage,
     is_protected_component,
@@ -557,11 +556,13 @@ class CodebaseEvolver:
 
         p0_path = _resolve_required_test(required_p0)
         safety_path = _resolve_required_test(required_safety)
-        if not p0_path or not safety_path:
+        is_full_workspace = (self.repo_root / "sonic-core" / "pyproject.toml").is_file()
+
+        if not p0_path or (not safety_path and is_full_workspace):
             missing = []
             if not p0_path:
                 missing.append(required_p0)
-            if not safety_path:
+            if not safety_path and is_full_workspace:
                 missing.append(required_safety)
             logger.critical(
                 "evolution_security_regression_suite_missing",
@@ -569,7 +570,11 @@ class CodebaseEvolver:
                 missing_tests=missing,
             )
             return False
-        res = self.run_tests([p0_path, safety_path])
+
+        tests_to_run = [p0_path]
+        if safety_path:
+            tests_to_run.append(safety_path)
+        res = self.run_tests(tests_to_run)
         return res.passed
 
     # ------------------------------------------------------------------

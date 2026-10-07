@@ -50,6 +50,10 @@ def temp_evolution_env(tmp_path: Path):
         "def test_safety_invariants():\n    assert True\n",
         encoding="utf-8",
     )
+    (repo_root / "sonic-core" / "tests" / "test_safety_sealed_policy.py").write_text(
+        "def test_safety_sealed():\n    assert True\n",
+        encoding="utf-8",
+    )
     (repo_root / "conftest.py").write_text(
         "import sys\nfrom pathlib import Path\n"
         "sys.path.insert(0, str(Path(__file__).parent / 'sonic-core'))\n",

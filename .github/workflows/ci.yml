@@ -152,7 +152,7 @@ jobs:
         working-directory: sonic-dashboard
         run: npm run build
         env:
-          NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+          NEXT_PUBLIC_API_URL: http://127.0.0.1:12000
 
   docker:
     name: Production Container Build

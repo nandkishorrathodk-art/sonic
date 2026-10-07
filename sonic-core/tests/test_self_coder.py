@@ -419,6 +419,10 @@ def test_self_coder_end_to_end_commits_a_real_change(repo: Path, tmp_path: Path)
         "def test_safety_present():\n    assert True\n",
         encoding="utf-8",
     )
+    (repo / "sonic-core" / "tests" / "test_safety_sealed_policy.py").write_text(
+        "def test_safety_sealed():\n    assert True\n",
+        encoding="utf-8",
+    )
     (repo / "conftest.py").write_text(
         "import sys\nfrom pathlib import Path\n"
         "sys.path.insert(0, str(Path(__file__).parent / 'sonic-core'))\n",
@@ -486,6 +490,9 @@ def test_self_coder_write_mode_applies_verified_candidate_without_commit(repo: P
     (repo / "sonic-core" / "sonic" / "agents" / "__init__.py").write_text("", encoding="utf-8")
     (repo / "sonic-core" / "tests" / "test_p0_security_hardening.py").write_text(
         "def test_safety_present():\n    assert True\n", encoding="utf-8"
+    )
+    (repo / "sonic-core" / "tests" / "test_safety_sealed_policy.py").write_text(
+        "def test_safety_sealed():\n    assert True\n", encoding="utf-8"
     )
     (repo / "conftest.py").write_text(
         "import sys\nfrom pathlib import Path\n"
@@ -939,6 +946,8 @@ def test_report_only_rollback_restores_cross_file_patch(tmp_path: Path):
     )
     (repo / "sonic-core" / "tests" / "test_p0_security_hardening.py").write_text(
         "def test_s(): assert True\n", encoding="utf-8")
+    (repo / "sonic-core" / "tests" / "test_safety_sealed_policy.py").write_text(
+        "def test_safety_s(): assert True\n", encoding="utf-8")
     (repo / "conftest.py").write_text(
         "import sys\nfrom pathlib import Path\nsys.path.insert(0,str(Path(__file__).parent/'sonic-core'))\n",
         encoding="utf-8")
@@ -1120,6 +1129,10 @@ def test_test_failure_triggers_rollback_and_avoid_lesson(repo: Path, tmp_path: P
     (repo / "sonic-core" / "sonic" / "__init__.py").write_text("", encoding="utf-8")
     (repo / "sonic-core" / "tests" / "test_p0_security_hardening.py").write_text(
         "def test_safety_invariants():\n    assert True\n",
+        encoding="utf-8",
+    )
+    (repo / "sonic-core" / "tests" / "test_safety_sealed_policy.py").write_text(
+        "def test_safety_sealed():\n    assert True\n",
         encoding="utf-8",
     )
     (repo / "conftest.py").write_text(
