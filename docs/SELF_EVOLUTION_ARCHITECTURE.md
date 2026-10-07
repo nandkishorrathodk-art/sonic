@@ -41,7 +41,7 @@ flowchart TD
     CLI --> RUNNER["ContinuousAutoEvolutionRunner"]
 
     RUNNER --> SCAN["Signal discovery on active checkout"]
-    SCAN --> PYTEST["Run `sonic-core/tests/`<br/>attribute failures to editable source<br/>(timeout: 300 s)"]
+    SCAN --> PYTEST["Run `sonic-core/tests/`<br/>attribute failures to editable source<br/>(timeout: `SONIC_EVOLUTION_TEST_TIMEOUT`, default 600 s)"]
     SCAN --> AUDIT["Static audit + TODO/FIXME/HACK<br/>and no-op marker scan"]
     PYTEST --> SIGNAL["Signals: test failures first,<br/>then audit and marker findings"]
     AUDIT --> SIGNAL
@@ -140,8 +140,10 @@ worktree lifecycle.
   external repositories or test suites discoverable: the outer signal scan
   still searches the configured SONIC source roots and runs the configured test
   scan.
-- The signal scan runs the full `sonic-core/tests/` suite with a 300-second
-  timeout; it is not yet an efficient arbitrary external-demo test selector.
+- The signal scan runs the full `sonic-core/tests/` suite with the same
+  env-overridable timeout as the verification gate
+  (`SONIC_EVOLUTION_TEST_TIMEOUT`, default 600 s); it is not yet an efficient
+  arbitrary external-demo test selector.
 - In the recent demo attempt, the candidate did not produce a patch: the first
   `/auto` run reached a SelfCoder cleanup error; after that lifecycle fix, a
   target-scoped attempt was rejected when the configured providers returned

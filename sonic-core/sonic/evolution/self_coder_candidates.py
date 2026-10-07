@@ -25,6 +25,28 @@ class CandidateWorkflowError(RuntimeError):
     """A self-coder candidate could not be safely created or promoted."""
 
 
+def _run_coroutine_sync(coro: Any) -> Any:
+    """Execute a coroutine synchronously, handling both non-running and running event loop contexts."""
+    def _runner() -> Any:
+        from sonic.memory.router import reset_memory_singleton
+        try:
+            return asyncio.run(coro)
+        finally:
+            reset_memory_singleton()
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_runner).result()
+    else:
+        return _runner()
+
+
 class SelfCoderCandidateStore:
     """Persist tested patch/report records outside the checked-out source tree."""
 
@@ -196,7 +218,11 @@ class SelfCoderCandidateStore:
             line[3:].strip() for line in working_tree_changes.splitlines()
         ]
         tenant_records = self.list(tenant_id)
-        if any(
+        # Skip redundant automatic discovery only when the caller has NOT pinned
+        # explicit signals. A pinned signal must always be attempted: otherwise a
+        # single empty discovery result at a commit would permanently short-circuit
+        # every later run (including the continuous runner's pinned retries).
+        if signals is None and any(
             record.get("base_commit") == base_commit
             and record.get("status") == "no_candidate"
             for record in tenant_records
@@ -388,9 +414,10 @@ class SelfCoderCandidateStore:
             if record["status"] == "verified":
                 try:
                     applied_candidates.append(
-                        self.auto_promote(
+                        await self._promote(
                             record["candidate_id"],
                             tenant_id,
+                            automatic=True,
                             auto_commit=auto_commit,
                         )
                     )
@@ -470,13 +497,13 @@ class SelfCoderCandidateStore:
         return "\n".join(lines)
 
     def approve(self, candidate_id: str, tenant_id: str) -> dict[str, Any]:
-        return self._promote(candidate_id, tenant_id, automatic=False)
+        return _run_coroutine_sync(self._promote(candidate_id, tenant_id, automatic=False))
 
     def auto_promote(self, candidate_id: str, tenant_id: str, *, auto_commit: bool = False) -> dict[str, Any]:
         """Apply an already verified candidate to the active working tree."""
-        return self._promote(candidate_id, tenant_id, automatic=True, auto_commit=auto_commit)
+        return _run_coroutine_sync(self._promote(candidate_id, tenant_id, automatic=True, auto_commit=auto_commit))
 
-    def _promote(
+    async def _promote(
         self, candidate_id: str, tenant_id: str, *, automatic: bool, auto_commit: bool = False
     ) -> dict[str, Any]:
         with self._lock(candidate_id):
@@ -655,7 +682,6 @@ class SelfCoderCandidateStore:
                         if automatic else "operator-approved patch applied to active working tree; no commit or push"
                     )
                 self.save(record)
-                return record
             except Exception as exc:
                 if snapshots and not self._restore_exact(snapshots):
                     record["status"] = "rollback_failed"
@@ -669,6 +695,20 @@ class SelfCoderCandidateStore:
                 if record["status"] == "blocked_conflict":
                     raise ValueError(record["error"]) from exc
                 return record
+
+            if not automatic and record.get("status") in {"applied", "promoted", "committed_metadata_failed"}:
+                from sonic.evolution.graph_recorder import record_verified_candidate
+
+                try:
+                    await record_verified_candidate(record, self.repo_root)
+                except Exception as exc:
+                    record["graph_record_error"] = (
+                        f"Candidate reached status {record.get('status')}, but verified graph "
+                        f"persistence failed: {exc}"
+                    )
+                    self.save(record)
+                    raise CandidateWorkflowError(record["graph_record_error"]) from exc
+            return record
 
     def _git_bytes(self, args: list[str]) -> bytes | None:
         """Read exact committed bytes, returning None for paths absent at the base."""

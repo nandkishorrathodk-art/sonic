@@ -1,9 +1,9 @@
 """
 SONIC v2 — Dynamic Strategy Adaptation Engine
 =============================================
-Empowers the agent to autonomously evolve its offensive strategies based on
-real feedback from targets (e.g. 403 Forbidden, WAF block, filtered port,
-rate limiting, connection reset).
+Empowers the agent to autonomously evolve its operational and computer-use strategies
+based on real feedback from targets and systems (e.g. 403 Forbidden, request filter block,
+filtered port, rate limiting, connection reset, process crash).
 
 USER DIRECTION:
 "isko scripted puppet nahi banana hai, force mat karo koi bhi tool ke liye
@@ -56,19 +56,23 @@ class TargetFeedbackSignal(StrEnum):
 
 
 class StrategicPosture(StrEnum):
-    """Adapted offensive posture reacting to target feedback."""
+    """Adapted strategic posture reacting to environmental and target feedback."""
     DIRECT_EXPLORATION = "DIRECT_EXPLORATION"
     HEADER_AND_VERB_MUTATION = "HEADER_AND_VERB_MUTATION"      # For 403 Forbidden / ACLs
-    WAF_EVASION_MUTATION = "WAF_EVASION_MUTATION"              # For WAF blocks
+    REQUEST_FILTER_ADAPTATION = "REQUEST_FILTER_ADAPTATION"    # For WAF / request filtering
     ALTERNATIVE_SURFACE_PIVOT = "ALTERNATIVE_SURFACE_PIVOT"    # For filtered / dead ports
     RATE_THROTTLING_AND_BACKOFF = "RATE_THROTTLING_AND_BACKOFF"# For 429 rate limit
     AUTONOMOUS_METHOD_INVENTION = "AUTONOMOUS_METHOD_INVENTION"# Trigger MethodLab
     CUSTOM_TOOL_AUTHORING = "CUSTOM_TOOL_AUTHORING"            # Trigger Toolsmith
-    EXPLOIT_PAYLOAD_MUTATION = "EXPLOIT_PAYLOAD_MUTATION"      # For binary crashes/segfaults
+    PROCESS_FAULT_DIAGNOSIS = "PROCESS_FAULT_DIAGNOSIS"        # For binary/process crashes and segfaults
     FLAG_EXTRACTION_AND_TRIAGE = "FLAG_EXTRACTION_AND_TRIAGE"  # For flag discovery
     CRYPTO_ORACLE_ANALYSIS = "CRYPTO_ORACLE_ANALYSIS"          # For crypto oracle failures
     REVERSE_ENGINEERING_DEOBFUSCATION = "REVERSE_ENGINEERING_DEOBFUSCATION"  # For stripped/packed binaries
     FORENSIC_HEADER_REPAIR = "FORENSIC_HEADER_REPAIR"          # For corrupted file headers
+
+    # Backwards compatibility aliases for general computer use alignment
+    WAF_EVASION_MUTATION = REQUEST_FILTER_ADAPTATION
+    EXPLOIT_PAYLOAD_MUTATION = PROCESS_FAULT_DIAGNOSIS
 
 
 @dataclass
@@ -86,7 +90,7 @@ class StrategyAdaptationPlan:
 
 class DynamicStrategyEngine:
     """
-    Evaluates real target feedback and evolves offensive strategies dynamically.
+    Evaluates real target and environment feedback and adapts execution strategies dynamically.
     Enforces non-puppet autonomy: develops custom probes and methods tailored
     to what the target reports.
     """
@@ -124,6 +128,13 @@ class DynamicStrategyEngine:
         """
         combined = f"{stderr}\n{stdout}".strip()
         combined_lower = combined.lower()
+
+        # 0. CTF flag capture dominates every other signal. A discovered flag is
+        # terminal evidence and must not be shadowed by incidental error text in
+        # the same output (e.g. a 403 or a syntax warning alongside the flag),
+        # which would otherwise trigger more probing instead of extraction.
+        if re.search(r"\b(?:flag|ctf|picoctf|htb)\{[^\}]+\}", combined, re.IGNORECASE):
+            return TargetFeedbackSignal.FLAG_DISCOVERED
 
         # 1. Check explicit or parsed HTTP status codes
         if status_code == 403 or "403 forbidden" in combined_lower or "status: 403" in combined_lower or "http/1.1 403" in combined_lower or "http/2 403" in combined_lower:
@@ -171,23 +182,19 @@ class DynamicStrategyEngine:
         if any(term in combined_lower for term in ("invalid syntax", "syntax error", "bad request", "400 bad request", "unrecognized option")):
             return TargetFeedbackSignal.PAYLOAD_SYNTAX_REJECTED
 
-        # 8. CTF Flag Detection (immediate capture signal)
-        if re.search(r"\b(?:flag|ctf|picoctf|htb)\{[^\}]+\}", stdout + stderr, re.IGNORECASE):
-            return TargetFeedbackSignal.FLAG_DISCOVERED
-
-        # 9. Binary Exploitation & Pwn (segfault / memory crash)
+        # 8. Binary Exploitation & Pwn (segfault / memory crash)
         if any(term in combined_lower for term in ("segmentation fault", "core dumped", "sigsegv", "signal 11", "sigill", "illegal instruction")):
             return TargetFeedbackSignal.BINARY_CRASH_OR_SEGFAULT
 
-        # 10. Cryptography Oracle Failures
+        # 9. Cryptography Oracle Failures
         if any(term in combined_lower for term in ("padding error", "bad padding", "decryption failed", "mac check failed", "invalid key length", "rsa key error")):
             return TargetFeedbackSignal.CRYPTO_ORACLE_FAILURE
 
-        # 11. Reverse Engineering & Binary Packing
+        # 10. Reverse Engineering & Binary Packing
         if any(term in combined_lower for term in ("stripped binary", "upx compressed", "ptrace: operation not permitted", "anti-debug")):
             return TargetFeedbackSignal.BINARY_OBFUSCATION
 
-        # 12. Forensics & File Corruption
+        # 11. Forensics & File Corruption
         if any(term in combined_lower for term in ("not a valid png", "corrupt header", "magic bytes mismatch", "unrecognized archive", "damaged zip")):
             return TargetFeedbackSignal.FORENSIC_CORRUPT_HEADER
 
@@ -227,19 +234,19 @@ class DynamicStrategyEngine:
         if signal == TargetFeedbackSignal.WAF_BLOCK:
             return StrategyAdaptationPlan(
                 signal=signal,
-                posture=StrategicPosture.WAF_EVASION_MUTATION,
-                rationale=f"Target {tgt} is shielded by a Web Application Firewall (WAF) or security filter.",
+                posture=StrategicPosture.REQUEST_FILTER_ADAPTATION,
+                rationale=f"Target {tgt} returned a filter/WAF response or security intermediary block.",
                 action_mutation=(
-                    "Standard known payloads are signature-blocked. Synthesize a NOVEL attack hypothesis "
-                    "via MethodLab. Use payload chunking, parameter pollution, character encoding (URL double encode, Unicode), "
-                    "or custom probe scripts tailored to target parser quirks."
+                    "Standard client requests are filtered or blocked. Adapt request formatting, chunking, "
+                    "encoding, or parameter structures, and synthesize custom client logic via MethodLab and Toolsmith "
+                    "tailored to endpoint expectations."
                 ),
-                avoid_directive=f"Avoid standard static exploit signatures against {tgt} (blocked by WAF).",
+                avoid_directive=f"Avoid sending rejected static request patterns against {tgt} (blocked by WAF/filter).",
                 synthesize_novel_method=True,
                 author_custom_tool=True,
                 suggested_actions=[
-                    "Synthesize novel parser-confusion or evasion technique via MethodLab",
-                    "Author custom obfuscated probe via Toolsmith",
+                    "Synthesize adaptive request formatting or parser handling via MethodLab",
+                    "Author custom client script via Toolsmith",
                 ],
             )
 
@@ -298,13 +305,16 @@ class DynamicStrategyEngine:
         if signal == TargetFeedbackSignal.BINARY_CRASH_OR_SEGFAULT:
             return StrategyAdaptationPlan(
                 signal=signal,
-                posture=StrategicPosture.EXPLOIT_PAYLOAD_MUTATION,
-                rationale=f"Target binary {tgt} crashed with segmentation fault or memory violation. Potential memory corruption / pwnable condition.",
-                action_mutation="Inspect crash state via gdb/dmesg, determine precise RIP/EIP offset using cyclic patterns, check binary protections (checksec), and author a reliable exploit probe.",
-                avoid_directive=f"Avoid sending arbitrary payload lengths to {tgt} without inspecting crash registers.",
+                posture=StrategicPosture.PROCESS_FAULT_DIAGNOSIS,
+                rationale=f"Target process/binary {tgt} crashed with segmentation fault or unhandled signal.",
+                action_mutation=(
+                    "Inspect crash state via gdb/dmesg or core dump, determine instruction offset and boundary condition, "
+                    "check process protections, and synthesize a diagnosis or diagnostic probe via MethodLab."
+                ),
+                avoid_directive=f"Avoid sending arbitrary inputs to {tgt} without inspecting crash registers.",
                 synthesize_novel_method=True,
                 author_custom_tool=True,
-                suggested_actions=["Run checksec on binary", "Inspect core dump / crash registers with gdb", "Synthesize precise ROP/buffer payload via MethodLab"],
+                suggested_actions=["Inspect binary and crash registers with gdb", "Analyze memory fault boundary condition", "Synthesize diagnostic reproduction probe via MethodLab"],
             )
 
         if signal == TargetFeedbackSignal.CRYPTO_ORACLE_FAILURE:
@@ -349,8 +359,8 @@ class DynamicStrategyEngine:
             posture=StrategicPosture.AUTONOMOUS_METHOD_INVENTION,
             rationale=f"Target feedback ({signal.value}) indicates standard approach failed.",
             action_mutation=(
-                "Do NOT rely on a static library of known exploit templates. "
-                "Synthesize a novel attack hypothesis tailored to the target via MethodLab or author a custom tool."
+                "Do NOT rely on static canned scripts or brittle templates. "
+                "Synthesize an adaptive hypothesis tailored to the target state via MethodLab or author a custom tool via Toolsmith."
             ),
             avoid_directive=f"Avoid repeating failed technique '{current_technique}' on {tgt}.",
             synthesize_novel_method=True,
