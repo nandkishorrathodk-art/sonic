@@ -325,6 +325,57 @@ class LessonsLedger:
             return self._lessons[:k]
         return hits[:k]
 
+    async def relevant_agentic(self, goal: str, llm_router: Any, k: int = 5) -> list[Lesson]:
+        """Use bounded query refinement to retrieve relevant tenant lessons."""
+        if not self._lessons or self.semantic_memory is None:
+            return self.relevant(goal, k)
+
+        from sonic.memory.agentic import AgenticRetriever
+
+        result = await AgenticRetriever(
+            vector_memory=self.semantic_memory,
+            llm_router=llm_router,
+            max_rounds=2,
+            max_queries=4,
+            candidates_per_query=max(k * 2, 10),
+            score_threshold=0.08,
+        ).retrieve(
+            goal,
+            tenant_id=self.tenant_id,
+            top_k=max(k * 3, 10),
+        )
+        logger.info(
+            "agentic_lesson_retrieval_completed",
+            tenant_id=self.tenant_id,
+            rounds=result.rounds,
+            query_count=len(result.queries),
+            stop_reason=result.stop_reason,
+            result_count=len(result.documents),
+        )
+        semantic_scores = {
+            str(lesson_id): float(match.get("score", 0.0))
+            for match in result.documents
+            if (lesson_id := (match.get("metadata") or {}).get("lesson_id"))
+        }
+
+        def score(lesson: Lesson) -> tuple[float, float, str]:
+            semantic_score = semantic_scores.get(lesson.lesson_id, 0.0)
+            return (
+                float(_relevance(goal, lesson)) + semantic_score * 3.0,
+                semantic_score,
+                lesson.created_at,
+            )
+
+        scored = sorted(self._lessons, key=score, reverse=True)
+        hits = [
+            lesson
+            for lesson in scored
+            if _relevance(goal, lesson) > 0 or lesson.lesson_id in semantic_scores
+        ]
+        if not hits and len(self._lessons) <= k:
+            return self._lessons[:k]
+        return hits[:k]
+
     def all(self) -> list[Lesson]:
         return list(self._lessons)
 
@@ -350,11 +401,17 @@ def inject_into_context(lessons: list[Lesson]) -> str:
     if reuses:
         lines.append("Past lessons — approaches that WORKED (reuse them):")
         for l in reuses:
-            lines.append(f"  [REUSE] {l.approach} → <untrusted-evidence>{l.evidence}</untrusted-evidence>")
+            lines.append(
+                f"  [REUSE][memory:{l.lesson_id}] {l.approach} → "
+                f"<untrusted-evidence>{l.evidence}</untrusted-evidence>"
+            )
     if avoids:
         lines.append("Past lessons — approaches that FAILED (avoid repeating):")
         for l in avoids:
-            lines.append(f"  [AVOID] {l.approach} → <untrusted-evidence>{l.evidence}</untrusted-evidence>")
+            lines.append(
+                f"  [AVOID][memory:{l.lesson_id}] {l.approach} → "
+                f"<untrusted-evidence>{l.evidence}</untrusted-evidence>"
+            )
     return "\n".join(lines) + "\n"
 
 # ---------------------------------------------------------------------------

@@ -104,6 +104,30 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     groq_api_key: str = ""
     nvidia_api_key: str = ""
+    embedding_provider: str = Field(
+        default="legacy_hash",
+        validation_alias="SONIC_EMBEDDING_PROVIDER",
+    )
+    embedding_base_url: str = Field(
+        default="",
+        validation_alias="SONIC_EMBEDDING_BASE_URL",
+    )
+    embedding_model: str = Field(
+        default="",
+        validation_alias="SONIC_EMBEDDING_MODEL",
+    )
+    embedding_api_key: str = Field(
+        default="",
+        validation_alias="SONIC_EMBEDDING_API_KEY",
+    )
+    embedding_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias="SONIC_EMBEDDING_TIMEOUT_SECONDS",
+    )
+    embedding_local_model: str = Field(
+        default="sentence-transformers/all-MiniLM-L6-v2",
+        validation_alias="SONIC_EMBEDDING_LOCAL_MODEL",
+    )
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     local_llm_url: str = "http://localhost:11434"
     default_llm_provider: str = "nvidia"

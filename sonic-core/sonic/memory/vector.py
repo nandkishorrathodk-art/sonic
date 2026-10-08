@@ -1,14 +1,14 @@
 """
 SONIC-REDA — Vector Search & Hybrid Memory
 ============================================
-Provides semantic vector search alongside Graph Memory for:
+Provides model-aware hybrid retrieval alongside Graph Memory for:
     - Semantic finding retrieval and deduplication
     - Similar vulnerability matching from historical engagements
     - Querying code snippets and hypotheses via embeddings
 
 Features:
-    - Cosine similarity search with normalized embeddings
-    - Fallback embedding engine (dense n-gram vectorizer) when external embedding API is offline
+    - Hybrid lexical and cosine-similarity retrieval
+    - Explicitly configured semantic embedding providers, with a labeled legacy hash mode
     - ChromaDB / Qdrant ready interface
 """
 
@@ -25,6 +25,11 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Any
 
+from sonic.memory.embeddings import (
+    EmbeddingProvider,
+    configured_embedding_provider,
+    normalize_vector,
+)
 from sonic.logger import get_logger
 
 try:
@@ -49,12 +54,16 @@ class VectorDocument:
     metadata: dict[str, Any] = field(default_factory=dict)
     vector: list[float] = field(default_factory=list)
     tenant_id: str = "default"
+    embedding_model: str = "legacy-hash-ngram-v1"
+    embedding_dimension: int = 0
 
 
 class DenseVectorizer:
     """
-    Lightweight, deterministic character/word n-gram vectorizer
-    providing zero-dependency semantic vector representations.
+    Lightweight, deterministic character/word n-gram hash vectorizer.
+
+    This legacy representation is not a learned semantic embedding; it remains
+    available for backwards compatibility when no embedding provider is selected.
     Accelerated with buffer slicing, fast dot products, and SIMD operations.
     """
 
@@ -171,12 +180,24 @@ class VectorMemory:
     ``sqlite3`` driver so the existing synchronous API is preserved.
     """
 
-    def __init__(self, dim: int = 128, db_path: str | None = None, persist: bool = True):
+    def __init__(
+        self,
+        dim: int = 128,
+        db_path: str | None = None,
+        persist: bool = True,
+        embedding_provider: EmbeddingProvider | None = None,
+    ):
         import sqlite3
 
         from sonic.memory.sqlite_graph import _default_db_path
         self.dim = dim
         self.vectorizer = DenseVectorizer(dim=dim)
+        self.embedding_provider = embedding_provider
+        self.embedding_model = (
+            embedding_provider.model_id
+            if embedding_provider is not None
+            else f"legacy-hash-ngram-v1:{dim}"
+        )
         self.documents: dict[tuple[str, str], VectorDocument] = {}
         self.persist = persist
         self._lock = threading.Lock()
@@ -198,25 +219,76 @@ class VectorMemory:
                 "doc_id TEXT, text TEXT NOT NULL, "
                 "metadata_json TEXT NOT NULL DEFAULT '{}', vector_json TEXT NOT NULL DEFAULT '[]', "
                 "tenant_id TEXT NOT NULL DEFAULT 'default', "
+                "embedding_model TEXT NOT NULL DEFAULT 'legacy-hash-ngram-v1', "
+                "embedding_dimension INTEGER NOT NULL DEFAULT 0, "
                 "PRIMARY KEY (tenant_id, doc_id))"
             )
             cols = [c[1] for c in self._db.execute("PRAGMA table_info(vector_documents)").fetchall()]
             if "tenant_id" not in cols:
                 self._db.execute("ALTER TABLE vector_documents ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            if "embedding_model" not in cols:
+                self._db.execute(
+                    "ALTER TABLE vector_documents ADD COLUMN embedding_model "
+                    "TEXT NOT NULL DEFAULT 'legacy-hash-ngram-v1'"
+                )
+            if "embedding_dimension" not in cols:
+                self._db.execute(
+                    "ALTER TABLE vector_documents ADD COLUMN embedding_dimension "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
             self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_vec_tenant_doc ON vector_documents(tenant_id, doc_id)")
             self._db.commit()
             # Load any previously persisted documents into the read cache.
-            for doc_id, text, meta_json, vec_json, t_id in self._db.execute(
-                "SELECT doc_id, text, metadata_json, vector_json, tenant_id FROM vector_documents"
-            ).fetchall():
+            rows = self._db.execute(
+                "SELECT doc_id, text, metadata_json, vector_json, tenant_id, "
+                "embedding_model, embedding_dimension FROM vector_documents"
+            ).fetchall()
+            for (
+                doc_id,
+                text,
+                meta_json,
+                vec_json,
+                t_id,
+                embedding_model,
+                stored_dimension,
+            ) in rows:
                 t = t_id or "default"
+                vector = json.loads(vec_json)
+                model_id = embedding_model
+                if model_id == "legacy-hash-ngram-v1":
+                    model_id = f"legacy-hash-ngram-v1:{len(vector) or self.dim}"
+                dimension = int(stored_dimension or len(vector))
                 self.documents[(t, doc_id)] = VectorDocument(
                     doc_id=doc_id,
                     text=text,
                     metadata=json.loads(meta_json),
-                    vector=json.loads(vec_json),
+                    vector=vector,
                     tenant_id=t,
+                    embedding_model=model_id,
+                    embedding_dimension=dimension,
                 )
+                if not stored_dimension:
+                    self._db.execute(
+                        "UPDATE vector_documents SET embedding_model = ?, "
+                        "embedding_dimension = ? WHERE tenant_id = ? AND doc_id = ?",
+                        (model_id, dimension, t, doc_id),
+                    )
+            if rows:
+                self._db.commit()
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        if self.embedding_provider is None:
+            return [self.vectorizer.vectorize(text) for text in texts]
+        vectors = [
+            normalize_vector(vector)
+            for vector in self.embedding_provider.embed(texts)
+        ]
+        if len(vectors) != len(texts):
+            raise ValueError("embedding provider returned the wrong number of vectors")
+        dimensions = {len(vector) for vector in vectors}
+        if len(dimensions) > 1 or (vectors and not next(iter(dimensions))):
+            raise ValueError("embedding provider returned inconsistent vector dimensions")
+        return vectors
 
     def index_document(
         self,
@@ -225,26 +297,64 @@ class VectorMemory:
         metadata: dict[str, Any] | None = None,
         tenant_id: str = "default",
     ) -> None:
-        """Add or update a document in the vector index (write-through to SQLite)."""
-        vector = self.vectorizer.vectorize(text)
+        """Add a document using the configured model and persist provenance."""
+        vector = self._embed([text])[0]
         t = tenant_id or "default"
+        details = dict(metadata or {})
+        details.setdefault("source_id", doc_id)
+        dimension = len(vector)
+        document = VectorDocument(
+            doc_id=doc_id,
+            text=text,
+            metadata=details,
+            vector=vector,
+            tenant_id=t,
+            embedding_model=self.embedding_model,
+            embedding_dimension=dimension,
+        )
         with self._lock:
-            self.documents[(t, doc_id)] = VectorDocument(
-                doc_id=doc_id,
-                text=text,
-                metadata=metadata or {},
-                vector=vector,
-                tenant_id=t,
-            )
+            incompatible_dimensions = {
+                existing.embedding_dimension
+                for existing in self.documents.values()
+                if existing.embedding_model == self.embedding_model
+                and existing.embedding_dimension
+                and existing.embedding_dimension != dimension
+            }
+            if incompatible_dimensions:
+                raise ValueError(
+                    "embedding dimension changed for the active model identity; "
+                    "use a new model id and re-embed stored documents"
+                )
             if self._db is not None:
                 self._db.execute(
                     "INSERT INTO vector_documents "
-                    "(doc_id, text, metadata_json, vector_json, tenant_id) VALUES (?, ?, ?, ?, ?) "
+                    "(doc_id, text, metadata_json, vector_json, tenant_id, "
+                    "embedding_model, embedding_dimension) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(tenant_id, doc_id) DO UPDATE SET "
-                    "text=excluded.text, metadata_json=excluded.metadata_json, vector_json=excluded.vector_json",
-                    (doc_id, text, json.dumps(metadata or {}, default=str), json.dumps(vector), t),
+                    "text=excluded.text, metadata_json=excluded.metadata_json, "
+                    "vector_json=excluded.vector_json, embedding_model=excluded.embedding_model, "
+                    "embedding_dimension=excluded.embedding_dimension",
+                    (
+                        doc_id,
+                        text,
+                        json.dumps(details, default=str),
+                        json.dumps(vector),
+                        t,
+                        self.embedding_model,
+                        dimension,
+                    ),
                 )
                 self._db.commit()
+            self.documents[(t, doc_id)] = document
+
+    @staticmethod
+    def _lexical_score(query: str, text: str) -> float:
+        query_terms = set(_TOKEN_RE.findall(query.casefold()))
+        document_terms = set(_TOKEN_RE.findall(text.casefold()))
+        if not query_terms or not document_terms:
+            return 0.0
+        return len(query_terms & document_terms) / len(query_terms | document_terms)
 
     def search(
         self,
@@ -256,8 +366,8 @@ class VectorMemory:
         """
         Search for top-k most semantically similar documents, optionally filtered by tenant.
         """
-        query_vec = self.vectorizer.vectorize(query)
-        scored: list[tuple[float, VectorDocument]] = []
+        query_vec = self._embed([query])[0]
+        scored: list[tuple[float, float, float, VectorDocument]] = []
 
         with self._lock:
             docs_snapshot = list(self.documents.values())
@@ -265,22 +375,106 @@ class VectorMemory:
         for doc in docs_snapshot:
             if tenant_id is not None and doc.tenant_id != tenant_id:
                 continue
-            sim = self.vectorizer.cosine_similarity(query_vec, doc.vector)
-            if sim >= score_threshold:
-                scored.append((sim, doc))
+            if (
+                doc.embedding_model == self.embedding_model
+                and doc.embedding_dimension != len(query_vec)
+            ):
+                raise ValueError(
+                    "stored embedding dimension does not match the active model; "
+                    "re-embed the stored documents"
+                )
+            vector_score = (
+                self.vectorizer.cosine_similarity(query_vec, doc.vector)
+                if doc.embedding_model == self.embedding_model
+                else 0.0
+            )
+            lexical_score = self._lexical_score(query, doc.text)
+            compatible_model = doc.embedding_model == self.embedding_model
+            combined_score = (
+                0.7 * vector_score + 0.3 * lexical_score
+                if compatible_model
+                else 0.3 * lexical_score
+            )
+            if combined_score >= score_threshold:
+                scored.append((combined_score, vector_score, lexical_score, doc))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda item: item[0], reverse=True)
 
         results = []
-        for score, doc in scored[:top_k]:
+        for score, vector_score, lexical_score, doc in scored[:top_k]:
+            source = (
+                doc.metadata.get("citation")
+                or doc.metadata.get("source")
+                or doc.metadata.get("source_uri")
+                or doc.metadata.get("source_id")
+                or doc.doc_id
+            )
             results.append({
                 "doc_id": doc.doc_id,
                 "text": doc.text,
                 "score": round(score, 4),
+                "vector_score": round(vector_score, 4),
+                "lexical_score": round(lexical_score, 4),
+                "retrieval_mode": (
+                    "lexical_only"
+                    if doc.embedding_model != self.embedding_model
+                    else (
+                        "legacy_hash+lexical"
+                        if doc.embedding_model.startswith("legacy-hash-ngram-v1:")
+                        else "semantic+lexical"
+                    )
+                ),
                 "metadata": doc.metadata,
                 "tenant_id": doc.tenant_id,
+                "embedding_model": doc.embedding_model,
+                "embedding_dimension": doc.embedding_dimension,
+                "citation": str(source),
             })
         return results
+
+    def reembed_all(self, *, batch_size: int = 64) -> int:
+        """Re-embed persisted documents in resumable batches with the active model."""
+        if self.embedding_provider is None:
+            raise ValueError("re-embedding requires a configured real embedding provider")
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        documents = list(self.documents.items())
+        updated = 0
+        for start in range(0, len(documents), batch_size):
+            batch = documents[start : start + batch_size]
+            vectors = self._embed([document.text for _, document in batch])
+            with self._lock:
+                if self._db is not None:
+                    self._db.execute("BEGIN")
+                try:
+                    for ((tenant, doc_id), document), vector in zip(
+                        batch, vectors, strict=True
+                    ):
+                        if self._db is not None:
+                            self._db.execute(
+                                "UPDATE vector_documents SET vector_json = ?, "
+                                "embedding_model = ?, embedding_dimension = ? "
+                                "WHERE tenant_id = ? AND doc_id = ?",
+                                (
+                                    json.dumps(vector),
+                                    self.embedding_model,
+                                    len(vector),
+                                    tenant,
+                                    doc_id,
+                                ),
+                            )
+                    if self._db is not None:
+                        self._db.commit()
+                except Exception:
+                    if self._db is not None:
+                        self._db.rollback()
+                    raise
+                for (_, document), vector in zip(batch, vectors, strict=True):
+                    document.vector = vector
+                    document.embedding_model = self.embedding_model
+                    document.embedding_dimension = len(vector)
+            updated += len(batch)
+        return updated
 
     def is_duplicate(self, text: str, threshold: float = 0.88, tenant_id: str | None = None) -> tuple[bool, str | None]:
         """
@@ -317,7 +511,9 @@ def get_vector_memory() -> VectorMemory:
     """Get or create global VectorMemory singleton (persistent by default)."""
     global _vector_memory
     if _vector_memory is None:
-        _vector_memory = VectorMemory()
+        _vector_memory = VectorMemory(
+            embedding_provider=configured_embedding_provider()
+        )
     return _vector_memory
 
 
@@ -329,5 +525,3 @@ def reset_vector_memory_singleton() -> None:
             with contextlib.suppress(Exception):
                 _vector_memory._db.close()
         _vector_memory = None
-
-

@@ -142,6 +142,38 @@ the ephemeral `InMemoryGraph`. So if Neo4j is down, memory still persists.
   deferred (Phase 3-6). They are now DONE — see "Phases 3-6 (capability
   layer)" below.
 
+### Embedding-backed hybrid retrieval (2026-10-08)
+- `VectorMemory` can use either a local Sentence Transformers model or an
+  OpenAI-compatible embeddings endpoint. Configuration is in
+  `sonic/config.py`; setup and the fixed Recall@3/MRR evaluation command are in
+  `docs/CONFIGURATION.md`.
+- The backwards-compatible default `legacy_hash` is explicitly labeled as
+  hashed n-gram retrieval, not learned semantic embeddings. Provider failures
+  do not silently fall back to hash vectors.
+- Vector rows persist model identity and dimension. Search never compares
+  incompatible embeddings; rows not yet re-embedded remain eligible for
+  lexical-only retrieval. `VectorMemory.reembed_all()` migrates in bounded,
+  resumable batches; back up the DB before changing providers.
+- Search returns lexical/vector score components and a source citation;
+  existing tenant filtering remains applied before ranking.
+- `sonic/memory/agentic.py` adds bounded query planning over the vector index.
+  It can propose alternate search queries and assess passage sufficiency, but
+  all evidence remains retrieved source rows, tenant-filtered by `VectorMemory`.
+  Computer-use cross-mission lessons use this path once per mission goal when
+  the model router is available; query planning is capped at two rounds/four
+  total queries and only ranked lesson evidence is injected into the agent's
+  existing reasoning prompt. Missing or invalid planner output is logged and
+  leaves the initial retrieval intact.
+- Regression tests: `tests/test_rag_embeddings.py` covers provider validation,
+  paraphrase retrieval, model isolation, migration, tenant filtering, citations,
+  and evaluation metrics. `tests/test_agentic_rag.py` covers bounded query
+  refinement, sufficiency stopping, invalid/repeated query rejection, planner
+  failure fallback, and tenant-scoped lesson use. Fixture tests validate
+  mechanics, not live model planning quality. The configured model's real
+  Recall@3/MRR must be measured with `python -m sonic.memory.retrieval_eval`
+  before claiming retrieval quality. No hosted or local embedding model was
+  exercised during development.
+
 ## Persistent body + safety (Phase 2 — DONE, foundation)
 - `DaytonaComputerProvider` persists its workspace index to
   `sonic_data/workstations.json` (`SONIC_WORKSTATION_STATE_PATH`). `_load_state()`
