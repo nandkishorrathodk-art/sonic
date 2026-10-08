@@ -1,8 +1,7 @@
 """
 Tests for Vision Perception & Coordinate Normalization in sonic-core:
-1. GUI/dual reasoning attaches desktop pixels when current structured state is
-   unavailable, and avoids image transfer for a fresh, unambiguous accessibility
-   snapshot.
+1. GUI reasoning always attaches a fresh screenshot; accessibility state cannot
+   substitute for the pixels needed by a GUI-only worker.
 2. extract_bbox_midpoint scales normalized 0-1000 coordinates to
    (raw_x / 1000.0) * width and (raw_y / 1000.0) * height in 1280x800 screens.
 3. ScreenObservation supports active_window_geometry (x, y, w, h) in various formats.
@@ -23,7 +22,11 @@ from sonic.computer_use.grounding import (
     crop_active_window_region,
     extract_bbox_midpoint,
 )
-from sonic.computer_use.models import ComputerActionType, ComputerWorldObservation
+from sonic.computer_use.models import (
+    ActionExecutionStatus,
+    ComputerActionType,
+    ComputerWorldObservation,
+)
 
 
 def _make_test_image_b64(width: int = 1280, height: int = 800, color: str = "red") -> str:
@@ -140,7 +143,7 @@ async def test_should_attach_image_without_fresh_structured_state_in_gui_plane()
 
 
 @pytest.mark.asyncio
-async def test_fresh_accessibility_state_avoids_image_transfer():
+async def test_fresh_accessibility_state_still_attaches_current_pixels():
     provider = _mock_provider()
     agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
     fake_b64 = _make_test_image_b64()
@@ -169,8 +172,8 @@ async def test_fresh_accessibility_state_avoids_image_transfer():
         captured_requests.append(req)
         mock_resp = MagicMock()
         mock_resp.content = (
-            'THOUGHT: grounded controls are clear\n'
-            'ACTION: GUI_CLICK\nTARGET: Save\nPAYLOAD: {}\nEXPECTED: saved'
+            'THOUGHT: inspect the visible button\n'
+            'ACTION: GUI_CLICK\nTARGET: 60,55\nPAYLOAD: {"x":60,"y":55}\nEXPECTED: save dialog opens'
         )
         return mock_resp
 
@@ -213,13 +216,78 @@ async def test_fresh_accessibility_state_avoids_image_transfer():
 
     assert len(captured_requests) == 1
     user_msg = captured_requests[0].messages[1]
-    assert user_msg.images == []
-    assert "fresh, grounded accessibility controls" in user_msg.content
-    assert "fresh accessibility/control inventory" in captured_requests[0].messages[0].content
-    assert "attached current screenshot and live observation" not in captured_requests[0].messages[0].content
+    assert user_msg.images
+    assert user_msg.images[0].base64 == fake_b64
+    assert "sole source of current desktop state" in user_msg.content
+    assert '"role": "button"' not in user_msg.content
+    assert "OCR, accessibility controls, or window telemetry" in captured_requests[0].messages[0].content
     assert obs.accessible_scene_fresh is True
-    assert obs.image_attached is False
-    assert obs.visual_escalation_reason == "fresh_accessibility_scene"
+    assert obs.image_attached is True
+    assert obs.visual_escalation_reason == "visual_reasoning_requested"
+
+
+@pytest.mark.asyncio
+async def test_gui_only_worker_fails_closed_when_fresh_pixels_are_unavailable():
+    provider = _mock_provider()
+    agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+    agent._active_workspace_id = "ws-1"
+    provider.screenshot.return_value = ScreenObservation(
+        width=1280,
+        height=800,
+        capture_age_ms=0,
+    )
+    snapshot = agent.perception_bus.publish(
+        width=1280,
+        height=800,
+        active_window="Document",
+        controls=[
+            {
+                "name": "Save",
+                "role": "button",
+                "bbox": (30, 40, 90, 70),
+                "source": "atspi",
+                "confidence": 0.95,
+                "freshness_ms": 10,
+            }
+        ],
+    )
+    router = MagicMock()
+    router.complete = AsyncMock()
+    agent.llm_router = router
+    obs = ComputerWorldObservation(
+        screen=ScreenObservation(
+            width=1280,
+            height=800,
+            active_window="Document",
+            capture_age_ms=0,
+            detected_controls=[
+                {
+                    "name": "Save",
+                    "role": "button",
+                    "bbox": (30, 40, 90, 70),
+                    "source": "atspi",
+                    "confidence": 0.95,
+                    "freshness_ms": 10,
+                }
+            ],
+        ),
+        active_application="Document",
+        perception_version=snapshot.version,
+        observation_age_ms=25,
+    )
+
+    action, target, payload, thought = await agent._llm_choose_action(
+        goal="Save the document",
+        observation=obs,
+        step_index=1,
+        primary_file="",
+        test_file="",
+    )
+
+    assert action == ActionExecutionStatus.BLOCKED
+    assert target == "gui-perception-unavailable"
+    assert "No fresh screenshot" in thought
+    router.complete.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -331,6 +331,7 @@ class ModelRouter:
         self,
         provider_name: str | None = None,
         task_type: str | None = None,
+        require_images: bool = False,
     ) -> tuple[CustomLLMProvider, str | None]:
         """
         Resolve which provider to use based on task_type or explicit provider name.
@@ -340,7 +341,14 @@ class ModelRouter:
         """
         # Explicit provider name takes priority
         if provider_name and provider_name in self.providers:
-            return self.providers[provider_name], None
+            provider = self.providers[provider_name]
+            model = provider.default_model
+            if require_images and not self._model_supports_images(model, provider):
+                raise RuntimeError(
+                    f"Provider {provider_name} default model is not configured "
+                    "as vision-capable."
+                )
+            return provider, None
 
         # Visual requests must honor the dedicated multimodal route. A text
         # default provider may be configured globally but still lack reliable
@@ -350,11 +358,34 @@ class ModelRouter:
             target_provider = rule["provider"]
             target_model = rule.get("model")
             if self._is_provider_ready(target_provider):
-                return self.providers[target_provider], target_model
+                provider = self.providers[target_provider]
+                selected_model = target_model or provider.default_model
+                if not require_images or self._model_supports_images(
+                    selected_model, provider
+                ):
+                    return provider, target_model
+                logger.warning(
+                    "vision_route_model_not_image_capable",
+                    task_type=task_type,
+                    provider=target_provider,
+                    model=selected_model,
+                )
             for fallback in rule.get("fallback", []):
                 fb_provider = fallback.split("/")[0] if "/" in fallback else fallback
                 if self._is_provider_ready(fb_provider):
                     fb_model = fallback.split("/", 1)[1] if "/" in fallback else None
+                    provider = self.providers[fb_provider]
+                    selected_model = fb_model or provider.default_model
+                    if require_images and not self._model_supports_images(
+                        selected_model, provider
+                    ):
+                        logger.warning(
+                            "vision_fallback_model_not_image_capable",
+                            task_type=task_type,
+                            provider=fb_provider,
+                            model=selected_model,
+                        )
+                        continue
                     logger.info(
                         "routing_fallback",
                         task_type=task_type,
@@ -363,10 +394,10 @@ class ModelRouter:
                     )
                     return self.providers[fb_provider], fb_model
 
-        if task_type == "vision":
+        if task_type == "vision" or require_images:
             raise RuntimeError(
-                "No configured vision provider is ready. Configure credentials "
-                "for the vision route or start its local vision model."
+                "No configured vision-capable provider is ready. Configure "
+                "credentials for a vision route or start its local vision model."
             )
 
         # If user explicitly configured a default provider (e.g. DEFAULT_PROVIDER=deepseek or openrouter),
@@ -761,41 +792,35 @@ class ModelRouter:
         # Requests containing pixels require a vision-capable model even when
         # their caller labels the surrounding task as reasoning or computer use.
         has_images = any(getattr(msg, "has_images", False) for msg in request.messages)
-        if has_images and "vision" in self.routing_rules:
+        if has_images:
             effective_task = "vision"
 
-        provider, model_override = self._resolve_provider(provider_name, effective_task)
+        provider, model_override = self._resolve_provider(
+            provider_name,
+            effective_task,
+            require_images=has_images,
+        )
         routed_request = request.model_copy(deep=True)
 
         # Override model if routing rule specifies one
         if model_override and not routed_request.model:
             routed_request.model = model_override
-
-        # If the resolved target model is a high-parameter reasoning/coding model
-        # (e.g. nemotron-3-super-120b or nemotron-3-ultra-550b) that does not accept
-        # raw image_url blocks, strip image bytes only from the primary attempt.
-        # Keep the routed request intact so a vision fallback still receives pixels.
-        active_model_name = (
-            routed_request.model or getattr(provider, "default_model", "") or ""
-        ).lower()
-        if (
-            has_images
-            and not self._model_supports_images(active_model_name)
+        if has_images and not self._model_supports_images(
+            routed_request.model or provider.default_model,
+            provider,
         ):
-            primary_request = routed_request.model_copy(deep=True)
-            for msg in primary_request.messages:
-                if getattr(msg, "images", None):
-                    msg.images = []
-        else:
-            primary_request = routed_request
+            raise RuntimeError(
+                f"Selected model {provider.name}/"
+                f"{routed_request.model or provider.default_model} is not "
+                "configured as vision-capable; refusing to discard screenshot pixels."
+            )
 
         # Set task metadata
         routed_request.task_type = effective_task
-        primary_request.task_type = effective_task
         request_spent = [Decimal(0)]
 
         try:
-            response = await self._budgeted_complete(provider, primary_request, request_spent)
+            response = await self._budgeted_complete(provider, routed_request, request_spent)
 
             # Check for safety refusal; trigger model fallback if detected
             if is_refusal_response(response):
@@ -833,9 +858,27 @@ class ModelRouter:
             )
 
     @staticmethod
-    def _model_supports_images(model_name: str) -> bool:
-        """Best-effort check for model families that accept image payloads."""
-        return any(marker in model_name for marker in ("vision", "vl", "gpt-4o", "claude"))
+    def _model_supports_images(
+        model_name: str,
+        provider: CustomLLMProvider | None = None,
+    ) -> bool:
+        """Use explicit model metadata when available, then known vision families."""
+        normalized_model = model_name.lower()
+        capabilities = getattr(provider, "model_capabilities", {}).get(
+            model_name
+        )
+        if capabilities is None and provider is not None:
+            capabilities = next(
+                (
+                    value
+                    for key, value in provider.model_capabilities.items()
+                    if key.lower() == normalized_model
+                ),
+                None,
+            )
+        if capabilities is not None:
+            return "vision" in capabilities
+        return any(marker in normalized_model for marker in ("vision", "vl", "gpt-4o", "claude"))
 
     def _fallback_candidates(self, task_type: str | None) -> list[tuple[str, str | None]]:
         """Return configured task and global fallbacks in their configured order."""
@@ -880,12 +923,20 @@ class ModelRouter:
             # Skip if same provider and no different model specified
             if fb_name == failed_provider and (not fb_model or fb_model == original_model):
                 continue
+            fb_provider = self.providers[fb_name]
+            fallback_model = fb_model or fb_provider.default_model
+            if task_type == "vision" and not self._model_supports_images(
+                fallback_model, fb_provider
+            ):
+                failures.append(
+                    f"{fb_name}/{fallback_model}: model is not configured as vision-capable"
+                )
+                continue
 
             logger.info("trying_fallback", provider=fb_name, model=fb_model, task_type=task_type)
             try:
-                fb_provider = self.providers[fb_name]
                 fallback_request = request.model_copy(deep=True)
-                fallback_request.model = fb_model
+                fallback_request.model = fallback_model
                 return await self._budgeted_complete(fb_provider, fallback_request, request_spent)
             except (LLMBudgetExceededError, LLMBudgetEstimateUnavailableError):
                 raise
@@ -929,13 +980,26 @@ class ModelRouter:
         """Route and stream, falling back only before the first emitted chunk."""
         effective_task = task_type or request.task_type
         has_images = any(getattr(msg, "has_images", False) for msg in request.messages)
-        if has_images and "vision" in self.routing_rules:
+        if has_images:
             effective_task = "vision"
-        provider, model_override = self._resolve_provider(provider_name, effective_task)
+        provider, model_override = self._resolve_provider(
+            provider_name,
+            effective_task,
+            require_images=has_images,
+        )
 
         routed_request = request.model_copy(deep=True)
         if model_override and not routed_request.model:
             routed_request.model = model_override
+        if has_images and not self._model_supports_images(
+            routed_request.model or provider.default_model,
+            provider,
+        ):
+            raise RuntimeError(
+                f"Selected model {provider.name}/"
+                f"{routed_request.model or provider.default_model} is not "
+                "configured as vision-capable; refusing to discard screenshot pixels."
+            )
         routed_request.task_type = effective_task
         candidates = [(provider.name, None), *self._fallback_candidates(effective_task)]
         original_model = routed_request.model
@@ -954,12 +1018,10 @@ class ModelRouter:
             if fallback_model:
                 attempt_request.model = fallback_model
             attempt_model = (attempt_request.model or attempt_provider.default_model).lower()
-            if (
-                has_images
-                and not self._model_supports_images(attempt_model)
+            if has_images and not self._model_supports_images(
+                attempt_model, attempt_provider
             ):
-                for message in attempt_request.messages:
-                    message.images = []
+                continue
 
             estimate = await self._reserve_budget(
                 attempt_provider, attempt_request, request_spent

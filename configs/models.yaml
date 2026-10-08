@@ -65,7 +65,7 @@ providers:
         speed_tier: fast
         cost_per_1k_input: 0.0003
         cost_per_1k_output: 0.0006
-        capabilities: [reasoning, coding, planning, vision, computer_use, multimodal, tool_use]
+        capabilities: [reasoning, coding, planning, tool_use]
       - id: openai/gpt-oss-120b
         speed_tier: fast
         cost_per_1k_input: 0.0005
@@ -214,18 +214,16 @@ routing_rules:
 
   vision:
     description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
-    provider: groq
-    model: qwen/qwen3.8-27b
+    provider: openrouter
+    model: openai/gpt-4o
     fallback:
-      - openrouter/openai/gpt-4o
       - nvidia/meta/llama-3.2-11b-vision-instruct
 
   computer_use:
     description: 'Autonomous computer vision and desktop interaction'
-    provider: groq
-    model: qwen/qwen3.8-27b
+    provider: openrouter
+    model: openai/gpt-4o
     fallback:
-      - openrouter/openai/gpt-4o
       - nvidia/meta/llama-3.2-11b-vision-instruct
 
 

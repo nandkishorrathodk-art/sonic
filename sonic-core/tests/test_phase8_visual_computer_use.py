@@ -7,6 +7,7 @@ includes GUI actions in its schema, that the action parser handles coordinate
 formats, and that the safety policy allows GUI actions.
 """
 import asyncio
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -78,6 +79,21 @@ def _seed_fresh_gui_observation(agent, *, active_window="Desktop", controls=None
     agent._screen_width = screen.width
     agent._screen_height = screen.height
     return observation
+
+
+def _allow_visual_focus(agent):
+    agent.llm_router = MagicMock()
+    agent.llm_router.complete = AsyncMock(
+        return_value=MagicMock(
+            content=json.dumps(
+                {
+                    "focused": True,
+                    "confidence": 0.99,
+                    "evidence": "A visible caret is present at the clicked field.",
+                }
+            )
+        )
+    )
 
 
 # ---- Tests ----
@@ -176,7 +192,7 @@ class TestGUIActionDispatch:
         provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_gui_type_dispatches_to_provider(self):
+    async def test_gui_type_without_pixel_target_is_blocked(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
         await agent.observe("ws-1")
@@ -185,24 +201,116 @@ class TestGUIActionDispatch:
             {"text": "hello world"}, "Type text"
         )
         assert trace.status == ActionExecutionStatus.BLOCKED
-        assert "editable control" in trace.actual_observation
+        assert "coordinates" in trace.actual_observation
         provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_gui_type_rejects_coordinates_without_editable_control(self):
+    async def test_gui_only_type_uses_pixel_target_without_accessibility_control(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+        _allow_visual_focus(agent)
         await agent.observe("ws-1")
         trace = await agent.execute_action(
             "ws-1",
             ComputerActionType.GUI_TYPE,
             "320,240",
-            {"x": 320, "y": 240, "text": "query"},
-            "Type into an editable control",
+            {
+                "x": 320,
+                "y": 240,
+                "text": "query",
+                "postcondition": {"screen_changed": True},
+            },
+            "The requested text appears",
         )
+        assert trace.status != ActionExecutionStatus.BLOCKED
+        assert any(call.args[1].action == GUIActionType.CLICK for call in provider.gui_action.await_args_list)
+        assert any(call.args[1].action == GUIActionType.TYPE for call in provider.gui_action.await_args_list)
+
+    @pytest.mark.asyncio
+    async def test_gui_only_type_blocks_when_pixels_do_not_confirm_focus(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+        agent.llm_router = MagicMock()
+        agent.llm_router.complete = AsyncMock(
+            return_value=MagicMock(
+                content=json.dumps(
+                    {
+                        "focused": False,
+                        "confidence": 0.98,
+                        "evidence": "No caret or focus indicator is visible.",
+                    }
+                )
+            )
+        )
+        await agent.observe("ws-1")
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_TYPE,
+            "320,240",
+            {
+                "x": 320,
+                "y": 240,
+                "text": "must not be sent",
+                "postcondition": {"screen_changed": True},
+            },
+            "The requested text appears",
+        )
+
         assert trace.status == ActionExecutionStatus.BLOCKED
-        assert "editable control" in trace.actual_observation
-        provider.gui_action.assert_not_awaited()
+        assert "no text was sent" in trace.actual_observation
+        assert all(
+            call.args[1].action != GUIActionType.TYPE
+            for call in provider.gui_action.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_gui_only_type_does_not_send_text_without_post_focus_pixels(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+        await agent.observe("ws-1")
+        provider.screenshot.side_effect = [
+            ScreenObservation(
+                width=1280,
+                height=800,
+                screenshot_base64="fresh-frame",
+                capture_age_ms=0,
+                active_window="Desktop",
+            ),
+            ScreenObservation(
+                width=1280,
+                height=800,
+                screenshot_base64="focused-frame",
+                capture_age_ms=0,
+                active_window="Desktop",
+            ),
+            ScreenObservation(
+                width=1280,
+                height=800,
+                capture_age_ms=0,
+                active_window="Desktop",
+            ),
+        ]
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_TYPE,
+            "320,240",
+            {
+                "x": 320,
+                "y": 240,
+                "text": "query",
+                "postcondition": {"screen_changed": True},
+            },
+            "The requested text appears",
+        )
+
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        assert "post-focus screenshot" in trace.actual_observation
+        assert all(
+            call.args[1].action != GUIActionType.TYPE
+            for call in provider.gui_action.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_gui_keypress_dispatches_to_provider(self):
@@ -346,15 +454,54 @@ class TestGUIActionDispatch:
         assert target == '{"x": 330, "y": 300}'
         assert payload == {"text": "folder name", "x": 330, "y": 300}
 
+    def test_gui_action_parser_recovers_wrapped_single_quoted_payload_json(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+
+        action, target, payload, _ = agent._parse_gui_action_response(
+            (
+                "ACTION: GUI_TYPE\nTARGET: 330, 300\n"
+                "PAYLOAD:\n```json\n{'text': 'sonic-gui-acceptance-20261008',}\n```\n"
+                "EXPECTED: The folder name appears in the dialog"
+            ),
+            "",
+        )
+
+        assert action == ComputerActionType.GUI_TYPE
+        assert target == "330, 300"
+        assert payload == {
+            "text": "sonic-gui-acceptance-20261008",
+            "x": 330,
+            "y": 300,
+        }
+
+    def test_gui_action_parser_still_rejects_bare_payload_text(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+
+        action, target, payload, reason = agent._parse_gui_action_response(
+            (
+                "ACTION: GUI_TYPE\nTARGET: folder name field\n"
+                "PAYLOAD: sonic-gui-acceptance-20261008\nEXPECTED: Type folder name"
+            ),
+            "",
+        )
+
+        assert action == ActionExecutionStatus.BLOCKED
+        assert target == "gui-invalid-response"
+        assert payload == {}
+        assert "PAYLOAD must be a JSON object" in reason
+
     @pytest.mark.asyncio
-    async def test_gui_type_rejects_json_pixel_target_without_semantic_control(self):
+    async def test_gui_type_accepts_json_pixel_target_without_semantic_control(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+        _allow_visual_focus(agent)
         await agent.observe("ws-1")
         action, target, payload, expected = agent._parse_gui_action_response(
             (
                 'ACTION: GUI_TYPE\nTARGET: {"x": 330, "y": 300}\n'
-                'PAYLOAD: {"text": "folder name"}\nEXPECTED: Text appears'
+                'PAYLOAD: {"text": "folder name", '
+                '"postcondition": {"screen_changed": true}}\n'
+                'EXPECTED: Text appears'
             ),
             "",
         )
@@ -363,15 +510,17 @@ class TestGUIActionDispatch:
             "ws-1", action, target, payload, expected,
         )
 
-        assert trace.status == ActionExecutionStatus.BLOCKED
-        assert "editable control" in trace.actual_observation
-        provider.gui_action.assert_not_awaited()
+        assert trace.status != ActionExecutionStatus.BLOCKED
+        assert any(
+            call.args[1].action == GUIActionType.TYPE
+            for call in provider.gui_action.await_args_list
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("focused_after_click", [True, False])
     async def test_gui_type_requires_fresh_focus_confirmation(self, focused_after_click):
         provider = _mock_provider()
-        agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="dual")
         control = {
             "name": "Folder name",
             "role": "entry",
@@ -435,7 +584,10 @@ class TestGUIActionDispatch:
             "ws-1",
             ComputerActionType.GUI_TYPE,
             "Folder name",
-            {"text": "SONIC_GUI_ACCEPTANCE"},
+            {
+                "text": "SONIC_GUI_ACCEPTANCE",
+                "postcondition": {"screen_changed": True},
+            },
             "Enter the requested folder name",
         )
 
@@ -1101,8 +1253,9 @@ class TestReasoningPrompt:
         assert "TERMINAL_EXEC" not in system_prompt
         assert "Which GUI application window or terminal command" not in user_prompt
         assert "AUTONOMOUS TOOL AUTHORING" not in user_prompt
-        assert "use only the fresh current screenshot when attached" in user_prompt
-        assert "otherwise use only the fresh grounded control inventory" in user_prompt
+        assert "sole source of current desktop state" in user_prompt
+        assert "Do not use OCR, accessibility controls" in user_prompt
+        assert "otherwise use only the fresh grounded control inventory" not in user_prompt
         assert "exact integer screen-pixel coordinates" in user_prompt
         assert "Never describe a desktop shortcut as an already-open window" in system_prompt
         assert "TARGET may be exact integer screen-pixel coordinates `x,y`" in user_prompt
@@ -1335,7 +1488,7 @@ class TestReasoningPrompt:
         assert step_callback.await_args.args[0] is traces[-1]
         provider.gui_action.assert_not_awaited()
 
-    def test_gui_reasoning_context_includes_grounded_controls_from_current_frame(self):
+    def test_gui_reasoning_context_omits_structured_controls_from_visual_prompt(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
         snapshot = agent.perception_bus.publish(
             screenshot_base64="frame-a",
@@ -1367,14 +1520,13 @@ class TestReasoningPrompt:
             "Create a folder", observation, 1, "", ""
         )
 
-        assert "Grounded visible controls" in user_prompt
-        assert '"label":"File"' in user_prompt
-        assert '"role":"menuitem"' in user_prompt
-        assert '"bbox_xywh":[12,20,44,22]' in user_prompt
-        assert '"source":"ocr"' in user_prompt
+        assert "Grounded visible controls" not in user_prompt
+        assert '"label":"File"' not in user_prompt
+        assert "File Edit View" not in user_prompt
+        assert "sole source of current desktop state" in user_prompt
 
     @pytest.mark.asyncio
-    async def test_gui_reasoning_keeps_pixels_with_grounded_controls(self):
+    async def test_gui_reasoning_uses_pixels_without_exposing_control_inventory(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
         agent._last_screenshot_b64 = "encoded-frame"
         snapshot = agent.perception_bus.publish(
@@ -1417,8 +1569,8 @@ class TestReasoningPrompt:
         request = agent.llm_router.complete.await_args.args[0]
         assert len(request.messages[1].images) == 1
         assert request.task_type == "computer_use"
-        assert "Grounded visible controls" in request.messages[1].content
-        assert "File" in request.messages[1].content
+        assert "Grounded visible controls" not in request.messages[1].content
+        assert "File Edit View" not in request.messages[1].content
 
     @pytest.mark.asyncio
     async def test_gui_reasoning_keeps_screenshot_fallback_without_controls(self):
