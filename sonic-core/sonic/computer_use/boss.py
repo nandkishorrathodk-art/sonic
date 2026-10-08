@@ -1900,6 +1900,11 @@ Rules:
             f"{sum(1 for r in p.results if r.success)} succeeded"
             for p in phases
         )
+        known_task_refs = "\n".join(
+            f"- {sub.id}: {sub.name or sub.goal}"
+            for phase in phases
+            for sub in phase.sub_missions
+        ) or "(none)"
 
         # Determine effective execution plane across phases
         explicit_constraint = (
@@ -1926,6 +1931,9 @@ OBJECTIVE: {objective}
 PREVIOUS PHASES:
 {phase_history}
 
+KNOWN TASK IDS (use these exact IDs in depends_on when referencing prior work):
+{known_task_refs}
+
 FINDINGS SO FAR:
 {all_findings[:2000]}
 
@@ -1940,6 +1948,7 @@ Respond with EXACTLY this JSON format:
   "phase_name": "Short name for this phase",
   "sub_missions": [
     {{
+      "id": "sub-next-1",
       "goal": "Specific goal for this worker",
       "plane": "{effective_plane}",
       "depends_on": [],
@@ -2020,6 +2029,37 @@ If the objective is complete or no more work is needed, return:
                 max_steps=max(1, min(requested_steps, 30)),
                 priority=priority,
             ))
+
+        dependency_aliases: dict[str, set[str]] = {}
+        for phase in phases:
+            for sub in phase.sub_missions:
+                for reference in (sub.name, sub.goal):
+                    normalized = " ".join(reference.split()).casefold()
+                    if normalized:
+                        dependency_aliases.setdefault(normalized, set()).add(sub.id)
+        for sub in sub_missions:
+            for reference in (sub.name, sub.goal):
+                normalized = " ".join(reference.split()).casefold()
+                if normalized:
+                    dependency_aliases.setdefault(normalized, set()).add(sub.id)
+
+        known_ids = {
+            task_id for task_id in self.task_graph.tasks
+        } | {sub.id for phase in phases for sub in phase.sub_missions} | {
+            sub.id for sub in sub_missions
+        }
+        for sub in sub_missions:
+            resolved_dependencies: list[str] = []
+            for dependency in sub.depends_on:
+                if dependency in known_ids:
+                    resolved_dependencies.append(dependency)
+                    continue
+                normalized = " ".join(dependency.split()).casefold()
+                matches = dependency_aliases.get(normalized, set())
+                resolved_dependencies.append(
+                    next(iter(matches)) if len(matches) == 1 else dependency
+                )
+            sub.depends_on = list(dict.fromkeys(resolved_dependencies))
 
         self.thinking_log.append(BossThinking(
             phase=phase_number,

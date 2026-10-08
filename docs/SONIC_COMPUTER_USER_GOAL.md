@@ -39,11 +39,15 @@ workstation tasks.
   controls, relevant text, application state, and recent changes.
 - Prefer incremental signals such as accessibility events, window changes,
   control state, and changed screen regions where the workstation exposes them.
-- Keep pixel perception available for visual appearance, layout, icons,
-  custom-drawn controls, and other cases structured signals cannot resolve.
-- Do not send a full screenshot to a remote model on every action by default.
-  Escalate to image-based reasoning when evidence is ambiguous, novel, or
-  contradictory.
+- For workers assigned to the visible GUI plane, use a fresh screenshot as the
+  primary reasoning input on every decision. Do not substitute OCR,
+  accessibility controls, or window telemetry when the screenshot is absent.
+- Structured state remains useful for freshness checks, coordinate bounds,
+  action safety, and independent verification; it must not silently replace
+  visual reasoning for GUI-only work.
+- For non-GUI tasks, avoid unnecessary image transfer; use image reasoning when
+  visual appearance, layout, icons, custom-drawn controls, or ambiguous state
+  require it.
 - Treat stale, incomplete, or mismatched observations as unusable for grounding.
 
 ### Act, adapt, and recover
@@ -83,14 +87,16 @@ operator outcome
   -> continue, replan, request approval, or report
 ```
 
-Perception should be a hybrid sensor system rather than an OCR-only pipeline or
-a screenshot-per-action pipeline:
+Perception should be a hybrid sensor system with a task-appropriate evidence
+contract:
 
-1. Reuse fresh accessibility, window, focus, and control-state information.
-2. Consume desktop change signals and inspect only relevant changed regions
-   when available.
-3. Use screenshot pixels and a vision model when semantic visual evidence is
-   actually needed.
+1. GUI-only reasoning consumes a fresh screenshot and grounds targets from its
+   pixels; structured controls are not a substitute when pixels are missing.
+2. Reuse fresh accessibility, window, focus, and control-state information for
+   internal freshness/safety checks and for tasks that do not require visual
+   GUI reasoning.
+3. Consume desktop change signals and inspect relevant changed regions when
+   available, while retaining full-frame evidence for visual decisions.
 4. Use independent task-level verification for completion claims.
 
 No single model, OCR engine, accessibility API, or world model can fully
@@ -174,13 +180,11 @@ acceptance remains the evidence required for stronger claims.
   causes an on-demand visual capture when a live workspace is available.
 - Unresolved visual targets remain blocked rather than falling back to guessed
   landmarks.
-- `GUI_TYPE` requires a current, uniquely resolved AT-SPI editable control;
-  OCR-only labels and coordinates without an editable-control match are not
-  sufficient. Any supplied point must fall inside that control. SONIC clicks
-  the control, obtains a fresh observation that confirms the same control has
-  keyboard focus, and only then types. OCR controls retain their own confidence
-  and freshness metadata; missing/low confidence or stale controls are not
-  indexed as actionable targets.
+- At the time of this 2026-10-01 implementation slice, `GUI_TYPE` required a
+  uniquely resolved AT-SPI editable control and confirmed focus through
+  accessibility state. This describes the non-GUI-only compatibility path;
+  the later visual-first GUI-only contract below supersedes it for workers
+  assigned to visible GUI work.
 - GUI action selection uses a single JSON-schema response contract. It does
   not simultaneously advertise native function calling to models whose
   configured capabilities do not declare tool use.
@@ -208,10 +212,9 @@ or a measured end-to-end latency improvement.
   latency alone. Structured events `computer_perception_observation`,
   `computer_reasoning_perception`, and `computer_action_to_state_observed`
   expose these measurements in service logs.
-- GUI-only system and user prompts now agree on the evidence source: use the
-  attached screenshot when present, otherwise use only the fresh grounded
-  accessibility/control inventory. If neither is available, request one visual
-  observation and do not guess.
+- At the time of this 2026-10-01 implementation slice, GUI-only prompts allowed
+  fresh accessibility state when no screenshot was attached. The later
+  visual-first GUI-only contract below supersedes that behavior.
 - These are instrumentation and contract-alignment changes. They do not remove
   screenshots after GUI actions or prove any fixed accessibility coverage or
   latency target; those require live acceptance across representative
@@ -258,6 +261,20 @@ or a measured end-to-end latency improvement.
   retaining one serialized display lease. Any mismatch stops the remaining
   actions. This can reduce reasoning round-trips for predictable short
   sequences; it does not create a separate learned/local fast policy.
+- Single-action GUI clicks, typing, keypresses, scrolling, and drags in the
+  mission loop now also require a structured `payload.postcondition` describing
+  observable text, window, control, or screen-change evidence. Missing or
+  malformed conditions are blocked before dispatch. After dispatch, the agent
+  checks the condition against the provider's fresh screen/state receipt:
+  matching conditions mark the action `VERIFIED`; unavailable or mismatching
+  evidence marks it `UNVERIFIED` and feeds the reason into the next reasoning
+  step. This is action-level verification only; it does not replace the
+  independent Judge's final-goal check. Pointer movement, waiting, and
+  observation-only actions are excluded because they need different measurable
+  postconditions.
+- Regression coverage for matching/mismatching postconditions and missing
+  conditions passed in `test_agent_action_receipts.py`. These are mocked
+  provider tests, not a live desktop acceptance result.
 - This is a dispatch-safety and evidence-binding foundation, **not** a fast
   action policy: action selection still waits for the configured reasoning
   model, and deep reasoning is not yet running concurrently with a local
@@ -487,9 +504,33 @@ live computer-use readiness and task completion remain unverified.
   this is not vision-readiness evidence. The local health endpoint's
   `llm_router=healthy` only means providers were configured, not that a usable
   visual model was authenticated or able to interpret pixels.
-- No GUI task or GUI action was dispatched. The isolated acceptance container
-  was preserved for a later attempt; no application was installed, and no live
-  computer-use success is claimed.
+- At this initial readiness check, no GUI task or GUI action was dispatched.
+  The later retry and its outcome are recorded below.
+
+### Isolated GUI retry and runtime fixes (2026-10-08)
+
+- The API was temporarily bound to `sonic-acceptance-20261008` and reported its
+  localhost-only noVNC port (16091) and fresh desktop evidence before the retry.
+  Afterward, the API was restored to its normal `sonic-desktop-workstation`
+  mapping; no prompt was sent to the shared desktop.
+- SONIC's GUI-only worker did not complete the folder task. Its GUI click
+  receipts were blocked before dispatch because the bounded intent expired or
+  the fresh screenshot no longer matched the state used for reasoning. The
+  worker was interrupted when its reasoning returned a non-GUI fallback.
+- The actual vision route failed closed: Groq returned HTTP 429, the OpenRouter
+  vision provider was not configured, and NVIDIA returned HTTP 403 for the
+  configured vision model. A healthy router status did not establish usable
+  visual reasoning. No worker receipt or independent Judge confirmation proves
+  the requested folder was created; live computer-use success remains
+  unverified.
+- Runtime fixes now renew GUI intents only after fresh evidence proves the same
+  window, geometry, focus, target, and UI state; they continue to block on any
+  changed or ambiguous state. Next-phase planning now supplies stable task IDs
+  and resolves an exact prior-task description to its unique ID, while unknown
+  or ambiguous dependencies remain fail-closed. GUI payload parsing accepts
+  wrapped JSON through the shared parser but still rejects non-object payloads.
+- Focused regression suites: **120 passed**. Ruff and `git diff --check` passed.
+  These are code-contract results, not evidence that the live GUI task succeeded.
 
 Full backend command (from the repository root):
 
@@ -504,3 +545,33 @@ The live acceptance gate remains open until the isolated workstation publishes
 fresh, versioned perception, a working vision route interprets its pixels, and
 SONIC produces GUI action receipts plus independent Judge evidence for a
 harmless task.
+
+### Visual-first GUI reasoning and fail-closed vision routing (2026-10-08)
+
+- GUI-assigned workers now refresh and attach a fresh screenshot for every
+  reasoning decision, even when NSI/accessibility controls are fresh. Their
+  current-state prompt omits OCR text, control inventories, and window
+  telemetry; screenshot pixels are the source for target interpretation.
+- GUI-only workers stop before model reasoning when no fresh screenshot is
+  available. `GUI_TYPE` in this contract requires screen-pixel coordinates,
+  clicks the grounded point, refreshes pixels, and asks the configured vision
+  route to confirm a visible focus indicator at that point. It sends no text if
+  the route is unavailable, the response is invalid/uncertain, or focus is not
+  visually confirmed at confidence >= 0.9. This is a fail-closed model check,
+  not independent proof that the model's focus judgment is correct.
+- Before dispatch, a GUI-only action is blocked if the current screenshot pixels
+  differ from the pixels used to ground the action, even when OCR/control
+  metadata appears unchanged. This avoids using structured metadata to excuse
+  a stale visual target; animations and blinking indicators can therefore cause
+  safe false blocks and require a new reasoning turn.
+- Requests containing images now route only to models configured as
+  vision-capable. The router does not strip image bytes to make a text-only
+  provider appear successful. Groq's text model was removed from the vision
+  routes; the configured routes prefer OpenRouter GPT-4o and fall back to
+  NVIDIA Llama Vision.
+- These changes make visual input the GUI worker's reasoning source, but do not
+  establish that the deployed vision provider is currently authenticated or can
+  interpret the screenshot. Live GUI acceptance remains blocked until provider
+  readiness is demonstrated and an isolated task passes independent Judge
+  verification. Pixels-only perception still requires pixel coordinates for
+  motor actions; it is not yet evidence of human-level reliability.

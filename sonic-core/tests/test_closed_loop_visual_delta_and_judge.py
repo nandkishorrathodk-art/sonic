@@ -148,7 +148,16 @@ async def test_watchdog_aborts_run_mission_before_burning_quota():
 
     # Mock choose_action to repeatedly attempt GUI_CLICK
     async def _mock_choose(goal, obs, step):
-        return ComputerActionType.GUI_CLICK, "50,50", {"x": 50, "y": 50}, "Click"
+        return (
+            ComputerActionType.GUI_CLICK,
+            "50,50",
+            {
+                "x": 50,
+                "y": 50,
+                "postcondition": {"screen_changed": True},
+            },
+            "Click",
+        )
 
     agent.choose_action = AsyncMock(side_effect=_mock_choose)
 
@@ -187,13 +196,30 @@ async def test_unchanged_focus_click_does_not_send_escape_before_typing():
 async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
     provider = _mock_static_gui_provider("unchanged_input_frame")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+    agent.llm_router = MagicMock()
+    agent.llm_router.complete = AsyncMock(
+        return_value=MagicMock(
+            content=json.dumps(
+                {
+                    "focused": True,
+                    "confidence": 0.99,
+                    "evidence": "A visible caret is present at the clicked field.",
+                }
+            )
+        )
+    )
     await agent.observe("ws-1")
 
     typing_trace = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_TYPE,
         "text field",
-        {"x": 240, "y": 180, "text": "folder name"},
+        {
+            "x": 240,
+            "y": 180,
+            "text": "folder name",
+            "postcondition": {"screen_changed": True},
+        },
         "Enter text in the focused field",
     )
     keypress_trace = await agent.execute_action(
@@ -221,7 +247,7 @@ async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
     ("updated_text", "changed_region", "expected_status", "expected_changed"),
     [
         ("Document - Saved", None, ActionExecutionStatus.SUCCESS, True),
-        ("Document - Untitled", None, ActionExecutionStatus.FAILED, False),
+        ("Document - Untitled", None, ActionExecutionStatus.UNVERIFIED, False),
         (
             "Document - Untitled",
             (10, 20, 90, 70),

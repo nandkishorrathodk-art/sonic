@@ -236,7 +236,7 @@ def test_vision_route_fails_closed_instead_of_using_local_text_model(monkeypatch
         "fallback": [],
     }
 
-    with pytest.raises(RuntimeError, match="No configured vision provider is ready"):
+    with pytest.raises(RuntimeError, match="No configured vision-capable provider is ready"):
         router._resolve_provider(task_type="vision")
 
 
@@ -279,27 +279,35 @@ def test_vision_routes_configure_distinct_multimodal_fallbacks():
     from_config = Path(__file__).resolve().parents[2] / "configs" / "models.yaml"
     router = ModelRouter.from_config(
         from_config,
-        env_vars={"GROQ_API_KEY": "groq-test-key"},
+        env_vars={
+            "GROQ_API_KEY": "groq-test-key",
+            "OPENROUTER_API_KEY": "openrouter-test-key",
+        },
     )
 
+    assert router.routing_rules["vision"]["provider"] == "openrouter"
     assert router.routing_rules["vision"]["fallback"] == [
-        "openrouter/openai/gpt-4o",
         "nvidia/meta/llama-3.2-11b-vision-instruct",
     ]
+    assert router.routing_rules["computer_use"]["provider"] == "openrouter"
     assert router.routing_rules["computer_use"]["fallback"] == [
-        "openrouter/openai/gpt-4o",
         "nvidia/meta/llama-3.2-11b-vision-instruct",
     ]
-    vision_provider, vision_model = router._resolve_provider(task_type="vision")
+    vision_provider, vision_model = router._resolve_provider(
+        task_type="vision",
+        require_images=True,
+    )
     computer_use_provider, computer_use_model = router._resolve_provider(
         task_type="computer_use"
     )
-    assert vision_provider.name == "groq"
-    assert vision_model == "qwen/qwen3.8-27b"
-    assert computer_use_provider.name == "groq"
-    assert computer_use_model == "qwen/qwen3.8-27b"
+    assert vision_provider.name == "openrouter"
+    assert vision_model == "openai/gpt-4o"
+    assert computer_use_provider.name == "openrouter"
+    assert computer_use_model == "openai/gpt-4o"
+    assert "vision" not in router.providers["groq"].model_capabilities[
+        "qwen/qwen3.8-27b"
+    ]
     assert "vision" in vision_provider.model_capabilities[vision_model]
-    assert "computer_use" in computer_use_provider.model_capabilities[computer_use_model]
     nvidia = router.providers["nvidia"]
     assert "vision" in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
     assert "tool_use" not in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
@@ -392,25 +400,29 @@ async def test_vision_fallback_preserves_image_and_reports_provider_status():
         default_model="vision-model",
     )
     fallback = CustomLLMProvider(
-        name="groq",
+        name="openrouter",
         base_url="https://example.invalid/v1",
         api_key="fallback-key",
-        default_model="qwen/qwen3.8-27b",
+        default_model="openai/gpt-4o",
+        capabilities=["vision", "multimodal"],
+        model_capabilities={
+            "openai/gpt-4o": ["vision", "multimodal"],
+        },
     )
     primary_error = RuntimeError("private provider response must not be exposed")
     primary_error.status_code = 503
     primary.complete_with_timing = AsyncMock(side_effect=primary_error)
     fallback.complete_with_timing = AsyncMock(return_value=LLMResponse(
         content="READY",
-        model="qwen/qwen3.8-27b",
-        provider=ProviderName.GROQ,
+        model="openai/gpt-4o",
+        provider=ProviderName.OPENROUTER,
     ))
     router.add_provider(primary)
     router.add_provider(fallback)
     router.routing_rules["vision"] = {
         "provider": "nvidia",
         "model": "vision-model",
-        "fallback": ["groq/qwen/qwen3.8-27b"],
+        "fallback": ["openrouter/openai/gpt-4o"],
     }
     request = LLMRequest(
         messages=[Message(
@@ -425,7 +437,7 @@ async def test_vision_fallback_preserves_image_and_reports_provider_status():
 
     assert response.content == "READY"
     fallback_request = fallback.complete_with_timing.await_args.args[0]
-    assert fallback_request.model == "qwen/qwen3.8-27b"
+    assert fallback_request.model == "openai/gpt-4o"
     assert fallback_request.messages[0].images[0].base64 == "synthetic-image"
 
 

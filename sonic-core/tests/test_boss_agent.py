@@ -519,6 +519,52 @@ async def test_boss_task_graph_orders_forward_dependencies_and_tracks_worker_ids
     )
 
 
+@pytest.mark.asyncio
+async def test_boss_next_phase_resolves_task_description_dependencies_to_ids():
+    prior_goal = (
+        "Launch File Manager, navigate to /workspace, and wait for the GUI "
+        "to reach a stable state."
+    )
+    prior_phase = Phase(
+        phase_number=1,
+        name="Open workspace",
+        sub_missions=[
+            SubMission(
+                id="sub-open-workspace",
+                name="Open workspace in File Manager",
+                goal=prior_goal,
+                plane="gui",
+            )
+        ],
+    )
+    response = json.dumps({
+        "thinking": "Continue from the observed workspace.",
+        "phase_name": "Create requested folder",
+        "sub_missions": [{
+            "id": "sub-create-folder",
+            "goal": "Create the requested folder in the visible File Manager.",
+            "plane": "gui",
+            "depends_on": [prior_goal],
+            "max_steps": 10,
+        }],
+    })
+    llm = _make_llm_mock([response])
+    boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=llm)
+    boss._sync_phase_to_graph(prior_phase)
+
+    next_phase = await boss._plan_next_phase(
+        "Create a folder using the visible desktop",
+        "File Manager is at /workspace.",
+        [prior_phase],
+        requested_plane="gui",
+    )
+
+    assert next_phase is not None
+    assert next_phase.sub_missions[0].depends_on == ["sub-open-workspace"]
+    planning_prompt = llm.complete.await_args.args[0].messages[1].content
+    assert "- sub-open-workspace: Open workspace in File Manager" in planning_prompt
+
+
 def test_boss_rejects_unknown_task_graph_dependencies():
     boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=MagicMock())
     phase = Phase(

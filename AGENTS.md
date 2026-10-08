@@ -7,7 +7,7 @@ SONIC's product goal is an **Autonomous AI-Human Digital Being** that can use a 
 > SONIC is a general-purpose AI computer user, not a cybersecurity-first bot. Its intended capability is to take an operator's desired outcome, understand and plan it, discover and operate relevant GUI applications, move between windows and tools, maintain progress across a long task, adapt to unexpected states, and verify the actual result. Cybersecurity is one possible workload, not SONIC's identity or default workflow.
 > Never imply that an intended capability is already reliable without task-specific evidence. Never hardcode a vendor application sequence as a substitute for general computer-use reasoning.
 
-> **Current Computer & Interaction contract:** Boss owns task analysis, delegation, evidence review, and replanning. Every actionable workstation prompt enters Boss orchestration; chat and explicit observation-only requests remain outside execution. If planning omits workers for a non-empty objective, Boss delegates one bounded adaptive worker rather than bypassing orchestration. Boss delegates to ordinary `ComputerUseAgent` workers, which operate arbitrary installed GUI applications on the shared visible desktop and retain access to the separate execution plane as permitted by the task. GUI completion requires Judge confirmation against fresh desktop evidence and worker receipts; missing or inconclusive verification cannot produce a success claim. There is no dedicated BrowserAgent specialist; website and online-service tasks, when requested, are handled as ordinary visible-desktop GUI work. Historical phase notes below describe changes at the time they were made; they are not proof of present runtime readiness or arbitrary-task capability.
+> **Current Computer & Interaction contract:** Boss owns task analysis, delegation, evidence review, and replanning. Every actionable workstation prompt enters Boss orchestration; chat and explicit observation-only requests remain outside execution. If planning omits workers for a non-empty objective, Boss delegates one bounded adaptive worker rather than bypassing orchestration. Boss delegates to ordinary `ComputerUseAgent` workers, which operate arbitrary installed GUI applications on the shared visible desktop and retain access to the separate execution plane as permitted by the task. GUI-assigned workers use fresh screenshot pixels as their current-state reasoning source; structured OCR/accessibility state must not substitute for visual input in this contract. GUI completion requires Judge confirmation against fresh desktop evidence and worker receipts; missing or inconclusive verification cannot produce a success claim. There is no dedicated BrowserAgent specialist; website and online-service tasks, when requested, are handled as ordinary visible-desktop GUI work. Historical phase notes below describe changes at the time they were made; they are not proof of present runtime readiness or arbitrary-task capability.
 Architecture: FastAPI backend (`sonic-core/`), Next.js dashboard
 (`sonic-dashboard/`), Docker desktop workstation (`sonic-desktop-workstation`), Neo4j/SQLite persistent memory, multi-tenant RBAC.
 
@@ -2413,6 +2413,36 @@ are a historical engineering record and must not override it.
   multi-application completion has not yet been demonstrated. Do not describe
   this slice as a complete push/event subscription or proven real-time
   computer-use capability.
+
+### Visual-first GUI hardening (2026-10-08)
+
+- GUI-assigned workers refresh and attach a fresh screenshot for each reasoning
+  decision. Their current-state prompt uses screenshot pixels rather than OCR,
+  accessibility-control inventories, or window telemetry as a substitute for
+  interpreting the visible interface. Missing fresh pixels or a failed
+  vision-capable route must fail closed.
+- GUI-only actions are revalidated immediately before provider dispatch. If
+  screenshot pixels differ from the frame used for reasoning, the action is
+  blocked and must be reconsidered from a new observation; stable OCR/control
+  metadata does not authorize a stale pixel target. This can conservatively
+  block on cursor blinking or animation.
+- GUI-only `GUI_TYPE` clicks the model-grounded pixel point, captures a fresh
+  screenshot, and asks the configured vision route to confirm a visible focus
+  indicator before typing. Missing, invalid, or uncertain verification
+  (confidence below 0.9) blocks text dispatch. This is a model-mediated guard,
+  not independent proof that the focus assessment is correct. Non-GUI-only
+  workers retain their accessibility-based focus confirmation path.
+- Image requests are routed only to models declared vision-capable; images are
+  not silently removed to satisfy a text-only provider. Configuration and
+  credential presence do not prove screenshot comprehension. A live visual
+  provider check and isolated GUI task with fresh worker receipts plus
+  independent Judge confirmation are still required before claiming reliable
+  desktop capability.
+- Targeted regression validation after this hardening: **121 passed** across
+  `test_agent_action_receipts.py`, `test_phase8_visual_computer_use.py`, and
+  `test_closed_loop_visual_delta_and_judge.py`; Ruff and `git diff --check`
+  passed. These tests use mocked providers and do not constitute live GUI
+  acceptance. No live GUI task was run after this change.
 
 ## Self-evolution verification gate — runtime blockers fixed (2026-10-05)
 The self-evolution department (`sonic-core/sonic/evolution/`) was reported as
