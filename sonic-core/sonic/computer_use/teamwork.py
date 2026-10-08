@@ -105,18 +105,17 @@ class DisplayLeaseManager:
         """Release a lease and clear ownership telemetry."""
         key = f"display:{display or os.environ.get('DISPLAY') or ':99'}"
         metadata = cls._lock_metadata.get(key)
-        is_owner = (
-            metadata is not None
-            and metadata.get("owner_task") is asyncio.current_task()
-        )
-        if is_owner and cls._locks.get(key) is lock and lock.locked():
-            metadata.pop("owner", None)
-            metadata.pop("owner_task", None)
-            metadata.pop("acquired_at", None)
-            try:
-                lock.release()
-            except RuntimeError:
-                pass
+        if metadata is None or metadata.get("owner_task") is not asyncio.current_task():
+            return
+        if cls._locks.get(key) is not lock or not lock.locked():
+            return
+        metadata.pop("owner", None)
+        metadata.pop("owner_task", None)
+        metadata.pop("acquired_at", None)
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
 
 
 # ---------------------------------------------------------------------------

@@ -627,7 +627,7 @@ def test_slow_gui_reasoning_blocks_when_fresh_nsi_state_is_unavailable():
     )
 
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "current desktop state could not be verified" in trace.actual_observation
+    assert "desktop state changed since the action was reasoned" in trace.actual_observation
     assert computer.gui_calls == 0
 
 

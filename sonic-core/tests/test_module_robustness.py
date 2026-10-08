@@ -613,10 +613,15 @@ class TestVerifyAndReplan:
             async def screenshot(self, ws):
                 from sonic.computer.models import ScreenObservation
                 return ScreenObservation(
-                    screenshot_base64="",
+                    screenshot_base64=(
+                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII="
+                    ),
                     width=1920,
                     height=1080,
+                    active_window="Application",
                     visible_text="",
+                    capture_age_ms=10,
+                    desktop_state="INTERACTIVE",
                 )
             async def status(self, ws):
                 return type(

@@ -461,3 +461,46 @@ ports published. This is only container availability evidence: no live NSI
 state-feed freshness, configured vision-provider readiness, or GUI task
 postcondition was checked. The opt-in shared-workstation tests were not run, so
 live computer-use readiness and task completion remain unverified.
+
+### CI regression follow-up and isolated acceptance blocker (2026-10-08)
+
+- Reproduced the repository CI environment locally with
+  `APP_ENV=development` and `SONIC_ALLOW_HOST_EXECUTION=false`. The full backend
+  suite completed with **1,934 passed, 41 skipped, 0 failed**. Two remaining
+  test assertions had expected an older generic stale-state message; they now
+  assert the concrete perception-version mismatch, and both pass.
+- The P0 security and sealed-action safety suites passed: **60 passed**.
+  The separate CLI suite passed **68 tests**.
+- Ruff passed for `sonic-core/sonic` and `sonic-cli/sonic_cli`; the documented
+  six-file mypy check reported no issues; `git diff --check` passed.
+- Local validation used Python **3.14.7**, while CI specifies Python **3.12**.
+  These results therefore do not replace a CI run on its configured runtime.
+- Docker Desktop was started for the isolated acceptance check. The local API
+  and Docker engine became healthy, and `sonic-acceptance-20261008` was
+  restarted on localhost-only VNC/noVNC ports. A real screenshot was captured
+  at 1280x800 with a 109 ms age, but the workstation status reported
+  `perception_version=0`; the NSI state sidecar was absent, so this was not
+  accepted as coherent, versioned NSI evidence.
+- Model readiness remains blocked. The configured NVIDIA vision model returned
+  HTTP 403 (authorization failed). The configured Groq Qwen route returned a
+  response to an attached screenshot but said it could not inspect the screen;
+  this is not vision-readiness evidence. The local health endpoint's
+  `llm_router=healthy` only means providers were configured, not that a usable
+  visual model was authenticated or able to interpret pixels.
+- No GUI task or GUI action was dispatched. The isolated acceptance container
+  was preserved for a later attempt; no application was installed, and no live
+  computer-use success is claimed.
+
+Full backend command (from the repository root):
+
+```powershell
+$env:APP_ENV='development'
+$env:SONIC_ALLOW_HOST_EXECUTION='false'
+python -m pytest sonic-core/tests/ -ra --tb=short
+1934 passed, 41 skipped
+```
+
+The live acceptance gate remains open until the isolated workstation publishes
+fresh, versioned perception, a working vision route interprets its pixels, and
+SONIC produces GUI action receipts plus independent Judge evidence for a
+harmless task.

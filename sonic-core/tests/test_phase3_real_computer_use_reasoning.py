@@ -51,11 +51,12 @@ class _StubComputer(ComputerProvider):
 
     def __init__(self, *, files=("auth_controller.py", "test_auth.py"),
                  visible_text="login endpoint at /api/auth/token",
-                 terminal_output="pytest exit 0"):
+                 terminal_output="pytest exit 0", visual=False):
         self.workspace_id = "ws-stub"
         self.files = list(files)
         self.visible_text = visible_text
         self.terminal_output = terminal_output
+        self.visual = visual
         self.written: dict[str, str] = {}
         self.commands: list[str] = []
         self.commits: list[str] = []
@@ -75,7 +76,15 @@ class _StubComputer(ComputerProvider):
         )
 
     async def screenshot(self, workspace_id):
-        return ScreenObservation(visible_text=self.visible_text, active_window="code-server")
+        return ScreenObservation(
+            screenshot_base64=(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII="
+                if self.visual else ""
+            ),
+            visible_text=self.visible_text,
+            active_window="code-server",
+            capture_age_ms=0 if self.visual else None,
+        )
 
     async def gui_action(self, workspace_id, action, actor="operator"):
         return ScreenObservation(visible_text=self.visible_text)
@@ -196,7 +205,11 @@ def test_action_selection_is_llm_driven():
         _action("GIT_COMMIT", "git-repo", '{"message": "fix auth"}', "commit"),
         _action("GOAL_COMPLETE", "goal-complete", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm)
+    agent = ComputerUseAgent(
+        computer_provider=comp,
+        llm_router=llm,
+        operator_approval_callback=lambda *_: True,
+    )
     traces = _run(agent.run_mission(comp.workspace_id, "Fix the auth vulnerability and run tests", steps=10))
 
     # The GOAL_COMPLETE declaration is followed by a typed verification action.
@@ -354,7 +367,7 @@ def test_goal_complete_terminates_loop_early():
 
 
 def test_gui_goal_complete_hands_off_without_claiming_verification():
-    comp = _StubComputer()
+    comp = _StubComputer(visual=True)
     llm = _StubLLM([_action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL)])
     agent = ComputerUseAgent(
         computer_provider=comp,

@@ -102,6 +102,15 @@ async def test_visual_verification_records_clean_pre_screenshot():
         active_window="Browser",
     )
     computer.gui_action = AsyncMock(return_value=obs_after)
+    computer.screenshot = AsyncMock(
+        return_value=ScreenObservation(
+            screenshot_base64=clean_screenshot,
+            width=1280,
+            height=800,
+            active_window="Browser",
+            capture_age_ms=0,
+        )
+    )
     computer.status = AsyncMock(
         return_value=MagicMock(
             active_application="Browser",
@@ -118,6 +127,7 @@ async def test_visual_verification_records_clean_pre_screenshot():
         active_window="Browser",
         capture_age_ms=0,
         controls_age_ms=0,
+        desktop_state="INTERACTIVE",
     )
     agent._last_world_observation = ComputerWorldObservation(
         screen=screen,
@@ -311,11 +321,13 @@ def test_boss_target_agnostic_fallback_decomposition():
 
     boss = BossAgent(computer_provider=MagicMock(), llm_router=MagicMock())
 
-    phase_bin = boss._fallback_decomposition("Analyze /tmp/firmware.bin and reverse engineer the key")
+    objective = "Analyze /tmp/firmware.bin and reverse engineer the key"
+    phase_bin = boss._fallback_decomposition(objective)
     assert phase_bin.phase_number == 1
     assert len(phase_bin.sub_missions) == 1
     assert phase_bin.sub_missions[0].id == "adaptive-investigator"
-    assert "predefined tool sequence" in phase_bin.sub_missions[0].goal
+    assert phase_bin.sub_missions[0].goal == objective
+    assert "predefined tool sequence" not in phase_bin.sub_missions[0].goal
     assert len(boss.thinking_log) >= 1
 
     phase_net = boss._fallback_decomposition("Scan network subnet 10.0.0.0/24 for active hosts")

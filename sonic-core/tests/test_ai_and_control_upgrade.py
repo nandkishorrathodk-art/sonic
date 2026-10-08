@@ -359,21 +359,25 @@ class _StubComputer(ComputerProvider):
         )
     async def screenshot(self, workspace_id):
         return ScreenObservation(
+            screenshot_base64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII=",
             width=self.width,
             height=self.height,
             visible_text="ui",
             active_window="x",
             capture_age_ms=0,
             controls_age_ms=0,
+            desktop_state="INTERACTIVE",
         )
     async def gui_action(self, workspace_id, action, actor="operator"):
         self.gui_calls.append((action.action, action.x or 0, action.y or 0))
         return ScreenObservation(
+            screenshot_base64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII=",
             width=self.width,
             height=self.height,
             active_window="x",
             capture_age_ms=0,
             controls_age_ms=0,
+            desktop_state="INTERACTIVE",
         )
     async def terminal(self, workspace_id, command, timeout=60, actor="operator"):
         return ExecResult(command=command, exit_code=0, stdout="", stderr="")
@@ -614,10 +618,18 @@ async def test_gui_reasoning_timeout_returns_explicit_blocked_result(monkeypatch
         llm_router=HangingRouter(),
         execution_plane="gui",
     )
+    agent._last_screenshot_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII="
+    observation = ComputerWorldObservation(
+        screen=ScreenObservation(
+            screenshot_base64=agent._last_screenshot_b64,
+            capture_age_ms=10,
+            active_window="x",
+        )
+    )
 
     action_type, target, _, expected = await agent._llm_choose_action(
         goal="Use the visible desktop",
-        observation=ComputerWorldObservation(),
+        observation=observation,
         step_index=1,
         primary_file="",
         test_file="",
@@ -633,10 +645,13 @@ def test_multimodal_computer_use_does_not_send_reasoning_effort():
     router = _RecordingRouter()
     agent = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=router)
     agent._last_screenshot_b64 = "aGVsbG8="
+    observation = ComputerWorldObservation(
+        screen=ScreenObservation(screenshot_base64=agent._last_screenshot_b64, capture_age_ms=10)
+    )
     _run(
         agent._llm_choose_action(
             goal="Inspect the supplied application",
-            observation=ComputerWorldObservation(),
+            observation=observation,
             step_index=1,
             primary_file="",
             test_file="",

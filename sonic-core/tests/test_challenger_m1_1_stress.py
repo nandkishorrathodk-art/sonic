@@ -442,7 +442,7 @@ async def test_stress_pre_dispatch_version_regression_rejected():
     )
 
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "current desktop state could not be verified" in trace.actual_observation
+    assert "perception version 5 -> 4" in trace.actual_observation
     assert len(computer.dispatched_actions) == 0
 
 

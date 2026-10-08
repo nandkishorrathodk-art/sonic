@@ -37,7 +37,6 @@ import httpx
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 
 try:
     from dotenv import find_dotenv, load_dotenv
@@ -1046,7 +1045,7 @@ class DeveloperAgent:
                 assistant_msg["tool_calls"] = parsed_tool_calls
 
             return assistant_msg, parsed_tool_calls
-        except (httpx.TransportError, httpx.RemoteProtocolError, httpx.TimeoutException) as exc:
+        except (httpx.TransportError, httpx.RemoteProtocolError, httpx.TimeoutException):
             if self._http_client and not self._http_client.is_closed:
                 try:
                     self._http_client.close()
@@ -1192,7 +1191,7 @@ class DeveloperAgent:
     def chat(self, prompt: str) -> str:
         """Fast zero-shot conversational turn without tool schema overhead, streaming directly."""
         clean_prompt = sanitize_secrets(prompt, [self.config.api_key])
-        self.messages.append({"role": "user", "content": prompt})
+        self.messages.append({"role": "user", "content": clean_prompt})
         step_messages = self._prune_messages(self.messages)
 
         try:
