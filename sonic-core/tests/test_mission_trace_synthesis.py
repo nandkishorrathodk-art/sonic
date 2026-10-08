@@ -22,8 +22,6 @@ agent's real ComputerDecisionTrace list — honest: no fabricated success.
 
 from __future__ import annotations
 
-import pytest
-
 from sonic.computer_use.models import (
     ComputerActionType,
     ComputerDecisionTrace,
@@ -32,9 +30,7 @@ from sonic.mission_engine.models import (
     DeliverableType,
     MilestoneStatus,
     MissionMilestone,
-    MissionObjective,
     MissionPlan,
-    MissionState,
 )
 from sonic.mission_engine.trace_synthesis import (
     milestone_status_from_traces,
@@ -276,8 +272,8 @@ def test_director_coordinate_boss_agent_integration():
         assert len(delivs) >= 2
 
 
-def test_director_coordinate_boss_agent_fallback_on_empty():
-    """Verify fallback to ComputerUseAgent when BossAgent returns no traces."""
+def test_director_does_not_bypass_boss_review_when_boss_returns_no_traces():
+    """An empty Boss result must not trigger standalone, unreviewed execution."""
     import asyncio
     from unittest.mock import AsyncMock, patch
     from sonic.mission_engine.director import MissionDirector
@@ -298,18 +294,13 @@ def test_director_coordinate_boss_agent_fallback_on_empty():
         status="COMPLETE",
         all_traces=[],
     )
-    fallback_traces = [
-        _trace(ComputerActionType.FILE_READ, "service.py", obs="single agent fallback run"),
-    ]
-
     with patch("sonic.computer_use.boss.BossAgent.run", new=AsyncMock(return_value=empty_report)) as mock_boss_run, \
-         patch("sonic.computer_use.agent.ComputerUseAgent.run_mission", new=AsyncMock(return_value=fallback_traces)) as mock_cua_run:
+         patch("sonic.computer_use.agent.ComputerUseAgent.run_mission", new_callable=AsyncMock) as mock_cua_run:
         final_state = asyncio.run(director.coordinate(state.mission_id))
         assert mock_boss_run.called
-        assert mock_cua_run.called
+        assert not mock_cua_run.called
         stashed = getattr(final_state, "_last_traces", [])
-        assert len(stashed) == 1
-        assert "single agent fallback run" in stashed[0].actual_observation
+        assert stashed == []
 
 
 def test_director_stash_traces_direct():

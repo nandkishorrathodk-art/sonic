@@ -112,7 +112,15 @@ async def test_docker_computer_gui_action_maximize_named_window():
 async def test_docker_computer_gui_action_window_tile():
     """Verify DockerComputerProvider tiles windows when GUIActionType.WINDOW_TILE is dispatched."""
     provider = DockerComputerProvider(container_name="test-workstation")
-    provider._docker_exec = AsyncMock(return_value=(0, "0x01 0 host App1\n0x02 0 host App2\n", ""))
+
+    async def fake_exec(command, timeout=60):
+        if "xdotool getdisplaygeometry" in command:
+            return 0, "1920 1080", ""
+        if "wmctrl -l" in command:
+            return 0, "0x01 0 host App1\n0x02 0 host App2\n", ""
+        return 0, "", ""
+
+    provider._docker_exec = AsyncMock(side_effect=fake_exec)
     provider.screenshot = AsyncMock(return_value=ScreenObservation(active_window="App1"))
 
     action = GUIAction(action=GUIActionType.WINDOW_TILE)
@@ -120,8 +128,8 @@ async def test_docker_computer_gui_action_window_tile():
 
     executed = [c[0][0] for c in provider._docker_exec.call_args_list]
     assert any("wmctrl -l" in cmd for cmd in executed)
-    assert any("wmctrl -i -r \"0x01\" -e 0,0,0,640,800" in cmd for cmd in executed)
-    assert any("wmctrl -i -r \"0x02\" -e 0,640,0,640,800" in cmd for cmd in executed)
+    assert any("wmctrl -i -r \"0x01\" -e 0,0,0,960,1080" in cmd for cmd in executed)
+    assert any("wmctrl -i -r \"0x02\" -e 0,960,0,960,1080" in cmd for cmd in executed)
 
 
 @pytest.mark.asyncio

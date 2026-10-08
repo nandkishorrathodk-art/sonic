@@ -14,6 +14,8 @@ import os
 import re
 import shlex
 import time
+from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from sonic.computer.models import (
@@ -22,7 +24,11 @@ from sonic.computer.models import (
     ScreenObservation,
 )
 from sonic.computer.provider import ComputerProvider
-from sonic.computer_use.action_contracts import ActionReceipt, StateDelta
+from sonic.computer_use.action_contracts import (
+    ActionReceipt,
+    GUIActionIntent,
+    StateDelta,
+)
 from sonic.computer_use.experience import compare_prediction, state_signature
 from sonic.computer_use.grounding import (
     draw_action_marker,
@@ -56,6 +62,7 @@ from sonic.research.failure_budget import FailureBudgetTracker
 from sonic.research.failure_classifier import classify_failure
 
 _GUI_REASONING_TIMEOUT_SECONDS = 60.0
+_MAX_GUI_BURST_ACTIONS = 4
 
 
 def _extract_command_from_sig(sig_payload_str: str) -> str:
@@ -340,6 +347,7 @@ class ComputerUseAgent:
         # replacement for the immutable operator objective.
         self.initial_context = dict(initial_context or {})
         self.system_prompt_overlay = str(system_prompt_overlay or kwargs.get("system_prompt_overlay") or "").strip()
+        self.operator_approval_callback = kwargs.get("operator_approval_callback")
         self.is_subagent_worker = bool(
             kwargs.get("is_subagent_worker")
             or self.initial_context.get("silent_background")
@@ -427,9 +435,9 @@ class ComputerUseAgent:
         elif llm_router is not None:
             raw_model = getattr(llm_router, "default_model", "")
             model_name = raw_model.lower() if isinstance(raw_model, str) else ""
-            self._compact_mode = any(
-                tag in model_name
-                for tag in ("7b", "8b", "11b", "3b", "1b", "small", "mini", "tiny")
+            self._compact_mode = bool(
+                re.search(r"(?<![a-z0-9])(?:1|3|7|8|11)b(?![a-z0-9])", model_name)
+                or re.search(r"\b(?:small|mini|tiny)\b", model_name)
             )
         else:
             self._compact_mode = False
@@ -481,6 +489,8 @@ class ComputerUseAgent:
         self._screen_width: int = 1920
         self._screen_height: int = 1080
         self._interrupted: bool = False
+        self._interrupt_event = asyncio.Event()
+        self._active_interrupt_check: Any | None = None
         self.goal_reached: bool = False
         self._consecutive_failures: int = 0
         self._consecutive_unchanged_screens: int = 0
@@ -504,8 +514,10 @@ class ComputerUseAgent:
         self.traces = list(value or [])
 
     @staticmethod
-    def _burst_gui_actions(payload: dict[str, Any]) -> list[GUIAction] | None:
-        """Decode an explicitly requested GUI burst without inventing actions."""
+    def _burst_gui_actions(
+        payload: dict[str, Any],
+    ) -> list[tuple[GUIAction, Any]] | None:
+        """Decode a small explicit GUI chunk, preserving per-step expectations."""
         raw = payload.get("burst_actions")
         if raw is None:
             raw = payload.get("actions") if payload.get("burst") is True else None
@@ -513,29 +525,86 @@ class ComputerUseAgent:
             return None
         if not isinstance(raw, list) or not raw:
             raise ValueError("GUI burst requires a non-empty actions list")
-        actions: list[GUIAction] = []
+        if len(raw) > _MAX_GUI_BURST_ACTIONS:
+            raise ValueError(
+                f"GUI burst is limited to {_MAX_GUI_BURST_ACTIONS} actions"
+            )
+        actions: list[tuple[GUIAction, Any]] = []
         for item in raw:
             if isinstance(item, GUIAction):
-                actions.append(item)
+                actions.append((item, None))
                 continue
             if not isinstance(item, dict):
                 raise ValueError("GUI burst actions must be structured GUI actions")
             data = dict(item)
+            postcondition = data.pop("postcondition", None)
             raw_kind = data.pop("action", data.pop("type", ""))
             try:
                 kind = GUIActionType(str(raw_kind).upper())
             except ValueError as exc:
                 raise ValueError(f"unknown GUI burst action: {raw_kind}") from exc
             data["action"] = kind
-            actions.append(GUIAction(**data))
+            actions.append((GUIAction(**data), postcondition))
         return actions
+
+    @staticmethod
+    def _has_gui_burst_payload(payload: dict[str, Any]) -> bool:
+        return payload.get("burst_actions") is not None or (
+            payload.get("burst") is True and payload.get("actions") is not None
+        )
+
+    @staticmethod
+    def _burst_postcondition_schema_error(postcondition: Any) -> str | None:
+        if isinstance(postcondition, str):
+            return None if postcondition.strip() else "postcondition text must not be empty"
+        if not isinstance(postcondition, dict) or not postcondition:
+            return "postcondition must be a non-empty mapping or visible-text string"
+        allowed = {
+            "active_window",
+            "visible_text",
+            "control_present",
+            "control_absent",
+            "require_state_change",
+            "screen_changed",
+        }
+        unknown = set(postcondition) - allowed
+        if unknown:
+            return f"unrecognized postcondition field: {next(iter(unknown))}"
+        if any(
+            key in postcondition
+            and (not isinstance(postcondition[key], str) or not postcondition[key].strip())
+            for key in (
+                "active_window",
+                "visible_text",
+                "control_present",
+                "control_absent",
+            )
+        ):
+            return "text and control postconditions must be non-empty strings"
+        if any(
+            key in postcondition and not isinstance(postcondition[key], bool)
+            for key in ("require_state_change", "screen_changed")
+        ):
+            return "state-change postconditions must be boolean"
+        if not set(postcondition).intersection(
+            {
+                "active_window",
+                "visible_text",
+                "control_present",
+                "control_absent",
+                "screen_changed",
+            }
+        ):
+            return "postcondition must name an observable state"
+        return None
 
     def _burst_postcondition_ok(
         self, postcondition: Any, snapshot: Any, *, changed: bool
     ) -> tuple[bool, str]:
         """Check only caller-supplied live state; an absent condition is honest."""
-        if postcondition is None:
-            return True, ""
+        schema_error = self._burst_postcondition_schema_error(postcondition)
+        if schema_error:
+            return False, schema_error
         if isinstance(postcondition, str):
             expected = postcondition.strip()
             ok = bool(expected) and expected.lower() in str(
@@ -553,6 +622,37 @@ class ComputerUseAgent:
         for key, expected in postcondition.items():
             if key in {"require_state_change", "screen_changed"}:
                 continue
+            if key in {"control_present", "control_absent"}:
+                expected_control = str(expected).casefold()
+                observed_controls = getattr(snapshot, "controls", ()) or ()
+                labels = []
+                for control in observed_controls:
+                    if isinstance(control, Mapping):
+                        label = next(
+                            (
+                                control.get(field)
+                                for field in ("name", "label", "title", "text")
+                                if control.get(field)
+                            ),
+                            "",
+                        )
+                    else:
+                        label = next(
+                            (
+                                getattr(control, field, "")
+                                for field in ("name", "label", "title", "text")
+                                if getattr(control, field, "")
+                            ),
+                            "",
+                        )
+                    labels.append(str(label).casefold())
+                found = any(expected_control in label for label in labels)
+                condition_met = (
+                    found if key == "control_present" else not found
+                )
+                if not condition_met:
+                    return False, f"postcondition {key} was not observed"
+                continue
             if key not in checks:
                 return False, f"unrecognized postcondition field: {key}"
             actual = str(checks[key] or "")
@@ -566,9 +666,49 @@ class ComputerUseAgent:
         self, workspace_id: str, payload: dict[str, Any], target_resource: str = ""
     ) -> tuple[bool, str, int | None]:
         """Run an explicit motor burst against versioned, freshly observed state."""
-        actions = self._burst_gui_actions(payload)
-        if actions is None:
+        steps = self._burst_gui_actions(payload)
+        if steps is None:
             raise ValueError("not a GUI burst")
+        actions = [action for action, _ in steps]
+        step_postconditions = [condition for _, condition in steps]
+        if any(condition is None for condition in step_postconditions):
+            return False, "every GUI burst action requires a postcondition", 126
+        for index, condition in enumerate(step_postconditions):
+            step_schema_error = self._burst_postcondition_schema_error(condition)
+            if step_schema_error:
+                return (
+                    False,
+                    f"GUI burst action {index + 1} requires a valid observable "
+                    f"postcondition: {step_schema_error}",
+                    126,
+                )
+        final_postcondition = payload.get("postcondition")
+        schema_error = self._burst_postcondition_schema_error(final_postcondition)
+        if schema_error:
+            return False, f"GUI burst requires a valid final postcondition: {schema_error}", 126
+
+        action_types = {
+            GUIActionType.CLICK: ComputerActionType.GUI_CLICK,
+            GUIActionType.DOUBLE_CLICK: ComputerActionType.GUI_DOUBLE_CLICK,
+            GUIActionType.RIGHT_CLICK: ComputerActionType.GUI_RIGHT_CLICK,
+            GUIActionType.TYPE: ComputerActionType.GUI_TYPE,
+            GUIActionType.KEYPRESS: ComputerActionType.GUI_KEYPRESS,
+            GUIActionType.HOTKEY: ComputerActionType.GUI_HOTKEY,
+            GUIActionType.SCROLL: ComputerActionType.GUI_SCROLL,
+            GUIActionType.MOVE: ComputerActionType.GUI_MOVE,
+            GUIActionType.DRAG: ComputerActionType.GUI_DRAG,
+        }
+        for action in actions:
+            action_type = action_types.get(action.action)
+            if action_type is None:
+                return False, f"GUI burst action is not permitted: {action.action.value}", 126
+            coordinate_error = self._validate_coordinates(
+                action_type,
+                action.model_dump(exclude={"action"}),
+            )
+            if coordinate_error:
+                return False, f"GUI burst action has invalid coordinates: {coordinate_error}", 126
+
         bus = self.perception_bus
         initial = bus.current()
 
@@ -588,9 +728,10 @@ class ComputerUseAgent:
                 await refresh_after_failure()
                 return False, "stale perception target; re-observe and replan", 126
         previous = initial
+        observed_step_index = 0
 
         async def observe_after_action(*_args: Any) -> dict[str, Any]:
-            nonlocal previous
+            nonlocal previous, observed_step_index
             before = previous
             await self.observe(workspace_id)
             current = bus.current()
@@ -603,11 +744,34 @@ class ComputerUseAgent:
             )
             if current.version <= before.version:
                 return {"ok": False}
+            if (
+                current.width != initial.width
+                or current.height != initial.height
+            ):
+                return {"ok": False, "reason": "display geometry changed during burst"}
+            active_window_expectation = (
+                step_postconditions[observed_step_index].get("active_window")
+                if isinstance(step_postconditions[observed_step_index], dict)
+                else None
+            )
+            if (
+                current.active_window != before.active_window
+                and (
+                    not isinstance(active_window_expectation, str)
+                    or active_window_expectation.casefold()
+                    not in current.active_window.casefold()
+                )
+            ):
+                return {"ok": False, "reason": "active window changed unexpectedly"}
+            step_ok, step_reason = self._burst_postcondition_ok(
+                step_postconditions[observed_step_index],
+                current,
+                changed=changed,
+            )
+            if not step_ok:
+                return {"ok": False, "reason": step_reason}
             previous = current
-            # A burst must not silently continue through an unchanged or
-            # unexpected desktop state.  The caller receives a replan signal.
-            if not changed:
-                return {"ok": False}
+            observed_step_index += 1
             return {"ok": True}
 
         result = await self.motor.execute_burst(
@@ -615,6 +779,8 @@ class ComputerUseAgent:
             actions,
             interval_seconds=float(payload.get("interval_seconds", 0.05)),
             observation_hook=observe_after_action,
+            interrupt_check=self._mission_interrupt_requested,
+            interrupt_event=self._interrupt_event,
         )
         if not result.success:
             await refresh_after_failure()
@@ -622,7 +788,7 @@ class ComputerUseAgent:
         snapshot = bus.current()
         changed = snapshot.version > initial.version and snapshot != initial
         ok, reason = self._burst_postcondition_ok(
-            payload.get("postcondition"), snapshot, changed=changed
+            final_postcondition, snapshot, changed=changed
         )
         if not ok:
             await refresh_after_failure()
@@ -632,6 +798,13 @@ class ComputerUseAgent:
     def interrupt(self) -> None:
         """Signal the agent to stop its active mission loop immediately."""
         self._interrupted = True
+        self._interrupt_event.set()
+
+    def _mission_interrupt_requested(self) -> bool:
+        interrupt_check = getattr(self, "_active_interrupt_check", None)
+        return self._interrupted or (
+            callable(interrupt_check) and bool(interrupt_check())
+        )
 
     def _gui_action_contract_active(self) -> bool:
         """Return whether this worker must stay within visible GUI actions."""
@@ -909,6 +1082,10 @@ class ComputerUseAgent:
         screen_received_at_ns = time.perf_counter_ns()
         self._last_screen_observation_received_at = asyncio.get_event_loop().time()
         self._last_observed_screen = screen_obs
+        self._last_gui_dispatch_evidence = (
+            screen_obs,
+            asyncio.get_event_loop().time(),
+        )
         if getattr(screen_obs, "desktop_state", "") == "STATE_ONLY":
             self._last_gui_state_observation = screen_obs
         else:
@@ -937,7 +1114,11 @@ class ComputerUseAgent:
                 )
             self._pending_gui_action_observation = None
         # Store screenshot for vision-in-the-loop (VLM image input)
-        self._last_screenshot_b64 = getattr(screen_obs, "screenshot_base64", "")
+        self._last_screenshot_b64 = (
+            getattr(screen_obs, "screenshot_base64", "")
+            if perception_source == "screenshot"
+            else ""
+        )
         # Track real screen dimensions so coordinate actions can be validated
         # against the actual desktop size rather than a default guess. Some
         # callers construct the agent via __new__ (bypassing __init__), so
@@ -950,20 +1131,29 @@ class ComputerUseAgent:
             self.perception_bus = PerceptionBus()
         self._screen_width = int(getattr(screen_obs, "width", self._screen_width) or self._screen_width)
         self._screen_height = int(getattr(screen_obs, "height", self._screen_height) or self._screen_height)
-        nsi_cached = (
-            getattr(self.computer, "_last_nsi_state", None)
-            or getattr(self.computer, "_last_nsi_frame", None)
-        )
+        nsi_cached = getattr(self.computer, "_last_nsi_state", None)
         now_loop = asyncio.get_event_loop().time()
+        nsi_packet = (
+            nsi_cached[1]
+            if (
+                isinstance(nsi_cached, tuple)
+                and len(nsi_cached) == 2
+                and isinstance(nsi_cached[1], dict)
+            )
+            else None
+        )
         _nsi_active = (
-            nsi_cached is not None
-            and isinstance(nsi_cached, tuple)
-            and len(nsi_cached) == 2
-            and (now_loop - float(nsi_cached[0])) < 1.0
-            and isinstance(nsi_cached[1], dict)
+            perception_source == "nsi_state"
+            and nsi_packet is not None
+            and now_loop - float(nsi_cached[0]) < 1.0
+            and nsi_packet.get("version") == getattr(screen_obs, "perception_version", None)
+            and nsi_packet.get("capture_timestamp_ns")
+            == getattr(screen_obs, "capture_timestamp_ns", None)
+            and str(nsi_packet.get("active_window") or "Desktop")
+            == str(getattr(screen_obs, "active_window", "") or "Desktop")
         )
         if _nsi_active:
-            nsi_pkt = nsi_cached[1]
+            nsi_pkt = nsi_packet
             from types import SimpleNamespace
             status = SimpleNamespace(
                 active_application=nsi_pkt.get("active_window") or "Desktop",
@@ -1681,7 +1871,7 @@ class ComputerUseAgent:
         if action_type in (ComputerActionType.GUI_KEYPRESS, ComputerActionType.GUI_HOTKEY):
             if (
                 not str(payload.get("key") or payload.get("keys") or "").strip()
-                and self._burst_gui_actions(payload) is None
+                and not self._has_gui_burst_payload(payload)
             ):
                 return (
                     ActionExecutionStatus.BLOCKED,
@@ -2716,9 +2906,21 @@ class ComputerUseAgent:
             or getattr(self, "gui_only", False)
         )
         structured_scene_available = self._has_fresh_accessible_scene(observation)
+        current_capture_age = getattr(observation.screen, "capture_age_ms", None)
+        current_frame_is_fresh = (
+            isinstance(current_capture_age, (int, float))
+            and not isinstance(current_capture_age, bool)
+            and math.isfinite(current_capture_age)
+            and 0 <= current_capture_age <= 2_000
+        )
+        explicit_screenshot_requested = (
+            prev_act_type == ComputerActionType.GUI_SCREENSHOT
+        )
+        if gui_reasoning and self._last_screenshot_b64 and not current_frame_is_fresh:
+            self._last_screenshot_b64 = ""
         if (
             gui_reasoning
-            and not structured_scene_available
+            and (not structured_scene_available or explicit_screenshot_requested)
             and not self._last_screenshot_b64
             and getattr(self, "_active_workspace_id", "")
             and hasattr(self.computer, "screenshot")
@@ -2731,7 +2933,10 @@ class ComputerUseAgent:
                 visual_observation.screenshot_base64
                 and visual_observation.width > 0
                 and visual_observation.height > 0
-                and (visual_age is None or visual_age <= 2_000)
+                and isinstance(visual_age, (int, float))
+                and not isinstance(visual_age, bool)
+                and math.isfinite(visual_age)
+                and 0 <= visual_age <= 2_000
             ):
                 self._last_screenshot_b64 = visual_observation.screenshot_base64
                 self._screen_width = visual_observation.width
@@ -2766,7 +2971,7 @@ class ComputerUseAgent:
             gui_reasoning
             and (
                 not structured_scene_available
-                or prev_act_type == ComputerActionType.GUI_SCREENSHOT
+                or explicit_screenshot_requested
             )
         )
         images: list[ImageContent] = []
@@ -2836,6 +3041,13 @@ class ComputerUseAgent:
             "visual_escalation_reason": escalation_reason,
             "image_escalation_count": counters["visual_escalations"],
         }
+        if gui_reasoning and not structured_scene_available and not image_attached:
+            return (
+                ActionExecutionStatus.BLOCKED,
+                "gui-perception-unavailable",
+                {},
+                "No fresh screenshot or unambiguous accessibility state is available.",
+            )
         logger.info(
             "computer_reasoning_perception",
             perception_source=observation.perception_source,
@@ -2904,6 +3116,25 @@ class ComputerUseAgent:
                 f"{efficiency_directive}"
                 "3. EARLY COMPLETION: If command output or screen observations already satisfy "
                 "the objective, declare GOAL_COMPLETE immediately."
+            )
+        if gui_reasoning:
+            action_instructions += (
+                "\nOPTIONAL SHORT GUI CHUNK: For a predictable, low-risk sequence of at most "
+                f"{_MAX_GUI_BURST_ACTIONS} directly grounded motor actions, you may put "
+                "\"burst_actions\" in PAYLOAD. Each item must use a low-level action name "
+                "(CLICK, DOUBLE_CLICK, RIGHT_CLICK, TYPE, KEYPRESS, HOTKEY, SCROLL, MOVE, "
+                "or DRAG) and include its own observable \"postcondition\". Also include "
+                "a final PAYLOAD \"postcondition\". A postcondition must identify "
+                "visible_text, active_window, control_present, control_absent, or "
+                "screen_changed. The executor observes after every step, checks bounds "
+                "and the stated postcondition, and stops/replans on a mismatch; never "
+                "chunk through an uncertain transition, dialog, or "
+                "approval-required operation. A chunk is optional, not a fixed workflow.\n"
+                "Example shape: {\"burst_actions\":[{\"action\":\"CLICK\",\"x\":120,"
+                "\"y\":80,\"postcondition\":{\"control_present\":\"observed label\"}}],"
+                "\"postcondition\":{\"visible_text\":\"observed result\"},"
+                "\"state_version\":<current perception version>}. Use only evidence "
+                "actually present in the current observation."
             )
         if self._gui_action_contract_active():
             user_text += (
@@ -4107,6 +4338,66 @@ class ComputerUseAgent:
             return "low"
         return "info"
 
+    @staticmethod
+    def _operator_approval_reason(
+        action_type: ComputerActionType,
+        target_resource: str,
+        payload: dict[str, Any],
+    ) -> str | None:
+        if action_type in {
+            ComputerActionType.APP_INSTALL,
+            ComputerActionType.GIT_COMMIT,
+            ComputerActionType.GIT_PUSH,
+        }:
+            return f"{action_type.value} is a consequential operation"
+
+        if action_type in {
+            ComputerActionType.GUI_CLICK,
+            ComputerActionType.GUI_DOUBLE_CLICK,
+            ComputerActionType.GUI_KEYPRESS,
+            ComputerActionType.GUI_HOTKEY,
+            ComputerActionType.BROWSER_CLICK,
+            ComputerActionType.BROWSER_KEYPRESS,
+            ComputerActionType.BROWSER_SELECT,
+        }:
+            labels = [target_resource]
+            if isinstance(payload, dict):
+                labels.extend(
+                    str(payload.get(key) or "")
+                    for key in ("target", "label", "control_name", "accessible_name")
+                )
+            label_text = " ".join(labels)
+            if re.search(
+                r"\b(send|submit|publish|post|buy|purchase|order|checkout|pay|"
+                r"transfer|delete|remove|erase|destroy|wipe|drop)\b",
+                label_text,
+                flags=re.IGNORECASE,
+            ):
+                return "the grounded control may send, publish, purchase, or destructively change data"
+        return None
+
+    async def _request_operator_approval(
+        self,
+        action_type: ComputerActionType,
+        target_resource: str,
+        reason: str,
+    ) -> bool:
+        callback = self.operator_approval_callback
+        if not callable(callback):
+            return False
+        try:
+            result = callback(action_type.value, target_resource, reason)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            logger.error(
+                "operator_action_approval_failed",
+                action_type=action_type.value,
+                error=str(exc),
+            )
+            return False
+        return result is True
+
     def _native_govern_action(
         self,
         action_type: ComputerActionType,
@@ -4185,15 +4476,122 @@ class ComputerUseAgent:
         action: GUIAction,
     ) -> ScreenObservation:
         """Prefer provider state receipts while keeping legacy image behavior."""
+        pending_intent = getattr(self, "_pending_gui_action_intent", None)
+        if pending_intent is not None:
+            prior_evidence = getattr(self, "_last_gui_dispatch_evidence", None)
+            if not isinstance(prior_evidence, tuple) or len(prior_evidence) != 2:
+                raise RuntimeError("no current observation is available for final GUI validation")
+            prior_screen, _ = prior_evidence
+            if getattr(prior_screen, "desktop_state", "") == "STATE_ONLY":
+                observe_state = getattr(self.computer, "observe_state", None)
+                observe_state_impl = getattr(type(self.computer), "observe_state", None)
+                if (
+                    not callable(observe_state)
+                    or observe_state_impl is ComputerProvider.observe_state
+                ):
+                    raise RuntimeError("current accessibility state cannot be revalidated")
+                final_screen = await observe_state(workspace_id)
+                if (
+                    final_screen is None
+                    or getattr(final_screen, "desktop_state", "") != "STATE_ONLY"
+                    or getattr(final_screen, "perception_version", 0)
+                    != getattr(prior_screen, "perception_version", 0)
+                    or self._screen_state_signature(final_screen)
+                    != self._screen_state_signature(prior_screen)
+                ):
+                    raise RuntimeError("desktop state changed before final GUI dispatch")
+            else:
+                final_screen = await self.computer.screenshot(workspace_id)
+                final_age = getattr(final_screen, "capture_age_ms", None)
+                if (
+                    getattr(final_screen, "desktop_state", "") != "INTERACTIVE"
+                    or not isinstance(final_age, (int, float))
+                    or isinstance(final_age, bool)
+                    or not math.isfinite(final_age)
+                    or not 0 <= final_age <= 2_000
+                    or getattr(final_screen, "width", 0)
+                    != getattr(prior_screen, "width", 0)
+                    or getattr(final_screen, "height", 0)
+                    != getattr(prior_screen, "height", 0)
+                    or self._screen_state_signature(final_screen)
+                    != self._screen_state_signature(prior_screen)
+                ):
+                    raise RuntimeError("desktop changed before final GUI dispatch")
+                prior_pixels = getattr(prior_screen, "screenshot_base64", "")
+                final_pixels = getattr(final_screen, "screenshot_base64", "")
+                has_semantic_evidence = bool(
+                    getattr(prior_screen, "detected_controls", None)
+                    or str(getattr(prior_screen, "visible_text", "") or "").strip()
+                )
+                if prior_pixels != final_pixels and not has_semantic_evidence:
+                    raise RuntimeError("desktop pixels changed before final GUI dispatch")
+            self._last_gui_dispatch_evidence = (
+                final_screen,
+                asyncio.get_running_loop().time(),
+            )
+            expected_provider_actions = {
+                "GUI_CLICK": {"CLICK"},
+                "GUI_DOUBLE_CLICK": {"DOUBLE_CLICK"},
+                "GUI_RIGHT_CLICK": {"RIGHT_CLICK"},
+                "GUI_TYPE": {"CLICK", "TYPE"},
+                "GUI_KEYPRESS": {"KEYPRESS", "HOTKEY"},
+                "GUI_MOVE": {"MOVE"},
+                "GUI_SCROLL": {"SCROLL"},
+                "GUI_DRAG": {"DRAG"},
+            }
+            if action.action.value not in expected_provider_actions.get(
+                pending_intent.action_type, set()
+            ):
+                raise RuntimeError("provider action differs from the GUI intent")
+            intent_payload = json.loads(pending_intent.payload_json)
+            binding_errors = pending_intent.validate_binding(
+                action_type=pending_intent.action_type,
+                target=pending_intent.target,
+                payload=intent_payload,
+            )
+            evidence = getattr(self, "_last_gui_dispatch_evidence", None)
+            if not isinstance(evidence, tuple) or len(evidence) != 2:
+                raise RuntimeError("no current observation is available for final GUI validation")
+            observed_screen, observed_at = evidence
+            elapsed_ms = max(
+                0.0,
+                (asyncio.get_running_loop().time() - observed_at) * 1000,
+            )
+            observation_errors = pending_intent.validate_observation(
+                observed_screen,
+                elapsed_ms=elapsed_ms,
+            )
+            if binding_errors or observation_errors:
+                raise RuntimeError(
+                    "; ".join((*binding_errors, *observation_errors))
+                )
         self._last_gui_action_observation_valid = False
         before_screen = getattr(self, "_last_gui_state_observation", None)
         if before_screen is None:
             before_screen = getattr(self, "_last_observed_screen", None)
         state_action = getattr(type(self.computer), "gui_action_state", None)
-        if callable(state_action):
-            result = await self.computer.gui_action_state(workspace_id, action)
-        else:
-            result = await self.computer.gui_action(workspace_id, action)
+        dispatch = (
+            self.computer.gui_action_state(workspace_id, action)
+            if callable(state_action)
+            else self.computer.gui_action(workspace_id, action)
+        )
+        dispatch_task = asyncio.create_task(dispatch)
+        try:
+            while not dispatch_task.done():
+                if self._mission_interrupt_requested():
+                    dispatch_task.cancel()
+                    await asyncio.gather(dispatch_task, return_exceptions=True)
+                    raise RuntimeError("GUI dispatch cancelled by interrupt")
+                try:
+                    await asyncio.wait_for(asyncio.shield(dispatch_task), timeout=0.025)
+                except asyncio.TimeoutError:
+                    continue
+            result = await dispatch_task
+        except BaseException:
+            if not dispatch_task.done():
+                dispatch_task.cancel()
+                await asyncio.gather(dispatch_task, return_exceptions=True)
+            raise
 
         self._last_gui_state_delta = None
         if getattr(result, "desktop_state", "") == "STATE_ONLY":
@@ -4294,16 +4692,34 @@ class ComputerUseAgent:
             display = get_display(workspace_id)
             if inspect.isawaitable(display):
                 display = await display
-        lock = await DisplayLeaseManager.acquire(
-            workspace_id,
-            display=display,
-            owner=getattr(self, "agent_id", None),
-        )
         try:
+            lock = await DisplayLeaseManager.acquire(
+                workspace_id,
+                display=display,
+                owner=getattr(self, "agent_id", None),
+                interrupt_check=self._mission_interrupt_requested,
+            )
+        except DisplayLeaseManager.Interrupted:
+            self._interrupted = True
+            self._interrupt_event.set()
+            return await self._execute_action_unlocked(
+                workspace_id,
+                ActionExecutionStatus.BLOCKED,
+                "interrupted",
+                {},
+                "Mission interrupted while waiting for display ownership.",
+            )
+        try:
+            pending_intent = getattr(self, "_pending_gui_action_intent", None)
             return await self._execute_action_unlocked(
                 workspace_id, action_type, target_resource, payload, predicted_outcome
             )
         finally:
+            if (
+                pending_intent is not None
+                and getattr(self, "_pending_gui_action_intent", None) is pending_intent
+            ):
+                del self._pending_gui_action_intent
             DisplayLeaseManager.release(lock, display=display)
 
     async def _execute_action_unlocked(
@@ -4325,6 +4741,59 @@ class ComputerUseAgent:
             self.safety = None
         self.action_counter += 1
         t_start = time.perf_counter()
+        if self._mission_interrupt_requested():
+            self._interrupted = True
+            self._interrupt_event.set()
+            actual_obs_str = "Action held before dispatch: mission interrupted."
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource=target_resource,
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
+            return trace
+        pending_intent = getattr(self, "_pending_gui_action_intent", None)
+        if pending_intent is not None:
+            intent_errors = pending_intent.validate_binding(
+                action_type=getattr(action_type, "value", str(action_type)),
+                target=target_resource,
+                payload=payload,
+            )
+            if intent_errors:
+                actual_obs_str = (
+                    "GUI action held before dispatch: " + "; ".join(intent_errors)
+                )
+                trace = ComputerDecisionTrace(
+                    step_index=self.action_counter,
+                    action_type=action_type,
+                    target_resource=target_resource,
+                    payload=str(payload),
+                    predicted_outcome=predicted_outcome,
+                    actual_observation=actual_obs_str,
+                    expected_observation=predicted_outcome,
+                    info_gain=0.0,
+                    recovery_attempted=False,
+                    status=ActionExecutionStatus.BLOCKED,
+                    exit_code=126,
+                    thought=getattr(self, "_last_thought", ""),
+                    duration_seconds=round(time.perf_counter() - t_start, 3),
+                    thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+                )
+                self.traces.append(trace)
+                self.history.append({"action": f"BLOCKED {target_resource}", "result": actual_obs_str})
+                return trace
         legacy_gui_actions = {
             ComputerActionType.BROWSER_CLICK: ComputerActionType.GUI_CLICK,
             ComputerActionType.BROWSER_TYPE: ComputerActionType.GUI_TYPE,
@@ -4391,7 +4860,7 @@ class ComputerUseAgent:
             ComputerActionType.GUI_KEYPRESS,
             ComputerActionType.GUI_HOTKEY,
         ) and not str(payload.get("key") or payload.get("keys") or "").strip() and (
-            self._burst_gui_actions(payload) is None
+            not self._has_gui_burst_payload(payload)
         ):
             actual_obs_str = (
                 f"{action_type.value} blocked: an explicit key is required; "
@@ -4450,7 +4919,7 @@ class ComputerUseAgent:
                 screen_height=screen_h,
                 grounding_fn=ground,
                 allow_landmarks=False,
-                coordinate_space=payload.get("coordinate_space"),
+                coordinate_space="pixel",
             )
 
         gui_actions = {
@@ -4576,7 +5045,7 @@ class ComputerUseAgent:
                     fresh_capture_age = getattr(fresh_state, "capture_age_ms", None)
                     fresh_controls_age = getattr(fresh_state, "controls_age_ms", None)
                     fresh_version = getattr(fresh_state, "perception_version", 0)
-                    previous_version = getattr(previous_observation, "perception_version", 0)
+                    previous_version = getattr(previous_screen, "perception_version", 0)
                     if (
                         fresh_state is None
                         or getattr(fresh_state, "desktop_state", "") != "STATE_ONLY"
@@ -4589,14 +5058,25 @@ class ComputerUseAgent:
                         or not math.isfinite(fresh_controls_age)
                         or not 0 <= fresh_controls_age <= 250
                         or not isinstance(fresh_version, int)
-                        or fresh_version < previous_version
+                        or fresh_version != previous_version
                     ):
                         raise RuntimeError("current desktop state could not be verified")
                     if self._screen_state_signature(fresh_state) != self._screen_state_signature(previous_screen):
                         raise RuntimeError("desktop state changed since the action was reasoned")
-                elif previous_evidence_is_stale:
-                    if previous_state == "STATE_ONLY":
-                        raise RuntimeError("stale accessibility state cannot be refreshed")
+                    pending_intent = getattr(self, "_pending_gui_action_intent", None)
+                    if pending_intent is not None:
+                        intent_errors = pending_intent.validate_observation(fresh_state)
+                        if intent_errors:
+                            raise RuntimeError("; ".join(intent_errors))
+                    self._last_gui_dispatch_evidence = (
+                        fresh_state,
+                        asyncio.get_running_loop().time(),
+                    )
+                elif previous_state == "STATE_ONLY":
+                    raise RuntimeError(
+                        "current accessibility state cannot be revalidated before dispatch"
+                    )
+                else:
                     fresh_screen = await self.computer.screenshot(workspace_id)
                     fresh_capture_age = getattr(fresh_screen, "capture_age_ms", None)
                     previous_pixels = (
@@ -4634,40 +5114,21 @@ class ComputerUseAgent:
                         )
                         if not has_semantic_evidence:
                             raise RuntimeError("desktop screenshot changed since the action was reasoned")
+                    pending_intent = getattr(self, "_pending_gui_action_intent", None)
+                    if pending_intent is not None:
+                        intent_errors = pending_intent.validate_observation(fresh_screen)
+                        if intent_errors:
+                            raise RuntimeError("; ".join(intent_errors))
+                    self._last_gui_dispatch_evidence = (
+                        fresh_screen,
+                        asyncio.get_running_loop().time(),
+                    )
                 if requested_window:
                     if active_window.casefold() != str(requested_window).strip().casefold():
-                        focus_result = await self._dispatch_gui_action(
-                            workspace_id,
-                            GUIAction(
-                                action=GUIActionType.SELECT_WINDOW,
-                                app_name=str(requested_window),
-                            ),
-                        )
-                        focus_status = (
-                            focus_result.get("status")
-                            if isinstance(focus_result, dict)
-                            else getattr(focus_result, "status", None)
-                        )
-                        focus_exit = (
-                            focus_result.get("exit_code")
-                            if isinstance(focus_result, dict)
-                            else getattr(focus_result, "exit_code", None)
-                        )
-                        if (
-                            focus_status is not None
-                            and str(focus_status).upper() in {"FAILED", "FAILURE", "BLOCKED", "ERROR"}
-                        ) or focus_exit not in (None, 0):
-                            raise RuntimeError("target window focus failed")
-                        refreshed = self.computer.status(workspace_id)
-                        if inspect.isawaitable(refreshed):
-                            refreshed = await refreshed
-                        refreshed_active = str(
-                            getattr(refreshed, "active_application", "")
-                            or getattr(refreshed, "active_window", "")
-                        ).strip()
-                        if refreshed_active.casefold() != str(requested_window).strip().casefold():
+                        if action_type != ComputerActionType.APP_FOCUS:
                             raise RuntimeError(
-                                f"target window ownership not verified: {refreshed_active or 'unknown'}"
+                                "requested window differs from the window used to ground "
+                                "this action; focus and re-observe before acting"
                             )
             except Exception as exc:
                 actual_obs_str = f"GUI action blocked before dispatch: {exc}"
@@ -4901,9 +5362,15 @@ class ComputerUseAgent:
         # the policy before it touches the provider. A denied action is recorded
         # as BLOCKED and NEVER executed, and deliberately does NOT trigger the
         # recovery path (recovery must not be able to bypass the safety gate).
+        approval_granted = False
+        approval_reason = self._operator_approval_reason(
+            action_type, target_resource, payload
+        )
         if self.safety is not None:
             verdict = self.safety.evaluate(action_type.value, target_resource, payload)
-            if not verdict.allowed:
+            if verdict.needs_approval:
+                approval_reason = approval_reason or verdict.reason
+            if not verdict.allowed and not verdict.needs_approval:
                 actual_obs_str = f"Safety blocked: {verdict.reason}"
                 if action_type == ComputerActionType.BROWSER_NAVIGATE:
                     actual_obs_str += (
@@ -4940,27 +5407,92 @@ class ComputerUseAgent:
                         self._recent_action_signatures = []
                     self._recent_action_signatures.append(blocked_signature)
                 return trace
+        if approval_reason:
+            approval_granted = await self._request_operator_approval(
+                action_type, target_resource, approval_reason
+            )
+            approved_intent = getattr(self, "_pending_gui_action_intent", None)
+            if (
+                approval_granted
+                and action_type.value.startswith("GUI_")
+                and isinstance(approved_intent, GUIActionIntent)
+            ):
+                self._pending_gui_action_intent = replace(
+                    approved_intent,
+                    expires_at_ns=time.perf_counter_ns() + 2_000_000_000,
+                )
+            if not approval_granted:
+                actual_obs_str = (
+                    "Action blocked: explicit operator approval was not received. "
+                    f"Reason: {approval_reason}"
+                )
+                trace = ComputerDecisionTrace(
+                    step_index=self.action_counter,
+                    action_type=action_type,
+                    target_resource=target_resource,
+                    payload=str(payload),
+                    predicted_outcome=predicted_outcome,
+                    actual_observation=actual_obs_str,
+                    expected_observation=predicted_outcome,
+                    info_gain=0.0,
+                    recovery_attempted=False,
+                    status=ActionExecutionStatus.BLOCKED,
+                    exit_code=126,
+                    duration_seconds=round(time.perf_counter() - t_start, 3),
+                    thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+                )
+                self.traces.append(trace)
+                self.history.append(
+                    {"action": action_type.value, "result": actual_obs_str}
+                )
+                return trace
 
         # ----- ASI Sandbox Pillar + Native Kernel governance -----
-        # The action's severity decides its isolation tier (fail-closed:
-        # critical/unknown severity never executes). The native Rust kernel is
-        # consulted for the envelope (seal intact + allowlisted family). A
-        # kernel Deny on a *specific target* (e.g. private-IP egress) is NOT
-        # treated as a sandbox-tier violation here — target-scope enforcement is
-        # the ActionBroker/SafetyKernel's job at execution time. Only an
-        # outright forbidden tier hard-blocks at this stage.
+        # The native verdict is an independent execution gate. This agent can
+        # dispatch directly to its provider, so Deny always blocks and
+        # approval-required verdicts need a trusted operator callback.
         routed = self._native_govern_action(action_type, target_resource)
-        if not routed.get("executable", True):
-            actual_obs_str = (
-                f"Sandbox tier forbids execution: {routed.get('reason', 'denied')}"
+        native_verdict = routed.get("native_verdict")
+        if native_verdict == "RequireApproval" and not approval_granted:
+            approval_granted = await self._request_operator_approval(
+                action_type,
+                target_resource,
+                str(routed.get("reason") or "native safety policy requires approval"),
             )
+            approved_intent = getattr(self, "_pending_gui_action_intent", None)
+            if (
+                approval_granted
+                and action_type.value.startswith("GUI_")
+                and isinstance(approved_intent, GUIActionIntent)
+            ):
+                self._pending_gui_action_intent = replace(
+                    approved_intent,
+                    expires_at_ns=time.perf_counter_ns() + 2_000_000_000,
+                )
+        native_denied = native_verdict == "Deny"
+        native_approval_missing = (
+            native_verdict == "RequireApproval" and not approval_granted
+        )
+        if (
+            not routed.get("executable", True)
+            or native_denied
+            or native_approval_missing
+        ):
+            actual_obs_str = (
+                f"Action denied by execution governance: {routed.get('reason', 'denied')}"
+            )
+            if native_approval_missing:
+                actual_obs_str = (
+                    "Action requires operator approval before execution: "
+                    f"{routed.get('reason', 'native policy requires approval')}"
+                )
             status = ActionExecutionStatus.BLOCKED
             logger.warning(
-                "action_blocked_by_sandbox_tier",
+                "action_blocked_by_execution_governance",
                 action=action_type.value,
                 tier=routed.get("tier"),
                 reason=routed.get("reason"),
-                native_verdict=routed.get("native_verdict"),
+                native_verdict=native_verdict,
             )
             trace = ComputerDecisionTrace(
                 step_index=self.action_counter,
@@ -5503,6 +6035,7 @@ class ComputerUseAgent:
                 )
                 recovery_needed = not burst_ok
             except Exception as exc:
+                burst_ok = False
                 actual_obs_str = f"GUI burst rejected: {exc}; re-observe and replan"
                 status = ActionExecutionStatus.FAILED
                 action_exit_code = 126
@@ -5710,6 +6243,24 @@ class ComputerUseAgent:
                             )
                             status = ActionExecutionStatus.BLOCKED
                             action_exit_code = 126
+                        else:
+                            pending_intent = getattr(
+                                self, "_pending_gui_action_intent", None
+                            )
+                            if pending_intent is not None:
+                                try:
+                                    self._pending_gui_action_intent = (
+                                        pending_intent.rebase_after_verified_transition(
+                                            focused_observation
+                                        )
+                                    )
+                                except ValueError as exc:
+                                    actual_obs_str = (
+                                        "GUI_TYPE blocked: verified focus transition "
+                                        f"could not renew the bounded intent: {exc}"
+                                    )
+                                    status = ActionExecutionStatus.BLOCKED
+                                    action_exit_code = 126
                 if (
                     status != ActionExecutionStatus.BLOCKED
                     and payload.get("clear_field") is True
@@ -6919,7 +7470,7 @@ class ComputerUseAgent:
                 status = ActionExecutionStatus.VERIFIED
 
             elif action_type == ComputerActionType.INVOKE_SUBAGENT:
-                from sonic.computer_use.teamwork import SubagentTeamworkManager
+                from sonic.computer_use.teamwork import SubagentTeamworkManager, _get_field
 
                 if getattr(self, "_teamwork_manager", None) is None:
                     self._teamwork_manager = SubagentTeamworkManager(
@@ -6942,18 +7493,18 @@ class ComputerUseAgent:
                 raw_subagents = payload.get("subagents") or payload.get("Subagents")
                 if not raw_subagents:
                     raw_subagents = [payload] if (isinstance(payload, dict) and any(
-                        k in payload for k in ("prompt", "Prompt", "goal", "role", "Role", "type_name", "requirements", "acceptance_criteria")
+                        k in payload for k in ("prompt", "Prompt", "goal", "task", "instruction", "role", "Role", "title", "name", "type_name", "type", "requirements", "acceptance_criteria")
                     )) else [
                         {
-                            "type_name": str(payload.get("type_name") or payload.get("TypeName") or "self"),
-                            "role": str(payload.get("role") or payload.get("Role") or target_resource or "Autonomous Subagent"),
-                            "prompt": str(payload.get("prompt") or payload.get("Prompt") or payload.get("goal") or target_resource or ""),
-                            "requirements": _norm_str_list(payload.get("requirements") or payload.get("Requirements")),
-                            "acceptance_criteria": _norm_str_list(payload.get("acceptance_criteria") or payload.get("AcceptanceCriteria")),
-                            "verification_command": str(payload.get("verification_command") or payload.get("VerificationCommand") or ""),
-                            "workspace_mode": str(payload.get("workspace_mode") or payload.get("Workspace") or payload.get("workspace") or "branch"),
-                            "execution_plane": str(payload.get("execution_plane") or payload.get("ExecutionPlane") or payload.get("plane") or "dual"),
-                            "model_tier": str(payload.get("model_tier") or payload.get("Model") or "inherit"),
+                            "type_name": str(_get_field(payload, "type_name", "type", default="self") or "self"),
+                            "role": str(_get_field(payload, "role", "title", "name", default=target_resource or "Autonomous Subagent") or target_resource or "Autonomous Subagent"),
+                            "prompt": str(_get_field(payload, "prompt", "goal", "task", "instruction", default=target_resource or "") or target_resource or ""),
+                            "requirements": _norm_str_list(_get_field(payload, "requirements", default=None)),
+                            "acceptance_criteria": _norm_str_list(_get_field(payload, "acceptance_criteria", "criteria", default=None)),
+                            "verification_command": str(_get_field(payload, "verification_command", "verify_cmd", default="") or ""),
+                            "workspace_mode": str(_get_field(payload, "workspace_mode", "workspace", default="branch") or "branch"),
+                            "execution_plane": str(_get_field(payload, "execution_plane", "plane", default="dual") or "dual"),
+                            "model_tier": str(_get_field(payload, "model_tier", "model", default="inherit") or "inherit"),
                             "max_steps": int(payload.get("max_steps") or payload.get("MaxSteps") or 12),
                             "max_correction_rounds": int(payload.get("max_correction_rounds") if payload.get("max_correction_rounds") is not None else 2),
                         }
@@ -6968,32 +7519,30 @@ class ComputerUseAgent:
                     if not isinstance(entry, dict):
                         continue
                     p = str(
-                        entry.get("prompt")
-                        or entry.get("Prompt")
-                        or entry.get("goal")
+                        _get_field(entry, "prompt", "goal", "task", "instruction", default="")
                         or (target_resource if not (payload.get("subagents") or payload.get("Subagents")) else "")
                         or ""
                     ).strip()
                     if not p:
                         # Prevent launching empty/blank subagents
                         continue
-                    plane = str(entry.get("execution_plane") or entry.get("ExecutionPlane") or entry.get("plane") or "dual").lower().strip()
+                    plane = str(_get_field(entry, "execution_plane", "plane", default="dual") or "dual").lower().strip()
                     if plane not in ("gui", "headless", "dual"):
                         plane = "dual"
-                    tier = str(entry.get("model_tier") or entry.get("Model") or entry.get("model") or "inherit").lower().strip()
+                    tier = str(_get_field(entry, "model_tier", "model", default="inherit") or "inherit").lower().strip()
                     if tier not in ("inherit", "flash", "pro"):
                         tier = "inherit"
-                    mode = str(entry.get("workspace_mode") or entry.get("Workspace") or entry.get("workspace") or "branch").lower().strip()
+                    mode = str(_get_field(entry, "workspace_mode", "workspace", default="branch") or "branch").lower().strip()
                     if mode not in ("inherit", "branch", "share"):
                         mode = "branch"
 
                     subagents_arg.append({
-                        "type_name": str(entry.get("type_name") or entry.get("TypeName") or "self"),
-                        "role": str(entry.get("role") or entry.get("Role") or "Autonomous Subagent"),
+                        "type_name": str(_get_field(entry, "type_name", "type", default="self") or "self"),
+                        "role": str(_get_field(entry, "role", "title", "name", default="Autonomous Subagent") or "Autonomous Subagent"),
                         "prompt": p,
-                        "requirements": _norm_str_list(entry.get("requirements") or entry.get("Requirements")),
-                        "acceptance_criteria": _norm_str_list(entry.get("acceptance_criteria") or entry.get("AcceptanceCriteria")),
-                        "verification_command": str(entry.get("verification_command") or entry.get("VerificationCommand") or ""),
+                        "requirements": _norm_str_list(_get_field(entry, "requirements", default=None)),
+                        "acceptance_criteria": _norm_str_list(_get_field(entry, "acceptance_criteria", "criteria", default=None)),
+                        "verification_command": str(_get_field(entry, "verification_command", "verify_cmd", default="") or ""),
                         "workspace_mode": mode,
                         "execution_plane": plane,
                         "model_tier": tier,
@@ -7256,6 +7805,19 @@ class ComputerUseAgent:
         trace.graph_delta = experience.graph_delta
         before_receipt_state = self._contract_state(before_state)
         after_receipt_state = self._contract_state(after_state)
+        intent_evidence = (
+            {
+                "source_perception_version": pending_intent.source_perception_version,
+                "source_active_window": pending_intent.source_active_window,
+                "source_width": pending_intent.source_width,
+                "source_height": pending_intent.source_height,
+                "expected_outcome": pending_intent.expected_outcome,
+                "issued_at_ns": pending_intent.issued_at_ns,
+                "expires_at_ns": pending_intent.expires_at_ns,
+            }
+            if pending_intent is not None
+            else {}
+        )
         trace.action_receipt = ActionReceipt(
             action_type=action_type.value,
             status=status,
@@ -7266,6 +7828,7 @@ class ComputerUseAgent:
             after=after_receipt_state,
             exit_code=action_exit_code,
             evidence=actual_obs_str,
+            intent=intent_evidence,
         )
         if getattr(self, "skill_ledger", None) is not None:
             self._pending_skill_context = (trace, before_graph)
@@ -7894,6 +8457,8 @@ class ComputerUseAgent:
         self._active_workspace_id = workspace_id
         t_start = time.perf_counter()
         self._interrupted = False
+        self._interrupt_event.clear()
+        self._active_interrupt_check = interrupt_check
         self._watchdog_aborted = False
         self._consecutive_stale_gui_blocks = 0
         goal_reached = False
@@ -7946,13 +8511,41 @@ class ComputerUseAgent:
 
             # 1. OBSERVE
             obs = await self.observe(workspace_id)
+            if self._mission_interrupt_requested():
+                self._interrupted = True
+                self._interrupt_event.set()
+                self.history.append({
+                    "action": "INTERRUPTED",
+                    "result": "Mission interrupted after observation; no action was dispatched.",
+                })
+                break
 
             # 2. REASON & CHOOSE ACTION
             action_type, target, payload, expected = await self.choose_action(goal, obs, step)
+            if self._mission_interrupt_requested():
+                self._interrupted = True
+                self._interrupt_event.set()
+                trace = await self.execute_action(
+                    workspace_id,
+                    ActionExecutionStatus.BLOCKED,
+                    "interrupted",
+                    {},
+                    "Mission interrupted during reasoning; action was not dispatched.",
+                )
+                if step_callback is not None:
+                    cb_res = step_callback(trace)
+                    if asyncio.iscoroutine(cb_res):
+                        await cb_res
+                break
 
             if (
                 action_type == ActionExecutionStatus.BLOCKED
-                and target in {"gui-contract-violation", "gui-invalid-response"}
+                and target
+                in {
+                    "gui-contract-violation",
+                    "gui-invalid-response",
+                    "gui-perception-unavailable",
+                }
             ):
                 trace = await self.execute_action(
                     workspace_id,
@@ -8061,6 +8654,54 @@ class ComputerUseAgent:
                 continue
 
             # 3. ACT & VERIFY
+            if action_type in {
+                ComputerActionType.GUI_CLICK,
+                ComputerActionType.GUI_DOUBLE_CLICK,
+                ComputerActionType.GUI_RIGHT_CLICK,
+                ComputerActionType.GUI_TYPE,
+                ComputerActionType.GUI_KEYPRESS,
+                ComputerActionType.GUI_MOVE,
+                ComputerActionType.GUI_SCROLL,
+                ComputerActionType.GUI_DRAG,
+            }:
+                try:
+                    ttl_ms = (
+                        250
+                        if getattr(obs.screen, "desktop_state", "") == "STATE_ONLY"
+                        else 2_000
+                    )
+                    self._pending_gui_action_intent = GUIActionIntent.create(
+                        action_type=action_type.value,
+                        target=target,
+                        payload=payload,
+                        expected_outcome=expected,
+                        observation=obs,
+                        ttl_ms=ttl_ms,
+                    )
+                except (TypeError, ValueError) as exc:
+                    reason = f"GUI action held; a fresh bounded intent could not be created: {exc}"
+                    self.history.append(
+                        {"action": f"{action_type.value} {target} (HELD)", "result": reason}
+                    )
+                    held_trace = await self.execute_action(
+                        workspace_id,
+                        ActionExecutionStatus.BLOCKED,
+                        "gui-action-intent-invalid",
+                        {},
+                        reason,
+                    )
+                    if step_callback is not None:
+                        try:
+                            callback_result = step_callback(held_trace)
+                            if asyncio.iscoroutine(callback_result):
+                                await callback_result
+                        except Exception as callback_error:
+                            logger.warning(
+                                "run_mission_step_callback_failed",
+                                error=str(callback_error),
+                            )
+                    self._inject_replan(goal)
+                    continue
             action_started_ns = time.perf_counter_ns()
             trace = await self.execute_action(workspace_id, action_type, target, payload, expected)
             perception_receipt = getattr(self, "_last_reasoning_perception", None)
@@ -8099,6 +8740,7 @@ class ComputerUseAgent:
                 and target in {
                     "reasoning-unavailable",
                     "gui-contract-violation",
+                    "gui-perception-unavailable",
                 }
             ):
                 break
@@ -8307,6 +8949,7 @@ class ComputerUseAgent:
                 logger.debug("post_mission_verify_error", error=str(v_err))
 
         self.goal_reached = goal_reached
+        self._active_interrupt_check = None
         t_elapsed = time.perf_counter() - t_start
         self.metrics.time_to_completion_seconds = round(t_elapsed, 2)
         # Honest verification score: ratio of real successes to total actions,

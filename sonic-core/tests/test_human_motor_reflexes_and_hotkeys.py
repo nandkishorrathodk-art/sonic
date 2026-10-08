@@ -232,13 +232,23 @@ async def test_docker_computer_gui_action_type_delay():
 @pytest.mark.asyncio
 async def test_docker_computer_tile_workstation():
     provider = DockerComputerProvider(container_name="test-workstation")
-    provider._docker_exec = AsyncMock(return_value=(0, "", ""))
+
+    async def fake_exec(command, timeout=60):
+        if "xdotool getdisplaygeometry" in command:
+            return 0, "1920 1080", ""
+        if "wmctrl -l" in command:
+            return 0, "0x1 0 0 host First\n0x2 0 0 host Second\n", ""
+        return 0, "", ""
+
+    provider._docker_exec = AsyncMock(side_effect=fake_exec)
 
     success = await provider.tile_workstation("ws-1")
     assert success is True
 
     executed_cmds = [call_args[0][0] for call_args in provider._docker_exec.call_args_list]
     # Tiling discovers windows at runtime rather than targeting named apps.
+    assert any("-e 0,0,0,960,1080" in c for c in executed_cmds)
+    assert any("-e 0,960,0,960,1080" in c for c in executed_cmds)
     assert any("wmctrl -l" in c for c in executed_cmds)
     assert all("Google Chrome" not in c and '"Terminal"' not in c for c in executed_cmds)
 

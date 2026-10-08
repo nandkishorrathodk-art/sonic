@@ -556,13 +556,12 @@ class CodebaseEvolver:
 
         p0_path = _resolve_required_test(required_p0)
         safety_path = _resolve_required_test(required_safety)
-        is_full_workspace = (self.repo_root / "sonic-core" / "pyproject.toml").is_file()
 
-        if not p0_path or (not safety_path and is_full_workspace):
+        if not p0_path or not safety_path:
             missing = []
             if not p0_path:
                 missing.append(required_p0)
-            if not safety_path and is_full_workspace:
+            if not safety_path:
                 missing.append(required_safety)
             logger.critical(
                 "evolution_security_regression_suite_missing",

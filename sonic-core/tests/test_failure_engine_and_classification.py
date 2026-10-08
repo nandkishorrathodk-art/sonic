@@ -285,6 +285,21 @@ def _mock_provider():
 class TestAgentFailureIntegration:
     """Verify Section 4 ComputerUseAgent failure behavior."""
 
+    def test_compact_mode_matches_complete_model_size_tokens(self):
+        provider = _mock_provider()
+
+        large_model = ComputerUseAgent(
+            computer_provider=provider,
+            llm_router=MagicMock(default_model="qwen/qwen3.8-27b"),
+        )
+        small_model = ComputerUseAgent(
+            computer_provider=provider,
+            llm_router=MagicMock(default_model="meta/llama-3.2-11b-vision-instruct"),
+        )
+
+        assert large_model._compact_mode is False
+        assert small_model._compact_mode is True
+
     @pytest.mark.asyncio
     async def test_reasoning_context_contains_forced_cognitive_fields_and_strategies(self):
         """The observation carries cognitive state while the prompt allows natural reasoning."""

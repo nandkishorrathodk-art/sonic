@@ -83,6 +83,9 @@ async def test_judge_confirms_valid_execution():
         "status": "COMPLETED",
         "exit_code": 0,
         "actual_observation": "Tasks listed: 0 pending, 1 completed",
+        "verification_evidence": (
+            "Independent task tracker check confirms the task list contains one completed task."
+        ),
     }
     result = SubMissionResult(
         sub_mission_id=sub_m.id,
@@ -101,6 +104,35 @@ async def test_judge_confirms_valid_execution():
 
     assert evaluation.verdict == JudgeVerdict.CONFIRMED
     assert evaluation.confidence >= 0.8
+
+
+@pytest.mark.asyncio
+async def test_judge_does_not_accept_generic_success_output_as_completion_proof():
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Run task tracker script")
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "echo completed successfully",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": "completed successfully",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Task tracker executed successfully",
+    )
+
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+    )
+
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
+    assert "lacks independent task evidence" in evaluation.notes
 
 
 @pytest.mark.asyncio
@@ -255,4 +287,169 @@ async def test_judge_confirms_gui_mission_with_real_window():
         result=result,
         worker_agent_id="sub-agent-gui",
     )
+    assert evaluation.verdict == JudgeVerdict.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_judge_accepts_browser_actions_in_gui_mission():
+    mock_computer = MagicMock()
+    mock_computer.screenshot = AsyncMock(return_value=type(
+        "Screen", (), {
+            "screenshot_base64": "c2NyZWVu",
+            "desktop_state": "INTERACTIVE",
+            "active_window": "Browser",
+            "capture_age_ms": 0,
+        }
+    )())
+    vision_judge = MagicMock()
+    vision_judge.complete = AsyncMock(return_value=type(
+        "Response", (), {
+            "content": '{"verdict":"CONFIRMED","visible_evidence":"Web page is visible in browser"}'
+        }
+    )())
+    judge = JudgeAgent(computer_provider=mock_computer, llm_router=vision_judge)
+    sub_m = SubMission(goal="Navigate to local portal and verify dashboard", plane="gui")
+    trace = {
+        "action_type": "BROWSER_NAVIGATE",
+        "target": "http://127.0.0.1:8080/dashboard",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": "Navigated to http://127.0.0.1:8080/dashboard",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Navigated to dashboard successfully",
+    )
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-browser",
+    )
+    assert evaluation.verdict == JudgeVerdict.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_judge_does_not_falsify_on_git_branch_python_args_shell_globs():
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Inspect git repository and python code")
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "git branch; ls *.py",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": "* main\n*args in func\n*.py files matched\n* bullet point",
+        "verification_evidence": "Repository status and files inspected cleanly.",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Inspected repository on * main branch",
+    )
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-git",
+    )
+    # Must NOT be falsified due to * main or *args or *.py
+    assert evaluation.verdict == JudgeVerdict.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_judge_falsifies_actual_unsaved_buffer_indicators():
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Edit document in editor")
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "nano doc.txt",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": "Editor opened with *untitled buffer [modified]",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Edited file",
+    )
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-edit",
+    )
+    assert evaluation.verdict == JudgeVerdict.FALSIFIED
+    assert "unsaved" in evaluation.notes.lower()
+
+
+@pytest.mark.asyncio
+async def test_judge_catches_unsaved_window_title_markers():
+    mock_computer = MagicMock()
+    mock_computer.status = AsyncMock(return_value=type(
+        "Status", (), {
+            "windows": ["* main.py - Editor", "Terminal"],
+            "active_application": "Editor",
+        }
+    )())
+    judge = JudgeAgent(computer_provider=mock_computer)
+    sub_m = SubMission(goal="Update code file")
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "code main.py",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": "Opened file",
+        "verification_evidence": "Edited main.py",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Updated code",
+    )
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-editor",
+    )
+    assert evaluation.verdict == JudgeVerdict.FALSIFIED
+    assert "unsaved" in evaluation.notes.lower()
+
+
+@pytest.mark.asyncio
+async def test_judge_allows_routine_open_port_and_bypass_markers():
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Check network service ports and caching")
+    trace = {
+        "action_type": "TERMINAL_EXEC",
+        "target": "netstat -tuln",
+        "status": "COMPLETED",
+        "exit_code": 0,
+        "actual_observation": "Active Internet connections: tcp 0.0.0.0:8080 LISTEN",
+        "verification_evidence": "Service is actively listening on port 8080.",
+    }
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[trace],
+        success=True,
+        findings_summary="Verified open port 8080 and bypassed cache successfully",
+        key_discoveries=["Service is on open port 8080"],
+    )
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="sub-agent-net",
+    )
+    # Should NOT be flagged as INCONCLUSIVE by vuln_markers check
     assert evaluation.verdict == JudgeVerdict.CONFIRMED

@@ -81,11 +81,21 @@ def extract_bbox_midpoint(
         normalized_space = coordinate_space.strip().lower()
         if normalized_space in {"normalized", "normalized_1000", "model_1000"}:
             is_normalized_1000 = True
+            force_pixels = False
         elif normalized_space in {"pixel", "screen_pixel", "absolute"}:
             is_normalized_1000 = False
+            force_pixels = True
         else:
             raise ValueError(f"unsupported coordinate space: {coordinate_space}")
-    pt = _extract_bbox_midpoint_impl(bbox_response, width, height, is_normalized_1000)
+    else:
+        force_pixels = False
+    pt = _extract_bbox_midpoint_impl(
+        bbox_response,
+        width,
+        height,
+        is_normalized_1000,
+        force_pixels=force_pixels,
+    )
     if pt == (0, 0):
         return None
     return pt
@@ -96,6 +106,8 @@ def _extract_bbox_midpoint_impl(
     width: int = 1280,
     height: int = 800,
     is_normalized_1000: bool | None = None,
+    *,
+    force_pixels: bool = False,
 ) -> tuple[int, int] | None:
     if not bbox_response:
         return None
@@ -107,33 +119,53 @@ def _extract_bbox_midpoint_impl(
 
     if isinstance(bbox_response, str) and "{" in bbox_response and "}" in bbox_response:
         try:
-            import json
             json_match = re.search(r"\{.*?\}", bbox_response, re.DOTALL)
             if json_match:
                 parsed_obj = json.loads(json_match.group(0))
                 if isinstance(parsed_obj, dict):
                     if "x" in parsed_obj and "y" in parsed_obj:
+                        if any(
+                            isinstance(parsed_obj[key], bool)
+                            or not isinstance(parsed_obj[key], (int, float))
+                            or not math.isfinite(parsed_obj[key])
+                            for key in ("x", "y")
+                        ):
+                            return None
                         return _extract_bbox_midpoint_impl(
                             (float(parsed_obj["x"]), float(parsed_obj["y"])),
                             width,
                             height,
                             is_normalized_1000,
+                            force_pixels=force_pixels,
                         )
                     if "point" in parsed_obj and isinstance(parsed_obj["point"], (list, tuple)) and len(parsed_obj["point"]) >= 2:
+                        if any(
+                            isinstance(value, bool)
+                            or not isinstance(value, (int, float))
+                            or not math.isfinite(value)
+                            for value in parsed_obj["point"][:2]
+                        ):
+                            return None
                         return _extract_bbox_midpoint_impl(
                             (float(parsed_obj["point"][0]), float(parsed_obj["point"][1])),
                             width,
                             height,
                             is_normalized_1000,
+                            force_pixels=force_pixels,
                         )
         except Exception:
             pass
 
     if isinstance(bbox_response, (tuple, list)):
         try:
+            if any(isinstance(value, bool) for value in bbox_response):
+                return None
             if len(bbox_response) >= 4:
                 x1, y1, x2, y2 = float(bbox_response[0]), float(bbox_response[1]), float(bbox_response[2]), float(bbox_response[3])
-                if max(x1, y1, x2, y2) <= 1.0:
+                if force_pixels:
+                    mid_x = int((x1 + x2) / 2.0)
+                    mid_y = int((y1 + y2) / 2.0)
+                elif max(x1, y1, x2, y2) <= 1.0:
                     mid_x = int(((x1 + x2) / 2.0) * width)
                     mid_y = int(((y1 + y2) / 2.0) * height)
                 elif is_normalized_1000 is True or (
@@ -147,7 +179,9 @@ def _extract_bbox_midpoint_impl(
                 return _screen_point(mid_x, mid_y)
             elif len(bbox_response) >= 2:
                 x, y = float(bbox_response[0]), float(bbox_response[1])
-                if max(x, y) <= 1.0:
+                if force_pixels:
+                    px, py = int(x), int(y)
+                elif max(x, y) <= 1.0:
                     px = int(x * width)
                     py = int(y * height)
                 elif is_normalized_1000 is True or (
@@ -178,7 +212,10 @@ def _extract_bbox_midpoint_impl(
         x1, y1, x2, y2 = numbers[0], numbers[1], numbers[2], numbers[3]
         raw_x = (x1 + x2) / 2.0
         raw_y = (y1 + y2) / 2.0
-        if max(x1, y1, x2, y2) <= 1.0:
+        if force_pixels:
+            mid_x = int(raw_x)
+            mid_y = int(raw_y)
+        elif max(x1, y1, x2, y2) <= 1.0:
             mid_x = int(raw_x * width)
             mid_y = int(raw_y * height)
         elif (
@@ -203,7 +240,10 @@ def _extract_bbox_midpoint_impl(
 
     elif len(numbers) >= 2:
         raw_x, raw_y = numbers[0], numbers[1]
-        if max(raw_x, raw_y) <= 1.0:
+        if force_pixels:
+            px = int(raw_x)
+            py = int(raw_y)
+        elif max(raw_x, raw_y) <= 1.0:
             px = int(raw_x * width)
             py = int(raw_y * height)
         elif (
@@ -228,6 +268,30 @@ def _extract_bbox_midpoint_impl(
             py = int(raw_y)
         return _screen_point(px, py)
 
+    return None
+
+
+def _direct_screen_point(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    coordinate_space: str | None,
+) -> tuple[int, int] | None:
+    if width <= 0 or height <= 0:
+        return None
+
+    normalized_space = (coordinate_space or "pixel").strip().lower()
+    if normalized_space in {"normalized", "normalized_1000", "model_1000"}:
+        if not (0 <= x <= 1000 and 0 <= y <= 1000):
+            return None
+        x = int(x * width / 1000)
+        y = int(y * height / 1000)
+    elif normalized_space not in {"pixel", "screen_pixel", "absolute"}:
+        return None
+
+    if 0 <= x < width and 0 <= y < height:
+        return x, y
     return None
 
 
@@ -337,13 +401,13 @@ def resolve_ui_target(
     if "," in clean_query:
         parts = clean_query.split(",")
         if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
-            coords = (int(parts[0].strip()), int(parts[1].strip()))
-            if coordinate_space and coordinate_space.strip().lower() in {"normalized", "normalized_1000", "model_1000"}:
-                return (
-                    int(coords[0] * width / 1000),
-                    int(coords[1] * height / 1000),
-                )
-            return coords
+            return _direct_screen_point(
+                int(parts[0].strip()),
+                int(parts[1].strip()),
+                width,
+                height,
+                coordinate_space,
+            )
 
     # 2. Dynamic Grounding function (multimodal vision model callback)
     if grounding_fn and screenshot_b64:
@@ -409,13 +473,13 @@ async def resolve_ui_target_async(
     if "," in clean_query:
         parts = clean_query.split(",")
         if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
-            coords = (int(parts[0].strip()), int(parts[1].strip()))
-            if coordinate_space and coordinate_space.strip().lower() in {"normalized", "normalized_1000", "model_1000"}:
-                return (
-                    int(coords[0] * width / 1000),
-                    int(coords[1] * height / 1000),
-                )
-            return coords
+            return _direct_screen_point(
+                int(parts[0].strip()),
+                int(parts[1].strip()),
+                width,
+                height,
+                coordinate_space,
+            )
 
     # 2. Dynamic Grounding function (sync or async)
     if grounding_fn and screenshot_b64:

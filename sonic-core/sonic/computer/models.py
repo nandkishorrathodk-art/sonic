@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def _now() -> str:
@@ -145,6 +145,12 @@ class GUIAction(BaseModel):
     app_name: str | None = None
     scroll_delta: int = 0
     delay_ms: int = 25
+
+    @model_validator(mode="after")
+    def validate_scroll_delta(self) -> "GUIAction":
+        if self.action == GUIActionType.SCROLL and self.scroll_delta == 0:
+            raise ValueError("GUIActionType.SCROLL requires a non-zero scroll_delta")
+        return self
 
 
 class ScreenObservation(BaseModel):

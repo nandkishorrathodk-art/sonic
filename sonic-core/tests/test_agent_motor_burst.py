@@ -62,9 +62,18 @@ class _Provider:
 def _payload(**extra):
     value = {
         "burst_actions": [
-            {"action": GUIActionType.KEYPRESS.value, "key": "Tab"},
-            {"action": GUIActionType.KEYPRESS.value, "key": "Enter"},
+            {
+                "action": GUIActionType.KEYPRESS.value,
+                "key": "Tab",
+                "postcondition": {"visible_text": "step 1"},
+            },
+            {
+                "action": GUIActionType.KEYPRESS.value,
+                "key": "Enter",
+                "postcondition": {"visible_text": "step 2"},
+            },
         ],
+        "postcondition": {"visible_text": "step 2"},
     }
     value.update(extra)
     return value
@@ -129,3 +138,127 @@ async def test_stale_burst_version_never_dispatches():
     assert trace.status == ActionExecutionStatus.FAILED
     assert provider.calls == 0
     assert "stale" in trace.actual_observation.lower()
+
+
+@pytest.mark.asyncio
+async def test_burst_requires_a_postcondition_for_each_action_and_the_final_state():
+    provider = _Provider()
+    agent = ComputerUseAgent(provider)
+    await agent.observe("workspace")
+    payload = _payload()
+    payload["burst_actions"][0].pop("postcondition")
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.GUI_KEYPRESS,
+        "target",
+        payload,
+        "advance",
+    )
+
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert provider.calls == 0
+    assert "every GUI burst action requires a postcondition" in trace.actual_observation
+
+
+@pytest.mark.asyncio
+async def test_burst_rejects_more_than_the_bounded_action_count():
+    provider = _Provider()
+    agent = ComputerUseAgent(provider)
+    await agent.observe("workspace")
+    payload = _payload()
+    payload["burst_actions"] = payload["burst_actions"] * 3
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.GUI_KEYPRESS,
+        "target",
+        payload,
+        "advance",
+    )
+
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert provider.calls == 0
+    assert "limited to 4 actions" in trace.actual_observation
+
+
+@pytest.mark.asyncio
+async def test_burst_checks_coordinates_before_any_action_is_dispatched():
+    provider = _Provider()
+    agent = ComputerUseAgent(provider)
+    await agent.observe("workspace")
+    payload = _payload()
+    payload["burst_actions"][1] = {
+        "action": GUIActionType.CLICK.value,
+        "x": 900,
+        "y": 20,
+        "postcondition": {"visible_text": "step 2"},
+    }
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.GUI_KEYPRESS,
+        "target",
+        payload,
+        "advance",
+    )
+
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert provider.calls == 0
+    assert "outside screen 800x600" in trace.actual_observation
+
+
+@pytest.mark.asyncio
+async def test_burst_holds_when_the_active_window_changes_unexpectedly():
+    class _WindowChangingProvider(_Provider):
+        def __init__(self):
+            super().__init__()
+            self.window_changed = False
+
+        async def gui_action(self, workspace_id, action):
+            result = await super().gui_action(workspace_id, action)
+            self.window_changed = True
+            return result
+
+        async def screenshot(self, workspace_id):
+            result = await super().screenshot(workspace_id)
+            if self.window_changed:
+                result.active_window = "Unexpected window"
+            return result
+
+    provider = _WindowChangingProvider()
+    agent = ComputerUseAgent(provider)
+    await agent.observe("workspace")
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.GUI_KEYPRESS,
+        "target",
+        _payload(),
+        "advance",
+    )
+
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert provider.calls == 1
+    assert "active window changed unexpectedly" in trace.actual_observation
+
+
+@pytest.mark.asyncio
+async def test_burst_rejects_postcondition_without_an_observable_predicate():
+    provider = _Provider()
+    agent = ComputerUseAgent(provider)
+    await agent.observe("workspace")
+    payload = _payload()
+    payload["burst_actions"][0]["postcondition"] = {"require_state_change": True}
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.GUI_KEYPRESS,
+        "target",
+        payload,
+        "advance",
+    )
+
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert provider.calls == 0
+    assert "must name an observable state" in trace.actual_observation

@@ -51,7 +51,9 @@ class DisplayLeaseManager:
 
     _locks: dict[str, asyncio.Lock] = {}
     _lock_metadata: dict[str, dict[str, Any]] = {}
-    WATCHDOG_TTL_SECONDS: float = 60.0
+
+    class Interrupted(RuntimeError):
+        """Raised when a waiting display lease is interrupted."""
 
     @classmethod
     def get_lock(cls, workspace_id: str, display: str | None = None) -> asyncio.Lock:
@@ -66,29 +68,6 @@ class DisplayLeaseManager:
         return cls._locks[key]
 
     @classmethod
-    def _break_stale_lock_if_needed(cls, key: str, lock: asyncio.Lock) -> None:
-        """Watchdog TTL: break stale locks held longer than 60s to prevent deadlocks."""
-        metadata = cls._lock_metadata.setdefault(key, {})
-        acquired_at = metadata.get("acquired_at")
-        if lock.locked():
-            if acquired_at is None:
-                metadata["acquired_at"] = time.time()
-            elif time.time() - acquired_at > cls.WATCHDOG_TTL_SECONDS:
-                logger.warning(
-                    "display_lease_watchdog_ttl_expired",
-                    key=key,
-                    owner=metadata.get("owner"),
-                    elapsed=time.time() - acquired_at,
-                )
-                try:
-                    lock.release()
-                except RuntimeError:
-                    pass
-                cls._locks[key] = asyncio.Lock()
-                metadata.pop("owner", None)
-                metadata.pop("acquired_at", None)
-
-    @classmethod
     async def acquire(
         cls,
         workspace_id: str,
@@ -96,34 +75,28 @@ class DisplayLeaseManager:
         *,
         timeout: float = 30.0,
         owner: str | None = None,
+        interrupt_check: Any | None = None,
     ) -> asyncio.Lock:
-        """Acquire a physical-display lease with 60-second watchdog TTL to avoid deadlocks."""
+        """Acquire exclusive ownership; elapsed time never transfers a live lease."""
         key = f"display:{display or os.environ.get('DISPLAY') or ':99'}"
         lock = cls.get_lock(workspace_id, display=display)
-        cls._break_stale_lock_if_needed(key, lock)
-        lock = cls._locks[key]
-
-        start_time = time.time()
+        deadline = time.monotonic() + timeout
         while True:
-            cls._break_stale_lock_if_needed(key, lock)
-            lock = cls._locks[key]
-            elapsed = time.time() - start_time
-            remaining = max(0.1, timeout - elapsed)
+            if callable(interrupt_check) and interrupt_check():
+                raise cls.Interrupted("display lease acquisition interrupted")
             try:
-                chunk = min(remaining, 5.0)
-                await asyncio.wait_for(lock.acquire(), timeout=chunk)
+                await asyncio.wait_for(lock.acquire(), timeout=min(0.05, max(0.001, deadline - time.monotonic())))
                 break
             except asyncio.TimeoutError:
-                if time.time() - start_time >= timeout:
-                    cls._break_stale_lock_if_needed(key, lock)
-                    lock = cls._locks[key]
-                    if not lock.locked():
-                        await asyncio.wait_for(lock.acquire(), timeout=1.0)
-                        break
+                if time.monotonic() >= deadline:
                     raise
 
         cls._lock_metadata[key].update(
-            {"owner": owner or workspace_id, "acquired_at": time.time()}
+            {
+                "owner": owner or workspace_id,
+                "owner_task": asyncio.current_task(),
+                "acquired_at": time.time(),
+            }
         )
         return lock
 
@@ -132,10 +105,14 @@ class DisplayLeaseManager:
         """Release a lease and clear ownership telemetry."""
         key = f"display:{display or os.environ.get('DISPLAY') or ':99'}"
         metadata = cls._lock_metadata.get(key)
-        if metadata is not None:
+        is_owner = (
+            metadata is not None
+            and metadata.get("owner_task") is asyncio.current_task()
+        )
+        if is_owner and cls._locks.get(key) is lock and lock.locked():
             metadata.pop("owner", None)
+            metadata.pop("owner_task", None)
             metadata.pop("acquired_at", None)
-        if lock.locked():
             try:
                 lock.release()
             except RuntimeError:
@@ -169,6 +146,45 @@ def _norm_str_list(v: Any) -> list[str]:
     if isinstance(v, (list, tuple, set)):
         return [str(it).strip() for it in v if it is not None and str(it).strip()]
     return [str(v).strip()]
+
+
+def _get_field(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """Case-insensitive and alias-aware dictionary field lookup."""
+    if not isinstance(d, dict) or not d:
+        return default
+
+    def _is_valid(val: Any) -> bool:
+        if val is None:
+            return False
+        if isinstance(val, str) and not val.strip():
+            return False
+        return True
+
+    for target_key in keys:
+        if not target_key:
+            continue
+
+        # 1. Exact match
+        if target_key in d:
+            val = d[target_key]
+            if _is_valid(val):
+                return val
+
+        # 2. Case-insensitive match
+        t_lower = target_key.lower()
+        for k, v in d.items():
+            if str(k).lower() == t_lower and _is_valid(v):
+                return v
+
+        # 3. Normalized alphanumeric match (ignores underscores, hyphens, casing)
+        t_norm = "".join(c for c in t_lower if c.isalnum())
+        if t_norm:
+            for k, v in d.items():
+                k_norm = "".join(c for c in str(k).lower() if c.isalnum())
+                if k_norm == t_norm and _is_valid(v):
+                    return v
+
+    return default
 
 
 @dataclass
@@ -310,23 +326,62 @@ class SubagentTeamworkManager:
                 if raw.prompt.strip():
                     specs.append(raw)
             elif isinstance(raw, dict):
-                p = str(raw.get("prompt") or raw.get("Prompt") or raw.get("goal") or "").strip()
+                p = str(
+                    _get_field(raw, "prompt", "goal", "task", "instruction", "objective", default="") or ""
+                ).strip()
                 if not p:
                     continue
+
+                type_name = str(_get_field(raw, "type_name", "type", default="self") or "self").strip()
+                role = str(_get_field(raw, "role", "title", "name", default="Autonomous Subagent") or "Autonomous Subagent").strip()
+                requirements = _norm_str_list(_get_field(raw, "requirements", default=None))
+                acceptance_criteria = _norm_str_list(
+                    _get_field(raw, "acceptance_criteria", "criteria", default=None)
+                )
+                verification_command = str(
+                    _get_field(raw, "verification_command", "verify_cmd", default="") or ""
+                ).strip()
+                workspace_mode = str(
+                    _get_field(raw, "workspace_mode", "workspace", default="branch") or "branch"
+                ).lower().strip()
+                execution_plane = str(
+                    _get_field(raw, "execution_plane", "plane", default="dual") or "dual"
+                ).lower().strip()
+                model_tier = str(
+                    _get_field(raw, "model_tier", "model", default="inherit") or "inherit"
+                ).lower().strip()
+
+                raw_max_steps = _get_field(raw, "max_steps", default=12)
+                try:
+                    max_steps = int(str(raw_max_steps if raw_max_steps is not None else 12))
+                except (ValueError, TypeError):
+                    max_steps = 12
+
+                raw_max_cr = _get_field(raw, "max_correction_rounds", default=2)
+                try:
+                    max_correction_rounds = int(str(raw_max_cr if raw_max_cr is not None else 2))
+                except (ValueError, TypeError):
+                    max_correction_rounds = 2
+
+                raw_emp_id = _get_field(raw, "employee_id", default=None)
+                employee_id = str(raw_emp_id).strip() or None if raw_emp_id is not None else None
+                if employee_id in ("None", "null", ""):
+                    employee_id = None
+
                 specs.append(
                     SubagentTaskSpec(
-                        type_name=str(raw.get("type_name") or raw.get("TypeName") or "self"),
-                        role=str(raw.get("role") or raw.get("Role") or "Autonomous Subagent"),
+                        type_name=type_name,
+                        role=role,
                         prompt=p,
-                        requirements=_norm_str_list(raw.get("requirements") or raw.get("Requirements")),
-                        acceptance_criteria=_norm_str_list(raw.get("acceptance_criteria") or raw.get("AcceptanceCriteria")),
-                        verification_command=str(raw.get("verification_command") or ""),
-                        workspace_mode=str(raw.get("workspace_mode") or raw.get("Workspace") or "branch").lower().strip(),
-                        execution_plane=str(raw.get("execution_plane") or raw.get("plane") or "dual").lower().strip(),
-                        model_tier=str(raw.get("model_tier") or raw.get("Model") or "inherit").lower().strip(),
-                        max_steps=int(str(raw.get("max_steps") or 12)),
-                        max_correction_rounds=int(str(raw.get("max_correction_rounds") if raw.get("max_correction_rounds") is not None else 2)),
-                        employee_id=str(raw.get("employee_id") or "").strip() or None,
+                        requirements=requirements,
+                        acceptance_criteria=acceptance_criteria,
+                        verification_command=verification_command,
+                        workspace_mode=workspace_mode,
+                        execution_plane=execution_plane,
+                        model_tier=model_tier,
+                        max_steps=max_steps,
+                        max_correction_rounds=max_correction_rounds,
+                        employee_id=employee_id,
                     )
                 )
 
@@ -374,13 +429,38 @@ class SubagentTeamworkManager:
             await self._execute_and_verify_loop(conv, spec, formatted_goal)
             return conv
 
-        if len(specs) == 1:
-            return [await _launch_one(specs[0])]
         raw_results = await asyncio.gather(*(_launch_one(s) for s in specs), return_exceptions=True)
         results: list[SubagentConversation] = []
-        for r in raw_results:
-            if isinstance(r, Exception):
-                logger.error("subagent_launch_exception", error=str(r))
+        for spec, r in zip(specs, raw_results):
+            if isinstance(r, (Exception, BaseException)):
+                logger.error("subagent_launch_exception", role=spec.role, error=str(r))
+                err_conv = None
+                for c in list(self.conversations.values()):
+                    if getattr(c, "last_spec", None) is spec:
+                        c.state = "errored"
+                        c.state_detail = f"Launch failed: {r}"
+                        c.last_summary = f"Launch failed: {r}"
+                        err_conv = c
+                        break
+                if err_conv is None:
+                    conv_id = f"subconv-{uuid.uuid4().hex[:10]}"
+                    w_mode = spec.workspace_mode if spec.workspace_mode in ("inherit", "branch", "share") else "branch"
+                    err_conv = SubagentConversation(
+                        conversation_id=conv_id,
+                        type_name=spec.type_name,
+                        role=spec.role,
+                        workspace_mode=w_mode,
+                        parent_workspace_id=workspace_id,
+                        effective_workspace_id=workspace_id,
+                        employee_id=spec.employee_id,
+                        employee_context=getattr(spec, "employee_context", {}) or {},
+                        state="errored",
+                        state_detail=f"Launch failed: {r}",
+                        last_summary=f"Launch failed: {r}",
+                        last_spec=spec,
+                    )
+                    self.conversations[conv_id] = err_conv
+                results.append(err_conv)
             elif isinstance(r, SubagentConversation):
                 results.append(r)
         return results

@@ -59,6 +59,9 @@ interface WorkerActivity {
   keyDiscoveries?: string[];
   actionsTaken?: number;
   durationSeconds?: number;
+  judgeVerdict?: string;
+  judgeNotes?: string;
+  evidenceVerified?: boolean;
 }
 
 function isWorkerDispatch(item: WorklogItem): boolean {
@@ -96,6 +99,23 @@ function summarizeWorkerAction(item: WorklogItem): string {
     "";
   const label = action.replaceAll("_", " ").toLowerCase();
   return target ? `${label} · ${target}` : label;
+}
+
+function outcomeBadgeClass(status: string): string {
+  switch (status.toUpperCase()) {
+    case "COMPLETE":
+      return "border-emerald-500/25 bg-emerald-500/10 text-emerald-400";
+    case "PARTIAL":
+    case "WAITING_FOR_HUMAN":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-300";
+    case "BLOCKED":
+    case "INCOMPLETE":
+    case "FAILED":
+    case "ERROR":
+      return "border-rose-500/30 bg-rose-500/10 text-rose-400";
+    default:
+      return "border-ink-700 bg-ink-850 text-muted-bright";
+  }
 }
 
 function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
@@ -139,6 +159,9 @@ function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
       worker.keyDiscoveries = item.key_discoveries || [];
       worker.actionsTaken = item.actions_taken;
       worker.durationSeconds = item.duration_seconds;
+      worker.judgeVerdict = item.judge_verdict || undefined;
+      worker.judgeNotes = item.judge_notes || undefined;
+      worker.evidenceVerified = item.evidence_verified;
       continue;
     }
 
@@ -150,6 +173,39 @@ function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
   }
 
   return Array.from(workers.values());
+}
+
+function workerStatusLabel(worker: WorkerActivity, missionRunning: boolean): string {
+  const status = worker.status.toUpperCase();
+  if (missionRunning && ["RUNNING", "PENDING"].includes(status)) return "RUNNING";
+  if (status === "WAITING_FOR_HUMAN") return "WAITING FOR HUMAN";
+  if (["BLOCKED", "TIMED_OUT", "FAILED", "PAUSED", "PARTIAL", "INCOMPLETE"].includes(status)) {
+    return status;
+  }
+  if (status === "RUNNING" || status === "PENDING") return "UNCONFIRMED";
+  if (worker.success === true) {
+    return worker.evidenceVerified === true && worker.judgeVerdict?.toUpperCase() === "CONFIRMED"
+      ? "COMPLETED"
+      : "UNVERIFIED";
+  }
+  if (worker.success === false) return "FAILED";
+  return status;
+}
+
+function workerStatusClass(status: string): string {
+  if (status === "COMPLETED" || status === "SUCCESS") {
+    return "border-emerald-500/25 bg-emerald-500/10 text-emerald-400";
+  }
+  if (status === "RUNNING") {
+    return "border-secondary-500/25 bg-secondary-500/10 text-secondary-300";
+  }
+  if (["FAILED", "BLOCKED", "TIMED_OUT", "INCOMPLETE"].includes(status)) {
+    return "border-rose-500/25 bg-rose-500/10 text-rose-400";
+  }
+  if (status === "WAITING FOR HUMAN" || status === "UNVERIFIED" || status === "PAUSED") {
+    return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+  }
+  return "border-amber-500/25 bg-amber-500/10 text-amber-300";
 }
 
 function WorkerBoard({
@@ -180,31 +236,8 @@ function WorkerBoard({
 
       <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
         {workers.map((worker) => {
-          const normalizedStatus = worker.status.toUpperCase();
-          const unreported = missionRunning && ["RUNNING", "PENDING"].includes(normalizedStatus);
-          const statusLabel = unreported
-            ? "RUNNING"
-            : normalizedStatus === "RUNNING" || normalizedStatus === "PENDING"
-              ? "UNCONFIRMED"
-              : normalizedStatus === "WAITING_FOR_HUMAN"
-                ? "WAITING FOR HUMAN"
-              : worker.success === true
-                ? "COMPLETED"
-                : worker.success === false
-                  ? normalizedStatus === "BLOCKED" || normalizedStatus === "TIMED_OUT"
-                    ? normalizedStatus
-                    : "FAILED"
-                  : normalizedStatus;
-          const statusClass =
-            statusLabel === "COMPLETED" || statusLabel === "SUCCESS"
-              ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
-              : statusLabel === "RUNNING"
-                ? "border-secondary-500/25 bg-secondary-500/10 text-secondary-300"
-                : statusLabel === "WAITING FOR HUMAN"
-                  ? "border-amber-500/25 bg-amber-500/10 text-amber-300"
-                : statusLabel === "FAILED" || statusLabel === "BLOCKED" || statusLabel === "TIMED_OUT"
-                  ? "border-rose-500/25 bg-rose-500/10 text-rose-400"
-                  : "border-amber-500/25 bg-amber-500/10 text-amber-300";
+          const statusLabel = workerStatusLabel(worker, missionRunning);
+          const statusClass = workerStatusClass(statusLabel);
           const PlaneIcon = worker.plane?.toLowerCase() === "headless" ? Code2 : Monitor;
 
           return (
@@ -246,6 +279,16 @@ function WorkerBoard({
                   {worker.findings && (
                     <p className="mt-1 line-clamp-2 text-[10px] text-slate-300">
                       {worker.findings}
+                    </p>
+                  )}
+                  {worker.judgeVerdict && (
+                    <p className="mt-1 text-[10px] text-amber-300">
+                      Judge: {worker.judgeVerdict}
+                      {worker.evidenceVerified === true
+                        ? " · evidence confirmed"
+                        : worker.judgeNotes
+                          ? ` · ${worker.judgeNotes}`
+                          : " · evidence not confirmed"}
                     </p>
                   )}
                   {worker.keyDiscoveries && worker.keyDiscoveries.length > 0 && (
@@ -465,6 +508,86 @@ function ProbeProposalCard({
   );
 }
 
+function OperatorActionApprovalCard({
+  item,
+  sessionId = "default",
+}: {
+  item: WorklogItem;
+  sessionId?: string;
+}) {
+  const [resolution, setResolution] = useState<string>(
+    item.approval_status && item.approval_status !== "pending"
+      ? item.approval_status
+      : "",
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const resolve = async (approved: boolean) => {
+    if (!item.approval_id) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api.approveWorkstationAction(
+        item.approval_id,
+        approved,
+        sessionId,
+      );
+      setResolution(result?.status || (approved ? "approved" : "rejected"));
+    } catch (err: any) {
+      setError(err?.message || "Could not resolve this action approval");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="my-2.5 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3.5 text-xs shadow-md">
+      <div className="flex items-center gap-2 mb-2">
+        <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+        <span className="font-semibold text-slate-100 text-[12.5px]">
+          {item.title || "Operator approval required"}
+        </span>
+        <span className="ml-auto px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/30 text-amber-400 font-mono font-semibold text-[10px]">
+          {resolution ? resolution.toUpperCase() : "PAUSED"}
+        </span>
+      </div>
+      {item.content && (
+        <p className="text-[11.5px] text-slate-300 leading-relaxed mb-3 whitespace-pre-wrap">
+          {item.content}
+        </p>
+      )}
+      {error && (
+        <div role="alert" className="mb-2.5 p-2 rounded bg-rose-500/10 border border-rose-500/30 text-rose-400 text-[11px]">
+          {error}
+        </div>
+      )}
+      {!resolution && (
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => resolve(true)}
+            className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-[11px] flex items-center gap-1 transition shadow-sm disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+            <span>Approve this action</span>
+          </button>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => resolve(false)}
+            className="px-2 py-1 rounded-md bg-ink-800 hover:bg-ink-750 text-slate-300 hover:text-white border border-ink-700 text-[11px] flex items-center gap-1 transition disabled:opacity-50"
+          >
+            <X className="w-3 h-3" />
+            <span>Reject</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PhaseCompleteBanner({ item }: { item: WorklogItem }) {
   return (
     <div className="my-3 flex items-center gap-2 rounded-xl bg-ink-850 border border-secondary-500/30 px-3 py-2 text-xs">
@@ -514,9 +637,14 @@ export function WorklogFeed({
   const currentRunItems =
     latestObjectiveIndex >= 0 ? displayItems.slice(latestObjectiveIndex) : displayItems;
   const workerActivities = buildWorkerActivities(currentRunItems);
+  const latestMissionOutcome = [...currentRunItems]
+    .reverse()
+    .find((item) => Boolean(item.outcome_status));
+  const missionOutcomeStatus = latestMissionOutcome?.outcome_status?.toUpperCase();
 
   const normalizedStatus = (status || "").toUpperCase();
   const isWaitingForHuman = Boolean(waitingForHuman || normalizedStatus === "WAITING_FOR_HUMAN");
+  const isPaused = normalizedStatus === "PAUSED";
   const isFinished =
     normalizedStatus === "IDLE" ||
     normalizedStatus === "PAUSED" ||
@@ -658,9 +786,25 @@ export function WorklogFeed({
         onScroll={handleTimelineScroll}
         className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-3 space-y-2 text-xs"
       >
-        {normalizedStatus === "ERROR" && (
+        {(normalizedStatus === "ERROR" || normalizedStatus === "BLOCKED") && (
           <div role="alert" className="mb-3 rounded-lg border border-danger/50 bg-danger/10 px-3 py-2 text-sm text-danger">
-            SONIC could not complete this task. Review the latest error and worklog before retrying.
+            <strong>{normalizedStatus === "BLOCKED" ? "Workstation blocked" : "SONIC could not complete this task"}</strong>
+            <p className="mt-1 text-xs">{currentAction || "Review the latest error and worklog before retrying."}</p>
+          </div>
+        )}
+        {latestMissionOutcome &&
+          missionOutcomeStatus !== "COMPLETE" &&
+          missionOutcomeStatus !== "WAITING_FOR_HUMAN" && (
+          <div
+            role="status"
+            className={`mb-3 rounded-lg border px-3 py-2 text-sm ${outcomeBadgeClass(missionOutcomeStatus || "INCOMPLETE")}`}
+          >
+            <strong>Mission outcome: {missionOutcomeStatus || "INCOMPLETE"}</strong>
+            <p className="mt-1 whitespace-pre-wrap text-xs">
+              {latestMissionOutcome.findings_summary ||
+                latestMissionOutcome.content ||
+                "The objective was not fully verified."}
+            </p>
           </div>
         )}
         {displayItems.length === 0 ? (
@@ -680,6 +824,16 @@ export function WorklogFeed({
             const itemId = item.id || `item-${idx}`;
 
             if (isWorkerDispatch(item) || isWorkerReport(item)) return null;
+
+            if (item.approval_id) {
+              return (
+                <OperatorActionApprovalCard
+                  key={itemId}
+                  item={item}
+                  sessionId={sessionId}
+                />
+              );
+            }
 
             // 0. Operator Gate / Active Probe Approval Proposals
             const isApprovalProposal =
@@ -735,6 +889,7 @@ export function WorklogFeed({
                   output={outText}
                   durationSeconds={item.duration_seconds}
                   exitCode={item.exit_code}
+                  actionStatus={item.action_status}
                   agentName={item.sub_agent_name}
                   agentId={item.sub_agent_id}
                 />
@@ -871,6 +1026,11 @@ export function WorklogFeed({
                           <span className="text-[9px] text-muted-dim uppercase px-1 rounded bg-ink-900 border border-ink-750">
                             A-SEA
                           </span>
+                          {item.outcome_status && (
+                            <span className={`rounded border px-1.5 py-0.5 text-[9px] font-semibold ${outcomeBadgeClass(item.outcome_status)}`}>
+                              {item.outcome_status}
+                            </span>
+                          )}
                         </div>
                         <button
                           type="button"
@@ -950,24 +1110,32 @@ export function WorklogFeed({
         <div ref={worklogEndRef} />
       </div>
 
-      {/* WAITING_FOR_HUMAN Banner */}
-      {isWaitingForHuman && (
+      {/* Pause and human-assistance states both need an explicit continuation path. */}
+      {(isWaitingForHuman || isPaused) && (
         <div className="mx-3 mt-2 rounded-xl border border-amber-500/50 bg-amber-500/10 p-3 text-xs space-y-2 shadow-lg">
           <div className="flex items-center gap-2 text-amber-400 font-mono font-semibold">
             <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>WAITING_FOR_HUMAN — Operator Verification / Assistance Needed</span>
+            <span>
+              {isWaitingForHuman
+                ? "WAITING_FOR_HUMAN — Operator Verification / Assistance Needed"
+                : "PAUSED — Human Takeover"}
+            </span>
           </div>
           <p className="text-[11.5px] text-slate-200 leading-relaxed">
-            {waitingForHumanReason || "Complete the required verification (CAPTCHA / OTP / 2FA) on the live desktop or enter the verification code/note below, then click Resume."}
+            {isWaitingForHuman
+              ? waitingForHumanReason || "Complete the requested verification on the live desktop, then continue."
+              : "The worker stopped. Continuing starts a new reasoning run from the original objective and current desktop; review prior actions because there is no restored worker checkpoint."}
           </p>
           <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={resumeNote}
-              onChange={(e) => setResumeNote(e.target.value)}
-              placeholder="Enter OTP, verification code, or note (optional)..."
-              className="flex-1 bg-ink-950 border border-amber-500/40 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white outline-none focus:border-amber-400"
-            />
+            {isWaitingForHuman && (
+              <input
+                type="text"
+                value={resumeNote}
+                onChange={(e) => setResumeNote(e.target.value)}
+                placeholder="Enter verification note (optional)..."
+                className="flex-1 bg-ink-950 border border-amber-500/40 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white outline-none focus:border-amber-400"
+              />
+            )}
             <button
               type="button"
               disabled={resuming}
@@ -975,7 +1143,13 @@ export function WorklogFeed({
               className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-ink-950 font-mono font-bold text-xs flex items-center gap-1.5 transition disabled:opacity-50"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              <span>{resuming ? "Resuming..." : "Resume"}</span>
+              <span>
+                {resuming
+                  ? "Starting..."
+                  : isPaused
+                    ? "Re-evaluate & Continue"
+                    : "Continue"}
+              </span>
             </button>
           </div>
         </div>

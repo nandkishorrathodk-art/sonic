@@ -113,7 +113,11 @@ class JudgeAgent:
         for trace in traces:
             action = _t_val(trace, "action_type", "")
             action = action.value if hasattr(action, "value") else str(action)
-            if action.startswith("GUI_") or action in ("APP_LAUNCH", "APP_FOCUS", "APP_CLOSE"):
+            if (
+                action.startswith("GUI_")
+                or action.startswith("BROWSER_")
+                or action in ("APP_LAUNCH", "APP_FOCUS", "APP_CLOSE")
+            ):
                 receipt_status = _t_val(trace, "status", "")
                 receipt_status = (
                     receipt_status.value
@@ -305,7 +309,6 @@ class JudgeAgent:
                     "error_context": err_summary[:300],
                 },
             )
-
         # 2. Extract Concrete Ground-Truth Receipts from Traces
         worker_self_verified = any(
             str(_t_val(t, "status", "")).upper() in ("VERIFIED", "SUCCESS")
@@ -324,7 +327,7 @@ class JudgeAgent:
             t_obs = str(_t_val(t, "actual_observation") or _t_val(t, "observation") or "")
             t_ev = str(_t_val(t, "verification_evidence", ""))
             t_text = f"{t_obs} {t_ev}"
-            if re.search(r'\*untitled|\buntitled\*|\bunsaved\b|\[modified\]|(?:^|\s)\*[a-zA-Z0-9_\-\.]+', t_text, re.IGNORECASE):
+            if re.search(r'\*untitled|\buntitled\*|\bunsaved\b|\[modified\]', t_text, re.IGNORECASE):
                 unsaved_match = f"Trace observation indicated unsaved editor buffer: {t_text[:120]}"
                 break
 
@@ -337,7 +340,7 @@ class JudgeAgent:
                     if act:
                         wins.append(act)
                     for w in wins:
-                        if re.search(r'\*untitled|\buntitled\*|\bunsaved\b|\[modified\]|(?:^|\s)\*[a-zA-Z0-9_\-\.]+', str(w), re.IGNORECASE):
+                        if re.search(r'\*untitled|\buntitled\*|\bunsaved\b|\[modified\]|^\s*[*•]\s*[\w\.\-]+|[*•]\s*[\w\.\-]+\s*[-–—]', str(w), re.IGNORECASE):
                             unsaved_match = f"Open editor window contains unsaved marker: '{w}'"
                             break
             except Exception:
@@ -395,11 +398,7 @@ class JudgeAgent:
                 # GUI actions with exit_code is None must NOT be treated as has_concrete_proof = True
                 # without verifying the target application state or artifacts.
                 app_state_verified = False
-                if action in ("FILE_WRITE", "FILE_EDIT", "FILE_CREATE") and target:
-                    app_state_verified = True
-                elif verif_ev and "verified" in verif_ev.lower():
-                    app_state_verified = True
-                elif obs and any(
+                if obs and any(
                     term in obs.lower()
                     for term in (
                         "[app_state_verified]",
@@ -426,7 +425,7 @@ class JudgeAgent:
                     if action in ("FILE_WRITE", "FILE_EDIT", "FILE_CREATE") and target:
                         written_files.append(target)
             else:
-                if (exit_c == 0 and (obs or verif_ev)) or (exit_c is None and (verif_ev or (obs and t_status in ("COMPLETED", "VERIFIED")))):
+                if exit_c == 0 and verif_ev.strip() and obs.strip():
                     has_concrete_proof = True
                     if target:
                         evidence_items.append(f"{action}:{target[:120]}")
@@ -451,26 +450,9 @@ class JudgeAgent:
                 },
             )
 
-        # 3. Anti-Self-Attestation Gate
         is_gui_mission = str(getattr(sub_mission, "plane", "")).lower() == "gui"
-        if worker_self_verified and not has_concrete_proof and not is_gui_mission:
-            logger.warning(
-                "judge_self_attestation_rejected",
-                worker=worker_agent_id,
-                sub_mission_id=sub_mission.id,
-            )
-            return JudgeEvaluation(
-                verdict=JudgeVerdict.FALSIFIED,
-                confidence=1.0,
-                notes="Self-attestation rejected: Worker claimed completion without concrete execution receipts.",
-                self_attestation_rejected=True,
-                remediation_blueprint={
-                    "fix_goal": f"Produce verifiable execution receipts for: {sub_mission.goal}",
-                },
-            )
-
         # 3.5 Security Vulnerability Reproduction Check:
-        vuln_markers = ("sqli", "sql injection", "xss", "rce", "cve-", "idor", "open port", "flag{", "bypass", "vulnerability")
+        vuln_markers = ("sqli", "sql injection", "xss", "rce", "cve-", "idor", "flag{", "vulnerability")
         combined_findings = (result.findings_summary + " " + " ".join(result.key_discoveries)).lower()
         if any(m in combined_findings for m in vuln_markers):
             return JudgeEvaluation(
@@ -537,6 +519,8 @@ class JudgeAgent:
                                 "fix_goal": f"Ensure '{fpath}' is properly written and non-empty.",
                             },
                         )
+                    has_concrete_proof = True
+                    evidence_items.append(f"Independently read non-empty file: {fpath[:120]}")
                 except Exception as exc:
                     return JudgeEvaluation(
                         verdict=JudgeVerdict.FALSIFIED,
@@ -547,6 +531,40 @@ class JudgeAgent:
                             "fix_goal": f"Fix file path or write error for '{fpath}'.",
                         },
                     )
+
+        # 4.5 Anti-Self-Attestation Gate, after independent artifact checks.
+        if worker_self_verified and not has_concrete_proof and not is_gui_mission:
+            has_failed_execution = any(
+                str(_t_val(trace, "status", "")).upper() in ("FAILED", "BLOCKED")
+                or (
+                    _t_val(trace, "exit_code", None) is not None
+                    and _t_val(trace, "exit_code", None) != 0
+                )
+                for trace in traces
+            )
+            logger.warning(
+                "judge_self_attestation_rejected",
+                worker=worker_agent_id,
+                sub_mission_id=sub_mission.id,
+            )
+            return JudgeEvaluation(
+                verdict=(
+                    JudgeVerdict.FALSIFIED
+                    if has_failed_execution
+                    else JudgeVerdict.INCONCLUSIVE
+                ),
+                confidence=0.9 if has_failed_execution else 0.4,
+                notes=(
+                    "Self-attestation rejected: execution evidence contradicts the "
+                    "completion claim."
+                    if has_failed_execution
+                    else "Completion is unverified: successful execution lacks independent task evidence."
+                ),
+                self_attestation_rejected=True,
+                remediation_blueprint={
+                    "fix_goal": f"Produce verifiable execution receipts for: {sub_mission.goal}",
+                },
+            )
 
         gui_evaluation: JudgeEvaluation | None = None
         if is_gui_mission:
@@ -572,16 +590,11 @@ class JudgeAgent:
             token for token in re.findall(r"[a-z0-9]+", sub_mission.goal.lower())
             if len(token) > 2 and token not in stop_words
         }
-        receipt_text = " ".join([
-            f"{_t_val(trace, 'target_resource', '')} "
-            f"{_t_val(trace, 'target', '')} "
+        receipt_text = " ".join(
             f"{_t_val(trace, 'actual_observation', '')} "
-            f"{_t_val(trace, 'payload', '')}"
+            f"{_t_val(trace, 'verification_evidence', '')}"
             for trace in traces
-        ] + [
-            result.findings_summary,
-            " ".join(result.key_discoveries),
-        ]).lower()
+        ).lower()
         receipt_terms = set(re.findall(r"[a-z0-9]+", receipt_text))
         has_overlap = bool(goal_terms.intersection(receipt_terms)) or any(
             gt in receipt_text for gt in goal_terms

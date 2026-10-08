@@ -189,6 +189,65 @@ async def test_agent_interrupt_check_callback():
     assert agent._interrupted is True
 
 
+@pytest.mark.asyncio
+async def test_agent_interrupt_during_reasoning_prevents_gui_dispatch():
+    from sonic.computer_use.agent import ComputerUseAgent
+    from sonic.computer.models import ScreenObservation
+    from sonic.computer_use.models import ComputerActionType, ComputerWorldObservation
+
+    class _MockComputer:
+        async def screenshot(self, _workspace_id):
+            return ScreenObservation(
+                screenshot_base64="",
+                width=1280,
+                height=800,
+                active_window="Desktop",
+            )
+
+        async def status(self, _workspace_id):
+            return MagicMock(
+                active_application="Desktop",
+                active_window="Desktop",
+                open_applications=["Desktop"],
+            )
+
+        async def gui_action(self, *_args, **_kwargs):
+            raise AssertionError("GUI action dispatched after interruption")
+
+    provider = _MockComputer()
+    agent = ComputerUseAgent(
+        computer_provider=provider,
+        tenant_id="test-tenant",
+        execution_plane="gui",
+    )
+    agent._bootstrap_performed = True
+    agent.observe = AsyncMock(return_value=ComputerWorldObservation())
+    reasoning_started = asyncio.Event()
+    continue_reasoning = asyncio.Event()
+
+    async def delayed_reasoning(*_args):
+        reasoning_started.set()
+        await continue_reasoning.wait()
+        return (
+            ComputerActionType.GUI_CLICK,
+            "200,200",
+            {"x": 200, "y": 200},
+            "Click the visible control",
+        )
+
+    agent._llm_choose_action = delayed_reasoning
+    task = asyncio.create_task(agent.run_mission("test-ws", "Click the control", steps=1))
+    await reasoning_started.wait()
+    agent.interrupt()
+    continue_reasoning.set()
+    traces = await task
+
+    assert agent._interrupted is True
+    assert len(traces) == 1
+    assert traces[0].status == "BLOCKED"
+    assert "interrupted" in traces[0].actual_observation.lower()
+
+
 # ===========================================================================
 # 2. Workstation Route RBAC & State Transition Tests
 # ===========================================================================

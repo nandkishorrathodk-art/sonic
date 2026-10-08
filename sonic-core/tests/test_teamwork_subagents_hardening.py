@@ -14,18 +14,16 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 import time
 import pytest
 
-from sonic.agents.judge import JudgeAgent, JudgeVerdict, JudgeEvaluation
+from sonic.agents.judge import JudgeVerdict
 from sonic.computer.headless import HeadlessComputeProvider
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
-from sonic.computer_use.teamwork import DisplayLeaseManager, SubagentTaskSpec, SubagentTeamworkManager
+from sonic.computer_use.teamwork import DisplayLeaseManager, SubagentTaskSpec, SubagentTeamworkManager, _get_field
 from sonic.llm.schemas import LLMRequest, LLMResponse
-from sonic.safety.action_policy import ActionPolicy
 
 
 class _HardeningStubLLM:
@@ -208,29 +206,33 @@ async def test_manage_subagents_kill_and_kill_all(tmp_path: Path):
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
-async def test_display_lease_watchdog_ttl_breaks_stale_lock():
-    """DisplayLeaseManager breaks locks held longer than WATCHDOG_TTL_SECONDS to avoid deadlock."""
+async def test_display_lease_timeout_never_breaks_an_active_owner():
+    """Elapsed ownership time never permits a second physical-display owner."""
     display = ":9988"
     key = f"display:{display}"
-    lock = DisplayLeaseManager.get_lock("ws-ttl", display=display)
+    lock = await DisplayLeaseManager.acquire(
+        "ws-ttl", display=display, timeout=1.0, owner="stale-worker"
+    )
+    DisplayLeaseManager._lock_metadata[key]["acquired_at"] = time.time() - 70.0
 
-    # Acquire lock and simulate expired acquisition timestamp (70s ago)
-    await lock.acquire()
-    DisplayLeaseManager._lock_metadata[key] = {
-        "owner": "stale-worker",
-        "acquired_at": time.time() - 70.0,
-    }
+    with pytest.raises(asyncio.TimeoutError):
+        await DisplayLeaseManager.acquire(
+            "ws-ttl",
+            display=display,
+            timeout=0.1,
+            owner="fresh-worker",
+        )
+    assert lock.locked()
+    assert DisplayLeaseManager._lock_metadata[key]["owner"] == "stale-worker"
 
-    # Now a second caller attempts to acquire with acquire()
-    # The watchdog must detect expiration, break stale lock, and succeed
-    new_lock = await asyncio.wait_for(
-        DisplayLeaseManager.acquire("ws-ttl", display=display, timeout=5.0, owner="fresh-worker"),
-        timeout=6.0,
+    DisplayLeaseManager.release(lock, display=display)
+    assert not lock.locked()
+    new_lock = await DisplayLeaseManager.acquire(
+        "ws-ttl", display=display, timeout=1.0, owner="fresh-worker"
     )
     assert new_lock.locked()
     assert DisplayLeaseManager._lock_metadata[key]["owner"] == "fresh-worker"
     DisplayLeaseManager.release(new_lock, display=display)
-    assert not new_lock.locked()
 
 
 @pytest.mark.no_live_infra
@@ -323,3 +325,178 @@ async def test_independent_judge_fails_closed_on_unparseable_or_inconclusive(tmp
     # Verify that judge verdict is FALSIFIED (not promoted to CONFIRMED)
     assert conv.verified is False
     assert conv.judge_verdict == JudgeVerdict.FALSIFIED.value
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_get_field_helper_and_permissive_subagent_parsing(tmp_path: Path):
+    """Verify _get_field alias/casing resolution and permissive subagent parsing in invoke_subagents."""
+    # 1. Direct unit checks for _get_field
+    sample = {
+        "Prompt": "Do work",
+        "Role": "Lead Worker",
+        "TypeName": "research",
+        "Workspace": "inherit",
+        "Model": "flash",
+        "VerificationCommand": "pytest -k unit",
+        "empty_key": "",
+        "fallback_target": "recovered_value",
+    }
+    assert _get_field(sample, "prompt") == "Do work"
+    assert _get_field(sample, "PROMPT") == "Do work"
+    assert _get_field(sample, "goal", "task", "prompt") == "Do work"
+    assert _get_field(sample, "role", "title", "name") == "Lead Worker"
+    assert _get_field(sample, "type_name", "type") == "research"
+    assert _get_field(sample, "workspace_mode", "workspace") == "inherit"
+    assert _get_field(sample, "model_tier", "model") == "flash"
+    assert _get_field(sample, "verification_command", "verify_cmd") == "pytest -k unit"
+    assert _get_field(sample, "empty_key", "fallback_target") == "recovered_value"
+    assert _get_field(sample, "missing_key", default="default_val") == "default_val"
+    assert _get_field({}, "key", default=42) == 42
+    assert _get_field(None, "key", default=None) is None
+
+    # 2. Permissive parsing inside invoke_subagents across varied LLM payload schemas
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+    ws = await provider.create(tenant_id="t-hardening", engagement_id="e-parse")
+    agent = ComputerUseAgent(computer_provider=provider, tenant_id="t-hardening")
+    mgr = SubagentTeamworkManager(
+        parent_agent=agent,
+        computer_provider=provider,
+        llm_router=_HardeningStubLLM(),
+        safety=None,
+        tenant_id="t-hardening",
+    )
+
+    convs = await mgr.invoke_subagents(
+        ws.id,
+        [
+            # Worker 1: Uppercase / PascalCase standard keys
+            {
+                "Prompt": "PascalCase prompt",
+                "Role": "Pascal Worker",
+                "TypeName": "self",
+                "Workspace": "branch",
+                "Model": "pro",
+                "VerificationCommand": "echo 1",
+                "MaxSteps": 5,
+                "MaxCorrectionRounds": 1,
+            },
+            # Worker 2: goal alias with criteria and verify_cmd
+            {
+                "goal": "Goal alias prompt",
+                "title": "Goal Worker",
+                "type": "self",
+                "workspace": "inherit",
+                "model": "flash",
+                "verify_cmd": "echo 2",
+                "criteria": ["Goal criterion passes"],
+            },
+            # Worker 3: task alias with empty prompt fallback
+            {
+                "prompt": "   ",
+                "task": "Task alias recovered prompt",
+                "name": "Task Worker",
+                "workspace_mode": "branch",
+                "requirements": "R1: Requirement text",
+            },
+            # Worker 4: instruction alias
+            {
+                "instruction": "Instruction alias prompt",
+                "role": "Instruction Worker",
+            },
+        ],
+    )
+
+    assert len(convs) == 4
+    # Worker 1 checks
+    s1 = convs[0].last_spec
+    assert s1.prompt == "PascalCase prompt"
+    assert s1.role == "Pascal Worker"
+    assert s1.workspace_mode == "branch"
+    assert s1.model_tier == "pro"
+    assert s1.verification_command == "echo 1"
+    assert s1.max_steps == 5
+
+    # Worker 2 checks
+    s2 = convs[1].last_spec
+    assert s2.prompt == "Goal alias prompt"
+    assert s2.role == "Goal Worker"
+    assert s2.workspace_mode == "inherit"
+    assert s2.model_tier == "flash"
+    assert s2.verification_command == "echo 2"
+    assert s2.acceptance_criteria == ["Goal criterion passes"]
+
+    # Worker 3 checks
+    s3 = convs[2].last_spec
+    assert s3.prompt == "Task alias recovered prompt"
+    assert s3.role == "Task Worker"
+    assert s3.requirements == ["R1: Requirement text"]
+
+    # Worker 4 checks
+    s4 = convs[3].last_spec
+    assert s4.prompt == "Instruction alias prompt"
+    assert s4.role == "Instruction Worker"
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_transparent_subagent_error_reporting_on_launch_failure(tmp_path: Path):
+    """When a subagent launch fails with an exception, an errored SubagentConversation is recorded and returned."""
+    provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
+    ws = await provider.create(tenant_id="t-hardening", engagement_id="e-err-report")
+    agent = ComputerUseAgent(computer_provider=provider, tenant_id="t-hardening")
+    mgr = SubagentTeamworkManager(
+        parent_agent=agent,
+        computer_provider=provider,
+        llm_router=_HardeningStubLLM(),
+        safety=None,
+        tenant_id="t-hardening",
+    )
+
+    orig_prepare = mgr._prepare_subagent_workspace
+
+    async def _failing_prepare(ws_id: str, conv_id: str, w_mode: str):
+        # Fail specifically for the second worker
+        if "Worker-2" in conv_id or getattr(_failing_prepare, "counter", 0) == 1:
+            _failing_prepare.counter += 1
+            raise RuntimeError("Simulated workspace preparation failure")
+        _failing_prepare.counter += 1
+        return await orig_prepare(ws_id, conv_id, w_mode)
+
+    _failing_prepare.counter = 0
+    mgr._prepare_subagent_workspace = _failing_prepare
+
+    async def _mock_execute_loop(conv, spec, goal):
+        conv.state = "completed"
+        conv.state_detail = "Completed successfully"
+
+    mgr._execute_and_verify_loop = _mock_execute_loop
+
+    convs = await mgr.invoke_subagents(
+        ws.id,
+        [
+            {"role": "Worker 1", "prompt": "Task 1", "max_steps": 1},
+            {"role": "Worker 2 (Failing)", "prompt": "Task 2", "max_steps": 1},
+            {"role": "Worker 3", "prompt": "Task 3", "max_steps": 1},
+        ],
+    )
+
+    # Must return all 3 records, NOT just 2!
+    assert len(convs) == 3
+
+    # Worker 1 succeeds
+    assert convs[0].role == "Worker 1"
+    assert convs[0].state in ("idle", "running", "completed")
+
+    # Worker 2 has state="errored" with transparent details
+    err_conv = convs[1]
+    assert err_conv.role == "Worker 2 (Failing)"
+    assert err_conv.state == "errored"
+    assert "Launch failed: Simulated workspace preparation failure" in err_conv.state_detail
+    assert err_conv.conversation_id in mgr.conversations
+    assert mgr.conversations[err_conv.conversation_id].state == "errored"
+
+    # Worker 3 succeeds
+    assert convs[2].role == "Worker 3"
+    assert convs[2].state in ("idle", "running", "completed")
+

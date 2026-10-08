@@ -103,6 +103,7 @@ async def test_boss_agent_tracks_task_graph_lifecycle_during_run():
         predicted_outcome="Discover endpoints",
         actual_observation="Found /login and /api",
         status=ActionExecutionStatus.VERIFIED,
+        exit_code=0,
         verification_evidence="Test fixture independently verified the discovered endpoints.",
     )
 

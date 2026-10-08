@@ -379,6 +379,14 @@ class DockerComputerProvider(ComputerProvider):
                 stderr_str = stderr_data.decode("utf-8", errors="replace")
                 self._last_exec = (cmd, exit_code, stdout_str, stderr_str)
                 return exit_code, stdout_str, stderr_str
+            except asyncio.CancelledError:
+                if "proc" in locals() and proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    await proc.wait()
+                raise
             except TimeoutError:
                 try:
                     proc.kill()
@@ -682,6 +690,7 @@ class _State:
         self.last_atspi_timestamp_ns = 0
         self.last_env_ts = 0.0
         self.last_apps_ts = 0.0
+        self.state_fingerprint = ""
 
 S = _State()
 
@@ -924,8 +933,34 @@ def _fast_retina_worker():
                 S.visible_text = "\n".join(vparts)
                 S.detected_controls = fresh_controls
                 S.controls_timestamp_ns = time.time_ns()
-                S.version += 1
                 width, height = img.size if img is not None else (0, 0)
+                state_fingerprint = json.dumps(
+                    {
+                        "active_window": aw,
+                        "open_windows": sorted(ows),
+                        "visible_text": S.visible_text,
+                        "controls": sorted(
+                            [
+                                {
+                                    key: value
+                                    for key, value in control.items()
+                                    if key != "freshness_ms"
+                                }
+                                for control in fresh_controls
+                            ],
+                            key=lambda control: json.dumps(
+                                control, sort_keys=True, separators=(",", ":")
+                            ),
+                        ),
+                        "width": width,
+                        "height": height,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if state_fingerprint != S.state_fingerprint:
+                    S.version += 1
+                    S.state_fingerprint = state_fingerprint
                 pkt = {
                     "ok": True,
                     "version": S.version,
@@ -1164,8 +1199,8 @@ while True:
                     or (command == "frame" and bool(data.get("b64")))
                 )
                 if valid_payload:
-                    cache_name = "_last_nsi_state" if command == "state" else "_last_nsi_frame"
-                    setattr(self, cache_name, (asyncio.get_event_loop().time(), data))
+                    if command == "frame":
+                        self._last_nsi_frame = (asyncio.get_event_loop().time(), data)
                     return data
                 logger.warning(
                     "nsi_frame_response_invalid",
@@ -1226,8 +1261,8 @@ while True:
                         or (command == "frame" and bool(data.get("b64")))
                     )
                     if valid_payload:
-                        cache_name = "_last_nsi_state" if command == "state" else "_last_nsi_frame"
-                        setattr(self, cache_name, (asyncio.get_event_loop().time(), data))
+                        if command == "frame":
+                            self._last_nsi_frame = (asyncio.get_event_loop().time(), data)
                         return data
             except Exception:
                 pass
@@ -1336,6 +1371,10 @@ while True:
         )
         self._last_state_observation = observation
         self._last_state_observed_at = asyncio.get_event_loop().time()
+        self._last_nsi_state = (
+            self._last_state_observed_at,
+            data,
+        )
         return observation
 
     async def screenshot(self, workspace_id: str) -> ScreenObservation:
@@ -1909,13 +1948,13 @@ while True:
                 if target:
                     if target.lower().startswith("0x"):
                         focus_cmd = (
-                            f"export DISPLAY={disp}; xdotool key Escape 2>/dev/null; "
+                            f"export DISPLAY={disp}; "
                             f"wmctrl -i -a {shlex.quote(target)} 2>/dev/null || "
                             f"xdotool windowactivate --sync {shlex.quote(target)} 2>/dev/null"
                         )
                     else:
                         focus_cmd = (
-                            f"export DISPLAY={disp}; xdotool key Escape 2>/dev/null; "
+                            f"export DISPLAY={disp}; "
                             f"(wmctrl -a {shlex.quote(target)} 2>/dev/null || "
                             f"wmctrl -x -a {shlex.quote(target)} 2>/dev/null || "
                             f"xdotool search --onlyvisible --name {shlex.quote(target)} windowactivate 2>/dev/null || "
@@ -1925,6 +1964,31 @@ while True:
                     if focus_code != 0:
                         raise RuntimeError(
                             f"window focus failed for '{target}': {focus_err.strip()}"
+                        )
+                    if target.lower().startswith("0x"):
+                        active_code, active_id, active_err = await self._docker_exec(
+                            f"export DISPLAY={disp}; xdotool getactivewindow"
+                        )
+                        try:
+                            focused = (
+                                active_code == 0
+                                and int(active_id.strip(), 0) == int(target, 16)
+                            )
+                        except ValueError:
+                            focused = False
+                    else:
+                        active_code, active_title, active_err = await self._docker_exec(
+                            f"export DISPLAY={disp}; "
+                            "xdotool getactivewindow getwindowname"
+                        )
+                        focused = (
+                            active_code == 0
+                            and target.casefold() in active_title.strip().casefold()
+                        )
+                    if not focused:
+                        raise RuntimeError(
+                            f"window focus could not be verified for '{target}': "
+                            f"{active_err.strip()}"
                         )
                     self._active_windows[workspace_id] = target
 
@@ -2022,6 +2086,16 @@ while True:
         with direct wmctrl targeting.
         """
         disp = self._get_display(workspace_id)
+        size_code, size_out, _ = await self._docker_exec(
+            f"DISPLAY={disp} xdotool getdisplaygeometry", timeout=5
+        )
+        try:
+            width, height = (int(value) for value in size_out.split())
+        except (TypeError, ValueError):
+            return False
+        if size_code != 0 or width <= 1 or height <= 0:
+            return False
+
         windows: list[tuple[str, str]] = []
         code_l, out_l, _ = await self._docker_exec(f"DISPLAY={disp} wmctrl -l 2>/dev/null", timeout=5)
         if code_l == 0 and out_l.strip():
@@ -2038,14 +2112,31 @@ while True:
         client_windows = [w for w in windows if w[1] not in ("xfce4-panel", "Desktop", "desktop")]
         if client_windows:
             left_win = client_windows[0]
-            await self._docker_exec(f'DISPLAY={disp} wmctrl -i -r "{left_win[0]}" -b remove,maximized_vert,maximized_horz')
-            code1, _, _ = await self._docker_exec(f'DISPLAY={disp} wmctrl -i -r "{left_win[0]}" -e 0,0,0,640,800')
+            unmax_code, _, _ = await self._docker_exec(
+                f'DISPLAY={disp} wmctrl -i -r "{left_win[0]}" -b remove,maximized_vert,maximized_horz'
+            )
+            if unmax_code != 0:
+                return False
+            left_width = width // 2
+            code1, _, _ = await self._docker_exec(
+                f'DISPLAY={disp} wmctrl -i -r "{left_win[0]}" -e 0,0,0,{left_width},{height}'
+            )
             if len(client_windows) > 1:
                 right_win = client_windows[1]
-                await self._docker_exec(f'DISPLAY={disp} wmctrl -i -r "{right_win[0]}" -b remove,maximized_vert,maximized_horz')
-                code2, _, _ = await self._docker_exec(f'DISPLAY={disp} wmctrl -i -r "{right_win[0]}" -e 0,640,0,640,800')
+                unmax_code, _, _ = await self._docker_exec(
+                    f'DISPLAY={disp} wmctrl -i -r "{right_win[0]}" -b remove,maximized_vert,maximized_horz'
+                )
+                if unmax_code != 0:
+                    return False
+                right_width = width - left_width
+                code2, _, _ = await self._docker_exec(
+                    f'DISPLAY={disp} wmctrl -i -r "{right_win[0]}" '
+                    f'-e 0,{left_width},0,{right_width},{height}'
+                )
 
-        return (not windows and code_l == 0) or code1 == 0 or code2 == 0
+        if not client_windows:
+            return False
+        return code1 == 0 and (len(client_windows) < 2 or code2 == 0)
 
     async def settle_screen(
         self,
@@ -2264,7 +2355,10 @@ while True:
             "[ -n \"$ex\" ] && basename \"$ex\"; "
             "b=$(basename \"$f\" .desktop); echo \"$b\"; "
             "done; "
-            "find /usr/local/bin -maxdepth 1 -type f 2>/dev/null | while read -r p; do [ -x \"$p\" ] && basename \"$p\"; done; "
+            "printf '%s\\n' \"$PATH\" | tr ':' '\\n' | while read -r d; do "
+            "[ -d \"$d\" ] || continue; "
+            "find \"$d\" -maxdepth 1 \\( -type f -o -type l \\) -executable -printf '%f\\n' 2>/dev/null; "
+            "done; "
             f"for b in {utils_str}; do command -v \"$b\" 2>/dev/null; done; true"
         )
         code, out, _ = await self._docker_exec(discovery_cmd, timeout=10)

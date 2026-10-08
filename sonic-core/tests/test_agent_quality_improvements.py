@@ -181,6 +181,38 @@ async def test_observe_uses_compact_state_without_fetching_screenshot():
 
 
 @pytest.mark.asyncio
+async def test_rejected_nsi_state_cache_does_not_override_screenshot_metadata():
+    provider = StateOnlyObservationProvider()
+    provider.observe_state = AsyncMock(return_value=None)
+    provider.screenshot = AsyncMock(return_value=ScreenObservation(
+        screenshot_base64="current-frame",
+        active_window="Current Screen",
+        width=1920,
+        height=1080,
+        visible_text="Current frame content",
+        capture_age_ms=0,
+        controls_age_ms=0,
+    ))
+    provider._last_nsi_state = (
+        time.monotonic(),
+        {
+            "version": 99,
+            "capture_timestamp_ns": time.time_ns() - 5_000_000_000,
+            "active_window": "Stale Window",
+            "open_windows": ["Stale Window"],
+        },
+    )
+    agent = ComputerUseAgent(computer_provider=provider)
+
+    observation = await agent.observe("ws-1")
+
+    assert observation.perception_source == "screenshot"
+    assert observation.screen.active_window == "Current Screen"
+    assert observation.visible_text == "Current frame content"
+    assert observation.active_application == "Chromium"
+
+
+@pytest.mark.asyncio
 async def test_observe_records_action_to_next_state_latency():
     provider = StateOnlyObservationProvider()
     agent = ComputerUseAgent(computer_provider=provider)

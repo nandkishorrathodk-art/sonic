@@ -4,6 +4,7 @@ Validates Dual-Plane Concurrency (Mandates 1, 5) and Empirical Falsification (Ru
 """
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,7 +16,7 @@ from sonic.computer_use.models import (
     ComputerActionType,
     ComputerDecisionTrace,
 )
-from sonic.computer_use.models_boss import SubMission
+from sonic.computer_use.models_boss import SubMission, SubMissionResult
 
 
 def test_sub_mission_plane_inference_dual_plane():
@@ -77,6 +78,68 @@ async def test_requested_plane_overrides_decomposition_plane():
 
     assert phase is not None
     assert phase.sub_missions[0].plane == "headless"
+
+
+def test_fallback_worker_uses_laya_plane_for_original_objective(monkeypatch):
+    plane_router = SimpleNamespace(
+        decide_execution_plane=lambda goal: (
+            "headless" if "test" in goal else "gui",
+            0.95,
+        )
+    )
+    monkeypatch.setattr(
+        "sonic.llm.laya_engine.get_laya_engine",
+        lambda: plane_router,
+    )
+    boss = BossAgent(
+        computer_provider=MagicMock(),
+        llm_router=MagicMock(),
+    )
+
+    phase = boss._fallback_decomposition("Run the test suite")
+
+    assert phase.sub_missions[0].goal == "Run the test suite"
+    assert phase.sub_missions[0].plane == "headless"
+
+
+def test_explicit_requested_plane_overrides_fallback_laya_plane(monkeypatch):
+    monkeypatch.setattr(
+        "sonic.llm.laya_engine.get_laya_engine",
+        lambda: SimpleNamespace(
+            decide_execution_plane=lambda _goal: ("headless", 0.95)
+        ),
+    )
+    boss = BossAgent(
+        computer_provider=MagicMock(),
+        llm_router=MagicMock(),
+        requested_plane="gui",
+    )
+
+    phase = boss._fallback_decomposition("Run the test suite")
+
+    assert phase.sub_missions[0].plane == "gui"
+
+
+@pytest.mark.asyncio
+async def test_boss_interrupt_before_planning_prevents_worker_dispatch():
+    boss = BossAgent(
+        computer_provider=MagicMock(),
+        llm_router=MagicMock(),
+    )
+    boss._strategic_decomposition = AsyncMock(
+        side_effect=AssertionError("planning must not run after interrupt")
+    )
+
+    report = await boss.run(
+        workspace_id="ws-1",
+        objective="Use the desktop to complete a task",
+        interrupt_check=lambda: True,
+    )
+
+    assert report.status == "INCOMPLETE"
+    assert report.total_sub_agents == 0
+    assert "before planning or worker dispatch" in report.findings_summary
+    boss._strategic_decomposition.assert_not_awaited()
 
 
 def test_shared_display_serializes_gui_workers_only():
@@ -170,3 +233,163 @@ async def test_summarize_sub_agent_traces_deterministic_on_failure():
     assert "Execution failed: no verified progress" in summary
     assert "TERMINAL_EXEC" in summary
     assert "Permission denied" in summary
+
+
+@pytest.mark.asyncio
+async def test_plan_next_phase_respects_headless_plane_without_explicit_constraint():
+    """Verify that _plan_next_phase respects LLM's requested headless plane and avoids sticky Phase 1 poisoning."""
+    from sonic.computer_use.models_boss import Phase
+
+    router = MagicMock()
+    router.complete = AsyncMock(return_value=type(
+        "Response",
+        (),
+        {
+            "content": json.dumps({
+                "thinking": "Deploy headless test runner.",
+                "phase_name": "Testing",
+                "sub_missions": [
+                    {"id": "sub-test", "goal": "Run pytest suite", "plane": "headless", "max_steps": 2}
+                ],
+            })
+        },
+    )())
+    boss = BossAgent(
+        computer_provider=MagicMock(),
+        llm_router=router,
+    )
+    # Simulate Phase 1 having run and set self.requested_plane = "gui"
+    boss.requested_plane = "gui"
+    assert boss._explicit_requested_plane is None
+
+    past_phase = Phase(
+        phase_number=1,
+        name="UI Setup",
+        sub_missions=[SubMission(id="sub-gui", goal="Open app in browser", plane="gui")],
+    )
+
+    next_phase = await boss._plan_next_phase(
+        objective="Test web application",
+        all_findings="UI setup completed",
+        phases=[past_phase],
+    )
+
+    assert next_phase is not None
+    assert next_phase.sub_missions[0].plane == "headless"
+
+
+@pytest.mark.asyncio
+async def test_plan_next_phase_enforces_explicit_requested_plane():
+    """When caller explicitly specifies requested_plane, _plan_next_phase forces all workers to that plane."""
+    from sonic.computer_use.models_boss import Phase
+
+    router = MagicMock()
+    router.complete = AsyncMock(return_value=type(
+        "Response",
+        (),
+        {
+            "content": json.dumps({
+                "thinking": "Deploy headless test runner.",
+                "phase_name": "Testing",
+                "sub_missions": [
+                    {"id": "sub-test", "goal": "Run pytest suite", "plane": "headless", "max_steps": 2}
+                ],
+            })
+        },
+    )())
+    boss = BossAgent(
+        computer_provider=MagicMock(),
+        llm_router=router,
+        requested_plane="gui",
+    )
+    assert boss._explicit_requested_plane == "gui"
+
+    past_phase = Phase(
+        phase_number=1,
+        name="UI Setup",
+        sub_missions=[SubMission(id="sub-gui", goal="Open app in browser", plane="gui")],
+    )
+
+    next_phase = await boss._plan_next_phase(
+        objective="Test web application",
+        all_findings="UI setup completed",
+        phases=[past_phase],
+    )
+
+    assert next_phase is not None
+    assert next_phase.sub_missions[0].plane == "gui"
+
+
+@pytest.mark.asyncio
+async def test_shared_desktop_wave_admits_one_gui_worker_and_concurrent_headless_workers():
+    """Wave scheduling limits shared desktop to 1 GUI worker, but allows headless workers to run concurrently."""
+    from sonic.computer_use.models_boss import Phase
+
+    computer = type(
+        "DisplayProvider",
+        (),
+        {"screenshot": lambda self: None, "gui_action": lambda self: None},
+    )()
+    boss = BossAgent(
+        computer_provider=computer,
+        llm_router=MagicMock(),
+        max_parallel_workers=4,
+    )
+    assert boss._shared_desktop is True
+
+    # 4 unblocked ready candidates: GUI, headless, headless, GUI
+    cands = [
+        SubMission(id="g1", goal="GUI task 1", plane="gui"),
+        SubMission(id="h1", goal="Headless task 1", plane="headless"),
+        SubMission(id="h2", goal="Headless task 2", plane="headless"),
+        SubMission(id="g2", goal="GUI task 2", plane="gui"),
+    ]
+
+    phase = Phase(phase_number=1, name="Mixed Phase", sub_missions=cands)
+    boss._strategic_decomposition = AsyncMock(return_value=phase)
+    boss._check_objective_complete = AsyncMock(return_value=(True, "All complete"))
+
+    wave_dispatches = []
+    current_wave_agents = []
+
+    async def mock_dispatch(workspace_id, sub_m, *args, **kwargs):
+        current_wave_agents.append(sub_m.id)
+        return SubMissionResult(
+            sub_mission_id=sub_m.id,
+            goal=sub_m.goal,
+            role=sub_m.role,
+            success=True,
+            status="SUCCESS",
+            findings_summary="done",
+            key_discoveries=[],
+            actions_taken=1,
+            duration_seconds=0.1,
+            traces=[],
+            agent_id="",
+            agent_name="",
+            judge_verdict="CONFIRMED",
+            judge_notes="Verified",
+            evidence_verified=True,
+        )
+
+    boss._dispatch_sub_agent = AsyncMock(side_effect=mock_dispatch)
+
+    dispatched_subagent_events = []
+    async def phase_cb(event_type, data):
+        if event_type == "sub_dispatch":
+            dispatched_subagent_events.append((data["sub_mission_id"], data["plane"]))
+
+    report = await boss.run(
+        workspace_id="ws-1",
+        objective="Execute mixed workload",
+        phase_callback=phase_cb,
+    )
+
+    assert report.status == "COMPLETE"
+    # All 4 sub-missions were executed
+    dispatched_ids = [e[0] for e in dispatched_subagent_events]
+    assert len(dispatched_ids) == 4
+    # The first wave must contain g1, h1, h2 (3 workers: 1 GUI + 2 headless)
+    # and g2 must be deferred to the subsequent wave!
+    assert dispatched_ids[:3] == ["g1", "h1", "h2"]
+    assert dispatched_ids[3] == "g2"

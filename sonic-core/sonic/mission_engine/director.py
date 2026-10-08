@@ -573,7 +573,10 @@ class MissionDirector:
 
             # Check if the mission objective is complex or multi-step (or if autonomy_level >= L3_AUTONOMOUS)
             traces = []
-            if self._is_complex_or_autonomous(mission.objective, getattr(state, "current_plan", None)):
+            boss_attempted = self._is_complex_or_autonomous(
+                mission.objective, getattr(state, "current_plan", None)
+            )
+            if boss_attempted:
                 try:
                     from sonic.computer_use.boss import BossAgent
 
@@ -603,8 +606,14 @@ class MissionDirector:
                     logger.warning("boss_agent_coordination_fallback", mission_id=mission_id, error=str(e))
                     traces = []
 
-            # If BossAgent run produces traces, use them; if it returns empty, fall back gracefully to single ComputerUseAgent.
-            if not traces:
+            # A failed or empty Boss run must not start new work outside its
+            # planning, delegation, and evidence-review contract.
+            if not traces and boss_attempted:
+                logger.warning(
+                    "mission_boss_run_produced_no_traces",
+                    mission_id=mission_id,
+                )
+            elif not boss_attempted:
                 agent = ComputerUseAgent(
                     computer_provider=self.computer,
                     llm_router=self.model_router,

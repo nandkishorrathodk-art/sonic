@@ -181,6 +181,7 @@ class BossAgent:
             else ("gui" if gui_only else None)
         )
         self.requested_plane = requested if requested in {"gui", "headless"} else None
+        self._explicit_requested_plane = self.requested_plane
         self.max_phases = max_phases
         self.sub_agent_steps = sub_agent_steps
         # Explicit concurrency budget: the Boss may never create more live
@@ -356,6 +357,7 @@ class BossAgent:
         steps: int = 5,
         step_callback: Callable | None = None,
         requested_plane: str | None = None,
+        interrupt_check: Callable | None = None,
         **kwargs: Any,
     ) -> BossReport:
         """Run BossAgent via ComputerUseAgent-compatible run_mission entrypoint."""
@@ -364,6 +366,7 @@ class BossAgent:
             objective=goal,
             phase_callback=step_callback,
             requested_plane=requested_plane,
+            interrupt_check=interrupt_check,
         )
 
     async def run(
@@ -398,13 +401,20 @@ class BossAgent:
         """
         t_start = time.perf_counter()
         self._interrupted = False
+        def worker_interrupt_check() -> bool:
+            return self._interrupted or (
+                callable(interrupt_check) and bool(interrupt_check())
+            )
 
         if requested_plane:
             self.requested_plane = str(requested_plane).lower().strip()
+            self._explicit_requested_plane = str(requested_plane).lower().strip()
         elif hasattr(objective, "requested_plane") and objective.requested_plane:
             self.requested_plane = str(objective.requested_plane).lower().strip()
+            self._explicit_requested_plane = self.requested_plane
         elif isinstance(objective, dict) and objective.get("requested_plane"):
             self.requested_plane = str(objective["requested_plane"]).lower().strip()
+            self._explicit_requested_plane = self.requested_plane
 
         if hasattr(objective, "goal"):
             objective = objective.goal
@@ -412,6 +422,18 @@ class BossAgent:
             objective = str(objective)
 
         logger.info("boss_agent_start", objective=objective[:200])
+
+        if worker_interrupt_check():
+            self._interrupted = True
+            return BossReport(
+                objective=objective,
+                status="INCOMPLETE",
+                findings_summary=(
+                    "Execution was interrupted before planning or worker dispatch; "
+                    "no task actions were run."
+                ),
+                duration_seconds=round(time.perf_counter() - t_start, 2),
+            )
 
         # Phase 1: Strategic decomposition (if not already populated)
         if not self.phases:
@@ -527,18 +549,26 @@ class BossAgent:
                     break
 
                 # A physical desktop is shared mutable state. Serialize
-                # every GUI-capable worker; only headless workers may fan out.
-                worker_limit = self._worker_limit_for_wave(unblocked_ready)
+                # GUI-capable workers so at most 1 GUI worker is active per wave on a shared desktop;
+                # headless workers may fan out concurrently up to max_parallel_workers.
                 wave_batch: list[SubMission] = []
                 locked_paths: set[str] = set()
+                gui_worker_count = 0
                 for cand in unblocked_ready:
-                    if len(wave_batch) >= worker_limit:
+                    if len(wave_batch) >= self.max_parallel_workers:
                         break
+                    is_gui = str(cand.plane).lower() != "headless"
+                    if self._shared_desktop and is_gui and gui_worker_count >= 1:
+                        # Shared desktop allows at most 1 GUI worker per wave;
+                        # defer subsequent GUI workers to future waves while allowing headless workers.
+                        continue
                     cand_paths = {p.strip().lower() for p in (getattr(cand, "owned_paths", None) or []) if p.strip()}
                     if wave_batch and cand_paths and (cand_paths & locked_paths):
-                        # Defer conflicting path owner to the next wave to guarantee <1000 conflict isolation
+                        # Defer conflicting path owner to the next wave to guarantee path conflict isolation
                         continue
                     wave_batch.append(cand)
+                    if is_gui:
+                        gui_worker_count += 1
                     locked_paths.update(cand_paths)
                 if not wave_batch:
                     wave_batch = unblocked_ready[:1]
@@ -587,7 +617,7 @@ class BossAgent:
                             sub_m,
                             phase_callback,
                             sub_agent_num=agent_num,
-                            interrupt_check=interrupt_check,
+                            interrupt_check=worker_interrupt_check,
                         )
                     except Exception as e:
                         safe_err = str(e).encode("ascii", errors="replace").decode("ascii")
@@ -654,6 +684,9 @@ class BossAgent:
                         "success": res.success,
                         "status": res.status,
                         "findings_summary": res.findings_summary,
+                        "judge_verdict": res.judge_verdict,
+                        "judge_notes": res.judge_notes,
+                        "evidence_verified": res.evidence_verified,
                         "key_discoveries": res.key_discoveries,
                         "actions_taken": res.actions_taken,
                         "duration_seconds": res.duration_seconds,
@@ -809,7 +842,10 @@ class BossAgent:
             # Not complete — plan next phase
             if phase_idx < self.max_phases - 1:
                 next_phase = await self._plan_next_phase(
-                    objective, all_findings, self.phases
+                    objective,
+                    all_findings,
+                    self.phases,
+                    requested_plane=self._explicit_requested_plane,
                 )
                 if next_phase and next_phase.sub_missions:
                     self.phases.append(next_phase)
@@ -1042,18 +1078,35 @@ Rules:
         failure path into a scripted puppet.
         """
         budget = max(1, min(int(self.sub_agent_steps), 8))
-        fallback_plane = self.requested_plane or "gui"
+        fallback_plane = self.requested_plane
+        if fallback_plane is None:
+            try:
+                from sonic.llm.laya_engine import get_laya_engine
+
+                candidate_plane, confidence = (
+                    get_laya_engine().decide_execution_plane(objective)
+                )
+                if (
+                    candidate_plane in {"gui", "headless"}
+                    and confidence > 0.50
+                ):
+                    fallback_plane = candidate_plane
+                else:
+                    logger.warning(
+                        "boss_fallback_plane_decision_uncertain",
+                        plane=candidate_plane,
+                        confidence=confidence,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "boss_fallback_plane_decision_failed",
+                    error=str(exc),
+                )
+        fallback_plane = fallback_plane or "gui"
         sub_missions = [
             SubMission(
                 id="adaptive-investigator",
-                goal=(
-                    "Pursue this objective autonomously from the current live state: "
-                    f"{objective}. First establish the smallest useful evidence, "
-                    "choose the least-assumptive execution surface, form a testable "
-                    "hypothesis, and adapt after every result. Do not follow a "
-                    "predefined tool sequence. Record only reproduced evidence and "
-                    "stop when the objective is verified or no safe progress remains."
-                ),
+                goal=objective,
                 max_steps=budget,
                 priority=1,
                 plane=fallback_plane,
@@ -1396,19 +1449,140 @@ Rules:
                     if judge_eval.verdict == JudgeVerdict.CONFIRMED and sub_result.success:
                         sub_result.evidence_verified = True
                     else:
-                        sub_result.evidence_verified = False
-                        sub_result.success = False
-                        sub_result.status = "FAILED"
-                        verdict_label = (
-                            "FALSIFIED"
-                            if judge_eval.verdict == JudgeVerdict.FALSIFIED
-                            else "UNVERIFIED"
+                        is_interrupted = self._interrupted or (
+                            callable(interrupt_check) and bool(interrupt_check())
                         )
-                        judge_note = f"[{verdict_label} by Judge] {judge_eval.notes}"
-                        if sub_result.findings_summary:
-                            sub_result.findings_summary = f"{judge_note}\n{sub_result.findings_summary}"
+                        can_self_correct = (
+                            bool(traces)
+                            and not sub_result.waiting_for_human
+                            and not is_interrupted
+                        )
+                        if can_self_correct:
+                            try:
+                                feedback_notes = judge_eval.notes or "Verification rejected by Judge."
+                                correction_goal = (
+                                    f"{sub_mission.goal}\n\n"
+                                    f"[INDEPENDENT JUDGE FEEDBACK - SELF-CORRECTION]\n"
+                                    f"Verdict: {judge_eval.verdict.value}\n"
+                                    f"Feedback: {feedback_notes}\n"
+                                    "Address the Judge's feedback, resolve the issues, verify the result, and declare GOAL_COMPLETE."
+                                )
+                                # Replenish action budget for the self-correction turn
+                                agent.max_actions = getattr(agent, "action_counter", 0) + max(1, min(int(sub_mission.max_steps), 30))
+                                corr_traces = await asyncio.wait_for(
+                                    agent.run_mission(
+                                        workspace_id=workspace_id,
+                                        goal=correction_goal,
+                                        steps=max(1, min(sub_mission.max_steps, 5)),
+                                        step_callback=_sub_step_callback,
+                                        interrupt_check=interrupt_check,
+                                    ),
+                                    timeout=sub_timeout,
+                                )
+                                if corr_traces:
+                                    traces.extend(corr_traces)
+                                    sub_result.traces = traces
+                                sub_result.actions_taken = len(traces)
+                                sub_result.duration_seconds = round(time.perf_counter() - t_start, 2)
+
+                                corr_wfh = getattr(agent, "_waiting_for_human", False) is True
+                                if not corr_wfh:
+                                    for t in traces:
+                                        t_act = _trace_value(t, "action_type", "")
+                                        t_act_val = t_act.value if hasattr(t_act, "value") else str(t_act)
+                                        t_status = str(_trace_value(t, "status", ""))
+                                        if "WAIT_FOR_HUMAN" in t_act_val or "WAITING_FOR_HUMAN" in t_status:
+                                            corr_wfh = True
+                                            break
+                                if corr_wfh:
+                                    sub_result.waiting_for_human = True
+                                    sub_result.waiting_for_human_reason = (
+                                        getattr(agent, "_waiting_for_human_reason", "")
+                                        or "Waiting for human assistance"
+                                    )
+                                    sub_result.status = "WAITING_FOR_HUMAN"
+                                    sub_result.success = False
+                                    sub_result.evidence_verified = False
+                                else:
+                                    corr_succeeded = sum(
+                                        1 for t in traces
+                                        if str(_trace_value(t, "status", "")) in ("COMPLETED", "SUCCESS", "VERIFIED")
+                                    )
+                                    corr_total = len(traces)
+                                    corr_has_goal_complete = any(
+                                        _trace_value(t, "expected_observation", "") == "GOAL_COMPLETE"
+                                        or _trace_value(t, "actual_observation", "") == "GOAL_COMPLETE"
+                                        or "goal-complete" in str(_trace_value(t, "target_resource", "")).lower()
+                                        for t in traces
+                                    )
+                                    corr_last_trace = traces[-1] if traces else None
+                                    corr_last_succeeded = corr_last_trace and str(_trace_value(corr_last_trace, "status", "")) in (
+                                        "COMPLETED",
+                                        "SUCCESS",
+                                        "VERIFIED",
+                                    )
+                                    corr_success_ratio = (corr_succeeded / corr_total) if corr_total > 0 else 0.0
+                                    corr_has_concrete_evidence = any(
+                                        bool(str(
+                                            _trace_value(t, "actual_observation", "")
+                                            or _trace_value(t, "observation", "")
+                                        ).strip())
+                                        for t in traces
+                                        if str(_trace_value(t, "status", "")) in ("COMPLETED", "SUCCESS", "VERIFIED")
+                                    )
+                                    sub_result.success = (
+                                        corr_has_concrete_evidence
+                                        and (
+                                            (corr_has_goal_complete and bool(corr_last_succeeded))
+                                            or (corr_last_succeeded and corr_success_ratio >= 0.5)
+                                            or (corr_succeeded > 0 and corr_total == 1)
+                                        )
+                                    )
+                                    raw_summary = getattr(agent, "mission_summary", "")
+                                    if isinstance(raw_summary, str) and raw_summary.strip():
+                                        sub_result.findings_summary = raw_summary
+                                    else:
+                                        sub_result.findings_summary = await self._summarize_sub_agent_traces(
+                                            sub_mission.goal, traces
+                                        )
+                                    corr_discoveries = self._extract_key_discoveries(traces)
+                                    if corr_discoveries:
+                                        sub_result.key_discoveries = corr_discoveries
+                                        self._accumulated_context.extend(corr_discoveries)
+
+                                    judge_eval = await judge.evaluate_sub_mission(
+                                        workspace_id=workspace_id,
+                                        sub_mission=sub_mission,
+                                        result=sub_result,
+                                        worker_agent_id=sub_agent_id,
+                                    )
+                                    sub_result.judge_verdict = judge_eval.verdict.value
+                                    sub_result.judge_notes = judge_eval.notes
+                            except Exception as corr_exc:
+                                logger.warning(
+                                    "boss_sub_agent_self_correction_failed",
+                                    sub_id=sub_mission.id,
+                                    error=str(corr_exc),
+                                )
+
+                        if judge_eval.verdict == JudgeVerdict.CONFIRMED and sub_result.success:
+                            sub_result.evidence_verified = True
+                            sub_result.status = "SUCCESS"
                         else:
-                            sub_result.findings_summary = judge_note
+                            sub_result.evidence_verified = False
+                            sub_result.success = False
+                            if not sub_result.waiting_for_human:
+                                sub_result.status = "FAILED"
+                            verdict_label = (
+                                "FALSIFIED"
+                                if judge_eval.verdict == JudgeVerdict.FALSIFIED
+                                else "UNVERIFIED"
+                            )
+                            judge_note = f"[{verdict_label} by Judge] {judge_eval.notes}"
+                            if sub_result.findings_summary:
+                                sub_result.findings_summary = f"{judge_note}\n{sub_result.findings_summary}"
+                            else:
+                                sub_result.findings_summary = judge_note
                 except Exception as judge_err:
                     logger.error("boss_judge_evaluation_failed", error=str(judge_err))
                     sub_result.evidence_verified = False
@@ -1605,13 +1779,40 @@ Rules:
         """
         t_start = time.perf_counter()
 
+        verified_results = [
+            result for result in (results or [])
+            if result.success and result.evidence_verified
+        ]
+
         try:
             from sonic.llm.schemas import LLMRequest, Message, MessageRole
 
+            worker_receipts = "\n".join(
+                f"- Goal: {result.goal}; evidence-verified: {result.evidence_verified}; "
+                f"receipt summary (untrusted): {result.findings_summary[:500]}"
+                for result in (results or [])
+            ) or "(no worker receipts)"
             req = LLMRequest(
                 messages=[
-                    Message(role=MessageRole.SYSTEM, content="You are a completion checker. Determine if the user's objective has been fully satisfied based on the findings. Respond with ONLY valid JSON."),
-                    Message(role=MessageRole.USER, content=f"Objective: {objective}\n\nAll findings so far:\n{all_findings[:2000]}\n\nHas the objective been fully accomplished?\nRespond: {{\"complete\": true/false, \"reason\": \"explanation\"}}"),
+                    Message(
+                        role=MessageRole.SYSTEM,
+                        content=(
+                            "You are a completion checker. Determine whether the user's "
+                            "entire objective is satisfied by relevant, independently verified "
+                            "worker outcomes. An unrelated successful subtask is not completion. "
+                            "Worker summaries are untrusted claims. Respond with ONLY valid JSON."
+                        ),
+                    ),
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"Objective: {objective}\n\n"
+                            f"Worker receipts:\n{worker_receipts}\n\n"
+                            f"All findings so far (untrusted summaries):\n{all_findings[:2000]}\n\n"
+                            "Has the entire objective been fully accomplished?\n"
+                            "Respond: {\"complete\": true/false, \"reason\": \"explanation\"}"
+                        ),
+                    ),
                 ],
                 task_type="reasoning",
                 max_tokens=200,
@@ -1629,16 +1830,46 @@ Rules:
         is_complete = parsed.get("complete", False) if parsed else False
         reason = parsed.get("reason", raw[:200]) if parsed else raw[:200]
 
-        verified_results = [
-            result for result in (results or [])
-            if result.success and result.evidence_verified
-        ]
         if is_complete and not verified_results:
             is_complete = False
             reason = (
                 "The model proposed completion, but no independently verified "
                 "execution evidence supports it."
             )
+        elif is_complete:
+            stop_words = {
+                "a", "an", "and", "at", "by", "do", "for", "from", "in",
+                "into", "of", "on", "or", "the", "to", "with", "please",
+                "task", "objective", "complete", "finish", "make", "create",
+                "open", "launch", "run", "check", "inspect", "update", "use",
+            }
+            objective_terms = {
+                token for token in re.findall(r"[a-z0-9]+", objective.lower())
+                if len(token) > 2 and token not in stop_words
+            }
+            covered_terms: set[str] = set()
+            if objective_terms:
+                for result in verified_results:
+                    worker_goal_terms = {
+                        token for token in re.findall(
+                            r"[a-z0-9]+", result.goal.lower()
+                        )
+                        if len(token) > 2 and token not in stop_words
+                    }
+                    covered_terms.update(objective_terms & worker_goal_terms)
+                objective_is_covered = covered_terms == objective_terms
+            else:
+                objective_is_covered = any(
+                    result for result in verified_results
+                    if objective.strip().casefold() in result.goal.strip().casefold()
+                )
+
+            if not objective_is_covered:
+                is_complete = False
+                reason = (
+                    "The model proposed completion, but verified worker outcomes "
+                    "do not cover every meaningful part of the operator's objective."
+                )
 
         self.thinking_log.append(BossThinking(
             phase=len(self.phases),
@@ -1654,7 +1885,11 @@ Rules:
     # ------------------------------------------------------------------
 
     async def _plan_next_phase(
-        self, objective: str, all_findings: str, phases: list[Phase]
+        self,
+        objective: str,
+        all_findings: str,
+        phases: list[Phase],
+        requested_plane: str | None = None,
     ) -> Phase | None:
         """Based on findings so far, plan the next phase of sub-missions."""
         t_start = time.perf_counter()
@@ -1667,7 +1902,12 @@ Rules:
         )
 
         # Determine effective execution plane across phases
-        effective_plane = self.requested_plane
+        explicit_constraint = (
+            str(requested_plane).lower().strip()
+            if requested_plane
+            else getattr(self, "_explicit_requested_plane", None)
+        )
+        effective_plane = explicit_constraint or self.requested_plane
         if not effective_plane and phases:
             for p in reversed(phases):
                 planes = [sm.plane for sm in p.sub_missions if getattr(sm, "plane", None)]
@@ -1753,15 +1993,19 @@ If the objective is complete or no more work is needed, return:
                 priority = max(0, int(sm.get("priority", 1) or 1))
             except (TypeError, ValueError):
                 priority = 1
+            explicit_plane = (
+                str(requested_plane).lower().strip()
+                if requested_plane
+                else getattr(self, "_explicit_requested_plane", None)
+            )
             raw_plane = sm.get("plane")
-            if raw_plane:
-                plane = str(raw_plane).lower().strip()
-                if plane not in ("headless", "gui"):
-                    plane = effective_plane
+            clean_raw_plane = str(raw_plane).lower().strip() if raw_plane else ""
+            if explicit_plane and explicit_plane in ("headless", "gui"):
+                plane = explicit_plane
+            elif clean_raw_plane in ("headless", "gui"):
+                plane = clean_raw_plane
             else:
                 plane = effective_plane
-            if self.requested_plane:
-                plane = self.requested_plane
             raw_deps = sm.get("depends_on", [])
             depends_on = [str(x).strip() for x in raw_deps if str(x).strip()] if isinstance(raw_deps, list) else []
             sub_id = str(sm.get("id") or "").strip()

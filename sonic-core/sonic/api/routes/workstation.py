@@ -159,6 +159,11 @@ class MissionProbeApproveRequest(BaseModel):
     approved: bool = True
 
 
+class WorkstationActionApprovalRequest(BaseModel):
+    approval_id: str
+    approved: bool
+
+
 class HumanWorkflowPlanRequest(BaseModel):
     """Input for the planning-only human-first software workflow."""
 
@@ -171,6 +176,7 @@ class HumanWorkflowPlanRequest(BaseModel):
 # -------------------------------------------------------------
 _tenant_workstations: dict[str, dict[str, dict[str, Any]]] = {}
 _background_tasks: dict[tuple[str, str], asyncio.Task] = {}
+_pending_operator_approvals: dict[tuple[str, str, str], asyncio.Future[bool]] = {}
 
 
 def _resolve_tenant_id(user: Any) -> str:
@@ -647,6 +653,60 @@ def _append_worklog(state: dict[str, Any], item_type: str, title: str, content: 
     }
     state.setdefault("worklog", []).append(item)
     return item
+
+
+def _request_operator_action_approval(
+    tenant_id: str,
+    session_id: str,
+    state: dict[str, Any],
+):
+    async def request(action_type: str, target: str, reason: str) -> bool:
+        approval_id = uuid.uuid4().hex
+        key = (tenant_id, session_id, approval_id)
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        _pending_operator_approvals[key] = future
+        previous_status = state.get("status")
+        state["status"] = "WAITING_FOR_APPROVAL"
+        state["current_action"] = f"Waiting for operator approval: {action_type}"
+        state["waiting_for_operator_approval"] = True
+        _append_worklog(
+            state,
+            "approval",
+            "Operator approval required",
+            f"{action_type}: {str(target)[:300]}\nReason: {reason}",
+            approval_id=approval_id,
+            approval_status="pending",
+            action_type=action_type,
+            target_resource=str(target)[:300],
+        )
+        _persist_workstation_state()
+        try:
+            return await asyncio.wait_for(future, timeout=600)
+        except TimeoutError:
+            logger.warning(
+                "workstation_action_approval_expired",
+                action_type=action_type,
+                tenant_id=tenant_id,
+                session_id=session_id,
+            )
+            return False
+        finally:
+            _pending_operator_approvals.pop(key, None)
+            for item in reversed(state.get("worklog", [])):
+                if (
+                    item.get("approval_id") == approval_id
+                    and item.get("approval_status") == "pending"
+                ):
+                    item["approval_status"] = "expired"
+                    item["resolved_at"] = _timestamp()
+                    break
+            state["waiting_for_operator_approval"] = False
+            if state.get("status") == "WAITING_FOR_APPROVAL":
+                state["status"] = previous_status or "RUNNING"
+                state["current_action"] = "Continuing after operator approval decision."
+            _persist_workstation_state()
+
+    return request
 
 
 def _summarize_recent_worklog(state: dict[str, Any], limit: int = 8) -> list[str]:
@@ -1792,8 +1852,8 @@ async def tile_workstation_desktop(
     if not desktop_id:
         raise HTTPException(status_code=400, detail="No active desktop session.")
 
-    await comp.tile_workstation(desktop_id)
-    return {"tiled": True}
+    tiled = await comp.tile_workstation(desktop_id)
+    return {"tiled": bool(tiled)}
 
 
 @router.get("/workstation/desktop/stream")
@@ -2285,6 +2345,44 @@ async def approve_workstation_mission_probe(
         "exit_code": execution.exit_code,
         "mission_status": mission.get("status"),
     }
+
+
+@router.post("/workstation/action/approve")
+async def approve_workstation_action(
+    req: WorkstationActionApprovalRequest,
+    session_id: str = Query("default"),
+    user: User = Depends(require_operator),
+):
+    """Resolve one exact pending agent action approval for this tenant/session."""
+    tenant_id = _resolve_tenant_id(user)
+    state = _get_or_create_session(tenant_id, session_id)
+    key = (tenant_id, session_id, req.approval_id)
+    pending = _pending_operator_approvals.get(key)
+    if pending is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Pending action approval not found or already expired",
+        )
+    if pending.done():
+        raise HTTPException(status_code=409, detail="Action approval was already resolved")
+
+    pending.set_result(req.approved)
+    approval_status = "approved" if req.approved else "rejected"
+    for item in reversed(state.get("worklog", [])):
+        if item.get("approval_id") == req.approval_id:
+            item["approval_status"] = approval_status
+            item["resolved_at"] = _timestamp()
+            break
+    _append_worklog(
+        state,
+        "event",
+        f"Operator {approval_status} action",
+        f"Approval {req.approval_id} was {approval_status}.",
+        approval_id=req.approval_id,
+        approval_status=approval_status,
+    )
+    _persist_workstation_state()
+    return {"status": approval_status, "approval_id": req.approval_id}
 
 
 
@@ -3058,6 +3156,28 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
         if not desktop_id:
             desktop_id = str(state.get("desktop", {}).get("workspace_id") or state.get("desktop", {}).get("sandbox_id") or "")
 
+        if execution_prompt and not desktop_id:
+            message = (
+                "I couldn't start this task because this session has no provisioned "
+                "workstation. Provision a workstation, then retry; no task actions were run."
+            )
+            action_blocked = True
+            state["status"] = "BLOCKED"
+            state["current_action"] = "Task blocked: workstation is not provisioned."
+            state["thought_summary"] = message
+            state["last_mission_outcome"] = {
+                "status": "BLOCKED",
+                "objective": prompt.strip(),
+                "summary": message,
+                "completed_at": _timestamp(),
+                "total_phases": 0,
+                "total_sub_agents": 0,
+                "total_actions": 0,
+            }
+            _append_worklog(state, "response", "Task Blocked", message)
+            _persist_workstation_state()
+            return
+
         # Capture pixels only when the prompt needs visual/application context.
         # Ordinary chat should not depend on a vision-capable provider.
         computer = None
@@ -3553,6 +3673,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         execution_plane=data.get("plane", "gui"),
                                         success=data.get("success"),
                                         findings_summary=data.get("findings_summary"),
+                                        judge_verdict=data.get("judge_verdict"),
+                                        judge_notes=data.get("judge_notes"),
+                                        evidence_verified=data.get("evidence_verified"),
                                         key_discoveries=data.get("key_discoveries"),
                                         actions_taken=data.get("actions_taken"),
                                         duration_seconds=data.get("duration_seconds"),
@@ -3574,6 +3697,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         "response",
                                         "SONIC Boss Report",
                                         data.get("findings_summary", ""),
+                                        outcome_status=str(
+                                            data.get("status", "INCOMPLETE")
+                                        ).upper(),
                                         findings_summary=data.get("findings_summary"),
                                     )
                                 _persist_workstation_state()
@@ -3728,6 +3854,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     "program_profile": program_profile,
                                     "recent_history": _summarize_recent_worklog(state),
                                 },
+                                operator_approval_callback=_request_operator_action_approval(
+                                    tenant_id, session_id, state
+                                ),
                             )
 
                             _append_worklog(
@@ -4090,6 +4219,19 @@ async def send_workstation_prompt(
     tenant_id = _resolve_tenant_id(user)
     state = _get_or_create_session(tenant_id, session_id)
     prompt_text = (req.prompt or "").strip()
+    target_info = state.get("target_sandbox", {})
+    target_workspace_id = str(
+        target_info.get("workspace_id") or target_info.get("sandbox_id") or ""
+    ).strip()
+    use_target_mission = (
+        (req.mode or "").strip().lower() == "autonomous"
+        and bool(prompt_text)
+        and bool(target_workspace_id)
+        and target_info.get("scope_verified") is True
+    )
+    if use_target_mission and state.get("mission", {}).get("status") == "RUNNING":
+        raise HTTPException(status_code=409, detail="A mission is already running for this session")
+
     if prompt_text:
         state["mission_name"] = prompt_text
         state["session_name"] = prompt_text
@@ -4105,36 +4247,41 @@ async def send_workstation_prompt(
     )
     _persist_workstation_state()
 
-    # Autonomous mode against an external target sandbox runs mission preflight.
-    # If no external target sandbox is provisioned, the objective executes directly
-    # on the workstation environment via the Boss multi-phase orchestrator.
-    if (req.mode or "").lower() == "autonomous":
-        target_id = _session_target_id(user, session_id)
-        target_box = state.get("target_sandbox", {})
-        if target_id and target_box.get("scope_verified", False):
-            if state.get("mission", {}).get("status") == "RUNNING":
-                raise HTTPException(status_code=409, detail="A mission is already running for this session")
-
-            mission_id = f"mission-{uuid.uuid4().hex[:10]}"
-            state["mission"].update({
-                "mission_id": mission_id,
-                "objective": prompt_text,
-                "status": "QUEUED",
-                "target_sandbox_id": target_id,
-                "started_at": _timestamp(),
-                "completed_at": "",
-                "events": [],
-            })
-            state["status"] = "RUNNING"
-            state["current_action"] = "Executing autonomous mission for evidence-based discovery..."
-            _mission_event(state, "mission", "Autonomous mission accepted", prompt_text, mission_id=mission_id, workspace_id=target_id)
-            _track_background_task(tenant_id, session_id, asyncio.create_task(_run_foreground_operator_task(
-                _run_mission_preflight(tenant_id, session_id, mission_id)
-            )))
-            return {"status": "accepted", "reasoning": "mission_started", "message": "Autonomous mission accepted for the scoped target.", "state": state}
-
     # Never hold the HTTP request open on an external LLM.  The dashboard can
-    # refresh workstation state while this task records the real result.
+    # refresh workstation state while Boss routes and records actionable work.
+    if use_target_mission:
+        mission_id = f"mission-{uuid.uuid4().hex[:10]}"
+        state["mission"].update({
+            "mission_id": mission_id,
+            "objective": prompt_text,
+            "status": "QUEUED",
+            "target_sandbox_id": target_workspace_id,
+            "started_at": _timestamp(),
+            "completed_at": "",
+            "events": [],
+        })
+        _mission_event(
+            state,
+            "mission",
+            "Mission accepted",
+            prompt_text,
+            mission_id=mission_id,
+            workspace_id=target_workspace_id,
+        )
+        _track_background_task(
+            tenant_id,
+            session_id,
+            asyncio.create_task(
+                _run_mission_preflight(tenant_id, session_id, mission_id)
+            ),
+        )
+        return {
+            "status": "accepted",
+            "reasoning": "thinking",
+            "message": f"Objective '{prompt_text}' accepted for the verified target sandbox.",
+            "state": state,
+        }
+
     _track_background_task(
         tenant_id,
         session_id,

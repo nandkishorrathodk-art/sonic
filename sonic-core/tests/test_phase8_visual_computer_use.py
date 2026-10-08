@@ -65,17 +65,19 @@ def _seed_fresh_gui_observation(agent, *, active_window="Desktop", controls=None
         active_window=active_window,
         detected_controls=controls or [],
     )
-    agent._last_world_observation = ComputerWorldObservation(
+    observation = ComputerWorldObservation(
         screen=screen,
         active_application=active_window,
         perception_version=0,
         observation_age_ms=0,
     )
+    agent._last_world_observation = observation
     agent._last_gui_state_observation = screen
     agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
     agent._last_screenshot_b64 = screen.screenshot_base64
     agent._screen_width = screen.width
     agent._screen_height = screen.height
+    return observation
 
 
 # ---- Tests ----
@@ -380,10 +382,20 @@ class TestGUIActionDispatch:
             "confidence": 0.95,
             "freshness_ms": 0,
         }
+        provider.screenshot.return_value = ScreenObservation(
+            width=1280,
+            height=800,
+            screenshot_base64="fresh-frame",
+            capture_age_ms=0,
+            controls_age_ms=0,
+            active_window="File Manager",
+            detected_controls=[control],
+        )
 
         def publish_scene(*, focused):
             current = {**control, "focused": focused}
             snapshot = agent.perception_bus.publish(
+                screenshot_base64="fresh-frame",
                 width=1280,
                 height=800,
                 active_window="File Manager",
@@ -391,6 +403,7 @@ class TestGUIActionDispatch:
             )
             observation = ComputerWorldObservation(
                 screen=ScreenObservation(
+                    screenshot_base64="fresh-frame",
                     width=1280,
                     height=800,
                     active_window="File Manager",
@@ -645,10 +658,12 @@ class TestGUIActionDispatch:
             llm_router=router,
             gui_only=True,
         )
+        router.complete = AsyncMock(side_effect=RuntimeError("reasoning failed"))
+        observation = _seed_fresh_gui_observation(agent)
 
         action_type, target, payload, expected = await agent.choose_action(
             "hi sonic, close browser and close all tabs",
-            ComputerWorldObservation(),
+            observation,
         )
 
         assert action_type == ActionExecutionStatus.BLOCKED
@@ -972,10 +987,11 @@ class TestActionParsing:
             reasoning_content="",
             tool_calls=[],
         ))
+        observation = _seed_fresh_gui_observation(agent)
 
         action, *_ = await agent._llm_choose_action(
             "Inspect the visible desktop",
-            ComputerWorldObservation(),
+            observation,
             1,
             "",
             "",
@@ -1071,14 +1087,9 @@ class TestReasoningPrompt:
             ),
             reasoning_content="",
         ))
-        obs = MagicMock()
+        obs = _seed_fresh_gui_observation(agent)
         obs.visible_text = "Desktop"
         obs.terminal_output = "ready"
-        obs.active_application = "Desktop"
-        obs.filesystem_files = []
-        obs.git_branch = "main"
-        obs.git_clean = True
-        obs.browser_state = {}
 
         await agent._llm_choose_action("Inspect the desktop", obs, 1, "test.py", "test_test.py")
 
@@ -1113,10 +1124,11 @@ class TestReasoningPrompt:
             reasoning_content="private reasoning that must not be surfaced",
             tool_calls=[],
         ))
+        observation = _seed_fresh_gui_observation(agent)
 
         action, target, payload, expected = await agent._llm_choose_action(
             "Inspect the desktop",
-            ComputerWorldObservation(),
+            observation,
             1,
             "",
             "",
@@ -1156,7 +1168,7 @@ class TestReasoningPrompt:
                 tool_calls=[],
             ),
         ])
-        observation = ComputerWorldObservation()
+        observation = _seed_fresh_gui_observation(agent)
 
         first = await agent._llm_choose_action(
             "Create a folder using the visible desktop",
@@ -1205,7 +1217,7 @@ class TestReasoningPrompt:
                 tool_calls=[],
             ),
         ])
-        observation = ComputerWorldObservation()
+        observation = _seed_fresh_gui_observation(agent)
 
         first = await agent._llm_choose_action(
             "Use the visible desktop",
@@ -1246,17 +1258,18 @@ class TestReasoningPrompt:
             reasoning_content="",
             tool_calls=[],
         ))
+        observation = _seed_fresh_gui_observation(agent)
 
         first = await agent._llm_choose_action(
             "Use the visible desktop",
-            ComputerWorldObservation(),
+            observation,
             1,
             "",
             "",
         )
         second = await agent._llm_choose_action(
             "Use the visible desktop",
-            ComputerWorldObservation(),
+            observation,
             2,
             "",
             "",
@@ -1279,7 +1292,7 @@ class TestReasoningPrompt:
             ),
             reasoning_content="",
         ))
-        observation = ComputerWorldObservation()
+        observation = _seed_fresh_gui_observation(agent)
 
         action, *_ = await agent._llm_choose_action(
             "Inspect the desktop", observation, 1, "", ""
@@ -1391,6 +1404,8 @@ class TestReasoningPrompt:
                 screenshot_base64="encoded-frame",
                 width=1280,
                 height=800,
+                capture_age_ms=0,
+                controls_age_ms=0,
                 visible_text="File Edit View",
             ),
             visible_text="File Edit View",
@@ -1427,6 +1442,8 @@ class TestReasoningPrompt:
                 screenshot_base64="encoded-frame",
                 width=1280,
                 height=800,
+                capture_age_ms=0,
+                controls_age_ms=0,
             ),
             perception_version=snapshot.version,
         )
