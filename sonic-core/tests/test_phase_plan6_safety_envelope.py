@@ -124,7 +124,7 @@ def test_in_workspace_write_is_allowed_and_executes():
         _act("FILE_WRITE", "app.py", '{"path": "app.py", "content": "x"}'),
         _act("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy())
+    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy(), execution_plane="headless")
     traces = _run(agent.run_mission(comp.workspace_id, "patch", steps=3))
     assert traces[0].status in ("SUCCESS", "VERIFIED")
     assert "app.py" in comp.written  # actually executed
@@ -136,7 +136,7 @@ def test_safe_terminal_exec_allowed():
         _act("TERMINAL_EXEC", "ls", '{"command": "ls -la"}'),
         _act("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy())
+    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy(), execution_plane="headless")
     traces = _run(agent.run_mission(comp.workspace_id, "list", steps=3))
     assert traces[0].status in ("SUCCESS", "RECOVERED", "VERIFIED")
     assert "ls -la" in comp.commands
@@ -152,7 +152,7 @@ def test_file_write_escaping_workspace_is_denied():
         _act("FILE_WRITE", "/etc/passwd", '{"path": "/etc/passwd", "content": "evil"}'),
         _act("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy())
+    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy(), execution_plane="headless")
     traces = _run(agent.run_mission(comp.workspace_id, "pwn", steps=3))
     assert traces[0].status == "BLOCKED"
     assert "escapes workspace" in traces[0].actual_observation or "Safety blocked" in traces[0].actual_observation
@@ -166,27 +166,39 @@ def test_traversal_path_denied():
         _act("FILE_WRITE", "../../etc/shadow", '{"path": "../../etc/shadow", "content": "x"}'),
         _act("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy())
+    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy(), execution_plane="headless")
     traces = _run(agent.run_mission(comp.workspace_id, "pwn", steps=3))
     assert traces[0].status == "BLOCKED"
     assert comp.written == []
 
 
 def test_policy_block_stops_mission_without_scripted_retries():
+    from sonic.tools.base import SecurityTool
+
+    class _NoCallTool(SecurityTool):
+        def name(self): return "nmap"
+        def version(self): return "7.94"
+        def build_command(self, request): return "nmap"
+        def parse_output(self, stdout, stderr): return []
+        async def execute(self, request):
+            raise AssertionError("policy should have blocked this before execute")
+
     comp = _StubComputer()
     blocked_navigation = _act(
-        "BROWSER_NAVIGATE",
-        "https://unauthorized.example",
-        '{"url": "https://unauthorized.example"}',
+        "SECURITY_TOOL",
+        "unauthorized.invalid",
+        '{"tool": "nmap", "target": "unauthorized.invalid"}',
     )
     llm = _StubLLM([blocked_navigation, blocked_navigation])
     agent = ComputerUseAgent(
         computer_provider=comp,
         llm_router=llm,
         safety=_policy(allow_security_tool_targets={"authorized.example"}),
+        security_tools={"nmap": _NoCallTool(provider=None)},
+        execution_plane="headless",
     )
 
-    traces = _run(agent.run_mission(comp.workspace_id, "research the authorized target", steps=5))
+    traces = _run(agent.run_mission(comp.workspace_id, "scan the authorized target", steps=5))
 
     assert len(traces) == 1
     assert traces[0].status == "BLOCKED"
@@ -204,7 +216,7 @@ def test_destructive_command_denied():
         _act("TERMINAL_EXEC", "rm", '{"command": "rm -rf /"}'),
         _act("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy())
+    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy(), execution_plane="headless")
     traces = _run(agent.run_mission(comp.workspace_id, "destroy", steps=3))
     assert traces[0].status == "BLOCKED"
     assert "destructive" in traces[0].actual_observation.lower() or "safety blocked" in traces[0].actual_observation.lower()
@@ -266,7 +278,8 @@ def test_security_tool_private_target_denied():
         _act("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
     agent = ComputerUseAgent(computer_provider=comp, llm_router=llm,
-                             safety=_policy(), security_tools={"nmap": tool})
+                             safety=_policy(), security_tools={"nmap": tool},
+                             execution_plane="headless")
     traces = _run(agent.run_mission(comp.workspace_id, "scan metadata", steps=3))
     assert traces[0].status == "BLOCKED"
     assert "egress" in traces[0].actual_observation.lower() or "safety blocked" in traces[0].actual_observation.lower()
@@ -283,7 +296,7 @@ def test_unknown_action_type_denied_by_default():
         _act("TERMINAL_EXEC", "ls", '{"command": "ls"}'),
         _act("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=policy)
+    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=policy, execution_plane="headless")
     traces = _run(agent.run_mission(comp.workspace_id, "x", steps=3))
     assert traces[0].status == "BLOCKED"
     assert "not allowed" in traces[0].actual_observation.lower() or "safety blocked" in traces[0].actual_observation.lower()
@@ -303,7 +316,7 @@ def test_safety_gate_blocks_curiosity_pursuit(tmp_path):
     # No mission `responses`: the default mission action is a destructive
     # command, so the gate is exercised by the curiosity pursue closure.
     llm = _StubLLM(proposals=["erase everything"])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy())
+    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=_policy(), execution_plane="headless")
     curiosity = CuriosityLoop(llm_router=llm, vector_memory=vm, max_cycles=1, exploration_steps=2)
     res = _run(agent.idle_cycle(comp.workspace_id, curiosity))
     # The pursuit's destructive action was blocked, not executed.
@@ -341,7 +354,7 @@ def test_rate_limit_denies_beyond_cap():
         _act("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
     policy = _policy(max_actions_per_minute=2)
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=policy)
+    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm, safety=policy, execution_plane="headless")
     traces = _run(agent.run_mission(comp.workspace_id, "write a lot", steps=6))
     statuses = [t.status for t in traces]
     # After 2 allowed actions, further ones are rate-limited (BLOCKED).

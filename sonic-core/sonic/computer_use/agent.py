@@ -802,7 +802,7 @@ class ComputerUseAgent:
 
     def _mission_interrupt_requested(self) -> bool:
         interrupt_check = getattr(self, "_active_interrupt_check", None)
-        return self._interrupted or (
+        return bool(getattr(self, "_interrupted", False)) or (
             callable(interrupt_check) and bool(interrupt_check())
         )
 
@@ -2627,7 +2627,8 @@ class ComputerUseAgent:
 
         obs_summary += f"Actions taken so far:\n{history_text or '(none — this is the first action)'}\n"
         if getattr(self, "_last_thought", "") and len(self.traces) > 0:
-            obs_summary += f"\nYour Immediate Prior Thought was:\n\"{self._last_thought[:400]}\"\n"
+            prior_thought = str(getattr(self, "_last_thought", "") or "")
+            obs_summary += f"\nYour Immediate Prior Thought was:\n\"{prior_thought[:400]}\"\n"
 
         if self._gui_action_contract_active():
             visible_controls = (
@@ -3041,7 +3042,7 @@ class ComputerUseAgent:
             "visual_escalation_reason": escalation_reason,
             "image_escalation_count": counters["visual_escalations"],
         }
-        if gui_reasoning and not structured_scene_available and not image_attached:
+        if self._gui_action_contract_active() and not structured_scene_available and not image_attached:
             return (
                 ActionExecutionStatus.BLOCKED,
                 "gui-perception-unavailable",
@@ -5058,9 +5059,13 @@ class ComputerUseAgent:
                         or not math.isfinite(fresh_controls_age)
                         or not 0 <= fresh_controls_age <= 250
                         or not isinstance(fresh_version, int)
-                        or fresh_version != previous_version
                     ):
                         raise RuntimeError("current desktop state could not be verified")
+                    if fresh_version != previous_version:
+                        raise RuntimeError(
+                            "desktop state changed since the action was reasoned "
+                            f"(perception version {previous_version} -> {fresh_version})"
+                        )
                     if self._screen_state_signature(fresh_state) != self._screen_state_signature(previous_screen):
                         raise RuntimeError("desktop state changed since the action was reasoned")
                     pending_intent = getattr(self, "_pending_gui_action_intent", None)
@@ -8457,7 +8462,11 @@ class ComputerUseAgent:
         self._active_workspace_id = workspace_id
         t_start = time.perf_counter()
         self._interrupted = False
-        self._interrupt_event.clear()
+        interrupt_event = getattr(self, "_interrupt_event", None)
+        if interrupt_event is None:
+            interrupt_event = asyncio.Event()
+            self._interrupt_event = interrupt_event
+        interrupt_event.clear()
         self._active_interrupt_check = interrupt_check
         self._watchdog_aborted = False
         self._consecutive_stale_gui_blocks = 0
@@ -8764,12 +8773,25 @@ class ComputerUseAgent:
             # turn a real safety decision into scripted retry noise. The
             # operator can change scope/approval and start a fresh attempt.
             trace_observation = str(getattr(trace, "actual_observation", "") or "")
+            trace_action_type = str(
+                getattr(
+                    getattr(trace, "action_type", action_type),
+                    "value",
+                    getattr(trace, "action_type", action_type),
+                )
+            ).upper()
+            trace_status = str(
+                getattr(getattr(trace, "status", ""), "value", getattr(trace, "status", ""))
+            ).upper()
+            normalized_trace_observation = trace_observation.strip().casefold()
             stale_gui_block = (
-                trace.status == ActionExecutionStatus.BLOCKED
-                and action_type in getattr(self, "_GUI_ONLY_ACTIONS", set())
-                and trace_observation.startswith("GUI action blocked before dispatch:")
+                trace_status == ActionExecutionStatus.BLOCKED.value
+                and trace_action_type.startswith(("GUI_", "APP_", "BROWSER_"))
+                and normalized_trace_observation.startswith(
+                    "gui action blocked before dispatch:"
+                )
                 and any(
-                    marker in trace_observation.lower()
+                    marker in normalized_trace_observation
                     for marker in (
                         "changed since the action was reasoned",
                         "stale accessibility state",
