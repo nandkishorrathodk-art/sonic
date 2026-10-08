@@ -53,6 +53,9 @@ dev = [
 local-laya = [
     "laya>=0.3.27,<0.4.0",
 ]
+rag-local = [
+    "sentence-transformers>=3.0.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["sonic*"]

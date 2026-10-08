@@ -408,6 +408,8 @@ class ComputerUseAgent:
         # reuse) and injects them into reasoning so the being does not forget
         # what it learned across missions. None = lessons not collected.
         self.lessons_ledger = lessons_ledger
+        self._agentic_lessons_goal: str | None = None
+        self._agentic_lessons: list[Any] = []
         self.skill_ledger = skill_ledger
         # Optional Self-Evolution Engine: coordinates dynamic strategy, novel method invention,
         # toolsmithing, cross-mission learning, and codebase evolution.
@@ -2370,7 +2372,12 @@ class ComputerUseAgent:
         lessons_block = ""
         if getattr(self, "lessons_ledger", None) is not None:
             from sonic.being.lessons import inject_into_context
-            lessons_block = inject_into_context(self.lessons_ledger.relevant(goal))
+            lessons = (
+                self._agentic_lessons
+                if self._agentic_lessons_goal == goal
+                else self.lessons_ledger.relevant(goal)
+            )
+            lessons_block = inject_into_context(lessons)
 
         # Living state (BeingMind mood) — a real affect signal the LLM can
         # act on (fixed the audit: mood floats were never read by any prompt).
@@ -2936,6 +2943,22 @@ class ComputerUseAgent:
             Message,
             MessageRole,
         )
+
+        if (
+            self.lessons_ledger is not None
+            and self.llm_router is not None
+            and hasattr(self.lessons_ledger, "relevant_agentic")
+            and self._agentic_lessons_goal != goal
+        ):
+            try:
+                self._agentic_lessons = await self.lessons_ledger.relevant_agentic(
+                    goal, self.llm_router
+                )
+                self._agentic_lessons_goal = goal
+            except Exception as exc:
+                logger.warning("agentic_rag_lesson_retrieval_failed", error=str(exc))
+                self._agentic_lessons = self.lessons_ledger.relevant(goal)
+                self._agentic_lessons_goal = goal
 
         system_prompt, obs_summary = self._build_reasoning_context(
             goal, observation, step_index, primary_file, test_file
@@ -9053,6 +9076,8 @@ class ComputerUseAgent:
     ) -> list[ComputerDecisionTrace]:
         """Runs an end-to-end closed-loop autonomous engineering mission."""
         self._active_workspace_id = workspace_id
+        self._agentic_lessons_goal = None
+        self._agentic_lessons = []
         t_start = time.perf_counter()
         self._interrupted = False
         interrupt_event = getattr(self, "_interrupt_event", None)
