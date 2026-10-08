@@ -52,20 +52,15 @@ except ImportError:
     pass
 
 # Default system prompt for the autonomous developer agent
-DEFAULT_DEVELOPER_SYSTEM_PROMPT = f"""You are SONIC Developer Agent, an autonomous AI Software Engineer operating directly on the local repository workspace.
+DEFAULT_DEVELOPER_SYSTEM_PROMPT = f"""You are SONIC Developer Agent, an autonomous AI Software Engineer created by Nandkishor Rathod at Parth Lab, operating directly on the local repository workspace.
 You solve coding, debugging, refactoring, and engineering tasks with rigor, precision, and verification.
+Founder & Creator: Nandkishor Rathod
+Organization: Parth Lab
 Current OS: {sys.platform} ({'Windows' if sys.platform == 'win32' else 'Linux/POSIX'})
 
-You have access to the following local tools:
-1. view_file(path, start_line=None, end_line=None): View contents of a file or list directory contents.
-2. write_file(path, content): Create or overwrite a file in the workspace.
-3. edit_file(path, target_content, replacement_content): Replace a unique snippet in an existing file.
-4. run_command(command, timeout=30): Execute shell commands in the repository.
-5. git_diff(): Inspect uncommitted git changes and status.
-6. run_pytest(test_path=None): Run test suite or specific tests using pytest.
-
 Operational Guidelines:
-- Grounding First: Always inspect files (`view_file`) or search the workspace before modifying code. Never guess contents.
+- Grounding First: When asked to modify or inspect code, inspect files (`view_file`) or search the workspace first. Never guess contents.
+- Conversational Clarity: If the user is asking questions, chatting, or requesting explanations without asking to modify code, answer directly and helpfully without calling tools.
 - Surgical Edits: When editing files, view the exact lines first. Ensure `target_content` has exact indentation and whitespace.
 - Platform Awareness: Use `view_file` to list directories and view files. On Windows, do NOT use Linux commands like `ls`, `grep`, or `find`; use python, git, or pytest commands.
 - Test and Verify: Run relevant tests or pytest (`run_pytest`, `run_command`) after making changes to verify correctness.
@@ -202,14 +197,14 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
 # ==============================================================================
 
 
-def _truncate_output(text: str, max_lines: int = 150, max_chars: int = 12000) -> str:
+def _truncate_output(text: str, max_lines: int = 80, max_chars: int = 4000) -> str:
     """Safely truncate excessive tool output to prevent LLM context window overflow."""
     if not text or not isinstance(text, str):
         return text
     lines = text.splitlines()
     if len(lines) > max_lines:
-        keep_head = max(10, max_lines - 40)
-        keep_tail = 30
+        keep_head = max(10, max_lines - 30)
+        keep_tail = 20
         truncated_count = len(lines) - (keep_head + keep_tail)
         trimmed = (
             lines[:keep_head]
@@ -663,7 +658,7 @@ class LLMConfig:
         default_fallback_models = {
             "groq": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
             "openai": ["gpt-4o-mini"],
-            "openrouter": ["qwen/qwen3.8-27b"],
+            "openrouter": ["qwen/qwen3.8-27b", "meta-llama/llama-3.3-70b-instruct"],
             "deepseek": [],
             "nvidia": [],
             "local": [],
@@ -782,6 +777,28 @@ class DeveloperAgent:
         self.console = console or Console(legacy_windows=False)
         self.system_prompt = system_prompt or DEFAULT_DEVELOPER_SYSTEM_PROMPT
         self._llm_client = llm_client
+        self._http_client: httpx.Client | None = None
+        self.messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.system_prompt}
+        ]
+
+    def reset(self) -> None:
+        """Reset conversation memory to initial system prompt."""
+        self.messages = [{"role": "system", "content": self.system_prompt}]
+
+    def _get_client(self) -> httpx.Client:
+        """Get or initialize persistent HTTP client with connection pooling."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.Client(timeout=self.config.timeout)
+        return self._http_client
+
+    def close(self) -> None:
+        """Close persistent HTTP client."""
+        if self._http_client and not self._http_client.is_closed:
+            try:
+                self._http_client.close()
+            except Exception:
+                pass
 
     # ---- Tool Delegation Methods ----
 
@@ -857,47 +874,23 @@ class DeveloperAgent:
     # ---- Rich Display Helpers ----
 
     def _display_tool_call(self, tool_name: str, args: dict[str, Any]) -> None:
-        """Render a tool call nicely on the Rich console with secrets masked."""
-        grid = Table.grid(padding=(0, 1))
-        grid.add_column(style="bold yellow", justify="right")
-        grid.add_column(style="white")
-
-        for key, val in args.items():
-            val_str = sanitize_secrets(str(val), [self.config.api_key])
-            if key in ("content", "target_content", "replacement_content") and len(val_str) > 150:
-                val_str = val_str[:150] + f"... ({len(val_str)} characters)"
-            grid.add_row(f"{key}:", val_str)
-
-        self.console.print(
-            Panel(
-                grid,
-                title=f"[bold yellow]🔧 Tool Call: [cyan]{tool_name}[/cyan][/bold yellow]",
-                border_style="yellow",
-                box=box.ROUNDED,
-            )
-        )
+        """Render a tool call clearly and concisely."""
+        sanitized_args = sanitize_secrets(str(args), [self.config.api_key])
+        if len(sanitized_args) > 100:
+            sanitized_args = sanitized_args[:95] + "..."
+        self.console.print(f"  [bold yellow]→ {tool_name}[/bold yellow][dim]({sanitized_args})[/dim]")
 
     def _display_tool_result(self, tool_name: str, result: str) -> None:
-        """Render tool execution output on the Rich console with secrets masked."""
+        """Render tool execution output cleanly without bloated panels."""
         sanitized_res = sanitize_secrets(result, [self.config.api_key])
-        lines = sanitized_res.splitlines()
-        if len(lines) > 25:
-            preview = "\n".join(lines[:20]) + f"\n[dim]... (+{len(lines) - 20} more lines truncated) ...[/dim]"
-        else:
-            preview = sanitized_res
-
         is_error = sanitized_res.startswith("Error:") or "Exit code: 1" in sanitized_res or "pytest exit code: 1" in sanitized_res
-        color = "red" if is_error else "green"
-        prefix = "✗ Tool Error" if is_error else "✓ Tool Output"
-
-        self.console.print(
-            Panel(
-                preview,
-                title=f"[{color}]{prefix}: [cyan]{tool_name}[/cyan][/{color}]",
-                border_style=color,
-                box=box.ROUNDED,
-            )
-        )
+        color = "red" if is_error else "dim green"
+        lines = sanitized_res.splitlines()
+        first_line = lines[0] if lines else "Done"
+        if len(first_line) > 90:
+            first_line = first_line[:85] + "..."
+        count_info = f" ({len(lines)} lines)" if len(lines) > 1 else ""
+        self.console.print(f"    [{color}]└─ {first_line}{count_info}[/{color}]")
 
     # ---- LLM Step & Streaming Execution ----
 
@@ -905,6 +898,7 @@ class DeveloperAgent:
         self,
         messages: list[dict[str, Any]],
         model: str | None = None,
+        include_tools: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Perform one LLM turn with SSE streaming for thoughts and tool calls."""
         if not self.config.api_key:
@@ -918,15 +912,16 @@ class DeveloperAgent:
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
+        payload: dict[str, Any] = {
             "model": active_model,
             "messages": messages,
-            "tools": TOOLS_SCHEMA,
-            "tool_choice": "auto",
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
             "stream": True,
         }
+        if include_tools:
+            payload["tools"] = TOOLS_SCHEMA
+            payload["tool_choice"] = "auto"
 
         content_acc: list[str] = []
         thought_acc: list[str] = []
@@ -937,7 +932,8 @@ class DeveloperAgent:
         printed_content_hdr = False
 
         endpoint = f"{self.config.base_url.rstrip('/')}/chat/completions"
-        with httpx.Client(timeout=self.config.timeout) as client:
+        client = self._get_client()
+        try:
             with client.stream("POST", endpoint, headers=headers, json=payload) as response:
                 if response.status_code != 200:
                     err_body = response.read().decode("utf-8", errors="replace")
@@ -1029,77 +1025,185 @@ class DeveloperAgent:
                                 if fn.get("arguments"):
                                     tool_calls_acc[idx]["function"]["arguments"] += fn["arguments"]
 
-        if printed_thought_hdr or printed_content_hdr:
-            self.console.print()
+            if printed_thought_hdr or printed_content_hdr:
+                self.console.print()
 
-        # Build assistant message
-        assistant_msg: dict[str, Any] = {"role": "assistant"}
-        full_content = "".join(content_acc).strip()
-        if full_content:
-            assistant_msg["content"] = full_content
-        else:
-            assistant_msg["content"] = None
+            # Build assistant message
+            assistant_msg: dict[str, Any] = {"role": "assistant"}
+            full_content = "".join(content_acc).strip()
+            if full_content:
+                assistant_msg["content"] = full_content
+            else:
+                assistant_msg["content"] = None
 
-        parsed_tool_calls: list[dict[str, Any]] = []
-        if tool_calls_acc:
-            for idx in sorted(tool_calls_acc.keys()):
-                tc = tool_calls_acc[idx]
-                if not tc.get("id"):
-                    tc["id"] = f"call_{idx}_{int(time.time() * 1000)}"
-                parsed_tool_calls.append(tc)
-            assistant_msg["tool_calls"] = parsed_tool_calls
+            parsed_tool_calls: list[dict[str, Any]] = []
+            if tool_calls_acc:
+                for idx in sorted(tool_calls_acc.keys()):
+                    tc = tool_calls_acc[idx]
+                    if not tc.get("id"):
+                        tc["id"] = f"call_{idx}_{int(time.time() * 1000)}"
+                    parsed_tool_calls.append(tc)
+                assistant_msg["tool_calls"] = parsed_tool_calls
 
-        return assistant_msg, parsed_tool_calls
+            return assistant_msg, parsed_tool_calls
+        except (httpx.TransportError, httpx.RemoteProtocolError, httpx.TimeoutException) as exc:
+            if self._http_client and not self._http_client.is_closed:
+                try:
+                    self._http_client.close()
+                except Exception:
+                    pass
+            self._http_client = None
+            raise
+
+    def _find_alternate_provider(self) -> LLMConfig | None:
+        """Find an alternative configured provider if the current provider is exhausted."""
+        current_prov = self.config.provider.lower()
+        candidates = [
+            ("openrouter", "OPENROUTER_API_KEY", "qwen/qwen3.8-27b", "https://openrouter.ai/api/v1"),
+            ("openai", "OPENAI_API_KEY", "gpt-4o-mini", "https://api.openai.com/v1"),
+            ("deepseek", "DEEPSEEK_API_KEY", "deepseek-chat", "https://api.deepseek.com"),
+            ("groq", "GROQ_API_KEY", "openai/gpt-oss-120b", "https://api.groq.com/openai/v1"),
+        ]
+        for prov_name, env_key, default_model, base_url in candidates:
+            if prov_name != current_prov:
+                key = os.environ.get(env_key, "").strip()
+                if key:
+                    return LLMConfig(
+                        provider=prov_name,
+                        model=default_model,
+                        api_key=key,
+                        base_url=base_url,
+                        fallback_models=[],
+                    )
+        return None
 
     def _step_llm(
         self,
         messages: list[dict[str, Any]],
+        include_tools: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Perform one LLM turn with automatic failover to fallback models if rate-limited."""
         if self._llm_client is not None:
-            return self._llm_client(messages, TOOLS_SCHEMA)
+            if include_tools:
+                return self._llm_client(messages, TOOLS_SCHEMA)
+            return self._llm_client(messages, None)
 
         models_to_try = [self.config.model] + [
             m for m in self.config.fallback_models if m != self.config.model
         ]
 
         last_error: Exception | None = None
+        max_tpm_retries = 2
         for i, candidate_model in enumerate(models_to_try):
-            try:
-                return self._call_single_llm(messages, model=candidate_model)
-            except RuntimeError as exc:
-                err_text = str(exc)
-                is_rate_limit = (
-                    "429" in err_text
-                    or "rate_limit" in err_text.lower()
-                    or "tpd" in err_text.lower()
-                    or "tokens per day" in err_text.lower()
-                    or "503" in err_text
-                )
-                last_error = exc
-                if is_rate_limit and i + 1 < len(models_to_try):
-                    next_model = models_to_try[i + 1]
-                    self.console.print(
-                        f"\n[bold yellow]⚠️ Model '{candidate_model}' rate-limited ({self.config.provider} HTTP 429). "
-                        f"Failing over to fallback model '{next_model}'...[/bold yellow]"
+            for retry_attempt in range(max_tpm_retries + 1):
+                try:
+                    try:
+                        return self._call_single_llm(messages, model=candidate_model, include_tools=include_tools)
+                    except TypeError:
+                        return self._call_single_llm(messages, model=candidate_model)
+                except Exception as exc:
+                    err_text = str(exc)
+                    is_tpd = "tpd" in err_text.lower() or "tokens per day" in err_text.lower()
+                    is_rate_limit = (
+                        "429" in err_text
+                        or "rate_limit" in err_text.lower()
+                        or is_tpd
+                        or "503" in err_text
                     )
-                    self.config.model = next_model
-                    continue
-                raise last_error from None
+                    is_model_unavailable = (
+                        "404" in err_text
+                        or "does not exist" in err_text.lower()
+                        or "model_not_found" in err_text.lower()
+                    )
+                    is_network_drop = any(
+                        n in type(exc).__name__.lower()
+                        for n in ["transport", "remoteprotocol", "ssl", "timeout"]
+                    ) or "eof" in err_text.lower()
+
+                    last_error = exc
+
+                    # 1. Transient rate limit (TPM) - backoff retry same model
+                    if is_rate_limit and not is_tpd and retry_attempt < max_tpm_retries:
+                        backoff = 2.0 * (retry_attempt + 1)
+                        self.console.print(
+                            f"[dim yellow]⏳ Rate limit on '{candidate_model}' ({self.config.provider}). Retrying in {backoff:.1f}s...[/dim yellow]"
+                        )
+                        time.sleep(backoff)
+                        continue
+
+                    # 2. Network drop - retry same model
+                    if is_network_drop and retry_attempt < max_tpm_retries:
+                        backoff = 1.5 * (retry_attempt + 1)
+                        self.console.print(
+                            f"[dim yellow]🔌 Connection dropped. Reconnecting in {backoff:.1f}s...[/dim yellow]"
+                        )
+                        time.sleep(backoff)
+                        continue
+
+                    # 3. Model failover within provider (on rate limit or model unavailable)
+                    if (is_rate_limit or is_model_unavailable) and i + 1 < len(models_to_try):
+                        next_model = models_to_try[i + 1]
+                        reason = "unavailable (HTTP 404)" if is_model_unavailable else "rate-limited (HTTP 429)"
+                        self.console.print(
+                            f"\n[bold yellow]⚠️ Model '{candidate_model}' {reason}. "
+                            f"Failing over to fallback model '{next_model}'...[/bold yellow]"
+                        )
+                        self.config.model = next_model
+                        break
+
+                    # 4. Cross-provider failover if all models in current provider fail
+                    if (is_rate_limit or is_tpd) and i + 1 >= len(models_to_try):
+                        alt_cfg = self._find_alternate_provider()
+                        if alt_cfg:
+                            self.console.print(
+                                f"\n[bold yellow]⚠️ All models exhausted on {self.config.provider}. "
+                                f"Failing over to alternative provider '{alt_cfg.provider}' ({alt_cfg.model})...[/bold yellow]"
+                            )
+                            self.config = alt_cfg
+                            try:
+                                return self._call_single_llm(messages, model=self.config.model, include_tools=include_tools)
+                            except TypeError:
+                                return self._call_single_llm(messages, model=self.config.model)
+
+                    raise last_error from None
 
         if last_error:
             raise last_error
         raise RuntimeError("No models available.")
 
     def _prune_messages(self, messages: list[dict[str, Any]], max_history: int = 12) -> list[dict[str, Any]]:
-        """Keep system prompt, initial user prompt, and recent turns to prevent context window overflow."""
+        """Keep system prompt and recent complete conversational turns to prevent context window overflow."""
         if len(messages) <= max_history + 2:
             return messages
-        prefix = messages[:2]
+        prefix = messages[:1]
         suffix = messages[-max_history:]
-        while suffix and suffix[0].get("role") == "tool":
-            suffix = suffix[1:]
+        first_user_idx = None
+        for idx, msg in enumerate(suffix):
+            if msg.get("role") == "user":
+                first_user_idx = idx
+                break
+        if first_user_idx is not None:
+            suffix = suffix[first_user_idx:]
+        else:
+            while suffix and suffix[0].get("role") == "tool":
+                suffix = suffix[1:]
         return prefix + suffix
+
+    def chat(self, prompt: str) -> str:
+        """Fast zero-shot conversational turn without tool schema overhead, streaming directly."""
+        clean_prompt = sanitize_secrets(prompt, [self.config.api_key])
+        self.messages.append({"role": "user", "content": prompt})
+        step_messages = self._prune_messages(self.messages)
+
+        try:
+            assistant_msg, _ = self._step_llm(step_messages, include_tools=False)
+            self.messages.append(assistant_msg)
+            ans = assistant_msg.get("content") or ""
+            return sanitize_secrets(ans, [self.config.api_key])
+        except Exception as exc:
+            err_msg = sanitize_secrets(str(exc), [self.config.api_key])
+            self.console.print(f"\n[bold red]Error: {err_msg}[/bold red]")
+            return err_msg
 
     # ---- Main Observe-Reason-Act Execution Loop ----
 
@@ -1111,19 +1215,16 @@ class DeveloperAgent:
         clean_prompt = sanitize_secrets(prompt, [self.config.api_key])
         self.console.print(
             Panel(
-                f"[bold cyan]⚡ SONIC Autonomous AI Software Engineer[/bold cyan]\n"
-                f"[bold]Model:[/bold] {self.config.model} ([dim]{self.config.provider}[/dim])\n"
-                f"[bold]Workspace:[/bold] {self.workspace_dir}\n"
-                f"[bold]Task:[/bold] {clean_prompt}",
+                f"[bold cyan]⚡ Task:[/bold cyan] {clean_prompt}\n"
+                f"[dim]Model: {self.config.model} ({self.config.provider}) · Workspace: {self.workspace_dir.name}[/dim]",
                 border_style="cyan",
-                title="Engineering Session Initialized",
+                box=box.ROUNDED,
+                padding=(0, 1),
             )
         )
 
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": prompt},
-        ]
+        messages = self.messages
+        messages.append({"role": "user", "content": prompt})
 
         step = 0
         total_tool_calls = 0
@@ -1131,7 +1232,7 @@ class DeveloperAgent:
         try:
             while step < self.max_steps:
                 step += 1
-                self.console.print(f"\n[bold blue]━━━ Cycle {step}/{self.max_steps} ━━━[/bold blue]")
+                self.console.print(f"[bold cyan]── Step {step}/{self.max_steps}[/bold cyan]")
 
                 # LLM Step (Stream reasoning and extract tool calls)
                 step_messages = self._prune_messages(messages)
@@ -1142,7 +1243,10 @@ class DeveloperAgent:
                 if not tool_calls:
                     final_ans = assistant_msg.get("content") or ""
                     clean_ans = sanitize_secrets(final_ans, [self.config.api_key])
-                    self.console.print("\n[bold green]✓ Objective successfully accomplished.[/bold green]")
+                    self.console.print(
+                        f"\n[bold green]✔ Completed in {step} step{'s' if step > 1 else ''} "
+                        f"({total_tool_calls} tool call{'s' if total_tool_calls != 1 else ''}).[/bold green]"
+                    )
                     return DeveloperAgentResult(
                         success=True,
                         steps=step,

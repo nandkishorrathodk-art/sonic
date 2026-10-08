@@ -52,7 +52,15 @@ def resolve_local_context(cwd: Path | str | None = None) -> LocalWorkspaceContex
         if repo_root is None:
             raise ValueError("SONIC_REPO_ROOT must point to an existing Git checkout")
     else:
-        repo_root = _git_root(working_dir) or _git_root(source_checkout)
+        if working_dir == Path.home().resolve():
+            candidate_sonic = working_dir / "sonic"
+            repo_root = (
+                _git_root(source_checkout)
+                or (_git_root(candidate_sonic) if candidate_sonic.exists() else None)
+                or _git_root(working_dir)
+            )
+        else:
+            repo_root = _git_root(working_dir) or _git_root(source_checkout)
     is_git = repo_root is not None
     if repo_root is None:
         repo_root = working_dir

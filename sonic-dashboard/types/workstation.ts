@@ -19,6 +19,9 @@ export interface WorklogItem {
   exit_code?: number;
   role?: "user" | "assistant" | "system" | string;
   proposed_actions?: any[];
+  approval_id?: string;
+  approval_status?: "pending" | "approved" | "rejected" | "expired" | string;
+  target_resource?: string;
   sub_agent_number?: number;
   sub_agent_id?: string;
   sub_agent_name?: string;
@@ -37,6 +40,10 @@ export interface WorklogItem {
   actions_taken?: number;
   findings_summary?: string;
   key_discoveries?: string[];
+  judge_verdict?: string | null;
+  judge_notes?: string | null;
+  evidence_verified?: boolean;
+  outcome_status?: string;
 }
 
 export interface DesktopApp {

@@ -248,6 +248,81 @@ async def test_completion_checker_requires_success_as_well_as_verified_evidence(
 
 
 @pytest.mark.asyncio
+async def test_completion_checker_rejects_verified_but_unrelated_subtask():
+    router = _VisionJudge('{"complete":true,"reason":"A worker succeeded"}')
+    boss = BossAgent(computer_provider=_Desktop(), llm_router=router)
+    unrelated = SubMissionResult(
+        sub_mission_id="network-check",
+        goal="Check network connectivity",
+        success=True,
+        evidence_verified=True,
+        findings_summary="Network connectivity check independently verified.",
+    )
+
+    complete, reason = await boss._check_objective_complete(
+        "Create a folder for project notes and save report",
+        "A worker completed a network check.",
+        [unrelated],
+    )
+
+    assert complete is False
+    assert "do not cover every meaningful part" in reason
+
+
+@pytest.mark.asyncio
+async def test_completion_checker_rejects_partial_verified_objective_coverage():
+    router = _VisionJudge('{"complete":true,"reason":"The folder is ready"}')
+    boss = BossAgent(computer_provider=_Desktop(), llm_router=router)
+    partial = SubMissionResult(
+        sub_mission_id="folder-only",
+        goal="Create a folder for project notes",
+        success=True,
+        evidence_verified=True,
+        findings_summary="The project notes folder was independently verified.",
+    )
+
+    complete, reason = await boss._check_objective_complete(
+        "Create a folder for project notes and save report",
+        "The folder is ready.",
+        [partial],
+    )
+
+    assert complete is False
+    assert "do not cover every meaningful part" in reason
+
+
+@pytest.mark.asyncio
+async def test_completion_checker_accepts_verified_subtasks_covering_entire_goal():
+    router = _VisionJudge('{"complete":true,"reason":"Both results are verified"}')
+    boss = BossAgent(computer_provider=_Desktop(), llm_router=router)
+    results = [
+        SubMissionResult(
+            sub_mission_id="folder",
+            goal="Create a folder for project notes",
+            success=True,
+            evidence_verified=True,
+            findings_summary="Folder created and verified.",
+        ),
+        SubMissionResult(
+            sub_mission_id="report",
+            goal="Save report for project notes",
+            success=True,
+            evidence_verified=True,
+            findings_summary="Report saved and verified.",
+        ),
+    ]
+
+    complete, reason = await boss._check_objective_complete(
+        "Create a folder for project notes and save report",
+        "Folder and report verified.",
+        results,
+    )
+
+    assert complete is True
+    assert reason == "Both results are verified"
+
+
+@pytest.mark.asyncio
 async def test_final_boss_report_is_not_complete_without_judge_confirmation():
     boss = BossAgent(
         computer_provider=_Desktop(),

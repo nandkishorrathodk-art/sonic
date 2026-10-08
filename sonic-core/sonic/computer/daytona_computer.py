@@ -1000,7 +1000,12 @@ class DaytonaComputerProvider(ComputerProvider):
                 clicks = abs(delta)
                 cmd_parts = []
                 if getattr(action, "x", None) is not None and getattr(action, "y", None) is not None:
-                    cmd_parts.append(f"DISPLAY={disp} xdotool mousemove {int(action.x)} {int(action.y)}")
+                    await self._move_mouse_smoothly(
+                        sandbox,
+                        workspace_id,
+                        int(action.x),
+                        int(action.y),
+                    )
                 for _ in range(clicks):
                     cmd_parts.append(f"DISPLAY={disp} xdotool click {button}")
                 scroll_cmd = " && ".join(cmd_parts)

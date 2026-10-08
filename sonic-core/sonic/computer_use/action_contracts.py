@@ -10,6 +10,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import json
+import math
+import time
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +25,328 @@ if TYPE_CHECKING:
 
 def _frozen(values: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return MappingProxyType(dict(values or {}))
+
+
+@dataclass(frozen=True)
+class GUIActionIntent:
+    """One bounded GUI action tied to its source observation.
+
+    Confidence and risk are optional annotations, never authorization inputs;
+    the existing safety policy remains the only risk gate.
+    """
+
+    action_type: str
+    target: str
+    payload_json: str
+    expected_outcome: str
+    source_perception_version: int
+    source_state_version: int
+    source_active_window: str
+    source_focus: str | None
+    target_identity: str | None
+    source_width: int
+    source_height: int
+    issued_at_ns: int
+    expires_at_ns: int
+    confidence: float | None = None
+    risk_level: str | None = None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        action_type: str,
+        target: str,
+        payload: Mapping[str, Any],
+        expected_outcome: str,
+        observation: Any,
+        now_ns: int | None = None,
+        ttl_ms: int = 2_000,
+    ) -> GUIActionIntent:
+        """Create an intent only from a fresh, identified desktop observation."""
+        action_name = str(action_type).strip()
+        if not action_name.startswith("GUI_"):
+            raise ValueError("GUI intents require a GUI action")
+        if not isinstance(payload, Mapping):
+            raise ValueError("GUI action payload must be a mapping")
+        if ttl_ms <= 0:
+            raise ValueError("GUI action intent TTL must be positive")
+
+        screen = getattr(observation, "screen", None)
+        if screen is None:
+            raise ValueError("GUI action intent requires an observed screen")
+        active_window = str(
+            getattr(screen, "active_window", "")
+            or getattr(observation, "active_application", "")
+        ).strip()
+        width = getattr(screen, "width", 0)
+        height = getattr(screen, "height", 0)
+        version = getattr(observation, "perception_version", 0)
+        state_version = getattr(screen, "perception_version", 0)
+        age_ms = getattr(observation, "observation_age_ms", None)
+        capture_age_ms = getattr(screen, "capture_age_ms", None)
+        if (
+            not isinstance(capture_age_ms, (int, float))
+            or isinstance(capture_age_ms, bool)
+            or not math.isfinite(capture_age_ms)
+            or capture_age_ms < 0
+        ):
+            raise ValueError("GUI action intent requires known capture age")
+        issued_at = now_ns if now_ns is not None else time.perf_counter_ns()
+        received_at_ns = getattr(observation, "observation_received_monotonic_ns", None)
+        elapsed_ms = (
+            max(0, issued_at - received_at_ns) / 1_000_000
+            if isinstance(received_at_ns, int) and not isinstance(received_at_ns, bool)
+            else 0.0
+        )
+        effective_age_ms = max(
+            capture_age_ms + elapsed_ms,
+            float(age_ms)
+            if isinstance(age_ms, (int, float)) and not isinstance(age_ms, bool)
+            else 0.0,
+        )
+        if getattr(screen, "desktop_state", "") == "STATE_ONLY":
+            controls_age_ms = getattr(screen, "controls_age_ms", None)
+            if (
+                not isinstance(controls_age_ms, (int, float))
+                or isinstance(controls_age_ms, bool)
+                or not math.isfinite(controls_age_ms)
+                or controls_age_ms < 0
+            ):
+                raise ValueError("state-only GUI intent requires known controls age")
+            effective_age_ms = max(effective_age_ms, controls_age_ms + elapsed_ms)
+        if (
+            not active_window
+            or not isinstance(width, int)
+            or isinstance(width, bool)
+            or width <= 0
+            or not isinstance(height, int)
+            or isinstance(height, bool)
+            or height <= 0
+            or not isinstance(version, int)
+            or isinstance(version, bool)
+            or version <= 0
+        ):
+            raise ValueError("GUI action intent requires a versioned active desktop")
+        if getattr(screen, "desktop_state", "") == "STATE_ONLY" and (
+            not isinstance(state_version, int)
+            or isinstance(state_version, bool)
+            or state_version <= 0
+        ):
+            raise ValueError("state-only GUI intent requires a versioned source state")
+        if (
+            not isinstance(age_ms, (int, float))
+            or isinstance(age_ms, bool)
+            or not math.isfinite(age_ms)
+            or age_ms < 0
+            or effective_age_ms > ttl_ms
+        ):
+            raise ValueError("GUI action intent requires fresh observation evidence")
+
+        controls = [
+            control
+            for control in (getattr(screen, "detected_controls", []) or [])
+            if isinstance(control, Mapping)
+        ]
+        focus_is_observed = any("focused" in control for control in controls)
+        focused_controls = [
+            {
+                key: control.get(key)
+                for key in ("name", "role", "bbox", "source")
+                if key in control
+            }
+            for control in controls
+            if control.get("focused") is True
+        ]
+        source_focus = (
+            json.dumps(
+                sorted(focused_controls, key=lambda item: json.dumps(item, sort_keys=True)),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if focus_is_observed
+            else None
+        )
+        target_terms = {
+            str(target).strip().casefold(),
+            str(payload.get("target") or "").strip().casefold(),
+            str(payload.get("selector") or "").strip().casefold(),
+        } - {""}
+        target_controls = [
+            control
+            for control in controls
+            if any(
+                term == str(control.get(key) or "").strip().casefold()
+                for term in target_terms
+                for key in ("name", "label", "text")
+            )
+        ]
+        target_identity = None
+        if len(target_controls) == 1:
+            target_control = target_controls[0]
+            target_identity = json.dumps(
+                {
+                    key: target_control.get(key)
+                    for key in ("name", "label", "text", "role", "bbox", "source")
+                    if key in target_control
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        return cls(
+            action_type=action_name,
+            target=str(target),
+            payload_json=json.dumps(
+                dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ),
+            expected_outcome=str(expected_outcome),
+            source_perception_version=version,
+            source_state_version=state_version,
+            source_active_window=active_window,
+            source_focus=source_focus,
+            target_identity=target_identity,
+            source_width=width,
+            source_height=height,
+            issued_at_ns=issued_at,
+            expires_at_ns=issued_at + max(0, ttl_ms - int(effective_age_ms)) * 1_000_000,
+        )
+
+    def validate_binding(
+        self,
+        *,
+        action_type: str,
+        target: str,
+        payload: Mapping[str, Any],
+        now_ns: int | None = None,
+    ) -> tuple[str, ...]:
+        """Reject action substitution or an intent that expired before dispatch."""
+        reasons: list[str] = []
+        current = now_ns if now_ns is not None else time.perf_counter_ns()
+        if current > self.expires_at_ns:
+            reasons.append("GUI action intent expired")
+        if str(action_type).strip() != self.action_type:
+            reasons.append("GUI action type differs from intent")
+        if str(target) != self.target:
+            reasons.append("GUI action target differs from intent")
+        try:
+            encoded_payload = json.dumps(
+                dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+        except (TypeError, ValueError):
+            reasons.append("GUI action payload is not serializable")
+        else:
+            if encoded_payload != self.payload_json:
+                reasons.append("GUI action payload differs from intent")
+        return tuple(reasons)
+
+    def rebase_after_verified_transition(
+        self,
+        observation: Any,
+        *,
+        now_ns: int | None = None,
+    ) -> GUIActionIntent:
+        """Mint a continuation only after an observed, authorized UI transition."""
+        current = now_ns if now_ns is not None else time.perf_counter_ns()
+        remaining_ms = (self.expires_at_ns - current) // 1_000_000
+        if remaining_ms <= 0:
+            raise ValueError("GUI action intent expired before its verified transition")
+        return type(self).create(
+            action_type=self.action_type,
+            target=self.target,
+            payload=json.loads(self.payload_json),
+            expected_outcome=self.expected_outcome,
+            observation=observation,
+            now_ns=current,
+            ttl_ms=int(remaining_ms),
+        )
+
+    def validate_observation(
+        self,
+        screen: Any,
+        *,
+        now_ns: int | None = None,
+        max_age_ms: int = 2_000,
+        elapsed_ms: float = 0.0,
+    ) -> tuple[str, ...]:
+        """Require fresh evidence from the same window and display geometry."""
+        current = now_ns if now_ns is not None else time.perf_counter_ns()
+        reasons: list[str] = []
+        if current > self.expires_at_ns:
+            reasons.append("GUI action intent expired")
+        age_ms = getattr(screen, "capture_age_ms", None)
+        if (
+            not isinstance(age_ms, (int, float))
+            or isinstance(age_ms, bool)
+            or not math.isfinite(age_ms)
+            or age_ms < 0
+            or age_ms + elapsed_ms > max_age_ms
+        ):
+            reasons.append("fresh desktop evidence is unavailable")
+        if getattr(screen, "desktop_state", "") == "STATE_ONLY":
+            controls_age_ms = getattr(screen, "controls_age_ms", None)
+            if (
+                not isinstance(controls_age_ms, (int, float))
+                or isinstance(controls_age_ms, bool)
+                or not math.isfinite(controls_age_ms)
+                or controls_age_ms < 0
+                or controls_age_ms > 250
+            ):
+                reasons.append("fresh accessibility controls are unavailable")
+        active_window = str(getattr(screen, "active_window", "") or "").strip()
+        if active_window.casefold() != self.source_active_window.casefold():
+            reasons.append("active window differs from GUI action intent")
+        if (
+            getattr(screen, "width", 0) != self.source_width
+            or getattr(screen, "height", 0) != self.source_height
+        ):
+            reasons.append("display geometry differs from GUI action intent")
+        version = getattr(screen, "perception_version", 0)
+        if (
+            getattr(screen, "desktop_state", "") == "STATE_ONLY"
+            and (
+                not isinstance(version, int)
+                or isinstance(version, bool)
+                or version != self.source_state_version
+            )
+        ):
+            reasons.append("desktop state version differs from GUI action intent")
+        controls = [
+            control
+            for control in (getattr(screen, "detected_controls", []) or [])
+            if isinstance(control, Mapping)
+        ]
+        if self.source_focus is not None:
+            if not any("focused" in control for control in controls):
+                reasons.append("current focused-control state is unavailable")
+            else:
+                focused_controls = [
+                    {
+                        key: control.get(key)
+                        for key in ("name", "role", "bbox", "source")
+                        if key in control
+                    }
+                    for control in controls
+                    if control.get("focused") is True
+                ]
+                current_focus = json.dumps(
+                    sorted(
+                        focused_controls,
+                        key=lambda item: json.dumps(item, sort_keys=True),
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if current_focus != self.source_focus:
+                    reasons.append("focused control differs from GUI action intent")
+        if self.target_identity is not None:
+            target = json.loads(self.target_identity)
+            if not any(
+                all(control.get(key) == value for key, value in target.items())
+                for control in controls
+            ):
+                reasons.append("target control disappeared or changed since GUI action intent")
+        return tuple(reasons)
 
 
 @dataclass(frozen=True)
@@ -79,11 +404,13 @@ class ActionReceipt:
     after: Mapping[str, Any] = field(default_factory=dict)
     exit_code: int | None = None
     evidence: str = ""
+    intent: Mapping[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "before", _frozen(self.before))
         object.__setattr__(self, "after", _frozen(self.after))
+        object.__setattr__(self, "intent", _frozen(self.intent))
 
 
 @dataclass(frozen=True)

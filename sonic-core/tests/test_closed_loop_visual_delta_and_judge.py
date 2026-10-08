@@ -234,6 +234,20 @@ async def test_state_only_gui_receipt_verifies_delta_without_screenshot(
     updated_text, changed_region, expected_status, expected_changed
 ):
     class StateReceiptProvider:
+        async def observe_state(self, workspace_id):
+            return ScreenObservation(
+                screenshot_base64="",
+                capture_age_ms=20,
+                controls_age_ms=15,
+                perception_version=1,
+                width=1280,
+                height=800,
+                active_window="Document",
+                visible_text="Document - Untitled",
+                detected_controls=[],
+                desktop_state="STATE_ONLY",
+            )
+
         async def gui_action_state(self, workspace_id, action, actor="operator"):
             return ScreenObservation(
                 screenshot_base64="",

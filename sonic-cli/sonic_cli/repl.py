@@ -14,8 +14,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.syntax import Syntax
 
 from sonic_cli.context import LocalWorkspaceContext, get_token, resolve_local_context
@@ -31,32 +33,32 @@ if hasattr(sys.stdout, "reconfigure"):
 console = Console(legacy_windows=False)
 
 
-def _print_welcome_banner(ctx: LocalWorkspaceContext) -> None:
-    """Print the clean ASCII logo and status header."""
+def _print_welcome_banner(ctx: LocalWorkspaceContext, model_info: str = "") -> None:
+    """Print the modern, sleek banner and capacity summary."""
     if Path.cwd().resolve() == Path.home().resolve():
         console.print(
-            "[yellow]⚠️  SONIC CLI works best when run in a project directory, "
-            "not your home directory.[/yellow]"
+            f"[dim cyan]📁 Auto-detected SONIC repository at: [bold]{ctx.repo_root}[/bold][/dim cyan]"
         )
 
-    # ASCII Logo + Title
-    logo_lines = [
-        "  .:|:.",
-        " '\"':*|:*.  SONIC CLI",
-        " .:::|:::  v0.3.0",
-        "  ':|:'",
-    ]
-    console.print("\n".join(logo_lines))
-    console.print()
+    branch_display = ctx.branch if ctx.is_git else "non-git"
+    model_display = model_info or os.environ.get("SONIC_MODEL") or "qwen/qwen3.8-27b (groq)"
 
-    # Status / Capacity summary line
-    branch_display = ctx.branch if ctx.is_git else "non-git workspace"
-    status_line = (
-        f"Autonomous AI-Human Digital Being · "
-        f"Branch: [cyan]{branch_display}[/cyan] · "
-        f"Workspace: [dim]{ctx.workspace_id}[/dim]"
+    banner_text = (
+        f"[bold cyan]⚡ SONIC CLI[/bold cyan] [dim]v0.3.1[/dim] · [bold white]Autonomous AI Software Engineer[/bold white]\n"
+        f"[dim]Repo:[/dim] [bold white]{ctx.repo_root.name}[/bold white]  │  "
+        f"[dim]Branch:[/dim] [cyan]{branch_display}[/cyan]  │  "
+        f"[dim]Model:[/dim] [green]{model_display}[/green]  │  "
+        f"[dim]Workspace:[/dim] [dim]{ctx.workspace_id}[/dim]\n"
+        f"[dim]Commands: [cyan]/help[/cyan] · Auto-evolve: [cyan]/auto[/cyan] · Reset: [cyan]/reset[/cyan] · Direct coding & questions.[/dim]"
     )
-    console.print(status_line)
+    console.print(
+        Panel(
+            banner_text,
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 2),
+        )
+    )
     console.print()
 
 
@@ -222,6 +224,8 @@ def _handle_help() -> None:
     console.print("  [cyan]/journal[/cyan]      - View evolution journal and verification receipts")
     console.print("  [cyan]/test [path][/cyan]  - Run pytest directly with formatted output")
     console.print("  [cyan]/status[/cyan]       - Show git branch, dirty files, repo root, and environment keys")
+    console.print("  [cyan]/model [name][/cyan]- View active model or switch model")
+    console.print("  [cyan]/reset[/cyan]        - Reset conversational memory")
     console.print("  [cyan]/clear[/cyan]        - Clear terminal screen")
     console.print("  [cyan]/help[/cyan]         - Show this command guide")
     console.print("  [cyan]/exit[/cyan]         - Exit SONIC CLI")
@@ -368,6 +372,14 @@ def _is_identity_query(prompt: str) -> bool:
         "who is sonic",
         "tell me about yourself",
         "introduce yourself",
+        "who created you",
+        "who made you",
+        "who built you",
+        "who is your founder",
+        "who is the founder",
+        "founder",
+        "creator",
+        "parth lab",
     ]
     return any(p in cleaned for p in patterns)
 
@@ -407,11 +419,32 @@ def _handle_greeting() -> None:
     )
 
 
+def _is_engineering_task(prompt: str) -> bool:
+    """Heuristic to decide whether prompt needs tool access (agent.run) or is conversational (agent.chat)."""
+    p = prompt.lower()
+    # Indicators of file paths or code extensions
+    if any(ext in p for ext in [".py", ".ts", ".js", ".json", ".md", ".toml", ".yaml", ".yml", ".html", ".css", ".sh"]):
+        return True
+    if any(sep in prompt for sep in ["/", "\\"]):
+        return True
+    # Action verbs for engineering work
+    actions = [
+        "fix", "build", "create", "write", "edit", "modify", "update", "delete", "remove",
+        "refactor", "run", "test", "debug", "implement", "add", "diff", "commit", "inspect",
+        "search", "find", "replace", "install", "check", "verify", "patch", "analyze"
+    ]
+    tokens = re.findall(r"\b\w+\b", p)
+    if any(tok in actions for tok in tokens):
+        return True
+    return False
+
+
 def _dispatch_prompt(
     prompt: str,
     ctx: LocalWorkspaceContext,
     server_url: str = "http://127.0.0.1:12000",
     token: str = "",
+    agent: Any = None,
 ) -> None:
     """Dispatch user prompt to the local DeveloperAgent, with conversational handling for greetings."""
     if _is_greeting(prompt):
@@ -430,8 +463,8 @@ def _dispatch_prompt(
 
     if _is_identity_query(prompt):
         console.print(
-            "⚡ I am SONIC, an Autonomous AI Software Engineer operating directly on your local workspace.\n"
-            "I use native tool calling to inspect files, edit code, run tests, and evolve this repository.\n"
+            "⚡ I am SONIC, an Autonomous AI Software Engineer created by Nandkishor Rathod at Parth Lab.\n"
+            "I operate directly on your local workspace to inspect files, edit code, run tests, and evolve this repository.\n"
             "Tell me what file or task you'd like to work on, or type [cyan]/help[/cyan] to see available commands."
         )
         return
@@ -449,18 +482,22 @@ def _dispatch_prompt(
         )
         return
 
-    try:
-        from sonic_cli.developer_agent import DeveloperAgent
-    except ImportError as exc:
-        console.print(
-            f"[red]Could not import DeveloperAgent from sonic_cli.developer_agent: {exc}[/red]\n"
-            "[yellow]Please verify sonic_cli is properly installed.[/yellow]"
-        )
-        return
+    if agent is None:
+        try:
+            from sonic_cli.developer_agent import DeveloperAgent
+        except ImportError as exc:
+            console.print(
+                f"[red]Could not import DeveloperAgent from sonic_cli.developer_agent: {exc}[/red]\n"
+                "[yellow]Please verify sonic_cli is properly installed.[/yellow]"
+            )
+            return
+        agent = DeveloperAgent(workspace_dir=ctx.repo_root, console=console)
 
     try:
-        agent = DeveloperAgent(workspace_dir=ctx.repo_root, console=console)
-        agent.run(prompt)
+        if _is_engineering_task(prompt):
+            agent.run(prompt)
+        else:
+            agent.chat(prompt)
     except KeyboardInterrupt:
         console.print("\n[yellow]Task interrupted by operator (Ctrl+C).[/yellow]")
     except Exception as exc:
@@ -475,7 +512,16 @@ def run_repl(
 
     ctx = resolve_local_context()
     resolved_token = get_token(token)
-    _print_welcome_banner(ctx)
+
+    active_agent = None
+    try:
+        from sonic_cli.developer_agent import DeveloperAgent
+        active_agent = DeveloperAgent(workspace_dir=ctx.repo_root, console=console)
+        model_info = f"{active_agent.config.model} ({active_agent.config.provider})"
+    except Exception:
+        model_info = ""
+
+    _print_welcome_banner(ctx, model_info=model_info)
 
     try:
         from prompt_toolkit import PromptSession
@@ -489,26 +535,23 @@ def run_repl(
     history_file.parent.mkdir(parents=True, exist_ok=True)
     if PromptSession is not None:
         commands_completer = WordCompleter(
-            ["/auto", "/diff", "/journal", "/test", "/status", "/clear", "/help", "/exit", "/quit"],
+            ["/auto", "/diff", "/journal", "/test", "/status", "/model", "/reset", "/clear", "/help", "/exit", "/quit"],
             ignore_case=True,
         )
-        style = Style.from_dict({"prompt": "bold", "bottom-toolbar": "dim"})
+        style = Style.from_dict({"prompt": "bold cyan", "bottom-toolbar": "dim"})
         session = PromptSession[str](
-            message="> ",
+            message="sonic ❯ ",
             completer=commands_completer,
             history=FileHistory(str(history_file)),
             style=style,
         )
-        placeholder_text = (
-            "Ask SONIC to inspect code, fix tests, implement features, or run /auto, /test"
-        )
 
         def bottom_toolbar() -> str:
-            branch = ctx.branch if ctx.is_git else "non-git workspace"
-            return f"Branch: {branch} · Local AI Developer · /help"
+            branch = ctx.branch if ctx.is_git else "non-git"
+            curr_model = active_agent.config.model if active_agent else "default"
+            return f"Branch: {branch} · Model: {curr_model} · /help"
     else:
         session = None
-        placeholder_text = ""
         bottom_toolbar = None
         console.print(
             "[yellow]prompt_toolkit is unavailable; using the basic terminal prompt.[/yellow]"
@@ -517,10 +560,9 @@ def run_repl(
     while True:
         try:
             if session is None:
-                user_input = input("> ")
+                user_input = input("sonic ❯ ")
             else:
                 user_input = session.prompt(
-                    placeholder=placeholder_text,
                     bottom_toolbar=bottom_toolbar,
                 )
         except KeyboardInterrupt:
@@ -538,7 +580,7 @@ def run_repl(
             break
         if cmd == "/clear":
             console.clear()
-            _print_welcome_banner(ctx)
+            _print_welcome_banner(ctx, model_info=model_info)
         elif cmd == "/diff":
             _handle_diff(ctx)
         elif cmd == "/journal":
@@ -550,6 +592,20 @@ def run_repl(
             _handle_status(ctx, server_url=server_url, token=resolved_token)
         elif cmd == "/help":
             _handle_help()
+        elif cmd == "/reset":
+            if active_agent is not None:
+                active_agent.reset()
+            console.print("[green]✓ Conversational memory reset.[/green]")
+        elif cmd == "/model" or cmd.startswith("/model "):
+            new_model = cmd[6:].strip() if cmd.startswith("/model ") else ""
+            if active_agent is not None:
+                if new_model:
+                    active_agent.config.model = new_model
+                    console.print(f"[green]✓ Switched model to:[/green] [cyan]{new_model}[/cyan]")
+                else:
+                    console.print(f"[bold]Active model:[/bold] [cyan]{active_agent.config.model}[/cyan] ({active_agent.config.provider})")
+            else:
+                console.print("[yellow]Agent not initialized.[/yellow]")
         elif cmd == "/auto" or cmd.startswith("/auto "):
             parts = cmd.split()
             if len(parts) > 2 or (
@@ -562,4 +618,4 @@ def run_repl(
         elif cmd.startswith("/"):
             console.print(f"[yellow]Unknown command: {cmd}. Type /help for available commands.[/yellow]")
         else:
-            _dispatch_prompt(cmd, ctx, server_url=server_url, token=resolved_token)
+            _dispatch_prompt(cmd, ctx, server_url=server_url, token=resolved_token, agent=active_agent)

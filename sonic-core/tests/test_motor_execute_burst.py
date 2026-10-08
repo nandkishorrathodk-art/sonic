@@ -98,6 +98,35 @@ async def test_execute_burst_verifier_interrupts():
     assert result.stop_reason == "verifier interrupted burst"
 
 
+@pytest.mark.asyncio
+async def test_execute_burst_interrupt_cancels_in_flight_action_and_stops():
+    started = asyncio.Event()
+    interrupted = asyncio.Event()
+
+    class BlockingComputer(_Computer):
+        async def gui_action(self, workspace_id: str, action: GUIAction):
+            self.calls.append(action)
+            started.set()
+            await asyncio.Event().wait()
+
+    computer = BlockingComputer()
+    task = asyncio.create_task(
+        MotorReflexes(computer).execute_burst(
+            "workspace",
+            _actions(),
+            interrupt_event=interrupted,
+        )
+    )
+    await started.wait()
+    interrupted.set()
+    result = await task
+
+    assert result.success is False
+    assert result.stopped is True
+    assert result.stop_reason == "motor burst interrupted during dispatch"
+    assert len(computer.calls) == 1
+
+
 def test_execute_burst_validates_configuration():
     motor = MotorReflexes(_Computer())
     actions = _actions(1)

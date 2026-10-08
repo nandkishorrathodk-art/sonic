@@ -44,6 +44,45 @@ def test_grounding_rejects_offscreen_points_instead_of_clamping():
     assert extract_bbox_midpoint("<|box_start|>(800, 500, 1000, 700)<|box_end|>", width=1280, height=800) == (1152, 480)
 
 
+@pytest.mark.parametrize(
+    "value",
+    (
+        (1, 1),
+        '{"x": 1, "y": 1}',
+        "<|box_start|>(1, 0, 3, 2)<|box_end|>",
+    ),
+)
+def test_explicit_pixel_grounding_does_not_scale_small_coordinates(value):
+    expected = (2, 1) if isinstance(value, str) and "box_start" in value else (1, 1)
+    assert extract_bbox_midpoint(
+        value,
+        width=1280,
+        height=800,
+        coordinate_space="pixel",
+    ) == expected
+
+
+def test_direct_pixel_grounding_rejects_out_of_bounds_coordinates():
+    assert resolve_ui_target("1280, 400", width=1280, height=800) is None
+    assert resolve_ui_target("400, 800", width=1280, height=800) is None
+
+
+@pytest.mark.asyncio
+async def test_async_direct_grounding_rejects_out_of_bounds_coordinates():
+    from sonic.computer_use.grounding import resolve_ui_target_async
+
+    assert await resolve_ui_target_async(
+        "1280, 400",
+        width=1280,
+        height=800,
+    ) is None
+    assert await resolve_ui_target_async(
+        "704, 440",
+        width=1280,
+        height=800,
+    ) == (704, 440)
+
+
 def test_landmark_substring_collision_prevention():
     # Without coordinates or vision grounding, text queries fail closed to None (no blind clicking)
     assert resolve_ui_target("token", width=1280, height=800) is None

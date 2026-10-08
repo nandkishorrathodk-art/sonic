@@ -226,6 +226,12 @@ export const api = {
       body: JSON.stringify({ action_id: actionId, approved }),
     }),
 
+  approveWorkstationAction: (approvalId: string, approved: boolean, sessionId = "default") =>
+    apiClient<any>(`/workstation/action/approve?session_id=${encodeURIComponent(sessionId)}`, {
+      method: "POST",
+      body: JSON.stringify({ approval_id: approvalId, approved }),
+    }),
+
   openMissionBrowser: (url: string, sessionId = "default", approved = false) =>
     apiClient<any>(`/workstation/mission/browser-open?session_id=${encodeURIComponent(sessionId)}`, {
       method: "POST",

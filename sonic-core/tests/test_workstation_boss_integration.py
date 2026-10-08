@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from sonic.api.routes.workstation import (
+    WorkstationPromptRequest,
     _get_or_create_session,
     _infer_program_profile,
     _is_action_prompt,
@@ -13,6 +14,7 @@ from sonic.api.routes.workstation import (
     _record_unverified_observation,
     _requires_desktop_observation,
     _run_prompt_reasoning,
+    send_workstation_prompt,
 )
 from sonic.computer_use.models import (
     ComputerActionType,
@@ -270,6 +272,69 @@ async def test_workstation_routes_concise_computer_task_to_boss_agent(monkeypatc
     mock_boss_inst.run.assert_awaited_once()
     assert mock_boss_inst.run.await_args.kwargs["requested_plane"] == "gui"
     assert state["status"] == "IDLE"
+
+
+@pytest.mark.asyncio
+async def test_actionable_workstation_request_without_desktop_is_blocked(monkeypatch):
+    tenant_id = "test-tenant-no-desktop"
+    session_id = "no-desktop-session"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["desktop"] = {}
+    state["worklog"] = []
+    monkeypatch.setattr("sonic.api.routes.workstation._persist_workstation_state", lambda: None)
+
+    await _run_prompt_reasoning(tenant_id, session_id, "Create file notes.txt")
+
+    assert state["status"] == "BLOCKED"
+    assert state["last_mission_outcome"]["status"] == "BLOCKED"
+    assert "no task actions were run" in state["thought_summary"]
+    assert any(item.get("title") == "Task Blocked" for item in state["worklog"])
+
+
+@pytest.mark.asyncio
+async def test_autonomous_prompt_uses_verified_target_sandbox_without_desktop(monkeypatch):
+    import sonic.api.routes.workstation as workstation
+    from types import SimpleNamespace
+
+    tenant_id = "test-tenant-scoped-target"
+    session_id = "scoped-target-session"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["desktop"] = {}
+    state["target_sandbox"] = {
+        "workspace_id": "target-workspace",
+        "sandbox_id": "target-workspace",
+        "target": "target.test",
+        "scope_verified": True,
+    }
+    state["mission"]["status"] = "IDLE"
+    monkeypatch.setattr(workstation, "_resolve_tenant_id", lambda _user: tenant_id)
+    monkeypatch.setattr(workstation, "_persist_workstation_state", lambda: None)
+    preflight = AsyncMock()
+    monkeypatch.setattr(workstation, "_run_mission_preflight", preflight)
+    tasks = []
+    monkeypatch.setattr(
+        workstation,
+        "_track_background_task",
+        lambda _tenant, _session, task: tasks.append(task),
+    )
+
+    response = await send_workstation_prompt(
+        WorkstationPromptRequest(
+            prompt="Inspect the authorized target",
+            mode="autonomous",
+            session_id=session_id,
+        ),
+        user=SimpleNamespace(),
+    )
+    await asyncio.gather(*tasks)
+
+    assert response["status"] == "accepted"
+    assert state["mission"]["target_sandbox_id"] == "target-workspace"
+    preflight.assert_awaited_once_with(
+        tenant_id,
+        session_id,
+        state["mission"]["mission_id"],
+    )
 
 
 @pytest.mark.asyncio

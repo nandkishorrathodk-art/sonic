@@ -8,6 +8,7 @@ interface CommandBlockProps {
   output?: string;
   durationSeconds?: number;
   exitCode?: number;
+  actionStatus?: string;
   agentName?: string;
   agentId?: string;
   initiallyExpanded?: boolean;
@@ -18,6 +19,7 @@ export function CommandBlock({
   output,
   durationSeconds,
   exitCode,
+  actionStatus,
   agentName,
   agentId,
   initiallyExpanded = false,
@@ -57,6 +59,11 @@ export function CommandBlock({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0 ml-2">
+          {actionStatus && (
+            <span className="text-[9px] text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/25 whitespace-nowrap">
+              {actionStatus}
+            </span>
+          )}
           {agentName && agentId && (
             <span className="text-[9px] text-secondary-300 px-1.5 py-0.5 rounded bg-secondary-500/10 border border-secondary-500/25 whitespace-nowrap">
               {agentName} · {agentId}

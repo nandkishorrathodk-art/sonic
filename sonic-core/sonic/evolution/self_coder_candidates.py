@@ -152,11 +152,15 @@ class SelfCoderCandidateStore:
         import gc
         import os
         import stat
+        import time
 
-        gc.collect()
-        if path.exists():
+        for attempt in range(3):
+            gc.collect()
+            if not path.exists():
+                break
             try:
                 self._git(["worktree", "remove", "--force", str(path)])
+                break
             except Exception:
                 def _handle_remove_readonly(func, file_path, exc_info):
                     try:
@@ -168,8 +172,10 @@ class SelfCoderCandidateStore:
                 try:
                     if path.exists():
                         shutil.rmtree(str(path), onerror=_handle_remove_readonly)
+                        break
                 except Exception:
-                    pass
+                    if attempt < 2:
+                        time.sleep(0.3)
 
         try:
             self._git(["worktree", "prune"])

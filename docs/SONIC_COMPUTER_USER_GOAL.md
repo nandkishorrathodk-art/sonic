@@ -236,6 +236,34 @@ or a measured end-to-end latency improvement.
 - This is an opt-in optimization on the Docker provider only. Other providers
   retain screenshot behavior unless they implement the structured hook.
 
+### Bounded GUI action intents (2026-10-07)
+
+- The `ComputerUseAgent.run_mission()` path wraps each grounded pointer/keyboard
+  action in a one-action intent carrying its action, target, payload, expected
+  outcome, source perception version, active window, display dimensions, and
+  evidence-derived expiration.
+- The intent is checked after acquiring the shared-display lease, so queued or
+  substituted actions cannot reuse an expired contract. Immediately before
+  dispatch, the existing NSI/screenshot revalidation must still establish a
+  fresh observation in the same window and display geometry; the existing
+  safety policy, grounding, coordinate, and Judge gates remain authoritative.
+- An expired or mismatched intent is held before provider dispatch and produces
+  a blocked trace. The expected outcome remains a recorded prediction checked
+  against subsequent receipts/observations; it is not treated as a machine-
+  verified postcondition unless an explicit verifier establishes it.
+- The existing motor-burst path is now advertised as an optional chunk for
+  GUI reasoning, bounded to four typed actions. Each action must state an
+  observable postcondition, a final postcondition is required, and the executor
+  checks per-action state change, coordinates, and expected evidence while
+  retaining one serialized display lease. Any mismatch stops the remaining
+  actions. This can reduce reasoning round-trips for predictable short
+  sequences; it does not create a separate learned/local fast policy.
+- This is a dispatch-safety and evidence-binding foundation, **not** a fast
+  action policy: action selection still waits for the configured reasoning
+  model, and deep reasoning is not yet running concurrently with a local
+  vision-motor controller. No latency improvement or live GUI success claim is
+  made by these contracts or their unit tests.
+
 Focused verification run:
 
 ```text
@@ -260,3 +288,176 @@ acceptance evidence.
 - The dashboard PNGs in `assets/` are historical UI snapshots and do not show a
   verified task. The updated architecture SVG is a component/flow overview,
   not execution evidence.
+
+### Runtime integrity follow-up (2026-10-07)
+
+- Display leases no longer transfer ownership just because a TTL elapsed.
+  Another worker waits for release (and can stop waiting on interrupt), while
+  release verifies that the current task still owns the lease.
+- Interrupt checks now run between mission phases, before GUI dispatch, and
+  between motor-burst actions. An in-flight provider call is cancelled
+  best-effort; an action already delivered to the desktop cannot be undone.
+- GUI intents bind to both the agent observation version and the NSI state
+  version, plus active window, observed focus/target identity when available,
+  screen dimensions, and evidence age. Missing or stale state-only evidence
+  blocks dispatch rather than reusing cached metadata or guessing.
+- The Docker NSI cache is updated only after state validation accepts the feed.
+  Its state version advances on semantic desktop changes rather than every
+  capture, so unchanged state can be revalidated without weakening freshness.
+- A successful generic command receipt is not completion evidence by itself:
+  headless confirmation requires a successful execution plus independent
+  verification evidence, and file outcomes are read back when the provider
+  supports it. Boss completion also requires successful Judge-verified worker
+  outcomes whose sub-mission goals cover the operator objective; unrelated
+  verified work cannot complete the mission.
+
+Focused verification from `sonic-core/`:
+
+```text
+python -m pytest tests\test_action_contracts.py tests\test_teamwork_subagents_hardening.py tests\test_motor_execute_burst.py tests\test_workstation_interrupt_and_resilience.py tests\test_docker_computer_provider.py tests\test_agent_quality_improvements.py tests\test_judge_agent.py tests\test_boss_gui_completion_gate.py tests\test_phase8_visual_computer_use.py tests\test_agent_action_receipts.py tests\test_agent_motor_burst.py tests\test_closed_loop_visual_delta_and_judge.py tests\test_security_audit_remediation.py tests\test_e2e_autonomous_loop.py tests\test_boss_concurrency_and_summaries.py tests\test_boss_agent.py -q
+345 passed, 2 skipped, 1 warning (AsyncMock coroutine warning in an existing e2e regression test)
+```
+
+This is mocked/unit regression evidence only. No live Docker/NSI or
+multi-application desktop acceptance run was performed; general-purpose GUI
+task reliability remains unproven.
+
+### Coordinate grounding edge cases (2026-10-07)
+
+- Explicit pixel coordinate metadata now takes precedence over normalized-value
+  heuristics, so small pixel coordinates such as `(1, 1)` are not scaled across
+  the display. Normalized `[0, 1000]` responses remain explicitly scaled.
+- Direct coordinate queries now reject points outside the observed screen bounds
+  in both synchronous and asynchronous grounding paths; they are never clamped
+  to an edge coordinate.
+
+Focused grounding validation from `sonic-core/`:
+
+```text
+python -m pytest tests\test_visual_delta_and_grounding_accuracy.py tests\test_visual_grounding.py tests\test_vision_grounding_speed_and_accuracy.py tests\test_semantic_target_grounding.py tests\test_phase8_visual_computer_use.py -q
+124 passed
+```
+
+### Boss fallback routing and interrupt boundary (2026-10-07)
+
+- If strategic decomposition fails or returns no workers, Boss now asks Laya to
+  select the execution plane using the original operator objective. An explicit
+  plane constraint still wins; uncertain/failed inference is logged and keeps
+  the conservative GUI default.
+- The fallback worker now receives the operator's objective unchanged instead
+  of a generated wrapper sentence, preventing routing and completion checks
+  from reasoning over an altered goal.
+- If interruption is already signaled when Boss starts, it returns an
+  incomplete, no-actions report before planning or dispatch.
+
+Focused verification from `sonic-core/`:
+
+```text
+python -m pytest tests\test_boss_plane_routing_and_truthfulness.py tests\test_boss_agent.py tests\test_dag_and_replan_orchestration.py tests\test_workstation_boss_integration.py tests\test_workstation_interrupt_and_resilience.py -q
+62 passed
+```
+
+### Desktop provider outcome checks (2026-10-07)
+
+- A scroll action with a zero delta is now rejected by the shared `GUIAction`
+  contract. Previously Docker interpreted zero as three upward wheel events,
+  while Daytona dispatched no effective scroll.
+- Docker window focus now reads back the active window after requesting focus
+  and reports failure if the active title or window ID does not match.
+- Docker window tiling now reads the display dimensions instead of assuming
+  1280x800, and fails if window unmaximization or placement commands fail.
+- Tiling tests now provide discovered windows and a display size; an empty
+  window listing is not accepted as a successful tiling outcome.
+
+Focused verification from `sonic-core/`:
+
+```text
+python -m pytest tests\test_docker_computer_provider.py tests\test_human_motor_reflexes_and_hotkeys.py tests\test_multi_window_management_and_structured_workflow.py -q
+76 passed, 2 skipped
+python -m ruff check sonic\computer\models.py sonic\computer\docker_computer.py tests\test_docker_computer_provider.py
+All checks passed
+```
+
+These are mocked provider regressions, not a live desktop acceptance run. A
+broader Ruff invocation over the two existing motor/tiling test files still
+reports unused imports that predate these changes; they were left untouched.
+No claim is made here that a launched app or tiling command proves task
+completion.
+
+### Consequential action approval (2026-10-07)
+
+- The autonomous agent now pauses for a tenant/session-scoped operator decision
+  before Git commit/push, application installation, policy-classified
+  intrusive terminal commands, or GUI controls whose grounded label indicates
+  sending, publishing, purchasing, or destructive changes. Raw action payloads
+  are not copied into approval worklog items; only the action type, target
+  preview, and approval reason are shown.
+- The workstation approval endpoint resolves only a currently pending,
+  random-ID request belonging to the authenticated operator's tenant and
+  session. Rejection, timeout, missing approval callback, or callback failure
+  blocks dispatch. The dashboard displays explicit approve/reject controls.
+- Native `Deny` always blocks in the direct agent-to-provider path.
+  `RequireApproval` now requires the trusted workstation operator callback;
+  the model cannot self-approve by adding a payload field. A GUI intent
+  remains bound to its original target and state; after approval, final
+  dispatch still revalidates fresh desktop evidence.
+- This semantic control-label gate is a targeted safeguard, not a general
+  classifier for all possible consequences in every application. A control
+  without a grounded semantic label cannot be classified by its meaning.
+
+Focused validation from `sonic-core/`:
+
+```text
+python -m pytest tests\test_agent_action_receipts.py tests\test_workstation_action_approval.py tests\test_native_kernel_bridge.py -q
+31 passed
+python -m ruff check sonic\computer_use\agent.py sonic\api\routes\workstation.py tests\test_agent_action_receipts.py tests\test_workstation_action_approval.py
+All checks passed
+```
+
+Dashboard production build:
+
+```text
+npm run build
+Build completed successfully; existing React hook and image optimization warnings remain.
+```
+
+All approval-route/provider tests are mocked; no live workstation action was
+approved or dispatched as part of validation.
+
+### Operator outcome feedback (2026-10-07)
+
+- Delegated work is shown as `COMPLETED` only when the worker reports success,
+  the independent Judge verdict is `CONFIRMED`, and evidence is marked verified.
+  Positive worker claims without all three signals remain `UNVERIFIED`.
+- Boss report outcomes are visibly differentiated: `COMPLETE` is distinct from
+  `PARTIAL` and `INCOMPLETE`; partial/incomplete reports include the actual
+  summary. A blocked workstation now has an explicit alert with its current
+  blocker, and paused / waiting-for-human states retain their separate
+  continuation guidance.
+- This is presentation of existing backend receipts and verdicts; it does not
+  create verification evidence or change the backend's completion decision.
+
+Dashboard validation:
+
+```text
+npm run build
+Build completed successfully; existing React hook and image optimization warnings remain.
+npm run lint
+Passed with existing React hook and image optimization warnings.
+```
+
+### NSI and live-workstation readiness check (2026-10-07)
+
+Focused checks from `sonic-core/`:
+
+```text
+python -m pytest tests\test_observation_freshness.py tests\test_perception_bus.py tests\test_docker_computer_provider.py tests\test_action_contracts.py -q -rs
+68 passed, 2 skipped
+Skipped: two shared-workstation provider tests require SONIC_RUN_LIVE_WORKSTATION=1.
+```
+
+The Docker inventory showed `sonic-desktop-workstation` running with VNC/noVNC
+ports published. This is only container availability evidence: no live NSI
+state-feed freshness, configured vision-provider readiness, or GUI task
+postcondition was checked. The opt-in shared-workstation tests were not run, so
+live computer-use readiness and task completion remain unverified.

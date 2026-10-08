@@ -13,6 +13,7 @@ Tests for Vision Perception & Coordinate Normalization in sonic-core:
 import base64
 import io
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from PIL import Image
 
@@ -22,7 +23,7 @@ from sonic.computer_use.grounding import (
     crop_active_window_region,
     extract_bbox_midpoint,
 )
-from sonic.computer_use.models import ComputerWorldObservation
+from sonic.computer_use.models import ComputerActionType, ComputerWorldObservation
 
 
 def _make_test_image_b64(width: int = 1280, height: int = 800, color: str = "red") -> str:
@@ -74,7 +75,12 @@ async def test_should_attach_image_without_fresh_structured_state_in_dual_plane(
     agent.llm_router = mock_router
 
     obs = ComputerWorldObservation(
-        screen=ScreenObservation(screenshot_base64=fake_b64, width=1280, height=800),
+        screen=ScreenObservation(
+            screenshot_base64=fake_b64,
+            width=1280,
+            height=800,
+            capture_age_ms=0,
+        ),
     )
     await agent._llm_choose_action(
         goal="Click button",
@@ -112,7 +118,12 @@ async def test_should_attach_image_without_fresh_structured_state_in_gui_plane()
     agent.llm_router = mock_router
 
     obs = ComputerWorldObservation(
-        screen=ScreenObservation(screenshot_base64=fake_b64, width=1280, height=800),
+        screen=ScreenObservation(
+            screenshot_base64=fake_b64,
+            width=1280,
+            height=800,
+            capture_age_ms=0,
+        ),
     )
     await agent._llm_choose_action(
         goal="Click button",
@@ -212,9 +223,98 @@ async def test_fresh_accessibility_state_avoids_image_transfer():
 
 
 @pytest.mark.asyncio
+async def test_explicit_screenshot_action_reacquires_pixels_after_state_only_observation():
+    provider = _mock_provider()
+    fresh_frame = _make_test_image_b64(color="blue")
+    provider.screenshot.return_value = ScreenObservation(
+        screenshot_base64=fresh_frame,
+        width=1280,
+        height=800,
+        active_window="Document",
+        capture_age_ms=0,
+        controls_age_ms=0,
+    )
+    agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+    agent._active_workspace_id = "ws-1"
+    agent.action_history = [
+        SimpleNamespace(action_type=ComputerActionType.GUI_SCREENSHOT)
+    ]
+    snapshot = agent.perception_bus.publish(
+        width=1280,
+        height=800,
+        active_window="Document",
+        controls=[
+            {
+                "name": "Save",
+                "role": "button",
+                "bbox": (30, 40, 90, 70),
+                "bbox_format": "xyxy",
+                "source": "atspi",
+                "confidence": 0.95,
+                "freshness_ms": 10,
+            }
+        ],
+    )
+    obs = ComputerWorldObservation(
+        screen=ScreenObservation(
+            width=1280,
+            height=800,
+            active_window="Document",
+            desktop_state="STATE_ONLY",
+            capture_age_ms=0,
+            controls_age_ms=10,
+            detected_controls=[
+                {
+                    "name": "Save",
+                    "role": "button",
+                    "bbox": (30, 40, 90, 70),
+                    "bbox_format": "xyxy",
+                    "source": "atspi",
+                    "confidence": 0.95,
+                    "freshness_ms": 10,
+                }
+            ],
+        ),
+        perception_version=snapshot.version,
+        observation_age_ms=25,
+    )
+    captured_requests = []
+
+    async def mock_complete(request):
+        captured_requests.append(request)
+        return MagicMock(content="ACTION: GOAL_COMPLETE")
+
+    router = MagicMock()
+    router.complete = AsyncMock(side_effect=mock_complete)
+    agent.llm_router = router
+
+    await agent._llm_choose_action(
+        goal="Inspect the captured desktop",
+        observation=obs,
+        step_index=1,
+        primary_file="",
+        test_file="",
+    )
+
+    assert provider.screenshot.await_count == 1
+    assert captured_requests[0].messages[1].images[0].base64 == fresh_frame
+    assert obs.visual_escalation_reason == "explicit_screenshot_action"
+
+
+@pytest.mark.asyncio
 async def test_stale_accessibility_state_escalates_to_image():
     provider = _mock_provider()
+    fresh_frame = _make_test_image_b64(color="blue")
+    provider.screenshot.return_value = ScreenObservation(
+        screenshot_base64=fresh_frame,
+        width=1280,
+        height=800,
+        active_window="Document",
+        capture_age_ms=0,
+        controls_age_ms=0,
+    )
     agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+    agent._active_workspace_id = "ws-1"
     fake_b64 = _make_test_image_b64()
     agent._last_screenshot_b64 = fake_b64
     snapshot = agent.perception_bus.publish(
@@ -249,7 +349,12 @@ async def test_stale_accessibility_state_escalates_to_image():
     mock_router.complete = AsyncMock(side_effect=mock_complete)
     agent.llm_router = mock_router
     obs = ComputerWorldObservation(
-        screen=ScreenObservation(screenshot_base64=fake_b64, width=1280, height=800),
+        screen=ScreenObservation(
+            screenshot_base64=fake_b64,
+            width=1280,
+            height=800,
+            capture_age_ms=5_000,
+        ),
         perception_version=snapshot.version,
         observation_age_ms=800,
     )
@@ -280,6 +385,8 @@ async def test_ambiguous_state_fetches_visual_frame_only_on_demand():
             width=640,
             height=480,
             active_window="Document",
+            capture_age_ms=0,
+            controls_age_ms=0,
         )
     )
     agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
@@ -525,6 +632,7 @@ async def test_llm_choose_action_sends_one_full_frame_with_active_window_geometr
             height=800,
             active_window="CodeEditor",
             active_window_geometry=(100, 100, 600, 400),
+            capture_age_ms=0,
         ),
     )
     await agent._llm_choose_action(

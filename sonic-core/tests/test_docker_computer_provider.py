@@ -3,6 +3,7 @@ Unit tests for DockerComputerProvider (Native Workstation Engine).
 """
 
 import ast
+import asyncio
 import base64
 import binascii
 import os
@@ -115,6 +116,152 @@ async def test_vnc_url_fails_closed_without_selected_container_port_binding():
 
     assert await provider.get_vnc_url("unpublished-workstation") is None
     provider._docker_exec.assert_not_awaited()
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_exec_cancellation_kills_and_reaps_docker_client(monkeypatch):
+    provider = DockerComputerProvider(container_name="cancel-test-workstation")
+    monkeypatch.setattr(docker_computer_module.shutil, "which", lambda _: "docker")
+    monkeypatch.setattr(
+        docker_computer_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=b"true"),
+    )
+    communicate_started = asyncio.Event()
+
+    class FakeProcess:
+        returncode = None
+        killed = False
+        reaped = False
+
+        async def communicate(self):
+            communicate_started.set()
+            await asyncio.Future()
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            self.reaped = True
+            return self.returncode
+
+    process = FakeProcess()
+    monkeypatch.setattr(
+        docker_computer_module.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(return_value=process),
+    )
+
+    task = asyncio.create_task(provider._docker_exec("sleep 60"))
+    await communicate_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.killed is True
+    assert process.reaped is True
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_application_list_discovers_path_only_binaries():
+    provider = DockerComputerProvider(container_name="app-discovery-workstation")
+    provider._docker_exec = AsyncMock(
+        return_value=(0, "path-only-app\npath-symlink-app\n", "")
+    )
+
+    applications = await provider.application_list("ws-1")
+
+    assert "path-only-app" in applications
+    command = provider._docker_exec.await_args.args[0]
+    assert 'printf \'%s\\n\' "$PATH"' in command
+    assert r"\( -type f -o -type l \) -executable" in command
+
+
+@pytest.mark.no_live_infra
+def test_scroll_action_requires_nonzero_delta():
+    with pytest.raises(ValueError, match="non-zero scroll_delta"):
+        GUIAction(action=GUIActionType.SCROLL, x=10, y=10, scroll_delta=0)
+
+    assert GUIAction(
+        action=GUIActionType.SCROLL, x=10, y=10, scroll_delta=-1
+    ).scroll_delta == -1
+    assert GUIAction(action=GUIActionType.KEYPRESS, key="Return").scroll_delta == 0
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_window_focus_does_not_send_escape_to_current_application():
+    provider = DockerComputerProvider(container_name="focus-workstation")
+
+    async def fake_exec(command, timeout=60):
+        if "xdotool getactivewindow getwindowname" in command:
+            return 0, "target window", ""
+        return 0, "", ""
+
+    provider._docker_exec = AsyncMock(side_effect=fake_exec)
+    provider.screenshot = AsyncMock(
+        return_value=ScreenObservation(width=1280, height=800)
+    )
+
+    await provider.gui_action(
+        "ws-1",
+        GUIAction(action=GUIActionType.SELECT_WINDOW, app_name="target window"),
+    )
+
+    focus_commands = [
+        call.args[0]
+        for call in provider._docker_exec.await_args_list
+        if "wmctrl -a" in call.args[0]
+    ]
+    assert len(focus_commands) == 1
+    assert "xdotool key Escape" not in focus_commands[0]
+    assert provider._active_windows["ws-1"] == "target window"
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_window_focus_fails_if_active_window_does_not_match():
+    provider = DockerComputerProvider(container_name="focus-workstation")
+
+    async def fake_exec(command, timeout=60):
+        if "xdotool getactivewindow getwindowname" in command:
+            return 0, "another window", ""
+        return 0, "", ""
+
+    provider._docker_exec = AsyncMock(side_effect=fake_exec)
+
+    with pytest.raises(RuntimeError, match="could not be verified"):
+        await provider.gui_action(
+            "ws-1",
+            GUIAction(action=GUIActionType.SELECT_WINDOW, app_name="target window"),
+        )
+
+    assert "ws-1" not in provider._active_windows
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_tile_workstation_reports_partial_window_failure():
+    provider = DockerComputerProvider(container_name="tile-workstation")
+
+    async def fake_exec(command, timeout=60):
+        if "xdotool getdisplaygeometry" in command:
+            return 0, "1920 1080", ""
+        if "wmctrl -l" in command:
+            return 0, "0x1 0 0 host First\n0x2 0 0 host Second\n", ""
+        if "wmctrl -i -r \"0x1\" -e" in command:
+            return 0, "", ""
+        if "wmctrl -i -r \"0x2\" -e" in command:
+            return 1, "", "window move failed"
+        return 0, "", ""
+
+    provider._docker_exec = AsyncMock(side_effect=fake_exec)
+
+    assert await provider.tile_workstation("ws-1") is False
 
 
 @pytest.mark.no_live_infra
@@ -304,6 +451,7 @@ async def test_docker_observe_state_rejects_stale_or_invalid_nsi_state():
     })
 
     assert await provider.observe_state("ws-1") is None
+    assert "_last_nsi_state" not in provider.__dict__
 
     provider._nsi_request = AsyncMock(return_value={
         "ok": True,

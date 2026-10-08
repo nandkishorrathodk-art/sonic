@@ -103,6 +103,8 @@ class MotorReflexes:
         interval_seconds: float = 0.05,
         verifier: Callable[..., Awaitable[Any] | Any] | None = None,
         observation_hook: Callable[..., Awaitable[Any] | Any] | None = None,
+        interrupt_check: Callable[[], bool] | None = None,
+        interrupt_event: asyncio.Event | None = None,
     ) -> BurstResult:
         """Dispatch typed GUI actions at a controlled cadence, stopping fail-closed.
 
@@ -127,8 +129,40 @@ class MotorReflexes:
         for index, action in enumerate(action_list):
             if index:
                 await asyncio.sleep(interval_seconds)
+            if (
+                (interrupt_event is not None and interrupt_event.is_set())
+                or (callable(interrupt_check) and interrupt_check())
+            ):
+                result.success = False
+                result.stopped = True
+                result.stop_reason = "motor burst interrupted before next dispatch"
+                break
+
+            dispatch_task = asyncio.create_task(
+                self.computer.gui_action(workspace_id, action)
+            )
             try:
-                dispatched = await self.computer.gui_action(workspace_id, action)
+                while not dispatch_task.done():
+                    if (
+                        (interrupt_event is not None and interrupt_event.is_set())
+                        or (callable(interrupt_check) and interrupt_check())
+                    ):
+                        dispatch_task.cancel()
+                        await asyncio.gather(dispatch_task, return_exceptions=True)
+                        result.success = False
+                        result.stopped = True
+                        result.stop_reason = "motor burst interrupted during dispatch"
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(dispatch_task),
+                            timeout=0.025,
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                if result.stopped:
+                    break
+                dispatched = await dispatch_task
             except Exception as exc:
                 detail = BurstActionResult(index, action, False, error=str(exc))
                 result.actions.append(detail)
@@ -164,14 +198,20 @@ class MotorReflexes:
                     result.stop_reason = f"observation failed: {exc}"
                     break
                 if observed is False or (isinstance(observed, dict) and observed.get("ok") is False):
+                    reason = (
+                        str(observed.get("reason") or "").strip()
+                        if isinstance(observed, dict)
+                        else ""
+                    )
+                    reason = reason or "unexpected state/modal change"
                     result.actions[-1] = BurstActionResult(
-                        index, action, False, dispatched, "unexpected state/modal change",
+                        index, action, False, dispatched, reason,
                         "observation rejected",
                     )
                     result.completed -= 1
                     result.success = False
                     result.stopped = True
-                    result.stop_reason = "observation rejected the action"
+                    result.stop_reason = reason
                     break
             elif hasattr(self.computer, "observe"):
                 try:

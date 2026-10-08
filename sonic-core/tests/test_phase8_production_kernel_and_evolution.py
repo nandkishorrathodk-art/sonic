@@ -181,6 +181,12 @@ def test_protected_components_expansion():
         "sonic/evolution/self_coder",
         "sonic/evolution/coding_agent",
         "sonic-core/tests/test_p0_security_hardening.py",
+        "sonic/agents/judge.py",
+        "sonic/evidence",
+        "sonic-core/tests/test_safety_sealed_policy.py",
+        "sonic/evolution/self_coder_candidates.py",
+        "sonic/evolution/continuous_runner.py",
+        "sonic/sandbox/factory.py",
     ])
     assert _PROTECTED_COMPONENTS == expected
 
@@ -240,4 +246,3 @@ def test_evolution_pipeline_rejects_all_protected_components_and_traversals():
     )
     assert valid_prop.stage == EvolutionStage.ISOLATED_BRANCH
     assert msg == "Staged in isolated branch"
-
