@@ -106,7 +106,7 @@ class SelfCoderReport:
             f"- Started:  `{self.started_at}`",
             f"- Finished: `{self.finished_at or _now()}`",
             f"- Cycles:   {len(self.cycles)}",
-            f"- Verified updates applied: {'yes' if self.changed else 'no'}",
+            f"- Changes applied to active checkout: {'yes' if self.changed else 'no'}",
             "",
         ]
         for i, c in enumerate(self.cycles, 1):
@@ -132,8 +132,12 @@ class SelfCoderReport:
                 lines.append("")
                 lines.append(
                     "Applied fix (isolated tests passed):"
-                    if c.tree_action == "applied"
-                    else "Proposed fix (verified against tests, then rolled back):"
+                    if c.tree_action in {"applied", "committed"}
+                    else (
+                        "Verified candidate (isolated tests passed; awaiting approval):"
+                        if c.tree_action == "candidate_only"
+                        else "Proposed fix (verified against tests, then rolled back):"
+                    )
                 )
                 lines.append("```diff")
                 lines.append(c.proposed_diff.strip()[:4000])
@@ -276,6 +280,7 @@ class SelfCoder:
         """
         signals: list[tuple[str, str, str]] = self._failing_test_signals(limit)
         seen = {(target, signal) for signal, target, _ in signals}
+        audit_error: Exception | None = None
 
         try:
             from sonic.evolution.codebase_auditor import CodebaseAuditor
@@ -306,6 +311,7 @@ class SelfCoder:
                     return signals[:limit]
         except Exception as exc:
             logger.warning("self_coder_static_audit_failed", error=str(exc))
+            audit_error = exc
 
         for rel in self._source_files():
             if len(signals) >= limit:
@@ -332,6 +338,11 @@ class SelfCoder:
                 if len(signals) >= limit:
                     break
 
+        if not signals and audit_error is not None:
+            raise RuntimeError(
+                f"Static signal discovery failed: {audit_error}"
+            ) from audit_error
+
         return signals[:limit]
 
     def _failing_test_signals(self, limit: int) -> list[tuple[str, str, str]]:
@@ -340,15 +351,23 @@ class SelfCoder:
             import subprocess
             import sys
 
+            test_paths = [
+                path
+                for path in ("sonic-core/tests/", "sonic-cli/tests/")
+                if (self.repo_root / path).is_dir()
+            ]
+            if not test_paths:
+                raise RuntimeError("No configured test directories exist in the repository")
+
             cmd = [
                 sys.executable,
                 "-m",
                 "pytest",
-                "sonic-core/tests/",
                 "-q",
                 "--tb=short",
                 "-p",
                 "no:cacheprovider",
+                *test_paths,
             ]
             env = os.environ.copy()
             source_paths = [
@@ -380,6 +399,20 @@ class SelfCoder:
                 env=env,
             )
             out = (res.stdout or "") + (res.stderr or "")
+            if res.returncode in {2, 3, 4}:
+                detail = out.strip()[-2000:] if out.strip() else "pytest exited without diagnostic output"
+                raise RuntimeError(
+                    f"pytest could not complete signal discovery (exit {res.returncode}): "
+                    f"{detail}"
+                )
+            if res.returncode == 5:
+                if "no tests ran" in out.lower() or "no tests collected" in out.lower():
+                    return []
+                detail = out.strip()[-2000:] if out.strip() else "pytest exited without diagnostic output"
+                raise RuntimeError(
+                    f"pytest could not complete signal discovery (exit {res.returncode}): "
+                    f"{detail}"
+                )
             signals: list[tuple[str, str, str]] = []
             headings = list(re.finditer(r"(?m)^_{5,}\s*(.*?)\s*_{5,}\s*$", out))
             frame_pattern = re.compile(
@@ -455,7 +488,7 @@ class SelfCoder:
             return signals
         except Exception as exc:
             logger.warning("self_coder_failing_test_scan_failed", error=str(exc))
-            return []
+            raise RuntimeError(f"Test signal discovery failed: {exc}") from exc
 
     def _source_files(self):
         for root in _SOURCE_ROOTS:
@@ -492,9 +525,19 @@ class SelfCoder:
         # Step 1: agentic investigation — explore the REAL repo with tools so we
         # do not hallucinate modules/functions (the blind-coder failure mode).
         diagnosis = ""
-        if self.agentic and self.llm is not None:
+        if self.agentic:
             try:
                 from sonic.evolution.coding_agent import CodingAgent
+
+                if self.llm is None:
+                    self.llm = self.director._resolve_llm()
+                if self.llm is None:
+                    cycle.stage = "investigation_incomplete"
+                    cycle.reason = (
+                        "No configured LLM provider is available for the required "
+                        "tool-grounded investigation"
+                    )
+                    return cycle
 
                 agent = CodingAgent(
                     llm=self.llm,
@@ -514,14 +557,22 @@ class SelfCoder:
                     steps=cres.steps,
                     tools=len(cres.tool_calls),
                     has_diagnosis=bool(diagnosis),
+                    observed_target=target_file.replace("\\", "/")
+                    in {
+                        str(path).replace("\\", "/")
+                        for path in getattr(cres, "observed_files", [])
+                    },
                 )
-                has_tools = bool(getattr(cres, "tool_calls", []))
-                completed = cres.finished or (has_tools and bool(diagnosis.strip()))
-                if not completed or not diagnosis.strip():
+                observed_files = {
+                    str(path).replace("\\", "/")
+                    for path in getattr(cres, "observed_files", [])
+                }
+                target_observed = target_file.replace("\\", "/") in observed_files
+                if not cres.finished or not diagnosis.strip() or not target_observed:
                     cycle.stage = "investigation_incomplete"
                     cycle.reason = (
                         "No patch was generated because the coding agent did not "
-                        "finish a tool-grounded root-cause investigation"
+                        "finish a tool-grounded investigation that read the target file"
                     )
                     return cycle
             except Exception as exc:
@@ -620,6 +671,7 @@ class SelfCoder:
 
         tests_dirs = [
             self.repo_root / "sonic-core" / "tests",
+            self.repo_root / "sonic-cli" / "tests",
             self.repo_root / "tests",
         ]
 
@@ -694,6 +746,7 @@ class SelfCoder:
             result = await asyncio.to_thread(execute_candidates)
             for candidate in result.get("candidates", []):
                 applied = candidate.get("status") == "applied"
+                candidate_only = candidate.get("status") == "verified"
                 report.cycles.append(
                     SelfCoderCycle(
                         signal=str(candidate.get("description", "")),
@@ -703,7 +756,11 @@ class SelfCoder:
                         diagnosis=str(candidate.get("diagnosis", "")),
                         patch_files=list(candidate.get("files", [])),
                         proposed_diff=str(candidate.get("diff", "")),
-                        tree_action="applied" if applied else "rolled_back",
+                        tree_action=(
+                            "applied" if applied else
+                            "candidate_only" if candidate_only else
+                            "rolled_back"
+                        ),
                     )
                 )
                 report.changed = report.changed or applied

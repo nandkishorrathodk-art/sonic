@@ -172,7 +172,7 @@ async def self_coder_run(
     req: SelfCoderRunRequest = SelfCoderRunRequest(),
     user: User = Depends(require_operator),
 ):
-    """Generate and verify candidates, then apply safe updates in-place."""
+    """Generate and verify candidates for operator review without changing the checkout."""
     if req.push:
         raise HTTPException(status_code=400, detail="Self-coder candidates never push to a remote")
     if req.max_cycles < 1 or req.max_cycles > 10:
@@ -195,15 +195,9 @@ async def self_coder_run(
         raise HTTPException(status_code=500, detail=f"Candidate run failed: {exc}") from exc
     report_dict = {
         "candidates": result["candidates"],
-        "changed": any(
-            item.get("status") == "applied"
-            for item in result["candidates"]
-        ),
+        "changed": False,
         "active_branch_changed": False,
-        "active_worktree_changed": any(
-            item.get("status") == "applied"
-            for item in result["candidates"]
-        ),
+        "active_worktree_changed": False,
         "text": result["report"],
     }
     tenant_id = _tenant_id(user)

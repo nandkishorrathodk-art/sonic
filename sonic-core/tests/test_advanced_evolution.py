@@ -219,7 +219,9 @@ def test_goal_director_safety_invariant_rejection(temp_evolution_env):
         target_files=["sonic-core/sonic/safety/kernel.py"],
     )
 
-    report = asyncio.run(director.execute_goal(goal.goal_id))
+    report = asyncio.run(
+        director.execute_goal(goal.goal_id, report_only=False)
+    )
     assert report.stage == EvolutionStage.REJECTED
 
     updated = director.get_goal(goal.goal_id)
@@ -318,6 +320,7 @@ def test_awaiting_approval_keeps_applied_edits_and_reports_pending_status(temp_e
             custom_patch="VALUE = 2\n",
             auto_promote=False,
             test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+            report_only=False,
         )
     )
 
@@ -380,6 +383,7 @@ def test_approval_refuses_working_tree_edits_made_after_verification(temp_evolut
         custom_patch="VALUE = 2\n",
         auto_promote=False,
         test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+        report_only=False,
     ))
     target_path.write_text("VALUE = 3\n", encoding="utf-8")
 
@@ -418,6 +422,7 @@ def test_rejecting_approval_leaves_verified_working_tree_edits_untouched(temp_ev
         custom_patch="VALUE = 2\n",
         auto_promote=False,
         test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+        report_only=False,
     ))
 
     rejected = director.reject_goal(goal.goal_id)
@@ -454,6 +459,7 @@ def test_failed_git_commit_does_not_fabricate_promotion(temp_evolution_env, monk
         custom_patch="VALUE = 2\n",
         auto_promote=False,
         test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+        report_only=False,
     ))
     monkeypatch.setattr(
         director.evolver,
@@ -497,14 +503,65 @@ def test_report_only_verification_is_not_marked_awaiting_approval(temp_evolution
         custom_patch="VALUE = 2\n",
         auto_promote=False,
         test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
-        report_only=True,
     ))
 
     assert report.stage == EvolutionStage.AWAITING_APPROVAL
+    assert report.proposed_diff == "VALUE = 2\n"
     updated = director.get_goal(goal.goal_id)
     assert updated.status == GoalStatus.VERIFIED
     assert updated.approval_manifest == {}
+    assert "VALUE = 2" in updated.evolution_report
+    assert "no edits were applied, committed, or pushed" in updated.notes
     assert target_path.read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_legacy_working_tree_approval_requires_explicit_non_report_only(temp_evolution_env):
+    director: EvolutionGoalDirector = temp_evolution_env["director"]
+    repo_root: Path = temp_evolution_env["repo_root"]
+    target_rel = "sonic-core/sonic/tools/explicit_approval_probe.py"
+    target_path = repo_root / target_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo_root, "add", target_rel)
+    _git(repo_root, "commit", "-m", "Add explicit approval fixture")
+
+    goal = director.submit_goal(
+        title="Explicit in-place approval",
+        description="Only the explicit legacy mode may leave edits for resolve",
+        category=GoalCategory.BUG_FIX,
+        target_files=[target_rel],
+    )
+    report = asyncio.run(
+        director.execute_goal(
+            goal.goal_id,
+            custom_patch="VALUE = 2\n",
+            auto_promote=False,
+            test_paths=["sonic-core/tests/test_p0_security_hardening.py"],
+            report_only=False,
+        )
+    )
+
+    assert report.stage == EvolutionStage.AWAITING_APPROVAL
+    assert target_path.read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert director.get_goal(goal.goal_id).status == GoalStatus.AWAITING_APPROVAL
+
+
+def test_evolution_cli_defaults_to_review_only():
+    from sonic.evolution.cli import build_parser
+
+    parser = build_parser()
+    patch_args = parser.parse_args([
+        "patch", "--target", "sonic-core/sonic/tools/sample.py",
+        "--desc", "Fix sample", "--diff", "VALUE = 2\n",
+    ])
+    goal_args = parser.parse_args([
+        "goal", "--title", "Fix sample", "--desc", "Repair sample", "--execute",
+    ])
+    run_args = parser.parse_args(["run"])
+
+    assert patch_args.auto_promote is False
+    assert goal_args.auto_promote is False
+    assert run_args.auto_promote is False
 
 
 def test_goal_director_capability_add_bumps_minor_version(temp_evolution_env):

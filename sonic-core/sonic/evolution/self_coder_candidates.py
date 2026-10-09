@@ -188,9 +188,12 @@ class SelfCoderCandidateStore:
         max_cycles: int,
         coder_factory: Callable[[Path], Any],
         *,
+        auto_apply: bool = False,
         auto_commit: bool = False,
         signals: list[tuple[str, str, str]] | None = None,
     ) -> dict[str, Any]:
+        if auto_commit and not auto_apply:
+            raise ValueError("auto_commit requires explicit auto_apply=True")
         lock = self._repo_lock()
         await asyncio.to_thread(lock.acquire)
         try:
@@ -198,6 +201,7 @@ class SelfCoderCandidateStore:
                 tenant_id,
                 max_cycles,
                 coder_factory,
+                auto_apply=auto_apply,
                 auto_commit=auto_commit,
                 signals=signals,
             )
@@ -210,6 +214,7 @@ class SelfCoderCandidateStore:
         max_cycles: int,
         coder_factory: Callable[[Path], Any],
         *,
+        auto_apply: bool = False,
         auto_commit: bool = False,
         signals: list[tuple[str, str, str]] | None = None,
     ) -> dict[str, Any]:
@@ -417,7 +422,7 @@ class SelfCoderCandidateStore:
                 )
         applied_candidates: list[dict[str, Any]] = []
         for record in persisted:
-            if record["status"] == "verified":
+            if record["status"] == "verified" and auto_apply:
                 try:
                     applied_candidates.append(
                         await self._promote(
@@ -464,7 +469,7 @@ class SelfCoderCandidateStore:
     def _append_application_report(
         report: str, records: list[dict[str, Any]]
     ) -> str:
-        lines = [report.rstrip(), "", "## Candidate impact and application receipts"]
+        lines = [report.rstrip(), "", "## Candidate impact and verification receipts"]
         for record in records:
             lines.extend([
                 f"- Candidate: `{record['candidate_id']}` — **{record['status']}**",
@@ -474,7 +479,12 @@ class SelfCoderCandidateStore:
                 f"  - Files: {', '.join(record.get('files', [])) or 'none'}",
                 f"  - Verification: {record.get('verification', {})}",
             ])
-            if record.get("status") == "applied":
+            if record.get("status") == "verified":
+                lines.append(
+                    "  - Verified candidate recorded for operator review; "
+                    "active working tree unchanged; no commit or push was made"
+                )
+            elif record.get("status") == "applied":
                 if "commit failed" in str(record.get("promotion", "")).lower():
                     lines.append(
                         "  - Verified patch is applied, but the requested local commit failed; "

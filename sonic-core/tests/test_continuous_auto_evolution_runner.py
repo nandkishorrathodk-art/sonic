@@ -29,6 +29,7 @@ def test_continuous_runner_initialization(tmp_path):
     assert runner.tenant_id == "tenant-test"
     assert runner.max_cycles == 5
     assert runner.interval_seconds == 2
+    assert runner.auto_apply is False
     assert runner.auto_commit is False
     assert runner.is_running is False
 
@@ -95,6 +96,7 @@ async def test_continuous_runner_discovery_error(tmp_path):
 
     types = [e.get("type") for e in events]
     assert "cycle_error" in types
+    assert "cycle_idle" not in types
     error_event = next(e for e in events if e.get("type") == "cycle_error")
     assert "AST parse exploded" in error_event["message"]
 
@@ -173,23 +175,23 @@ async def test_continuous_runner_unverified_candidate_discarded(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_continuous_runner_successful_cycle_promoted(tmp_path):
-    """Test the runner requests committed promotion from the candidate workflow."""
+async def test_continuous_runner_records_verified_candidate_without_promoting(tmp_path):
+    """A normally configured runner records the verified candidate for review."""
     events = []
     mock_store = MagicMock(spec=SelfCoderCandidateStore)
     mock_store.run_candidate = AsyncMock(return_value={
         "candidates": [
             {
                 "candidate_id": "c1a2b3c4d5e6f708192a3b4c5d6e7f80",
-                "status": "promoted",
+                "status": "verified",
                 "target_file": "sonic/core.py",
-                "commit": "deadbeef1234567890abcdef",
-                "version_after": "0.1.1",
+                "files": ["sonic/core.py"],
+                "diff": "verified patch",
+                "verification": {"full_test_suite": True},
             }
         ],
         "report": "Verification succeeded in worktree",
     })
-    mock_store.auto_promote = MagicMock()
 
     runner = ContinuousAutoEvolutionRunner(
         repo_root=tmp_path,
@@ -211,17 +213,18 @@ async def test_continuous_runner_successful_cycle_promoted(tmp_path):
     types = [e.get("type") for e in events]
     assert "signal_found" in types
     assert "testing_worktree" in types
-    assert "promoting" in types
-    assert "cycle_success" in types
+    assert "candidate_ready" in types
+    assert "promoting" not in types
+    assert "cycle_success" not in types
 
     mock_store.run_candidate.assert_awaited_once()
-    assert mock_store.run_candidate.await_args.kwargs["auto_commit"] is True
-    mock_store.auto_promote.assert_not_called()
+    assert mock_store.run_candidate.await_args.kwargs["auto_apply"] is False
+    assert mock_store.run_candidate.await_args.kwargs["auto_commit"] is False
 
-    success_ev = next(e for e in events if e.get("type") == "cycle_success")
-    assert "deadbeef" in success_ev["message"]
-    assert success_ev["commit"] == "deadbeef1234567890abcdef"
-    assert success_ev["version"] == "0.1.1"
+    ready_ev = next(e for e in events if e.get("type") == "candidate_ready")
+    assert "active checkout was not changed" in ready_ev["message"]
+    assert ready_ev["candidate_id"] == "c1a2b3c4d5e6f708192a3b4c5d6e7f80"
+    assert ready_ev["diff"] == "verified patch"
     assert mock_store.run_candidate.await_args.kwargs["signals"] == [
         ("Remove unused variable", "sonic/core.py", "optimization")
     ]
@@ -293,6 +296,7 @@ async def test_continuous_runner_respects_auto_commit_option(tmp_path):
         await runner.run()
 
     mock_store.run_candidate.assert_awaited_once()
+    assert mock_store.run_candidate.await_args.kwargs["auto_apply"] is False
     assert mock_store.run_candidate.await_args.kwargs["auto_commit"] is False
 
 

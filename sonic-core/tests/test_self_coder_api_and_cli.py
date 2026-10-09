@@ -59,15 +59,15 @@ async def test_self_coder_tenant_scoped_reports():
 
     class MockStore:
         async def run_candidate(self, tenant_id, max_cycles, coder_factory):
-            return {"candidates": [{"tenant_id": tenant_id, "status": "applied"}],
+            return {"candidates": [{"tenant_id": tenant_id, "status": "verified"}],
                     "report": f"Report for {tenant_id}"}
 
     with patch("sonic.api.routes.self_coder._candidate_store", return_value=MockStore()):
         run_res_a = await self_coder_run(SelfCoderRunRequest(max_cycles=1), user=user_a)
 
-    assert run_res_a["changed"] is True
+    assert run_res_a["changed"] is False
     assert run_res_a["active_branch_changed"] is False
-    assert run_res_a["active_worktree_changed"] is True
+    assert run_res_a["active_worktree_changed"] is False
     assert run_res_a["text"] == "Report for tenant_alpha"
     assert run_res_a["candidates"][0]["tenant_id"] == "tenant_alpha"
     assert "tenant_alpha" in _last_reports_by_tenant
@@ -91,7 +91,7 @@ async def test_self_coder_tenant_scoped_reports():
 
 @pytest.mark.asyncio
 async def test_self_coder_run_never_pushes():
-    """Self-coder never pushes; verified candidates only commit to local branches."""
+    """Self-coder runs only record candidates; remote pushes are never supported."""
     operator_user = User(email="op@target.com", name="Op", role=UserRole.OPERATOR)
     with pytest.raises(HTTPException) as exc_info:
         await self_coder_run(SelfCoderRunRequest(push=True), user=operator_user)
