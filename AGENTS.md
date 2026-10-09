@@ -162,8 +162,9 @@ the ephemeral `InMemoryGraph`. So if Neo4j is down, memory still persists.
   Computer-use cross-mission lessons use this path once per mission goal when
   the model router is available; query planning is capped at two rounds/four
   total queries and only ranked lesson evidence is injected into the agent's
-  existing reasoning prompt. Missing or invalid planner output is logged and
-  leaves the initial retrieval intact.
+  existing reasoning prompt. Candidate ranks are fused across queries so
+  repeatedly high-ranked sources gain priority. Missing or invalid planner
+  output is logged and leaves the initial retrieval intact.
 - Regression tests: `tests/test_rag_embeddings.py` covers provider validation,
   paraphrase retrieval, model isolation, migration, tenant filtering, citations,
   and evaluation metrics. `tests/test_agentic_rag.py` covers bounded query

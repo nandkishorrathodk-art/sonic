@@ -72,9 +72,10 @@ agentic-retrieval step when a model router is available. SONIC searches the
 tenant's vector memory, asks the router whether the retrieved passages address
 the current goal, and—when necessary—runs up to two further retrieval-planning
 rounds. The planner can propose up to four total search queries; retrieved
-results are merged by document ID and the top lessons are passed to the normal
-reasoning prompt with their original evidence. The planner cannot write memory,
-create evidence, or execute actions.
+results are merged by document ID and ranked with reciprocal-rank fusion, so
+sources that appear near the top for multiple queries are favored. The top
+lessons are passed to the normal reasoning prompt with their original evidence.
+The planner cannot write memory, create evidence, or execute actions.
 
 This adds up to two text-only reasoning calls per mission's first lesson lookup.
 Queries and results remain tenant-scoped. If the planner is unavailable or

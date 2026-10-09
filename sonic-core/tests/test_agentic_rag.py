@@ -109,6 +109,42 @@ def test_agentic_retrieval_stops_when_evidence_is_sufficient():
     assert len(memory.calls) == 1
 
 
+def test_agentic_retrieval_fuses_ranks_across_queries():
+    class _RankedMemory:
+        def search(self, query, *, top_k, score_threshold, tenant_id):
+            if query == "initial task query":
+                return [
+                    {"doc_id": "single", "text": "one-query match", "score": 0.99},
+                    {"doc_id": "recurring", "text": "multi-query match", "score": 0.70},
+                ]
+            return [
+                {"doc_id": "recurring", "text": "multi-query match", "score": 0.60},
+                {"doc_id": "single-2", "text": "other one-query match", "score": 0.99},
+            ]
+
+    router = _Router(
+        [
+            '{"sufficient": false, "queries": ["alternate formulation"]}',
+        ]
+    )
+    result = asyncio.run(
+        AgenticRetriever(
+            _RankedMemory(), router, max_rounds=1, score_threshold=0.0
+        ).retrieve("initial task query", tenant_id="tenant-a", top_k=3)
+    )
+
+    assert result.documents[0]["doc_id"] == "recurring"
+    assert result.documents[0]["matched_queries"] == [
+        "initial task query",
+        "alternate formulation",
+    ]
+    assert result.documents[0]["query_ranks"] == {
+        "initial task query": 2,
+        "alternate formulation": 1,
+    }
+    assert result.documents[0]["rrf_score"] > result.documents[1]["rrf_score"]
+
+
 def test_agentic_retrieval_rejects_repeated_or_invalid_queries_and_is_bounded():
     memory = _Memory()
     router = _Router(
