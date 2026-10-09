@@ -123,25 +123,35 @@ class AgenticRetriever:
         tenant_id: str,
         by_id: dict[str, dict[str, Any]],
     ) -> None:
-        for result in self.vector_memory.search(
+        results = self.vector_memory.search(
             query,
             top_k=self.candidates_per_query,
             score_threshold=self.score_threshold,
             tenant_id=tenant_id,
-        ):
+        )
+        for rank, result in enumerate(results, start=1):
             doc_id = str(result["doc_id"])
             current = by_id.get(doc_id)
+            reciprocal_rank = 1.0 / (60 + rank)
             if current is None:
                 current = dict(result)
                 current["matched_queries"] = [query]
+                current["query_ranks"] = {query: rank}
+                current["rrf_score"] = reciprocal_rank
                 by_id[doc_id] = current
                 continue
             if query not in current["matched_queries"]:
                 current["matched_queries"].append(query)
+            current["query_ranks"][query] = rank
+            current["rrf_score"] += reciprocal_rank
             if float(result.get("score", 0.0)) > float(current.get("score", 0.0)):
                 matched_queries = current["matched_queries"]
+                query_ranks = current["query_ranks"]
+                rrf_score = current["rrf_score"]
                 current.update(result)
                 current["matched_queries"] = matched_queries
+                current["query_ranks"] = query_ranks
+                current["rrf_score"] = rrf_score
 
     async def _plan_queries(
         self,
@@ -250,7 +260,10 @@ class AgenticRetriever:
     ) -> AgenticRetrievalResult:
         documents = sorted(
             by_id.values(),
-            key=lambda item: float(item.get("score", 0.0)),
+            key=lambda item: (
+                float(item.get("rrf_score", 0.0)),
+                float(item.get("score", 0.0)),
+            ),
             reverse=True,
         )[:top_k]
         return AgenticRetrievalResult(
