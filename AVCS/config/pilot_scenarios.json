@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "pilot_name": "AVCS-Notepad-LowRisk-Pilot",
+  "notes": "Initial proposed Windows Notepad workflows. Run only in a dedicated disposable pilot sandbox. Each run receives a unique output directory. Expected output text is consumed only by the harness evaluator, not by the executor adapter as metadata.",
+  "scenarios": [
+    {
+      "task_id": "NP-CREATE-001",
+      "workflow_id": "notepad_create_save_exact_text",
+      "application": "Windows Notepad",
+      "prompt_template": "Using Windows Notepad, create a new plain-text document containing exactly the following three lines, with no extra text:\nAVCS CONTROLLED PILOT\nWorkflow: create-save\nRun marker: AVCS-PILOT-ALPHA\nSave it as this path: {output_path}\nAfter saving, verify the document is saved. Do not access any other files.",
+      "timeout_s": 180,
+      "max_actions": 30,
+      "risk_level": "LOW",
+      "output_relative_path": "created.txt",
+      "expected_text": "AVCS CONTROLLED PILOT\nWorkflow: create-save\nRun marker: AVCS-PILOT-ALPHA\n"
+    },
+    {
+      "task_id": "NP-APPEND-001",
+      "workflow_id": "notepad_append_single_line",
+      "application": "Windows Notepad",
+      "prompt_template": "Using Windows Notepad, open this existing pilot fixture: {fixture_path}\nAppend exactly one new line containing: APPENDED-BY-AVCS-PILOT\nPreserve every existing line and save the same file. Do not create or modify any other file.",
+      "timeout_s": 180,
+      "max_actions": 35,
+      "risk_level": "LOW",
+      "fixture_relative_path": "append_fixture.txt",
+      "fixture_text": "AVCS PILOT FIXTURE\nKeep this first line unchanged.\n",
+      "output_relative_path": "append_fixture.txt",
+      "expected_text": "AVCS PILOT FIXTURE\nKeep this first line unchanged.\nAPPENDED-BY-AVCS-PILOT\n"
+    },
+    {
+      "task_id": "NP-REPLACE-001",
+      "workflow_id": "notepad_find_replace_token",
+      "application": "Windows Notepad",
+      "prompt_template": "Using Windows Notepad, open this pilot fixture: {fixture_path}\nFind the exact token PILOT-OLD-7F31 and replace every occurrence with PILOT-NEW-7F31. Keep all other content unchanged and save the same file. Do not create or modify any other file.",
+      "timeout_s": 180,
+      "max_actions": 35,
+      "risk_level": "LOW",
+      "fixture_relative_path": "replace_fixture.txt",
+      "fixture_text": "AVCS FIND REPLACE FIXTURE\nToken=PILOT-OLD-7F31\nDo not change this line.\nSecondToken=PILOT-OLD-7F31\n",
+      "output_relative_path": "replace_fixture.txt",
+      "expected_text": "AVCS FIND REPLACE FIXTURE\nToken=PILOT-NEW-7F31\nDo not change this line.\nSecondToken=PILOT-NEW-7F31\n"
+    }
+  ]
+}

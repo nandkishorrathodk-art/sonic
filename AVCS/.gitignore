@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+runs/
+.pytest_cache/
+*.pt
+kaggle_logs*/
+build/
+dist/
+*.egg-info/
+pilot-results/
+m7-results/
+m8-live-results/

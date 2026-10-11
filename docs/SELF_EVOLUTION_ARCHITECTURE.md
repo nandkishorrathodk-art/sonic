@@ -41,13 +41,14 @@ flowchart TD
     CLI --> RUNNER["ContinuousAutoEvolutionRunner"]
 
     RUNNER --> SCAN["Signal discovery on active checkout"]
-    SCAN --> PYTEST["Run `sonic-core/tests/`<br/>attribute failures to editable source<br/>(timeout: `SONIC_EVOLUTION_TEST_TIMEOUT`, default 600 s)"]
+    SCAN --> PYTEST["Run available `sonic-core/tests/` and `sonic-cli/tests/`<br/>attribute failures to editable source<br/>(timeout: `SONIC_EVOLUTION_TEST_TIMEOUT`, default 600 s)"]
     SCAN --> AUDIT["Static audit + TODO/FIXME/HACK<br/>and no-op marker scan"]
     PYTEST --> SIGNAL["Signals: test failures first,<br/>then audit and marker findings"]
     AUDIT --> SIGNAL
 
     SIGNAL --> FOUND{"Any signal?"}
-    FOUND -->|No| IDLE["Wait / next bounded cycle"]
+    FOUND -->|No, scans completed| IDLE["Wait / next bounded cycle"]
+    SCAN -->|Scan error| SCANERROR["Emit cycle_error;<br/>do not report a clean repository"]
     IDLE --> SCAN
     FOUND -->|Yes| CANDIDATE["SelfCoderCandidateStore"]
 
@@ -58,7 +59,7 @@ flowchart TD
     CODER --> PINNED["SelfCoder.run() uses the supplied signal<br/>without rediscovering"]
     PINNED --> CYCLE["SelfCoder.run_cycle(signal, target, category)"]
 
-    CYCLE --> INVESTIGATE["CodingAgent investigates with read-only tools<br/>read / grep / inspect tests"]
+    CYCLE --> INVESTIGATE["Resolve configured ModelRouter;<br/>CodingAgent investigates with read-only tools<br/>read / grep / inspect tests"]
     INVESTIGATE --> GOAL["EvolutionGoalDirector creates<br/>file-scoped goal"]
     GOAL --> PATCH["PatchSynthesizer asks LLM<br/>for a unified diff"]
     PATCH --> PATCHCHECK{"Diff applies, changes real code,<br/>and avoids protected paths?"}
@@ -73,23 +74,11 @@ flowchart TD
     RETEST --> FULL["Import checks + full configured test dirs<br/>`sonic-core/tests` and `sonic-cli/tests`<br/>+ security regression"]
     FULL --> FULLPASS{"All verification receipts pass?"}
     FULLPASS -->|No| ROLLBACK
-    FULLPASS -->|Yes| RECORD["Save candidate + integrity hash;<br/>remove detached worktree"]
-
-    RECORD --> BASEMATCH{"Active HEAD still matches candidate base,<br/>and touched files have no conflict?"}
-    BASEMATCH -->|No| DISCARD["Mark stale / conflict;<br/>do not apply"]
-    BASEMATCH -->|Yes| APPLY["Apply exact verified diff<br/>to active checkout"]
-    APPLY --> POST["Re-run import, test and security checks"]
-    POST --> POSTPASS{"Post-apply checks pass?"}
-    POSTPASS -->|No| ROLLBACKACTIVE["Restore active files"]
-    POSTPASS -->|Yes| COMMIT{"`/auto` auto_commit enabled?"}
-    COMMIT -->|Yes| LOCAL["Commit changed files locally;<br/>bump version + journal"]
-    COMMIT -->|No| APPLIED["Leave verified patch applied;<br/>no commit"]
-    LOCAL --> NEXT["Report result; next bounded cycle"]
-    APPLIED --> NEXT
+    FULLPASS -->|Yes| RECORD["Save verified candidate + exact diff,<br/>integrity hash and test receipts;<br/>remove detached worktree"]
+    RECORD --> READY["Report candidate for operator review;<br/>active checkout unchanged;<br/>no commit or push"]
+    READY --> NEXT["Report result; next bounded cycle"]
     FAIL --> NEXT
     ROLLBACK --> NEXT
-    DISCARD --> NEXT
-    ROLLBACKACTIVE --> NEXT
     NEXT --> SCAN
 ```
 
@@ -104,10 +93,11 @@ flowchart TD
 3. **Proposes:** `PatchSynthesizer` asks the LLM for a unified diff and checks
    that it applies cleanly, changes actual code, and does not touch protected
    files.
-4. **Verifies and promotes:** `CodebaseEvolver` runs code and safety gates;
-   `SelfCoderCandidateStore` repeats verification in a detached worktree before
-   applying the exact tested patch to the active checkout. The `/auto` runner
-   enables local commit by default; it does **not** push to a remote.
+4. **Verifies and records:** `CodebaseEvolver` runs code and safety gates;
+   `SelfCoderCandidateStore` repeats verification in a detached worktree, then
+   persists the exact diff, integrity hash, and test receipts as a `verified`
+   candidate. The active checkout is unchanged; no commit or remote push occurs.
+   An operator must explicitly approve a candidate before it is applied.
 
 ## Separate queued-goal evolution path
 
@@ -118,19 +108,25 @@ flowchart LR
     DIRECTOR --> QUEUE["Read queued goals<br/>in priority order"]
     QUEUE --> ANALYZE["Analyze goal + target files"]
     ANALYZE --> SYNTH["PatchSynthesizer"]
-    SYNTH --> EVOLVE["CodebaseEvolver"]
+    SYNTH --> EVOLVE["CodebaseEvolver in report-only mode"]
     EVOLVE --> CHECKS["Protected paths + diff/AST<br/>tests + imports + security"]
     CHECKS --> RESULT{"Checks pass?"}
     RESULT -->|No| ROLLBACK["Rollback / retain failed goal"]
-    RESULT -->|Yes| COMMIT["Commit locally + version/journal"]
+    RESULT -->|Yes| RECORD["Persist exact diff + verification report<br/>on the goal; restore checkout"]
+    RECORD --> REVIEW["Operator reviews saved proposal"]
+    REVIEW -->|Explicit `--auto-promote` on a run| COMMIT["Apply, verify and commit"]
     COMMIT --> PUSH{"Explicit `--push`?"}
     PUSH -->|Yes| REMOTE["Push"]
     PUSH -->|No| DONE["Finish locally"]
+    REVIEW -->|No| DONE
 ```
 
 This lane uses the queued `EvolutionGoalDirector` and `CodebaseEvolver`
 directly. It does not use the `/auto` runner's outer signal scan and candidate
-worktree lifecycle.
+worktree lifecycle. `sonic evolution run`, `goal --execute`, and `patch` now
+default to recording verified proposals without changing the active checkout.
+Committing requires explicit `--auto-promote`; remote pushing additionally
+requires explicit `--push`.
 
 ## Current caveats from the implementation and recent test
 
@@ -140,18 +136,29 @@ worktree lifecycle.
   external repositories or test suites discoverable: the outer signal scan
   still searches the configured SONIC source roots and runs the configured test
   scan.
-- The signal scan runs the full `sonic-core/tests/` suite with the same
-  env-overridable timeout as the verification gate
+- The signal scan runs the available `sonic-core/tests/` and
+  `sonic-cli/tests/` suites with the same env-overridable timeout as the verification gate
   (`SONIC_EVOLUTION_TEST_TIMEOUT`, default 600 s); it is not yet an efficient
   arbitrary external-demo test selector.
+- `/auto` resolves the configured `ModelRouter` for its read-only
+  `CodingAgent` investigation. If no configured provider is usable, the
+  investigation remains incomplete and patch synthesis is not attempted.
+- `/auto`, the `/self-coder/run` API, and the periodic self-coder loop record
+  verified candidate diffs without applying them, committing, or pushing.
+  Candidate approval is a separate operator action.
+- Patch synthesis now also requires a completed investigation that successfully
+  read the exact target source file. A `finish` call, unrelated tool use, or
+  diagnosis without target-file evidence is insufficient.
+- Pytest collection/usage/runtime failures and static-audit failures are
+  surfaced as scan errors; they are not converted into an idle/clean result.
 - In the recent demo attempt, the candidate did not produce a patch: the first
   `/auto` run reached a SelfCoder cleanup error; after that lifecycle fix, a
   target-scoped attempt was rejected when the configured providers returned
   NVIDIA 403 and Groq 429. The demo's 23-contract baseline had 22 failures and
   1 pass, but no demo fix was verified.
 - Passing unit tests or a model-generated diff alone does not establish
-  successful evolution. A candidate is only promoted after the configured
-  verification and active-checkout conflict checks.
+  successful evolution. Candidate-only runs retain their diff and verification
+  receipts for review; they do not promote it into the active checkout.
 
 ## Source files
 

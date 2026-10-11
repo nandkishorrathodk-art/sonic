@@ -35,11 +35,13 @@ cyber-oriented dashboard branding and do not show a verified computer-use task:
 ## Current implementation, honestly stated
 
 The codebase includes a Docker-backed graphical workstation, generic GUI
-actions, a versioned NSI perception-state feed, screenshot escalation,
-orchestration, action receipts and an independent Judge handoff for GUI
-completion. A separate terminal and file-execution plane is available for work
-that is appropriate there. Safety and workspace controls apply to supported
-execution paths.
+actions, local AVCS pixel-reflex processing, orchestration, action receipts
+and an independent Judge handoff for GUI completion. Workstation screenshots
+are processed locally and are not sent to the workstation reasoning model.
+AVCS semantic target grounding and focus verification require evaluated local
+model heads; unsupported actions fail closed. A separate terminal and
+file-execution plane is available for work that is appropriate there. Safety
+and workspace controls apply to supported execution paths.
 
 These are implementation foundations, not proof of reliable work in every
 installed application. Current acceptance still requires a fresh observation,

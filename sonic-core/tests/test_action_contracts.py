@@ -127,12 +127,19 @@ def test_failed_receipt_cannot_satisfy_postconditions():
 def _gui_observation(*, window="Editor", version=7, age_ms=10):
     received_at_ns = time.perf_counter_ns()
     screen = ScreenObservation(
+        screenshot_base64="pixel-frame",
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": version,
+            "scene_hash": "stable-scene",
+            "width": 1280,
+            "height": 800,
+        },
         width=1280,
         height=800,
         active_window=window,
-        desktop_state="STATE_ONLY",
+        desktop_state="INTERACTIVE",
         capture_age_ms=0,
-        controls_age_ms=age_ms,
         perception_version=version,
     )
     return ComputerWorldObservation(
@@ -186,12 +193,19 @@ def test_gui_intent_expires_from_observation_age_and_requires_matching_live_wind
 
     assert intent.expires_at_ns - intent.issued_at_ns <= 10_000_000
     changed_window = ScreenObservation(
+        screenshot_base64="pixel-frame",
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": 8,
+            "scene_hash": "stable-scene",
+            "width": 1280,
+            "height": 800,
+        },
         width=1280,
         height=800,
         active_window="Different window",
-        desktop_state="STATE_ONLY",
+        desktop_state="INTERACTIVE",
         capture_age_ms=0,
-        controls_age_ms=0,
         perception_version=8,
     )
     assert "active window differs from GUI action intent" in intent.validate_observation(
@@ -202,16 +216,35 @@ def test_gui_intent_expires_from_observation_age_and_requires_matching_live_wind
         now_ns=intent.expires_at_ns + 1,
     )
     same_window_new_state = ScreenObservation(
+        screenshot_base64="pixel-frame",
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": 8,
+            "scene_hash": "stable-scene",
+            "width": 1280,
+            "height": 800,
+        },
         width=1280,
         height=800,
         active_window="Editor",
-        desktop_state="STATE_ONLY",
+        desktop_state="INTERACTIVE",
         capture_age_ms=0,
-        controls_age_ms=0,
         perception_version=8,
     )
-    assert "desktop state version differs from GUI action intent" in (
-        intent.validate_observation(same_window_new_state)
+    assert intent.validate_observation(same_window_new_state) == ()
+    changed_scene = same_window_new_state.model_copy(
+        update={
+            "avcs_state": {
+                "engine": "avcs_reflex",
+                "frame_index": 8,
+                "scene_hash": "changed-scene",
+                "width": 1280,
+                "height": 800,
+            }
+        }
+    )
+    assert "AVCS scene differs from GUI action intent" in (
+        intent.validate_observation(changed_scene)
     )
     assert "fresh desktop evidence is unavailable" in intent.validate_observation(
         observation.screen,
@@ -221,63 +254,19 @@ def test_gui_intent_expires_from_observation_age_and_requires_matching_live_wind
     )
 
 
-def test_gui_intent_binds_observed_focus_and_semantic_target():
-    controls = [
-        {
-            "name": "Save",
-            "role": "button",
-            "bbox": [10, 20, 70, 40],
-            "source": "atspi",
-            "focused": False,
-        },
-        {
-            "name": "Document title",
-            "role": "entry",
-            "bbox": [100, 20, 300, 45],
-            "source": "atspi",
-            "focused": True,
-        },
-    ]
+def test_gui_intent_uses_only_avcs_scene_and_active_window():
     observation = _gui_observation()
-    observation.screen.detected_controls = controls
     intent = GUIActionIntent.create(
         action_type="GUI_CLICK",
-        target="Save",
+        target="40,30",
         payload={"x": 40, "y": 30},
         expected_outcome="Save the document",
         observation=observation,
     )
 
-    assert intent.target_identity is not None
-    assert intent.source_focus is not None
-    changed = ScreenObservation(
-        width=1280,
-        height=800,
-        active_window="Editor",
-        desktop_state="STATE_ONLY",
-        capture_age_ms=0,
-        controls_age_ms=0,
-        perception_version=7,
-        detected_controls=[
-            {**controls[0], "focused": True},
-            {**controls[1], "focused": False},
-        ],
-    )
-    errors = intent.validate_observation(changed)
-    assert "focused control differs from GUI action intent" in errors
-    missing_target = ScreenObservation(
-        width=1280,
-        height=800,
-        active_window="Editor",
-        desktop_state="STATE_ONLY",
-        capture_age_ms=0,
-        controls_age_ms=0,
-        perception_version=7,
-        detected_controls=[controls[1]],
-    )
-    assert "target control disappeared or changed since GUI action intent" in (
-        intent.validate_observation(missing_target)
-    )
+    assert intent.source_scene_hash == "stable-scene"
+    assert not hasattr(intent, "source_focus")
+    assert not hasattr(intent, "target_identity")
 
 
 def test_gui_intent_refuses_stale_or_unversioned_observations():
@@ -293,7 +282,7 @@ def test_gui_intent_refuses_stale_or_unversioned_observations():
         )
 
     unversioned = _gui_observation(version=0)
-    with pytest.raises(ValueError, match="versioned active desktop"):
+    with pytest.raises(ValueError, match="versioned AVCS frame"):
         GUIActionIntent.create(
             action_type="GUI_CLICK",
             target="Save",

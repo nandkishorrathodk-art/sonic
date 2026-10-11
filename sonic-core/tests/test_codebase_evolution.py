@@ -239,11 +239,34 @@ class TestSuccessfulEvolutionAndSummary:
                 description="Minor refactor",
                 code_diff=enhanced_code,
                 auto_promote=False,
+                report_only=False,
             )
 
         assert report.stage == EvolutionStage.AWAITING_APPROVAL
         assert report.git_committed is False
         assert "AWAITING OPERATOR APPROVAL" in report.to_markdown()
+
+    def test_default_non_promoting_run_records_diff_without_applying(self, temp_repo):
+        evolver = CodebaseEvolver(repo_root=temp_repo)
+        target = "sonic/tools/adapters/custom_parser.py"
+        target_path = temp_repo / target
+        original = target_path.read_text(encoding="utf-8")
+        proposed = "def parse_status(code: int) -> str:\n    return 'OK'\n"
+        mock_test_res = TestExecutionResult(passed=True, total_tests=2, passed_tests=2)
+
+        with patch.object(evolver, "run_tests", return_value=mock_test_res), \
+             patch.object(evolver, "run_security_regression", return_value=True):
+            report = evolver.evolve(
+                target_component=target,
+                description="Record a verified proposal",
+                code_diff=proposed,
+            )
+
+        assert report.stage == EvolutionStage.AWAITING_APPROVAL
+        assert report.proposed_diff == proposed
+        assert "Proposed Diff (review only)" in report.to_markdown()
+        assert "VERIFIED (REPORT ONLY)" in report.to_markdown()
+        assert target_path.read_text(encoding="utf-8") == original
 
 
 class TestCodebaseEvolverBugFixes:
@@ -504,4 +527,3 @@ class TestCodebaseEvolverBugFixes:
         with patch.object(evolver, "run_tests", return_value=TestExecutionResult(passed=True)) as mock_run:
             assert evolver.run_security_regression() is True
             mock_run.assert_called_once_with(["tests/test_p0_security_hardening.py", "tests/test_safety_sealed_policy.py"])
-

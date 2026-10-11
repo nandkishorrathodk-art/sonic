@@ -760,19 +760,25 @@ class EvolutionGoalDirector:
         auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
-        report_only: bool = False,
+        report_only: bool | None = None,
     ) -> EvolutionSummaryReport:
         """Run one goal end-to-end.
 
-        When ``report_only`` is set nothing is committed and no side-effect
-        journal files (e.g. evolution.md) are written, so the caller keeps the
-        tree pristine. Original flow:
+        By default, a non-promoting run verifies and records the exact diff,
+        then restores the working tree. Passing ``auto_promote=True`` is an
+        explicit request to apply and commit the verified change.
         1. Analyzes goal and codebase
-        2. Applies patch with atomic rollback guarantees
+        2. Applies patch in the checkout with atomic rollback guarantees
         3. Runs verification tests
-        4. Bumps version upon success
-        5. Logs live notes to evolution.md
+        4. Optionally bumps version and records the change
         """
+        if report_only is None:
+            report_only = not auto_promote
+        if push and not auto_promote:
+            raise ValueError("push requires explicit auto_promote=True")
+        if report_only and auto_promote:
+            raise ValueError("report_only cannot be combined with auto_promote")
+
         goal = self.get_goal(goal_id)
         if not goal:
             raise ValueError(f"Evolution goal not found: {goal_id}")
@@ -951,9 +957,8 @@ class EvolutionGoalDirector:
             if report_only:
                 goal.status = GoalStatus.VERIFIED
                 goal.notes = (
-                    "Tests passed in report-only mode and the working tree was restored. "
-                    "There are no pending edits to promote; rerun without report-only "
-                    "to create an approval-ready working tree."
+                    "Verified diff and test receipts were recorded in the evolution report. "
+                    "The working tree was restored; no edits were applied, committed, or pushed."
                 )
             else:
                 goal.status = GoalStatus.AWAITING_APPROVAL
@@ -979,6 +984,7 @@ class EvolutionGoalDirector:
             else:
                 goal.status = GoalStatus.QUEUED  # keep in queue for next cycle retry
 
+            goal.evolution_report = report.to_markdown()
             goal.notes = f"Attempt {goal.attempts}/{goal.max_attempts} failed: {report.error_reason[:300]}"
             self._update_goal(goal)
 
@@ -1074,17 +1080,24 @@ class EvolutionGoalDirector:
         self,
         max_goals: int | None = None,
         push: bool = False,
-        auto_promote: bool = True,
+        auto_promote: bool = False,
+        report_only: bool | None = None,
     ) -> list[EvolutionSummaryReport]:
         """
         Continuously processes goals from the queue in priority order until
         the queue is exhausted or max_goals is reached.
 
-        ``auto_promote`` defaults to True here because this is the autonomous
-        self-coder loop the operator explicitly enabled: a change that passes
-        the real gates (diff application, AST, tests, security regression) is
-        committed locally and summarised. Remote push stays opt-in.
+        By default, verified diffs and their receipts are recorded without
+        changing the checkout. Applying and committing requires the explicit
+        ``auto_promote=True`` option; pushing additionally requires ``push=True``.
         """
+        if report_only is None:
+            report_only = not auto_promote
+        if push and not auto_promote:
+            raise ValueError("push requires explicit auto_promote=True")
+        if report_only and auto_promote:
+            raise ValueError("report_only cannot be combined with auto_promote")
+
         reports: list[EvolutionSummaryReport] = []
         processed = 0
 
@@ -1099,7 +1112,12 @@ class EvolutionGoalDirector:
                 break
 
             logger.info("evolution_processing_goal", goal_id=goal.goal_id, title=goal.title)
-            rep = await self.execute_goal(goal.goal_id, auto_promote=auto_promote, push=push)
+            rep = await self.execute_goal(
+                goal.goal_id,
+                auto_promote=auto_promote,
+                push=push,
+                report_only=report_only,
+            )
             reports.append(rep)
             processed += 1
 

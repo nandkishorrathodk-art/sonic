@@ -477,8 +477,10 @@ def test_self_coder_end_to_end_commits_a_real_change(repo: Path, tmp_path: Path)
     )
 
 
-def test_self_coder_write_mode_applies_verified_candidate_without_commit(repo: Path, tmp_path: Path):
-    """Write mode applies verified updates in-place without changing Git refs."""
+def test_self_coder_write_mode_records_verified_candidate_without_checkout_changes(
+    repo: Path, tmp_path: Path
+):
+    """Candidate mode leaves a verified diff for review without editing the checkout."""
     db = str(tmp_path / "evo.db")
     (repo / "sonic-core" / "tests" / "test_widget.py").write_text(
         "from sonic.agents.widget import total\n\n"
@@ -537,13 +539,14 @@ def test_self_coder_write_mode_applies_verified_candidate_without_commit(repo: P
     before_head = _git(repo, "rev-parse", "HEAD")
     before_branch = _git(repo, "branch", "--show-current")
     report = asyncio.run(coder.run(max_cycles=1))
-    assert report.changed is True
-    assert report.cycles[0].tree_action == "applied"
+    assert report.changed is False
+    assert report.cycles[0].tree_action == "candidate_only"
     assert report.cycles[0].commit_hash == ""
     assert _git(repo, "rev-parse", "HEAD") == before_head
     assert _git(repo, "branch", "--show-current") == before_branch
     assert not _git(repo, "branch", "--list", "sonic/self-coder/*")
-    assert "is not None" in (repo / "sonic-core" / "sonic" / "agents" / "widget.py").read_text()
+    assert "is not None" not in (repo / "sonic-core" / "sonic" / "agents" / "widget.py").read_text()
+    assert report.cycles[0].proposed_diff
 
 
 def test_failing_test_signal_targets_editable_source_frame(repo: Path, monkeypatch):
@@ -599,6 +602,79 @@ def test_test_only_failure_does_not_become_source_edit_signal(repo: Path, monkey
     assert SelfCoder(repo_root=repo)._failing_test_signals(limit=5) == []
 
 
+def test_failing_cli_test_signal_targets_cli_source(repo: Path, monkeypatch):
+    from sonic.evolution.self_coder import SelfCoder
+
+    cli_test_dir = repo / "sonic-cli" / "tests"
+    cli_source_dir = repo / "sonic-cli" / "sonic_cli"
+    cli_test_dir.mkdir(parents=True)
+    cli_source_dir.mkdir(parents=True)
+    test_file = cli_test_dir / "test_widget.py"
+    source_file = cli_source_dir / "widget.py"
+    test_file.write_text("def test_total():\n    assert False\n", encoding="utf-8")
+    source_file.write_text("def total():\n    return 0\n", encoding="utf-8")
+    output = (
+        "________________________ test_total _________________________\n"
+        "Traceback (most recent call last):\n"
+        "  sonic-cli/tests/test_widget.py:2: in test_total\n"
+        "  sonic-cli/sonic_cli/widget.py:2: in total\n"
+        "E AssertionError\n"
+        "FAILED sonic-cli/tests/test_widget.py::test_total - AssertionError\n"
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 1, stdout=output, stderr=""
+        ),
+    )
+
+    coder = SelfCoder(repo_root=repo)
+    signals = coder._failing_test_signals(limit=5)
+
+    assert len(signals) == 1
+    assert signals[0][1] == "sonic-cli/sonic_cli/widget.py"
+    assert coder._test_paths_for(signals[0][1]) == [
+        "sonic-cli/tests/test_widget.py"
+    ]
+
+
+def test_test_signal_discovery_raises_when_pytest_cannot_collect(repo: Path, monkeypatch):
+    from sonic.evolution.self_coder import SelfCoder
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 4, stdout="pytest usage error", stderr=""
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="could not complete signal discovery"):
+        SelfCoder(repo_root=repo)._failing_test_signals(limit=5)
+
+
+def test_test_signal_discovery_raises_when_no_test_suites_exist(tmp_path: Path):
+    from sonic.evolution.self_coder import SelfCoder
+
+    with pytest.raises(RuntimeError, match="No configured test directories"):
+        SelfCoder(repo_root=tmp_path)._failing_test_signals(limit=5)
+
+
+def test_static_scan_failure_is_not_reported_as_clean_repo(repo: Path, monkeypatch):
+    from sonic.evolution.codebase_auditor import CodebaseAuditor
+    from sonic.evolution.self_coder import SelfCoder
+
+    coder = SelfCoder(repo_root=repo)
+    monkeypatch.setattr(coder, "_failing_test_signals", lambda limit: [])
+    monkeypatch.setattr(
+        CodebaseAuditor,
+        "static_scan",
+        lambda self: (_ for _ in ()).throw(RuntimeError("audit unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="Static signal discovery failed"):
+        coder.discover_signals(limit=5)
+
+
 def test_static_audit_signal_is_prioritized_and_safety_targets_are_excluded(
     repo: Path, monkeypatch
 ):
@@ -643,6 +719,80 @@ def test_static_audit_signal_is_prioritized_and_safety_targets_are_excluded(
     assert all("safety/kernel.py" not in signal[1] for signal in signals)
 
 
+def test_agentic_self_coder_resolves_router_for_investigation(repo: Path, monkeypatch):
+    from sonic.evolution.pipeline import EvolutionStage
+    from sonic.evolution.self_coder import SelfCoder
+
+    llm = object()
+    init_calls: list[dict[str, object]] = []
+
+    class _Director:
+        test_paths = []
+
+        def _resolve_llm(self):
+            return llm
+
+        def submit_goal(self, **kwargs):
+            return SimpleNamespace(goal_id="goal-1")
+
+        async def execute_goal(self, *args, **kwargs):
+            return SimpleNamespace(
+                stage=EvolutionStage.ROLLED_BACK,
+                description="No patch produced",
+                lines_added=0,
+                lines_removed=0,
+                files_affected=[],
+                error_reason="model declined",
+                git_commit_hash="",
+            )
+
+    class _Agent:
+        def __init__(self, **kwargs):
+            init_calls.append(kwargs)
+
+        async def run(self, goal):
+            return SimpleNamespace(
+                finished=True,
+                diagnosis="Read the implementation and confirmed the cause.",
+                steps=2,
+                tool_calls=[{"name": "read_file"}],
+                observed_files=["sonic-core/sonic/agents/widget.py"],
+            )
+
+    monkeypatch.setattr("sonic.evolution.coding_agent.CodingAgent", _Agent)
+    coder = SelfCoder(repo_root=repo, director=_Director(), agentic=True)
+
+    cycle = asyncio.run(
+        coder.run_cycle("Inspect a real signal", "sonic-core/sonic/agents/widget.py", "bug_fix")
+    )
+
+    assert init_calls and init_calls[0]["llm"] is llm
+    assert cycle.diagnosis == "Read the implementation and confirmed the cause."
+    assert cycle.stage == EvolutionStage.ROLLED_BACK.value
+
+
+def test_agentic_self_coder_stops_when_no_llm_is_configured(repo: Path):
+    from sonic.evolution.self_coder import SelfCoder
+
+    class _Director:
+        test_paths = []
+        submit_goal = MagicMock()
+
+        def _resolve_llm(self):
+            return None
+
+    director = _Director()
+    coder = SelfCoder(repo_root=repo, director=director, agentic=True)
+
+    cycle = asyncio.run(
+        coder.run_cycle("Inspect a real signal", "sonic-core/sonic/agents/widget.py", "bug_fix")
+    )
+
+    assert cycle.stage == "investigation_incomplete"
+    assert "No configured LLM provider" in cycle.reason
+    director.submit_goal.assert_not_called()
+
+
 def test_self_coder_does_not_synthesize_without_completed_investigation(
     repo: Path, monkeypatch
 ):
@@ -675,6 +825,41 @@ def test_self_coder_does_not_synthesize_without_completed_investigation(
     assert cycle.stage == "investigation_incomplete"
     assert cycle.proposed_diff == ""
     assert cycle.tree_action == "rolled_back"
+
+
+def test_self_coder_requires_target_file_evidence_before_synthesis(
+    repo: Path, monkeypatch
+):
+    from sonic.evolution.coding_agent import CodingAgent
+
+    async def unsupported_diagnosis(self, goal):
+        return SimpleNamespace(
+            finished=True,
+            diagnosis="The issue is probably in the target module.",
+            steps=1,
+            tool_calls=["finish({'diagnosis': 'guess'})"],
+            observed_files=[],
+        )
+
+    monkeypatch.setattr(CodingAgent, "run", unsupported_diagnosis)
+    coder = SelfCoder(repo_root=repo, llm=_StubLLM(["unused"]))
+    monkeypatch.setattr(
+        coder.director,
+        "submit_goal",
+        lambda **kwargs: pytest.fail("unsupported diagnosis reached patch synthesis"),
+    )
+
+    cycle = asyncio.run(
+        coder.run_cycle(
+            "Review the implementation",
+            "sonic-core/sonic/agents/widget.py",
+            "bug_fix",
+        )
+    )
+
+    assert cycle.stage == "investigation_incomplete"
+    assert "read the target file" in cycle.reason
+    assert cycle.proposed_diff == ""
 
 
 def test_normalize_bare_hunks_fills_line_numbers(repo: Path):
@@ -809,6 +994,7 @@ def test_coding_agent_uses_tools_before_answering(tmp_path: Path):
     assert res.finished is True
     assert "saw_value=True" in res.diagnosis
     assert any("read_file" in c for c in res.tool_calls)
+    assert res.observed_files == ["sonic-core/sonic/x/mod.py"]
 
 
 def test_coding_agent_tools_are_real(tmp_path: Path):

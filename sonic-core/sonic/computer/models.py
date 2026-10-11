@@ -156,6 +156,7 @@ class GUIAction(BaseModel):
 class ScreenObservation(BaseModel):
     """Visual and state perception of the computer desktop screen."""
     screenshot_base64: str = ""
+    avcs_state: dict[str, Any] = Field(default_factory=dict)
     capture_timestamp_ns: int | None = Field(default=None, ge=0)
     capture_age_ms: float | None = Field(default=None, ge=0)
     controls_age_ms: float | None = Field(default=None, ge=0)

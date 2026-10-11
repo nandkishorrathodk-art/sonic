@@ -1,10 +1,6 @@
 #!/bin/bash
 set -e
 
-if ! command -v tesseract >/dev/null 2>&1; then
-    echo "[!] tesseract-ocr is unavailable; OCR controls will be omitted while other workstation perception continues." >&2
-fi
-
 # Remove any stale X locks
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 

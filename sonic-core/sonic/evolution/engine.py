@@ -216,9 +216,10 @@ class EvolutionEngine:
         auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
+        report_only: bool | None = None,
     ) -> EvolutionSummaryReport:
         """
-        Executes end-to-end continuous codebase self-evolution:
+        Verifies and records a proposal by default; applying it requires explicit opt-in:
         1. Enforces safety envelope immutability (blocks modifications to safety kernel).
         2. Validates AST / syntax pre-flight.
         3. Staged patch application with zero-corrupt atomic rollback snapshot.
@@ -233,6 +234,7 @@ class EvolutionEngine:
             auto_promote=auto_promote,
             push=push,
             test_paths=test_paths,
+            report_only=report_only,
         )
 
     def submit_evolution_goal(
@@ -261,23 +263,32 @@ class EvolutionEngine:
         auto_promote: bool = False,
         push: bool = False,
         test_paths: list[str] | None = None,
+        report_only: bool | None = None,
     ) -> EvolutionSummaryReport:
-        """Executes an enqueued evolution goal through analysis, tests, and version bump."""
+        """Verify and record a goal by default; apply/commit only when explicitly enabled."""
         return await self.goal_director.execute_goal(
             goal_id=goal_id,
             custom_patch=custom_patch,
             auto_promote=auto_promote,
             push=push,
             test_paths=test_paths,
+            report_only=report_only,
         )
 
     async def run_evolution_queue(
         self,
         max_goals: int | None = None,
         push: bool = False,
+        auto_promote: bool = False,
+        report_only: bool | None = None,
     ) -> list[EvolutionSummaryReport]:
-        """Runs the continuous evolution loop, draining queued goals in priority order."""
-        return await self.goal_director.run_continuous(max_goals=max_goals, push=push)
+        """Drain queued goals, recording verified diffs unless promotion is explicit."""
+        return await self.goal_director.run_continuous(
+            max_goals=max_goals,
+            push=push,
+            auto_promote=auto_promote,
+            report_only=report_only,
+        )
 
     def get_evolution_status(self) -> dict[str, Any]:
         """Returns comprehensive status of current version, queue depth, and journal metrics."""

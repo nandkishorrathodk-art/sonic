@@ -1,0 +1,20 @@
+{
+  "pilot_owner": "",
+  "customer_or_internal_sponsor": "",
+  "approved_windows_build": "",
+  "approved_application_versions": [],
+  "approved_machine_ids_or_pool": [],
+  "human_supervision_enabled": true,
+  "high_risk_actions_disabled": true,
+  "local_only_mode_requested": true,
+  "outbound_network_audit_completed": false,
+  "outbound_network_audit_artifact": "",
+  "data_retention_days": 0,
+  "screenshot_logging_disabled_by_default": true,
+  "secrets_and_pii_in_test_data": false,
+  "operator_rollback_tested": false,
+  "customer_or_sponsor_approval": false,
+  "security_review_completed": false,
+  "decision": "NOT_APPROVED",
+  "notes": "Complete manually. These attestations are not inferred from automated test results."
+}

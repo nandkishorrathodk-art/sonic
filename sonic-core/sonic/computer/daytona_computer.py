@@ -709,14 +709,13 @@ class DaytonaComputerProvider(ComputerProvider):
                     and str(getattr(active_result, "result", "") or "").strip()
                 ):
                     active_window = str(active_result.result).strip()
-                visible_text, controls = await self._extract_visible_text(sandbox)
                 return ScreenObservation(
                     screenshot_base64=b64,
                     width=1280,
                     height=800,
                     active_window=active_window,
-                    visible_text=visible_text,
-                    detected_controls=controls,
+                    visible_text="",
+                    detected_controls=[],
                     desktop_state="INTERACTIVE",
                 )
 
@@ -730,73 +729,6 @@ class DaytonaComputerProvider(ComputerProvider):
             detected_controls=[],
             desktop_state="NO_DISPLAY",
         )
-
-    async def _extract_visible_text(self, sandbox) -> tuple[str, list[str]]:
-        """Walk the AT-SPI accessibility tree to extract real on-screen text and control roles.
-
-        Returns (visible_text, detected_controls). Falls back to empty values if
-        the accessibility tree is unavailable — never fabricates content.
-        """
-        texts: list[str] = []
-        controls: list[str] = []
-
-        async def _walk(node, depth: int = 0):
-            if node is None or depth > 6:
-                return
-            name = getattr(node, "name", "") or ""
-            role = getattr(node, "role", "") or ""
-            desc = getattr(node, "description", "") or ""
-            if name and name.strip():
-                texts.append(name.strip())
-            if desc and desc.strip():
-                texts.append(desc.strip())
-            if role and role not in ("application", "root", "window", "frame", "panel"):
-                controls.append(role)
-            children = getattr(node, "children", None) or []
-            for child in children:
-                await _walk(child, depth + 1)
-
-        try:
-            if hasattr(sandbox, "computer_use") and hasattr(sandbox.computer_use, "accessibility"):
-                tree = await sandbox.computer_use.accessibility.get_tree()
-                await _walk(tree)
-        except Exception as e:
-            logger.debug("daytona_accessibility_tree_failed", error=str(e))
-
-        if not texts:
-            try:
-                # Fallback to real X11 window titles via wmctrl / xdotool
-                disp = self._get_display()
-                res = await sandbox.process.exec(
-                    f"DISPLAY={disp} wmctrl -l 2>/dev/null || DISPLAY={disp} xdotool search --onlyvisible --name '' getwindowname 2>/dev/null"
-                )
-                if res.exit_code == 0 and res.result:
-                    for line in res.result.splitlines():
-                        line = line.strip()
-                        if line:
-                            parts = line.split(None, 3)
-                            wtitle = parts[-1] if len(parts) >= 4 else line
-                            if wtitle:
-                                texts.append(wtitle)
-                                controls.append("window")
-            except Exception:
-                pass
-
-        # Deduplicate while preserving order, cap length
-        seen = set()
-        unique_texts = []
-        for t in texts:
-            if t not in seen:
-                seen.add(t)
-                unique_texts.append(t)
-        visible_text = " | ".join(unique_texts)[:2000]
-        seen_c = set()
-        unique_controls = []
-        for c in controls:
-            if c not in seen_c:
-                seen_c.add(c)
-                unique_controls.append(c)
-        return visible_text, unique_controls[:20]
 
     # -------------------------------------------------------------
     # 3. Real GUI Action Dispatch (Mouse, Keyboard, Window Management)

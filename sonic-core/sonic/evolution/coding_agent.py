@@ -67,6 +67,7 @@ class CodingResult:
     proposed_writes: dict[str, str] = field(default_factory=dict)
     steps: int = 0
     tool_calls: list[str] = field(default_factory=list)
+    observed_files: list[str] = field(default_factory=list)
     finished: bool = False
     stop_reason: str = ""
 
@@ -221,7 +222,11 @@ class CodingAgent:
         lo = max(1, int(start)) if start else 1
         hi = min(len(lines), int(end)) if end else len(lines)
         body = "\n".join(f"{i:>5}  {lines[i-1]}" for i in range(lo, hi + 1))
-        return ToolResult(True, body[:MAX_OUTPUT] if body else "(empty file)")
+        return ToolResult(
+            True,
+            body[:MAX_OUTPUT] if body else "(empty file)",
+            {"path": rel},
+        )
 
     def _t_grep(self, pattern: str, path: str = ".") -> ToolResult:
         base = self._resolve(path or ".")
@@ -397,6 +402,10 @@ class CodingAgent:
                 else:
                     res = self._dispatch(call.name, args)
                     out = res.output if res.ok else f"ERROR: {res.output}"
+                    if call.name == "read_file" and res.ok:
+                        observed_path = str(res.meta.get("path", "")).replace("\\", "/")
+                        if observed_path and observed_path not in result.observed_files:
+                            result.observed_files.append(observed_path)
                     logger.info("coding_agent_tool", step=step, tool=call.name, ok=res.ok)
                 messages.append(Message(
                     role=MessageRole.TOOL, content=out[:MAX_OUTPUT],

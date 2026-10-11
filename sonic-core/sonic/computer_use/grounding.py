@@ -9,7 +9,6 @@ on the active desktop screen, avoiding coordinate guessing or hallucination.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import io
 import json
@@ -515,39 +514,6 @@ async def resolve_ui_target_async(
             logger.warning("grounding_fn_async_resolution_failed", query=query, error=str(exc))
 
     return None
-
-
-async def query_multimodal_grounding(
-    llm_router: Any,
-    query: str,
-    screenshot_b64: str,
-    width: int = 1280,
-    height: int = 800,
-) -> tuple[int, int] | None:
-    """Ground a visual UI query using the configured multimodal vision model (e.g. moonshotai/kimi-k3)."""
-    if not llm_router or not screenshot_b64:
-        return None
-    from sonic.llm.prompts import grounding_user_prompt
-    from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
-
-    raw_b64 = screenshot_b64.split(",", 1)[-1] if "," in screenshot_b64 else screenshot_b64
-    images = [ImageContent(base64=raw_b64, media_type="image/png")]
-    prompt = grounding_user_prompt(query, width, height)
-    req = LLMRequest(
-        messages=[
-            Message(role=MessageRole.USER, content=prompt, images=images)
-        ],
-        task_type="vision",
-        max_tokens=64,
-        temperature=0.1,
-        extra_body={"response_format": {"type": "json_object"}},
-    )
-    try:
-        res = await asyncio.wait_for(llm_router.complete(req), timeout=8.0)
-        return _parse_normalized_grounding_response(res.content, width, height)
-    except Exception as exc:
-        logger.warning("multimodal_grounding_model_query_failed", query=query, error=str(exc))
-        return None
 
 
 def _parse_normalized_grounding_response(

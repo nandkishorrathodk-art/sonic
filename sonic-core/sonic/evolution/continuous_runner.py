@@ -31,7 +31,8 @@ class ContinuousAutoEvolutionRunner:
         tenant_id: str = "default",
         max_cycles: int = 10,
         interval_seconds: int = 5,
-        auto_commit: bool = True,
+        auto_apply: bool = False,
+        auto_commit: bool = False,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         candidate_store: SelfCoderCandidateStore | None = None,
     ) -> None:
@@ -39,6 +40,7 @@ class ContinuousAutoEvolutionRunner:
         self.tenant_id = tenant_id
         self.max_cycles = max_cycles
         self.interval_seconds = interval_seconds
+        self.auto_apply = auto_apply
         self.auto_commit = auto_commit
         self.on_event = on_event or (lambda ev: None)
         self.candidate_store = candidate_store or SelfCoderCandidateStore(repo_root=self.repo_root)
@@ -100,12 +102,18 @@ class ContinuousAutoEvolutionRunner:
                 signals = coder.discover_signals(limit=5)
             except Exception as exc:
                 self._emit("cycle_error", f"Signal discovery failed: {exc}", error=str(exc))
-                signals = []
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=self.interval_seconds
+                    )
+                except TimeoutError:
+                    pass
+                continue
 
             if not signals:
                 self._emit(
                     "cycle_idle",
-                    f"[Cycle {self._current_cycle}] No actionable defects found. Codebase is clean.",
+                    f"[Cycle {self._current_cycle}] No actionable signals found after successful scans.",
                 )
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
@@ -140,6 +148,7 @@ class ContinuousAutoEvolutionRunner:
                     self.tenant_id,
                     1,
                     coder_factory,
+                    auto_apply=self.auto_apply,
                     auto_commit=self.auto_commit,
                     signals=[target_sig],
                 )
@@ -150,9 +159,11 @@ class ContinuousAutoEvolutionRunner:
 
             candidates = candidate_result.get("candidates", [])
             if not candidates:
+                report = str(candidate_result.get("report", "")).strip()
+                details = f" Details: {report[:1200]}" if report else ""
                 self._emit(
                     "cycle_no_candidate",
-                    f"[Cycle {self._current_cycle}] Candidate synthesis yielded no passing patch.",
+                    f"[Cycle {self._current_cycle}] No verified patch was produced.{details}",
                 )
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
@@ -163,6 +174,23 @@ class ContinuousAutoEvolutionRunner:
             candidate = candidates[0]
             cand_id = candidate.get("candidate_id", "")
             cand_status = candidate.get("status", "")
+
+            if cand_status == "verified":
+                self._emit(
+                    "candidate_ready",
+                    f"[Cycle {self._current_cycle}] Candidate {cand_id[:8]} passed isolated verification "
+                    "and was recorded for operator review. The active checkout was not changed; "
+                    "nothing was committed or pushed.",
+                    candidate_id=cand_id,
+                    files=candidate.get("files", []),
+                    diff=candidate.get("diff", ""),
+                    verification=candidate.get("verification", {}),
+                )
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
+                except TimeoutError:
+                    pass
+                continue
 
             if cand_status != "promoted":
                 if cand_status in {"applied", "committed_metadata_failed"}:
@@ -195,7 +223,8 @@ class ContinuousAutoEvolutionRunner:
                     pass
                 continue
 
-            # run_candidate applies, verifies, commits, versions, and journals before returning.
+            # This status is reachable only when automatic application and commit
+            # were explicitly enabled by the caller.
             self._emit(
                 "promoting",
                 f"[Cycle {self._current_cycle}] Candidate {cand_id[:8]} verified, committed, versioned, and journaled.",

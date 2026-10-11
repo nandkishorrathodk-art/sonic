@@ -109,6 +109,7 @@ class EvolutionSummaryReport:
     git_pushed: bool = False
     git_push_message: str = ""
     error_reason: str = ""
+    proposed_diff: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_markdown(self) -> str:
@@ -119,6 +120,11 @@ class EvolutionSummaryReport:
             EvolutionStage.ROLLED_BACK: "🔴 ROLLED BACK (TESTS FAILED)",
             EvolutionStage.REJECTED: "⛔ REJECTED (SAFETY/AST VIOLATION)",
         }.get(self.stage, f"⚪ {self.stage.value.upper()}")
+        if (
+            self.stage == EvolutionStage.AWAITING_APPROVAL
+            and self.git_push_message.startswith("Report-only verification")
+        ):
+            status_badge = "🟢 VERIFIED (REPORT ONLY)"
 
         md = [
             f"# 🧬 Codebase Self-Evolution Summary: `{self.proposal_id}`",
@@ -151,6 +157,15 @@ class EvolutionSummaryReport:
 
         if self.git_push_message:
             md.append(f"- **Git Push Details:** `{self.git_push_message}`")
+
+        if self.proposed_diff:
+            md.extend([
+                "",
+                "## Proposed Diff (review only)",
+                "```diff",
+                self.proposed_diff.rstrip(),
+                "```",
+            ])
 
         if self.error_reason:
             md.extend([
@@ -653,7 +668,7 @@ class CodebaseEvolver:
         push: bool = False,
         test_paths: list[str] | None = None,
         pre_applied_files: list[str] | None = None,
-        report_only: bool = False,
+        report_only: bool | None = None,
     ) -> EvolutionSummaryReport:
         """
         Executes a complete, closed-loop codebase evolution cycle:
@@ -667,6 +682,13 @@ class CodebaseEvolver:
         8. Automatically appends audit notes to evolution.md
         9. Returns rich EvolutionSummaryReport
         """
+        if report_only is None:
+            report_only = not auto_promote
+        if report_only and auto_promote:
+            raise ValueError("report_only cannot be combined with auto_promote")
+        if push and not auto_promote:
+            raise ValueError("push requires explicit auto_promote=True")
+
         try:
             test_paths = self._validate_test_paths(test_paths)
         except (ValueError, SafetyInvariantViolation) as exc:
@@ -745,6 +767,7 @@ class CodebaseEvolver:
             description=description,
             stage=proposal.stage,
             files_affected=[target_component],
+            proposed_diff=code_diff,
         )
 
         # Gate 1: Safety Invariant Check

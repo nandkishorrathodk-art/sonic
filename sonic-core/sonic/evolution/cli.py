@@ -20,8 +20,8 @@ Usage Examples:
     # 5. View live evolution journal:
     python -m sonic.evolution.cli journal
 
-    # 6. Apply a direct diff patch:
-    python -m sonic.evolution.cli patch --target sonic-core/sonic/tools/sample.py --diff-file fix.patch --desc "Fix bug" --auto-promote
+    # 6. Verify and record a direct diff patch without applying it:
+    python -m sonic.evolution.cli patch --target sonic-core/sonic/tools/sample.py --diff-file fix.patch --desc "Fix bug"
 """
 
 from __future__ import annotations
@@ -88,14 +88,15 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", help="Evolution command")
 
     # Command: goal
-    goal_parser = subparsers.add_parser("goal", help="Enqueue and optionally execute an autonomous evolution goal")
+    goal_parser = subparsers.add_parser("goal", help="Enqueue and optionally verify an evolution goal")
     goal_parser.add_argument("--title", required=True, help="Title of the evolution goal or bug fix")
     goal_parser.add_argument("--desc", required=True, help="Detailed description of what to repair or improve")
     goal_parser.add_argument("--priority", type=int, default=2, choices=[1, 2, 3, 4], help="Priority (1=critical, 2=high, 3=medium, 4=low)")
     goal_parser.add_argument("--category", default="logic_improvement", choices=["bug_fix", "logic_improvement", "capability_add", "performance", "refactor"], help="Goal category")
     goal_parser.add_argument("--targets", nargs="*", help="Optional target file paths relative to repo root")
     goal_parser.add_argument("--execute", action="store_true", help="Immediately execute the goal after submitting")
-    goal_parser.add_argument("--push", action="store_true", default=False, help="Git push to origin if executed and promoted")
+    goal_parser.add_argument("--auto-promote", action="store_true", default=False, help="Explicitly apply and commit a verified goal")
+    goal_parser.add_argument("--push", action="store_true", default=False, help="Push a promoted goal to origin (requires --auto-promote)")
 
     # Command: goals
     goals_parser = subparsers.add_parser("goals", help="List all evolution goals in the queue")
@@ -120,9 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Command: run
-    run_parser = subparsers.add_parser("run", help="Run continuous evolution loop on queued goals")
+    run_parser = subparsers.add_parser("run", help="Verify and record queued evolution goals")
     run_parser.add_argument("--max-goals", type=_positive_int, default=None, help="Maximum number of goals to process (must be > 0)")
-    run_parser.add_argument("--push", action="store_true", default=False, help="Git push to origin for promoted goals")
+    run_parser.add_argument("--auto-promote", action="store_true", default=False, help="Explicitly apply and commit verified goals")
+    run_parser.add_argument("--push", action="store_true", default=False, help="Push promoted goals to origin (requires --auto-promote)")
 
     # Command: version
     subparsers.add_parser("version", help="Show current semantic version milestone and advancement history")
@@ -137,14 +139,13 @@ def build_parser() -> argparse.ArgumentParser:
     changelog_parser.add_argument("--to-ver", help="Ending version")
 
     # Command: patch
-    patch_parser = subparsers.add_parser("patch", help="Apply a code patch, verify via automated tests, commit, and push")
+    patch_parser = subparsers.add_parser("patch", help="Verify and record a code patch without applying it")
     patch_parser.add_argument("--target", required=True, help="Target component file relative to repository root")
     patch_parser.add_argument("--desc", required=True, help="Description of the bug fix, upgrade, or logical enhancement")
     patch_parser.add_argument("--diff-file", help="Path to a unified diff (.patch) or code replacement file")
     patch_parser.add_argument("--diff", help="Raw diff or code string passed directly")
-    patch_parser.add_argument("--auto-promote", action="store_true", default=True, help="Auto-commit on 100%% test pass without human approval (default: True)")
-    patch_parser.add_argument("--no-auto-promote", dest="auto_promote", action="store_false", help="Do not auto-commit, await manual approval")
-    patch_parser.add_argument("--push", action="store_true", default=False, help="Git push to origin after successful promotion")
+    patch_parser.add_argument("--auto-promote", action="store_true", default=False, help="Explicitly apply and commit after verification")
+    patch_parser.add_argument("--push", action="store_true", default=False, help="Push after promotion (requires --auto-promote)")
     patch_parser.add_argument("--tests", nargs="*", help="Specific pytest files/paths to verify against")
     patch_parser.add_argument("--summary-out", help="Optional output path to save the generated markdown summary")
 
@@ -275,6 +276,13 @@ def main() -> int:
         return 0
 
     if args.command == "goal":
+        if (args.push or args.auto_promote) and not args.execute:
+            print("Error: --auto-promote and --push require --execute", file=sys.stderr)
+            return 1
+        if args.push and not args.auto_promote:
+            print("Error: --push requires --auto-promote", file=sys.stderr)
+            return 1
+
         goal = director.submit_goal(
             title=args.title,
             description=args.desc,
@@ -291,11 +299,24 @@ def main() -> int:
             print("\n🧬 Executing Goal Now...")
             import asyncio as _asyncio
 
-            rep = _asyncio.run(director.execute_goal(goal.goal_id, auto_promote=True, push=args.push))
+            rep = _asyncio.run(
+                director.execute_goal(
+                    goal.goal_id,
+                    auto_promote=args.auto_promote,
+                    push=args.push,
+                    report_only=not args.auto_promote,
+                )
+            )
             print(f"Outcome: {rep.stage.value}")
             print(f"New Version: v{version_tracker.current_version()}")
-            print(f"Notes updated in: {journal.evolution_md_path}")
-            return 0 if rep.stage == EvolutionStage.PROMOTED else 2
+            if args.auto_promote:
+                print(f"Notes updated in: {journal.evolution_md_path}")
+            else:
+                print("Verified diff and test receipts were recorded on the goal; active checkout unchanged.")
+            return 0 if rep.stage in {
+                EvolutionStage.PROMOTED,
+                EvolutionStage.AWAITING_APPROVAL,
+            } else 2
         return 0
 
     if args.command == "goals":
@@ -339,16 +360,32 @@ def main() -> int:
         if args.max_goals is not None and args.max_goals <= 0:
             print("Error: --max-goals must be greater than 0", file=sys.stderr)
             return 1
+        if args.push and not args.auto_promote:
+            print("Error: --push requires --auto-promote", file=sys.stderr)
+            return 1
         print(f"🧬 Starting continuous evolution loop (max_goals={args.max_goals})...")
         import asyncio as _asyncio
 
-        reps = _asyncio.run(director.run_continuous(max_goals=args.max_goals, push=args.push))
+        reps = _asyncio.run(
+            director.run_continuous(
+                max_goals=args.max_goals,
+                push=args.push,
+                auto_promote=args.auto_promote,
+                report_only=not args.auto_promote,
+            )
+        )
         print(f"\n✅ Finished continuous run. Processed {len(reps)} goals.")
         print(f"Active Version: v{version_tracker.current_version()}")
-        print(f"All notes logged to: {journal.evolution_md_path}")
+        if args.auto_promote:
+            print(f"All notes logged to: {journal.evolution_md_path}")
+        else:
+            print("Verified diffs and test receipts were recorded on their goals; active checkout unchanged.")
         return 0
 
     if args.command == "patch":
+        if args.push and not args.auto_promote:
+            print("Error: --push requires --auto-promote", file=sys.stderr)
+            return 1
         repo_root = evolver.repo_root.resolve()
 
         if not is_safe_repo_path(args.target, repo_root):
@@ -387,6 +424,7 @@ def main() -> int:
             auto_promote=args.auto_promote,
             push=args.push,
             test_paths=args.tests,
+            report_only=not args.auto_promote,
         )
 
         md = report.to_markdown()
@@ -399,7 +437,10 @@ def main() -> int:
             out_p.write_text(md, encoding="utf-8")
             print(f"📝 Summary saved to: {out_p}")
 
-        print(f"📝 Live notes appended to: {journal.evolution_md_path}")
+        if args.auto_promote:
+            print(f"📝 Live notes appended to: {journal.evolution_md_path}")
+        else:
+            print("📝 Report contains the verified proposal diff; active checkout unchanged.")
 
         if report.stage in (EvolutionStage.PROMOTED, EvolutionStage.AWAITING_APPROVAL):
             return 0

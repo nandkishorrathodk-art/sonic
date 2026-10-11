@@ -2355,6 +2355,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "neo4j" },
+    { name = "numpy" },
     { name = "openai" },
     { name = "passlib", extra = ["bcrypt"] },
     { name = "pillow" },
@@ -2372,11 +2373,13 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+avcs-grounding = [
+    { name = "torch" },
+]
 dev = [
     { name = "cython" },
     { name = "httpx" },
     { name = "mypy" },
-    { name = "numpy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -2401,7 +2404,7 @@ requires-dist = [
     { name = "laya", marker = "extra == 'local-laya'", specifier = ">=0.3.27,<0.4.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==1.20.0" },
     { name = "neo4j", specifier = ">=5.27.0" },
-    { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "openai", specifier = ">=1.59.7" },
     { name = "passlib", extras = ["bcrypt"], specifier = ">=1.7.4" },
     { name = "pillow", specifier = ">=10.0" },
@@ -2420,9 +2423,10 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
     { name = "structlog", specifier = ">=24.4.0" },
     { name = "tenacity", specifier = ">=9.0.0" },
+    { name = "torch", marker = "extra == 'avcs-grounding'", specifier = ">=2.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.1" },
 ]
-provides-extras = ["dev", "local-laya", "rag-local"]
+provides-extras = ["dev", "local-laya", "rag-local", "avcs-grounding"]
 
 [[package]]
 name = "sonic-monorepo"

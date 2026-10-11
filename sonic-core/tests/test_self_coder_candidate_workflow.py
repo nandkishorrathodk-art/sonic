@@ -137,7 +137,7 @@ def _new_candidate(root: Path, storage: Path, tenant: str = "tenant-a"):
     return store, result["candidates"][0]
 
 
-def test_verified_candidate_is_applied_to_active_worktree_without_branch_or_commit(candidate_repo):
+def test_verified_candidate_is_recorded_without_changing_active_worktree(candidate_repo):
     root, storage = candidate_repo
     before_head = _git(root, "rev-parse", "HEAD")
     before_branch = _git(root, "branch", "--show-current")
@@ -145,18 +145,17 @@ def test_verified_candidate_is_applied_to_active_worktree_without_branch_or_comm
 
     store, candidate = _new_candidate(root, storage)
 
-    assert candidate["status"] == "applied"
+    assert candidate["status"] == "verified"
     assert candidate["verification"]["full_test_suite"] is True
     assert candidate["verification"]["security_regression"] is True
-    assert candidate["verification"]["active_worktree"]["full_test_suite"] is True
-    assert candidate["verification"]["active_worktree"]["security_regression"] is True
     assert candidate["commit"] == ""
     assert candidate["commit_branch"] == ""
     assert "Expected impact" in candidate["report"]
+    assert "active working tree unchanged" in candidate["report"]
     assert _git(root, "rev-parse", "HEAD") == before_head
     assert _git(root, "branch", "--show-current") == before_branch
-    assert _git(root, "status", "--porcelain") != before_status
-    assert 'return "candidate"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
+    assert _git(root, "status", "--porcelain") == before_status
+    assert 'return "base"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
     assert not _git(root, "branch", "--list", "sonic/self-coder/*")
     assert store.get(candidate["candidate_id"], "tenant-a")["diff"] == DIFF
 
@@ -171,7 +170,8 @@ async def test_verified_candidate_is_recorded_in_tenant_graph(candidate_repo, mo
 
     store = SelfCoderCandidateStore(root, storage)
     result = await store.run_candidate(
-        "tenant-a", 1, lambda worktree: _coder_factory(worktree), auto_commit=True
+        "tenant-a", 1, lambda worktree: _coder_factory(worktree),
+        auto_apply=True, auto_commit=True,
     )
     candidate = result["candidates"][0]
 
@@ -261,13 +261,13 @@ def test_candidate_run_preserves_unrelated_dirty_active_checkout(candidate_repo)
     assert (root / "operator-work.txt").read_text(encoding="utf-8") == (
         "keep this change\n"
     )
-    assert result["candidates"][0]["status"] == "applied"
-    assert 'return "candidate"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
+    assert result["candidates"][0]["status"] == "verified"
+    assert 'return "base"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
     assert "operator-work.txt" in result["candidates"][0]["working_tree_changes_excluded"]
     assert not list((storage / "worktrees").iterdir())
 
 
-def test_verified_candidate_application_does_not_change_head_branch_or_create_commit(candidate_repo):
+def test_verified_candidate_is_not_applied_or_committed_without_approval(candidate_repo):
     root, storage = candidate_repo
     original_branch = _git(root, "branch", "--show-current")
     original_head = _git(root, "rev-parse", "HEAD")
@@ -275,19 +275,19 @@ def test_verified_candidate_application_does_not_change_head_branch_or_create_co
 
     assert _git(root, "rev-parse", "HEAD") == original_head
     assert _git(root, "branch", "--show-current") == original_branch
-    assert candidate["status"] == "applied"
+    assert candidate["status"] == "verified"
 
-    applied = store.get(candidate["candidate_id"], "tenant-a")
+    verified = store.get(candidate["candidate_id"], "tenant-a")
 
-    assert applied["status"] == "applied"
-    assert applied["commit"] == ""
-    assert applied["commit_branch"] == ""
+    assert verified["status"] == "verified"
+    assert verified["commit"] == ""
+    assert verified["commit_branch"] == ""
     assert _git(root, "branch", "--show-current") == original_branch
     assert _git(root, "rev-parse", "HEAD") == original_head
     assert not _git(root, "branch", "--list", "sonic/self-coder/*")
-    assert 'return "candidate"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
-    with pytest.raises(ValueError, match="applied candidate records are retained"):
-        store.cleanup(applied["candidate_id"], "tenant-a")
+    assert 'return "base"' in (root / "sonic-core" / "app.py").read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="Reject a verified candidate before cleanup"):
+        store.cleanup(verified["candidate_id"], "tenant-a")
 
 
 def test_legacy_verified_candidate_can_still_be_manually_promoted(candidate_repo):
@@ -477,7 +477,12 @@ def test_candidate_conflict_blocks_without_overwriting_touched_operator_edit(can
     store = SelfCoderCandidateStore(root, storage)
 
     result = asyncio.run(
-        store.run_candidate("tenant-a", 1, lambda worktree: _coder_factory(worktree))
+        store.run_candidate(
+            "tenant-a",
+            1,
+            lambda worktree: _coder_factory(worktree),
+            auto_apply=True,
+        )
     )
 
     candidate = result["candidates"][0]
@@ -500,7 +505,12 @@ def test_post_apply_failure_restores_exact_touched_file_bytes(candidate_repo, mo
     )
 
     result = asyncio.run(
-        store.run_candidate("tenant-a", 1, lambda worktree: _coder_factory(worktree))
+        store.run_candidate(
+            "tenant-a",
+            1,
+            lambda worktree: _coder_factory(worktree),
+            auto_apply=True,
+        )
     )
 
     candidate = result["candidates"][0]
@@ -732,4 +742,3 @@ async def test_router_respects_custom_sqlite_paths(tmp_path, monkeypatch):
     db2 = str(tmp_path / "second.db")
     mem2 = await get_smart_memory(sqlite_db_path=db2)
     assert mem2.db_path == db2
-
