@@ -12,10 +12,13 @@ Verifies:
 8. LLM-driven and target-aware goal decomposition
 """
 
+import base64
+from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 import time
 
 import pytest
+from PIL import Image
 
 from sonic.computer.models import ComputerState, GitStatusInfo, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
@@ -25,6 +28,11 @@ from sonic.computer_use.models import (
     ComputerWorldObservation,
 )
 
+_FRAME = Image.new("RGB", (1, 1), color="black")
+_FRAME_BUFFER = BytesIO()
+_FRAME.save(_FRAME_BUFFER, format="PNG")
+_FRAME_BASE64 = base64.b64encode(_FRAME_BUFFER.getvalue()).decode("ascii")
+
 
 class DummyComputerProvider:
     """Minimal provider stub for testing agent logic without live Docker."""
@@ -32,6 +40,7 @@ class DummyComputerProvider:
     def __init__(self):
         self.gui_actions_taken = []
         self.service_actions_taken = []
+        self.frame_index = 0
 
     async def terminal(self, workspace_id, cmd):
         mock_res = MagicMock()
@@ -47,24 +56,40 @@ class DummyComputerProvider:
         return None
 
     async def screenshot(self, workspace_id):
+        self.frame_index += 1
         return ScreenObservation(
-            screenshot_base64="fresh-frame",
+            screenshot_base64=_FRAME_BASE64,
+            avcs_state={
+                "engine": "avcs_reflex",
+                "frame_index": self.frame_index,
+                "scene_hash": "desktop-scene",
+                "width": 1920,
+                "height": 1080,
+            },
             active_window="Chromium",
             width=1920,
             height=1080,
-            visible_text="Desktop",
+            desktop_state="INTERACTIVE",
             capture_age_ms=0,
             controls_age_ms=0,
         )
 
     async def gui_action(self, workspace_id, action):
         self.gui_actions_taken.append(action)
+        self.frame_index += 1
         return ScreenObservation(
-            screenshot_base64="after-frame",
+            screenshot_base64=_FRAME_BASE64,
+            avcs_state={
+                "engine": "avcs_reflex",
+                "frame_index": self.frame_index,
+                "scene_hash": "desktop-after-action",
+                "width": 1920,
+                "height": 1080,
+            },
             active_window="Chromium",
-            visible_text="",
             width=1920,
             height=1080,
+            desktop_state="INTERACTIVE",
             capture_age_ms=0,
             controls_age_ms=0,
         )
@@ -107,47 +132,19 @@ class TransientScreenshotProvider(DummyComputerProvider):
                 controls_age_ms=0,
             )
         return ScreenObservation(
-            screenshot_base64="valid-frame",
+            screenshot_base64=_FRAME_BASE64,
+            avcs_state={
+                "engine": "avcs_reflex",
+                "frame_index": 1,
+                "scene_hash": "desktop-scene",
+                "width": 1920,
+                "height": 1080,
+            },
             active_window="Desktop",
             width=1920,
             height=1080,
-        )
-
-
-class StateOnlyObservationProvider(DummyComputerProvider):
-    def __init__(self):
-        super().__init__()
-        self.screenshot_calls = 0
-        self.state_calls = 0
-
-    async def screenshot(self, workspace_id):
-        self.screenshot_calls += 1
-        return await super().screenshot(workspace_id)
-
-    async def observe_state(self, workspace_id):
-        self.state_calls += 1
-        return ScreenObservation(
-            screenshot_base64="",
-            capture_timestamp_ns=1,
-            capture_age_ms=15,
-            controls_age_ms=10,
-            perception_version=9,
-            width=1920,
-            height=1080,
-            active_window="Document",
-            visible_text="Document",
-            detected_controls=[
-                {
-                    "name": "Save",
-                    "role": "button",
-                    "bbox": (30, 40, 90, 70),
-                    "bbox_format": "xyxy",
-                    "source": "atspi",
-                    "confidence": 0.95,
-                    "freshness_ms": 0,
-                }
-            ],
-            desktop_state="STATE_ONLY",
+            capture_age_ms=0,
+            desktop_state="INTERACTIVE",
         )
 
 
@@ -159,62 +156,12 @@ async def test_observe_retries_transient_incomplete_desktop_frame():
     observation = await agent.observe("ws-1")
 
     assert provider.screenshot_calls == 2
-    assert observation.screen.screenshot_base64 == "valid-frame"
-
-
-@pytest.mark.asyncio
-async def test_observe_uses_compact_state_without_fetching_screenshot():
-    provider = StateOnlyObservationProvider()
-    agent = ComputerUseAgent(computer_provider=provider)
-
-    observation = await agent.observe("ws-1")
-
-    assert provider.state_calls == 1
-    assert provider.screenshot_calls == 0
-    assert observation.screen.desktop_state == "STATE_ONLY"
-    assert observation.screen.screenshot_base64 == ""
-    assert observation.perception_version > 0
-    assert observation.perception_source == "nsi_state"
-    assert observation.accessible_scene_fresh is True
-    assert agent.perception_bus.resolve("Save") is not None
-    assert agent._perception_counters["nsi_state_observations"] == 1
-
-
-@pytest.mark.asyncio
-async def test_rejected_nsi_state_cache_does_not_override_screenshot_metadata():
-    provider = StateOnlyObservationProvider()
-    provider.observe_state = AsyncMock(return_value=None)
-    provider.screenshot = AsyncMock(return_value=ScreenObservation(
-        screenshot_base64="current-frame",
-        active_window="Current Screen",
-        width=1920,
-        height=1080,
-        visible_text="Current frame content",
-        capture_age_ms=0,
-        controls_age_ms=0,
-    ))
-    provider._last_nsi_state = (
-        time.monotonic(),
-        {
-            "version": 99,
-            "capture_timestamp_ns": time.time_ns() - 5_000_000_000,
-            "active_window": "Stale Window",
-            "open_windows": ["Stale Window"],
-        },
-    )
-    agent = ComputerUseAgent(computer_provider=provider)
-
-    observation = await agent.observe("ws-1")
-
-    assert observation.perception_source == "screenshot"
-    assert observation.screen.active_window == "Current Screen"
-    assert observation.visible_text == "Current frame content"
-    assert observation.active_application == "Chromium"
+    assert observation.screen.screenshot_base64 == _FRAME_BASE64
 
 
 @pytest.mark.asyncio
 async def test_observe_records_action_to_next_state_latency():
-    provider = StateOnlyObservationProvider()
+    provider = DummyComputerProvider()
     agent = ComputerUseAgent(computer_provider=provider)
     trace = MagicMock(id="trace-state-latency", action_to_state_ms=None)
     agent.traces.append(trace)
@@ -415,21 +362,19 @@ def test_target_injected_at_top_of_observation():
     assert "Universal Anti-Bypass Invariant" in system_prompt
 
 
-def test_observation_caps_huge_screen_and_files():
+def test_observation_caps_large_file_lists_without_screen_text():
     provider = DummyComputerProvider()
     agent = ComputerUseAgent(computer_provider=provider)
 
-    # 10,000 char screen text and 500 files
-    huge_screen = "A" * 10000
+    # A workstation AVCS observation does not supply OCR-derived screen text.
     huge_files = [f"file_{i}.txt" for i in range(500)]
     obs = ComputerWorldObservation(
-        visible_text=huge_screen,
         filesystem_files=huge_files,
     )
     _, obs_summary = agent._build_reasoning_context("test goal", obs, 1, "a.py", "b.py")
 
-    # Screen visible content must be capped to ~4000 chars
-    assert "Screen Visible Content: " + ("A" * 3997) + "..." in obs_summary
+    assert "Not extracted; current pixels are processed locally by AVCS." in obs_summary
+    assert "A" * 100 not in obs_summary
     # Files must be capped to top 60 files + more files summary
     assert "+440 more files" in obs_summary
 
@@ -504,14 +449,14 @@ async def test_plane_separation_in_observations():
     trace_gui = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_CLICK,
-        "search button",
+        "640,400",
         {"x": 640, "y": 400},
         "click search",
     )
     assert trace_gui.status == ActionExecutionStatus.COMPLETED
     assert agent._last_action_output == {}
     assert agent._last_gui_action_result.get("action_type") == "GUI_CLICK"
-    assert agent._last_gui_action_result.get("target") == "search button"
+    assert agent._last_gui_action_result.get("target") == "640,400"
 
     # 2. Command action DOES write to _last_action_output
     trace_cmd = await agent.execute_action(
@@ -604,15 +549,12 @@ async def test_prevent_shell_command_injection_in_ui_execute():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_visual_grounding_unresolved_blocks_without_blind_click(monkeypatch):
-    from unittest.mock import AsyncMock
+async def test_visual_grounding_unresolved_blocks_without_blind_click():
     provider = DummyComputerProvider()
     agent = ComputerUseAgent(computer_provider=provider)
     await agent.observe("ws-1")
 
-    # Force visual grounding to fail (return None)
-    import sonic.computer_use.agent as agent_module
-    monkeypatch.setattr(agent_module, "resolve_ui_target_async", AsyncMock(return_value=None))
+    agent._ground_target_with_avcs = AsyncMock(return_value=None)
 
     trace = await agent.execute_action(
         "ws-1",
@@ -623,7 +565,8 @@ async def test_visual_grounding_unresolved_blocks_without_blind_click(monkeypatc
     )
 
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert trace.actual_observation == "Target UI element 'Login button' could not be resolved from visual grounding. Re-observing screen."
+    assert "AVCS grounder did not resolve" in trace.actual_observation
+    agent._ground_target_with_avcs.assert_awaited_once_with("Login button")
     # Ensure provider gui_action was NOT called with (0, 0)
     for act in provider.gui_actions_taken:
         if getattr(act, "action", None) == "click":

@@ -1,0 +1,67 @@
+{
+  "benchmark_name": "AVCS Sustained Reliability & Resource Soak Test",
+  "milestone": "Milestone 4",
+  "schema_version": "1.0",
+  "configuration": {
+    "duration_target_seconds": 1.0,
+    "duration_target_hours": 0.0,
+    "max_cycles": 15,
+    "base_seed": 999
+  },
+  "execution": {
+    "total_cycles_completed": 15,
+    "total_elapsed_seconds": 0.15,
+    "throughput_cycles_per_sec": 97.53
+  },
+  "resource_telemetry": {
+    "initial": {
+      "rss_mb": 225.695,
+      "vms_mb": 541.895,
+      "process_handles": 232,
+      "gdi_objects": 0,
+      "user_objects": 0
+    },
+    "final": {
+      "rss_mb": 226.109,
+      "vms_mb": 541.895,
+      "process_handles": 233,
+      "gdi_objects": 0,
+      "user_objects": 0
+    },
+    "deltas": {
+      "delta_rss_mb": 0.414,
+      "delta_process_handles": 1,
+      "delta_gdi_objects": 0,
+      "delta_user_objects": 0
+    },
+    "trend_slopes": {
+      "rss_slope_mb_per_cycle": 0.0027,
+      "rss_slope_mb_per_hour": 878.2418,
+      "handle_slope_per_hour": -0.0
+    }
+  },
+  "reliability": {
+    "action_status_distribution": {
+      "confirmed": 14,
+      "blocked": 0,
+      "failed": 1,
+      "ambiguous": 0
+    },
+    "capture_errors_encountered": 0,
+    "false_confirmations": 0,
+    "zero_false_confirmations": true
+  },
+  "latency_ms": {
+    "p50": 9.064900004887022,
+    "p95": 28.50369999941904,
+    "p99": 28.50369999941904
+  },
+  "acceptance_gates": {
+    "memory_stable": true,
+    "handles_stable": true,
+    "zero_false_confirmations": true,
+    "zero_unhandled_crashes": true,
+    "exit_gate_passed": true
+  },
+  "trace_file": "C:\\Users\\nandk\\Documents\\antigravity\\splendid-babbage\\benchmarks\\results\\soak_telemetry.jsonl"
+}

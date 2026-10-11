@@ -1,0 +1,111 @@
+{
+  "timestamp": "2026-10-09T09:49:44.813247+00:00",
+  "hardware": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "system": "Windows",
+    "release": "11",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 170 Stepping 4, GenuineIntel",
+    "cpu_logical_cores": 10,
+    "python_version": "3.14.7",
+    "torch_version": "2.14.0+cpu",
+    "torch_num_threads": 4,
+    "torch_cuda_available": false
+  },
+  "config": {
+    "source": "synthetic",
+    "device": "cpu",
+    "num_frames": 500,
+    "warmup_frames": 50
+  },
+  "summary": {
+    "total_frames": 500,
+    "total_elapsed_seconds": 2.808,
+    "effective_fps": 178.03,
+    "total_tick_p50_ms": 5.535,
+    "total_tick_p95_ms": 7.085,
+    "gate_passed_p50_sub10ms": true
+  },
+  "stage_statistics": {
+    "capture_ms": {
+      "mean": 0.501,
+      "std": 0.103,
+      "min": 0.282,
+      "p50": 0.512,
+      "p90": 0.602,
+      "p95": 0.657,
+      "p99": 0.808,
+      "max": 0.973
+    },
+    "tensor_prep_ms": {
+      "mean": 0.76,
+      "std": 0.148,
+      "min": 0.532,
+      "p50": 0.722,
+      "p90": 0.936,
+      "p95": 1.034,
+      "p99": 1.379,
+      "max": 1.522
+    },
+    "backbone_ms": {
+      "mean": 2.529,
+      "std": 1.873,
+      "min": 1.449,
+      "p50": 2.42,
+      "p90": 3.301,
+      "p95": 3.471,
+      "p99": 3.766,
+      "max": 41.261
+    },
+    "affordance_ms": {
+      "mean": 0.293,
+      "std": 0.096,
+      "min": 0.167,
+      "p50": 0.291,
+      "p90": 0.392,
+      "p95": 0.457,
+      "p99": 0.604,
+      "max": 0.987
+    },
+    "motion_flow_ms": {
+      "mean": 0.376,
+      "std": 0.104,
+      "min": 0.235,
+      "p50": 0.371,
+      "p90": 0.48,
+      "p95": 0.532,
+      "p99": 0.78,
+      "max": 1.011
+    },
+    "scene_diff_ms": {
+      "mean": 0.925,
+      "std": 0.244,
+      "min": 0.505,
+      "p50": 0.881,
+      "p90": 1.246,
+      "p95": 1.354,
+      "p99": 1.552,
+      "max": 1.647
+    },
+    "ipc_broadcast_ms": {
+      "mean": 0.226,
+      "std": 0.26,
+      "min": 0.132,
+      "p50": 0.204,
+      "p90": 0.283,
+      "p95": 0.326,
+      "p99": 0.35,
+      "max": 5.939
+    },
+    "total_tick_ms": {
+      "mean": 5.613,
+      "std": 2.063,
+      "min": 3.548,
+      "p50": 5.535,
+      "p90": 6.851,
+      "p95": 7.085,
+      "p99": 7.624,
+      "max": 44.682
+    }
+  }
+}

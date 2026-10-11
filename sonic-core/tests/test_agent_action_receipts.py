@@ -1,9 +1,12 @@
 """Focused coverage for execution evidence exposed on computer-use traces."""
 
 import asyncio
+import base64
 import time
+from io import BytesIO
 
 import pytest
+from PIL import Image
 
 from sonic.computer.models import ComputerState, GitStatusInfo, ScreenObservation
 from sonic.computer.provider import ComputerProvider
@@ -17,11 +20,14 @@ from sonic.computer_use.models import (
 from sonic.safety.action_policy import ActionPolicy
 from sonic.sandbox.provider import ExecResult
 
+_FRAME_BUFFER = BytesIO()
+Image.new("RGB", (1280, 800), color=(20, 30, 40)).save(_FRAME_BUFFER, format="PNG")
+_FRAME_BASE64 = base64.b64encode(_FRAME_BUFFER.getvalue()).decode("ascii")
+
 
 class _ReceiptComputer(ComputerProvider):
     def __init__(self, exit_code: int = 0):
         self.exit_code = exit_code
-        self.observe_state = None
         self.gui_calls = 0
         self.commands: list[str] = []
         self.git_actions: list[tuple[str, dict]] = []
@@ -36,13 +42,9 @@ class _ReceiptComputer(ComputerProvider):
         )
 
     async def screenshot(self, workspace_id):
-        return ScreenObservation(
-            screenshot_base64="before-screen",
-            width=1280,
-            height=800,
-            active_window="Desktop",
-            capture_age_ms=0,
-            controls_age_ms=0,
+        return _avcs_screen(
+            frame_index=1,
+            scene_hash="before-screen",
         )
     async def list_files(self, *args, **kwargs): return []
     async def read_file(self, *args, **kwargs): return ""
@@ -69,27 +71,37 @@ class _ReceiptComputer(ComputerProvider):
 
     async def gui_action(self, workspace_id, action, actor="operator"):
         self.gui_calls += 1
-        return ScreenObservation(
-            screenshot_base64="after-screen",
-            capture_age_ms=0,
-            controls_age_ms=0,
+        return _avcs_screen(
+            frame_index=2,
+            scene_hash="after-screen",
             active_window="observed window",
         )
 
 
-class _StateRevalidatingComputer(_ReceiptComputer):
-    async def observe_state(self, workspace_id):
-        return ScreenObservation(
-            screenshot_base64="",
-            width=1280,
-            height=800,
-            active_window="Desktop",
-            desktop_state="STATE_ONLY",
-            capture_age_ms=0,
-            controls_age_ms=0,
-            visible_text="same desktop",
-            perception_version=2,
-        )
+def _avcs_screen(
+    screenshot: str = _FRAME_BASE64,
+    *,
+    frame_index: int = 1,
+    scene_hash: str | None = None,
+    active_window: str = "Desktop",
+    **kwargs,
+) -> ScreenObservation:
+    return ScreenObservation(
+        screenshot_base64=screenshot,
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": frame_index,
+            "scene_hash": scene_hash or "before-screen",
+            "width": 1280,
+            "height": 800,
+        },
+        width=1280,
+        height=800,
+        active_window=active_window,
+        desktop_state="INTERACTIVE",
+        capture_age_ms=0,
+        **kwargs,
+    )
 
 
 def _run(coro):
@@ -120,7 +132,7 @@ def _execute_gui_move_from_stale_observation(
         return await agent.execute_action(
             "workspace",
             ComputerActionType.GUI_MOVE,
-            "visible desktop",
+            "640,400",
             {"x": 640, "y": 400},
             "cursor reaches requested position",
         )
@@ -346,17 +358,23 @@ def test_gui_trace_receipt_uses_observed_screen_transition():
         agent._last_world_observation = ComputerWorldObservation(
             screen=screen,
             active_application="Desktop",
-            perception_version=0,
+            perception_version=1,
             observation_age_ms=0,
+            observation_received_monotonic_ns=time.perf_counter_ns(),
         )
         agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+        agent._last_observed_screen = screen
+        agent._last_gui_dispatch_evidence = (
+            screen,
+            asyncio.get_running_loop().time(),
+        )
         agent._last_screenshot_b64 = screen.screenshot_base64
         agent._screen_width = screen.width
         agent._screen_height = screen.height
         return await agent.execute_action(
             "workspace",
             ComputerActionType.GUI_CLICK,
-            "observed control",
+            "10,10",
             {"x": 10, "y": 10},
             "screen changes",
         )
@@ -365,22 +383,119 @@ def test_gui_trace_receipt_uses_observed_screen_transition():
 
     assert trace.status != ActionExecutionStatus.BLOCKED, trace.actual_observation
     assert computer.gui_calls == 1
-    assert trace.action_receipt.before["screen_hash"] == "before-screen"
-    assert trace.action_receipt.after["screen_hash"] == "after-screen"
+    before_hash = trace.action_receipt.before["screen_hash"]
+    after_hash = trace.action_receipt.after["screen_hash"]
+    assert before_hash
+    assert after_hash
+    assert before_hash != after_hash
     assert "screen_hash" in trace.action_receipt.state_delta.changed
+
+
+def test_configured_avcs_grounder_resolves_semantic_target_before_dispatch(monkeypatch):
+    class _GroundingComputer(_ReceiptComputer):
+        def __init__(self):
+            super().__init__()
+            self.gui_actions = []
+            self.frame = ""
+
+        async def gui_action(self, workspace_id, action, actor="operator"):
+            self.gui_actions.append(action)
+            return ScreenObservation(
+                screenshot_base64=self.frame,
+                avcs_state={
+                    "engine": "avcs_reflex",
+                    "frame_index": 1,
+                    "scene_hash": self.frame,
+                    "width": 1280,
+                    "height": 800,
+                },
+                width=1280,
+                height=800,
+                active_window="Desktop",
+                capture_age_ms=0,
+                desktop_state="INTERACTIVE",
+            )
+
+        async def screenshot(self, workspace_id):
+            return ScreenObservation(
+                screenshot_base64=self.frame,
+                avcs_state={
+                    "engine": "avcs_reflex",
+                    "frame_index": 1,
+                    "scene_hash": self.frame,
+                    "width": 1280,
+                    "height": 800,
+                },
+                width=1280,
+                height=800,
+                active_window="Desktop",
+                capture_age_ms=0,
+                desktop_state="INTERACTIVE",
+            )
+
+    computer = _GroundingComputer()
+    agent = ComputerUseAgent(computer_provider=computer)
+    image = Image.new("RGB", (1280, 800), color=(20, 30, 40))
+    image_buffer = BytesIO()
+    image.save(image_buffer, format="PNG")
+    screenshot = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+    computer.frame = screenshot
+
+    class _Grounder:
+        def __init__(self):
+            self.request = None
+
+        def ground_target_png(self, png_bytes, query, width, height):
+            self.request = (png_bytes, query, width, height)
+            return {
+                "x": 321,
+                "y": 123,
+                "held_out_point_accuracy": 0.91,
+                "latency_ms": 0.25,
+            }
+
+    grounder = _Grounder()
+    agent._avcs_perception = grounder
+    monkeypatch.setenv("SONIC_AVCS_GROUNDING_CHECKPOINT", "evaluated-checkpoint.pt")
+
+    async def run_click():
+        screen = _avcs_screen(screenshot, scene_hash=screenshot)
+        agent._last_world_observation = ComputerWorldObservation(
+            screen=screen,
+            active_application="Desktop",
+            perception_version=1,
+            observation_age_ms=0,
+            observation_received_monotonic_ns=time.perf_counter_ns(),
+        )
+        agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+        agent._last_screenshot_b64 = screenshot
+        agent._screen_width = screen.width
+        agent._screen_height = screen.height
+        return await agent.execute_action(
+            "workspace",
+            ComputerActionType.GUI_CLICK,
+            "Save button",
+            {},
+            "document saved",
+        )
+
+    trace = _run(run_click())
+
+    assert trace.status != ActionExecutionStatus.BLOCKED, trace.actual_observation
+    assert computer.gui_calls == 1
+    assert (computer.gui_actions[0].x, computer.gui_actions[0].y) == (321, 123)
+    assert grounder.request == (
+        image_buffer.getvalue(),
+        "Save button",
+        1280,
+        800,
+    )
 
 
 def test_gui_action_intent_is_checked_under_display_lease_before_dispatch():
     computer = _ReceiptComputer()
     agent = ComputerUseAgent(computer_provider=computer)
-    screen = ScreenObservation(
-        screenshot_base64="before-screen",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        capture_age_ms=0,
-        controls_age_ms=0,
-    )
+    screen = _avcs_screen()
 
     async def run_click():
         observation = ComputerWorldObservation(
@@ -392,12 +507,17 @@ def test_gui_action_intent_is_checked_under_display_lease_before_dispatch():
         )
         agent._last_world_observation = observation
         agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+        agent._last_observed_screen = screen
+        agent._last_gui_dispatch_evidence = (
+            screen,
+            asyncio.get_running_loop().time(),
+        )
         agent._last_screenshot_b64 = screen.screenshot_base64
         agent._screen_width = screen.width
         agent._screen_height = screen.height
         agent._pending_gui_action_intent = GUIActionIntent.create(
             action_type="GUI_CLICK",
-            target="observed control",
+            target="10,10",
             payload={"x": 10, "y": 10},
             expected_outcome="screen changes",
             observation=observation,
@@ -405,7 +525,7 @@ def test_gui_action_intent_is_checked_under_display_lease_before_dispatch():
         return await agent.execute_action(
             "workspace",
             ComputerActionType.GUI_CLICK,
-            "observed control",
+            "10,10",
             {"x": 10, "y": 10},
             "screen changes",
         )
@@ -430,44 +550,16 @@ def test_expired_gui_action_intent_renews_only_after_unchanged_state_revalidatio
     computer = _ReceiptComputer()
 
     async def screenshot(_workspace_id):
-        semantic_state = (
-            {
-                "visible_text": "unchanged visible scene",
-                "detected_controls": [
-                    {"name": "Save", "role": "button", "bbox": [10, 10, 50, 30]}
-                ],
-            }
-            if fresh_pixels == "changed-screen"
-            else {}
-        )
-        return ScreenObservation(
-            screenshot_base64=fresh_pixels,
-            width=1280,
-            height=800,
-            active_window="Desktop",
-            capture_age_ms=0,
-            controls_age_ms=0,
-            **semantic_state,
+        return _avcs_screen(
+            frame_index=2,
+            scene_hash=(
+                "changed-scene" if fresh_pixels == "changed-screen" else "before-screen"
+            ),
         )
 
     computer.screenshot = screenshot
     agent = ComputerUseAgent(computer_provider=computer, gui_only=True)
-    screen = ScreenObservation(
-        screenshot_base64="before-screen",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        capture_age_ms=0,
-        controls_age_ms=0,
-        visible_text=(
-            "unchanged visible scene" if fresh_pixels == "changed-screen" else ""
-        ),
-        detected_controls=(
-            [{"name": "Save", "role": "button", "bbox": [10, 10, 50, 30]}]
-            if fresh_pixels == "changed-screen"
-            else []
-        ),
-    )
+    screen = _avcs_screen()
 
     async def run_expired_click():
         observation = ComputerWorldObservation(
@@ -484,17 +576,17 @@ def test_expired_gui_action_intent_renews_only_after_unchanged_state_revalidatio
         agent._screen_height = screen.height
         agent._pending_gui_action_intent = GUIActionIntent.create(
             action_type="GUI_CLICK",
-            target="observed control",
+            target="10,10",
             payload={"x": 10, "y": 10},
             expected_outcome="screen changes",
             observation=observation,
-            ttl_ms=1,
+            ttl_ms=100,
         )
-        await asyncio.sleep(0.005)
+        await asyncio.sleep(0.15)
         return await agent.execute_action(
             "workspace",
             ComputerActionType.GUI_CLICK,
-            "observed control",
+            "10,10",
             {"x": 10, "y": 10},
             "screen changes",
         )
@@ -503,7 +595,7 @@ def test_expired_gui_action_intent_renews_only_after_unchanged_state_revalidatio
 
     if should_block:
         assert trace.status == ActionExecutionStatus.BLOCKED
-        assert "screenshot changed" in trace.actual_observation
+        assert "AVCS scene changed" in trace.actual_observation
         assert computer.gui_calls == 0
     else:
         assert trace.status != ActionExecutionStatus.BLOCKED, trace.actual_observation
@@ -513,14 +605,7 @@ def test_expired_gui_action_intent_renews_only_after_unchanged_state_revalidatio
 def test_run_mission_creates_a_bounded_intent_for_grounded_gui_actions():
     computer = _ReceiptComputer()
     agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
-    screen = ScreenObservation(
-        screenshot_base64="before-screen",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        capture_age_ms=0,
-        controls_age_ms=0,
-    )
+    screen = _avcs_screen()
     observation = ComputerWorldObservation(
         screen=screen,
         active_application="Desktop",
@@ -541,7 +626,7 @@ def test_run_mission_creates_a_bounded_intent_for_grounded_gui_actions():
     async def choose_action(*_args):
         return (
             ComputerActionType.GUI_CLICK,
-            "observed control",
+            "10,10",
             {
                 "x": 10,
                 "y": 10,
@@ -569,182 +654,10 @@ def test_run_mission_creates_a_bounded_intent_for_grounded_gui_actions():
     assert traces[0].status != ActionExecutionStatus.BLOCKED, traces[0].actual_observation
 
 
-def test_stale_reasoning_observation_refreshes_intent_when_nsi_state_is_unchanged():
-    computer = _ReceiptComputer()
-    agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
-    source_screen = ScreenObservation(
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        visible_text="same desktop",
-        desktop_state="STATE_ONLY",
-        capture_age_ms=0,
-        controls_age_ms=0,
-        perception_version=7,
-    )
-    source = ComputerWorldObservation(
-        screen=source_screen,
-        active_application="Desktop",
-        perception_version=1,
-        observation_age_ms=3_000,
-        observation_received_monotonic_ns=time.perf_counter_ns(),
-    )
-    fresh_screen = source_screen.model_copy(deep=True)
-    fresh = ComputerWorldObservation(
-        screen=fresh_screen,
-        active_application="Desktop",
-        perception_version=2,
-        observation_age_ms=0,
-        observation_received_monotonic_ns=time.perf_counter_ns(),
-    )
-    observed = False
-
-    async def observe_state(_workspace_id):
-        nonlocal observed
-        observed = True
-        return fresh.screen
-
-    computer.observe_state = observe_state
-
-    async def fail_if_full_observe_is_used(_workspace_id):
-        raise AssertionError("GUI intent refresh must not run the full observation pipeline")
-
-    agent.observe = fail_if_full_observe_is_used
-    intent = _run(
-        agent._create_gui_action_intent(
-            "workspace",
-            action_type=ComputerActionType.GUI_CLICK,
-            target="observed control",
-            payload={"x": 10, "y": 10},
-            expected_outcome="screen changes",
-            observation=source,
-            ttl_ms=250,
-        )
-    )
-
-    assert observed
-    assert intent.source_perception_version > 0
-    assert intent.source_state_version == 7
-    assert agent._last_gui_dispatch_evidence[0].perception_version == 7
-
-
-def test_stale_reasoning_observation_does_not_rebase_after_nsi_state_changes():
-    computer = _ReceiptComputer()
-    agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
-    source_screen = ScreenObservation(
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        visible_text="same desktop",
-        desktop_state="STATE_ONLY",
-        capture_age_ms=0,
-        controls_age_ms=0,
-        perception_version=7,
-    )
-    source = ComputerWorldObservation(
-        screen=source_screen,
-        active_application="Desktop",
-        perception_version=1,
-        observation_age_ms=3_000,
-        observation_received_monotonic_ns=time.perf_counter_ns(),
-    )
-    fresh = ComputerWorldObservation(
-        screen=source_screen.model_copy(
-            update={"perception_version": 8},
-            deep=True,
-        ),
-        active_application="Desktop",
-        perception_version=2,
-        observation_age_ms=0,
-        observation_received_monotonic_ns=time.perf_counter_ns(),
-    )
-
-    async def observe_state(_workspace_id):
-        return fresh.screen
-
-    computer.observe_state = observe_state
-    with pytest.raises(ValueError, match="desktop state changed while reasoning"):
-        _run(
-            agent._create_gui_action_intent(
-                "workspace",
-                action_type=ComputerActionType.GUI_CLICK,
-                target="observed control",
-                payload={"x": 10, "y": 10},
-                expected_outcome="screen changes",
-                observation=source,
-                ttl_ms=250,
-            )
-        )
-
-
-def test_gui_observation_match_ignores_clock_ticks_but_detects_ui_text_changes():
-    agent = ComputerUseAgent(computer_provider=_ReceiptComputer(), execution_plane="gui")
-    source_screen = ScreenObservation(
-        width=1280,
-        height=800,
-        active_window="File Manager",
-        visible_text="New Folder 08:45",
-        detected_controls=[
-            {
-                "name": "Create",
-                "role": "push button",
-                "bbox": [100, 100, 160, 130],
-                "source": "atspi",
-                "focused": False,
-            },
-            {
-                "name": "08:45",
-                "role": "text",
-                "bbox": [1200, 0, 1240, 20],
-                "source": "ocr",
-            },
-        ],
-        desktop_state="STATE_ONLY",
-        capture_age_ms=0,
-        controls_age_ms=0,
-        perception_version=8,
-    )
-    source = ComputerWorldObservation(
-        screen=source_screen,
-        active_application="File Manager",
-        perception_version=1,
-        observation_age_ms=0,
-    )
-    clock_tick = source_screen.model_copy(deep=True)
-    clock_tick.visible_text = "New Folder 08:46"
-    clock_tick.detected_controls[1]["name"] = "08:46"
-    fresh = ComputerWorldObservation(
-        screen=clock_tick,
-        active_application="File Manager",
-        perception_version=2,
-        observation_age_ms=0,
-    )
-
-    assert agent._gui_observation_matches(source, fresh)
-
-    changed_ui = clock_tick.model_copy(deep=True)
-    changed_ui.visible_text = "New Document 08:46"
-    changed = ComputerWorldObservation(
-        screen=changed_ui,
-        active_application="File Manager",
-        perception_version=3,
-        observation_age_ms=0,
-    )
-    assert not agent._gui_observation_matches(source, changed)
-
-
 def test_stale_screenshot_intent_refresh_uses_only_a_fresh_screenshot():
     computer = _ReceiptComputer()
     agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
-    source_screen = ScreenObservation(
-        screenshot_base64="before-screen",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        desktop_state="INTERACTIVE",
-        capture_age_ms=0,
-        controls_age_ms=0,
-    )
+    source_screen = _avcs_screen()
     source = ComputerWorldObservation(
         screen=source_screen,
         active_application="Desktop",
@@ -771,20 +684,12 @@ def test_stale_screenshot_intent_refresh_uses_only_a_fresh_screenshot():
 
     assert intent.source_perception_version > 0
     assert intent.source_active_window == "Desktop"
-    assert agent._last_gui_dispatch_evidence[0].screenshot_base64 == "before-screen"
+    assert agent._last_gui_dispatch_evidence[0].screenshot_base64 == _FRAME_BASE64
 
 
 def test_slow_gui_reasoning_revalidates_unchanged_screenshot_before_dispatch():
     computer = _ReceiptComputer()
-    screen = ScreenObservation(
-        screenshot_base64="before-screen",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        desktop_state="INTERACTIVE",
-        capture_age_ms=0,
-        controls_age_ms=0,
-    )
+    screen = _avcs_screen()
 
     trace = _execute_gui_move_from_stale_observation(computer, screen)
 
@@ -795,57 +700,31 @@ def test_slow_gui_reasoning_revalidates_unchanged_screenshot_before_dispatch():
 def test_slow_gui_reasoning_fails_closed_when_screenshot_changed():
     class ChangedScreenComputer(_ReceiptComputer):
         async def screenshot(self, workspace_id):
-            return ScreenObservation(
-                screenshot_base64="changed-screen",
-                width=1280,
-                height=800,
-                active_window="Desktop",
-                desktop_state="INTERACTIVE",
-                capture_age_ms=0,
-                controls_age_ms=0,
+            return _avcs_screen(
+                frame_index=2,
+                scene_hash="changed-scene",
             )
 
     computer = ChangedScreenComputer()
-    screen = ScreenObservation(
-        screenshot_base64="before-screen",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        desktop_state="INTERACTIVE",
-        capture_age_ms=0,
-        controls_age_ms=0,
-    )
+    screen = _avcs_screen()
 
     trace = _execute_gui_move_from_stale_observation(computer, screen)
 
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "desktop screenshot changed" in trace.actual_observation
+    assert "AVCS scene changed" in trace.actual_observation
     assert computer.gui_calls == 0
 
 
 def test_recent_gui_observation_fails_closed_when_screenshot_changed():
     class ChangedScreenComputer(_ReceiptComputer):
         async def screenshot(self, workspace_id):
-            return ScreenObservation(
-                screenshot_base64="changed-screen",
-                width=1280,
-                height=800,
-                active_window="Desktop",
-                desktop_state="INTERACTIVE",
-                capture_age_ms=0,
-                controls_age_ms=0,
+            return _avcs_screen(
+                frame_index=2,
+                scene_hash="changed-scene",
             )
 
     computer = ChangedScreenComputer()
-    screen = ScreenObservation(
-        screenshot_base64="before-screen",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        desktop_state="INTERACTIVE",
-        capture_age_ms=0,
-        controls_age_ms=0,
-    )
+    screen = _avcs_screen()
 
     trace = _execute_gui_move_from_stale_observation(
         computer,
@@ -854,72 +733,27 @@ def test_recent_gui_observation_fails_closed_when_screenshot_changed():
     )
 
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "desktop screenshot changed" in trace.actual_observation
-    assert computer.gui_calls == 0
-
-
-def test_slow_gui_reasoning_blocks_when_fresh_nsi_state_is_unavailable():
-    computer = _StateRevalidatingComputer()
-    del computer.observe_state
-    screen = ScreenObservation(
-        screenshot_base64="",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        desktop_state="STATE_ONLY",
-        capture_age_ms=0,
-        controls_age_ms=0,
-        visible_text="same desktop",
-        perception_version=1,
-    )
-
-    trace = _execute_gui_move_from_stale_observation(
-        computer,
-        screen,
-        perception_version=1,
-    )
-
-    assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "desktop state changed since the action was reasoned" in trace.actual_observation
+    assert "AVCS scene changed" in trace.actual_observation
     assert computer.gui_calls == 0
 
 
 class _PostconditionComputer(_ReceiptComputer):
-    def __init__(self, visible_text: str, controls: list[dict]):
+    def __init__(self, *, screen_changed: bool):
         super().__init__()
-        self.post_visible_text = visible_text
-        self.post_controls = controls
+        self.screen_changed = screen_changed
 
     async def gui_action(self, workspace_id, action, actor="operator"):
         self.gui_calls += 1
-        return ScreenObservation(
-            screenshot_base64="after-screen",
-            width=1280,
-            height=800,
-            capture_age_ms=0,
-            controls_age_ms=0,
-            active_window="Desktop",
-            visible_text=self.post_visible_text,
-            detected_controls=self.post_controls,
+        return _avcs_screen(
+            frame_index=2,
+            scene_hash="after-screen" if self.screen_changed else "before-screen",
         )
 
 
 def _execute_click_with_postcondition(computer, postcondition):
     agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
-    payload = {
-        "x": 100,
-        "y": 100,
-        "postcondition": postcondition,
-    }
-    screen = ScreenObservation(
-        screenshot_base64="before-screen",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        desktop_state="INTERACTIVE",
-        capture_age_ms=0,
-        controls_age_ms=0,
-    )
+    payload = {"x": 100, "y": 100, "postcondition": postcondition}
+    screen = _avcs_screen()
 
     async def run():
         observation = ComputerWorldObservation(
@@ -931,9 +765,7 @@ def _execute_click_with_postcondition(computer, postcondition):
         )
         agent._last_world_observation = observation
         agent._last_observed_screen = screen
-        agent._last_screen_observation_received_at = (
-            asyncio.get_running_loop().time()
-        )
+        agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
         agent._last_gui_dispatch_evidence = (
             screen,
             asyncio.get_running_loop().time(),
@@ -943,7 +775,7 @@ def _execute_click_with_postcondition(computer, postcondition):
         agent._screen_height = screen.height
         agent._pending_gui_action_intent = GUIActionIntent.create(
             action_type=ComputerActionType.GUI_CLICK.value,
-            target="Create",
+            target="100,100",
             payload=payload,
             expected_outcome="The create dialog appears",
             observation=observation,
@@ -951,7 +783,7 @@ def _execute_click_with_postcondition(computer, postcondition):
         return await agent.execute_action(
             "workspace",
             ComputerActionType.GUI_CLICK,
-            "Create",
+            "100,100",
             payload,
             "The create dialog appears",
         )
@@ -961,11 +793,8 @@ def _execute_click_with_postcondition(computer, postcondition):
 
 def test_gui_action_is_verified_only_when_fresh_postcondition_matches():
     agent, trace = _execute_click_with_postcondition(
-        _PostconditionComputer(
-            "Create New Folder",
-            [{"name": "Create New Folder", "role": "dialog"}],
-        ),
-        {"control_present": "Create New Folder"},
+        _PostconditionComputer(screen_changed=True),
+        {"screen_changed": True},
     )
 
     assert trace.status == ActionExecutionStatus.VERIFIED
@@ -975,8 +804,8 @@ def test_gui_action_is_verified_only_when_fresh_postcondition_matches():
 
 def test_gui_action_with_unobserved_postcondition_is_unverified():
     agent, trace = _execute_click_with_postcondition(
-        _PostconditionComputer("Home", [{"name": "Home", "role": "window"}]),
-        {"control_present": "Create New Folder"},
+        _PostconditionComputer(screen_changed=False),
+        {"screen_changed": True},
     )
 
     assert trace.status == ActionExecutionStatus.UNVERIFIED
@@ -994,8 +823,12 @@ def test_mission_gui_postcondition_requires_structured_observable_condition():
     )
     assert agent._single_gui_postcondition_error(
         ComputerActionType.GUI_CLICK,
-        {"x": 10, "y": 10, "postcondition": {"control_present": "Save"}},
+        {"x": 10, "y": 10, "postcondition": {"screen_changed": True}},
     ) is None
+    assert agent._single_gui_postcondition_error(
+        ComputerActionType.GUI_CLICK,
+        {"x": 10, "y": 10, "postcondition": {"control_present": "Save"}},
+    ) is not None
     assert agent._single_gui_postcondition_error(
         ComputerActionType.GUI_CLICK,
         {"x": 10, "y": 10, "postcondition": {"unknown": "value"}},
@@ -1008,15 +841,7 @@ def test_run_mission_blocks_gui_action_without_postcondition():
         computer_provider=computer,
         execution_plane="gui",
     )
-    screen = ScreenObservation(
-        screenshot_base64="fresh-frame",
-        width=1280,
-        height=800,
-        active_window="Desktop",
-        capture_age_ms=0,
-        controls_age_ms=0,
-        perception_version=3,
-    )
+    screen = _avcs_screen(scene_hash="fresh-frame")
     observation = ComputerWorldObservation(
         screen=screen,
         active_application="Desktop",

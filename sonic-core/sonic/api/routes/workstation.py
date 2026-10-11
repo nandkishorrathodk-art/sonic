@@ -3104,7 +3104,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
     action_blocked = False
     action_observations: list[str] = []
     desktop_context = "Workstation ready."
-    desktop_screenshot_b64 = ""
     action_prompt = _is_action_prompt(prompt)
     observation_only = _is_observation_only_prompt(prompt)
     execution_prompt = action_prompt and not observation_only
@@ -3146,7 +3145,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
 
         from sonic.llm.prompts import WORKSTATION_CHAT_SYSTEM
         from sonic.llm.providers.custom import CustomLLMProvider
-        from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
+        from sonic.llm.schemas import LLMRequest, Message, MessageRole
 
         # Give the model an observation from the real Computer Use plane
         # Resolve against the exact tenant/session state loaded above.  Do not
@@ -3178,28 +3177,20 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
             _persist_workstation_state()
             return
 
-        # Capture pixels only when the prompt needs visual/application context.
-        # Ordinary chat should not depend on a vision-capable provider.
+        # Capture pixels locally for AVCS; workstation frames are never sent to an LLM.
         computer = None
         if desktop_id:
             if desktop_prompt:
                 try:
                     computer = get_daytona_computer()
                     screen = await computer.screenshot(desktop_id)
-                    desktop_screenshot_b64 = (
-                        getattr(screen, "screenshot_base64", "")
-                        or getattr(screen, "image_base64", "")
-                    )
-
+                    avcs_state = getattr(screen, "avcs_state", {}) or {}
                     ctx_parts = [
-                        f"CURRENT LIVE DESKTOP OBSERVATION (captured {screen.timestamp}): "
+                        f"CURRENT AVCS PIXEL OBSERVATION (captured {screen.timestamp}): "
                         f"state={screen.desktop_state}; resolution={screen.width}x{screen.height}; "
-                        f"active_window={screen.active_window!r}"
+                        f"active_window={screen.active_window!r}; "
+                        f"avcs_state={json.dumps(avcs_state, ensure_ascii=True, separators=(',', ':'))}"
                     ]
-                    if screen.visible_text:
-                        ctx_parts.append(f"window_info={screen.visible_text!r}")
-                    if screen.detected_controls:
-                        ctx_parts.append(f"controls={screen.detected_controls!r}")
                     desktop_context = "; ".join(ctx_parts) + "."
                     state["last_desktop_observation"] = desktop_context
                     state["last_desktop_observation_at"] = screen.timestamp
@@ -3209,7 +3200,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             state,
                             "action",
                             "Agent Desktop Observation",
-                            "Agent inspected the live workstation via screenshot. " + desktop_context,
+                            "AVCS processed the live workstation pixels locally. " + desktop_context,
                         )
                 except Exception as observation_err:
                     logger.warning("workstation_desktop_observation_failed", error=str(observation_err))
@@ -4104,14 +4095,6 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                         f"do not invent another persona or a tool list):\n{being_brief}\n\n"
                         f"Workstation Context & Real Terminal Output:\n{desktop_context}"
                     ),
-                    images=(
-                        [ImageContent(
-                            base64=desktop_screenshot_b64.split(",", 1)[-1],
-                            media_type="image/png",
-                        )]
-                        if desktop_prompt and desktop_screenshot_b64
-                        else []
-                    ),
                 ),
             ]
             try:
@@ -4121,7 +4104,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                             messages=messages,
                             max_tokens=900,
                             temperature=0.2,
-                            task_type="vision" if desktop_prompt and desktop_screenshot_b64 else "reasoning",
+                            task_type="reasoning",
                         )
                     ),
                     timeout=25,

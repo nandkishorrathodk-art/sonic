@@ -41,9 +41,8 @@ class GUIActionIntent:
     expected_outcome: str
     source_perception_version: int
     source_state_version: int
+    source_scene_hash: str
     source_active_window: str
-    source_focus: str | None
-    target_identity: str | None
     source_width: int
     source_height: int
     issued_at_ns: int
@@ -75,6 +74,24 @@ class GUIActionIntent:
         screen = getattr(observation, "screen", None)
         if screen is None:
             raise ValueError("GUI action intent requires an observed screen")
+        if (
+            getattr(screen, "desktop_state", "") != "INTERACTIVE"
+            or not getattr(screen, "screenshot_base64", "")
+        ):
+            raise ValueError("GUI action intent requires a fresh pixel frame")
+        avcs_state = getattr(screen, "avcs_state", None)
+        if not isinstance(avcs_state, Mapping) or avcs_state.get("engine") != "avcs_reflex":
+            raise ValueError("GUI action intent requires current AVCS pixel state")
+        state_version = avcs_state.get("frame_index")
+        if (
+            not isinstance(state_version, int)
+            or isinstance(state_version, bool)
+            or state_version <= 0
+        ):
+            raise ValueError("GUI action intent requires a versioned AVCS frame")
+        scene_hash = avcs_state.get("scene_hash")
+        if not isinstance(scene_hash, str) or not scene_hash.strip():
+            raise ValueError("GUI action intent requires an AVCS scene fingerprint")
         active_window = str(
             getattr(screen, "active_window", "")
             or getattr(observation, "active_application", "")
@@ -82,7 +99,6 @@ class GUIActionIntent:
         width = getattr(screen, "width", 0)
         height = getattr(screen, "height", 0)
         version = getattr(observation, "perception_version", 0)
-        state_version = getattr(screen, "perception_version", 0)
         age_ms = getattr(observation, "observation_age_ms", None)
         capture_age_ms = getattr(screen, "capture_age_ms", None)
         if (
@@ -105,16 +121,6 @@ class GUIActionIntent:
             if isinstance(age_ms, (int, float)) and not isinstance(age_ms, bool)
             else 0.0,
         )
-        if getattr(screen, "desktop_state", "") == "STATE_ONLY":
-            controls_age_ms = getattr(screen, "controls_age_ms", None)
-            if (
-                not isinstance(controls_age_ms, (int, float))
-                or isinstance(controls_age_ms, bool)
-                or not math.isfinite(controls_age_ms)
-                or controls_age_ms < 0
-            ):
-                raise ValueError("state-only GUI intent requires known controls age")
-            effective_age_ms = max(effective_age_ms, controls_age_ms + elapsed_ms)
         if (
             not active_window
             or not isinstance(width, int)
@@ -128,12 +134,6 @@ class GUIActionIntent:
             or version <= 0
         ):
             raise ValueError("GUI action intent requires a versioned active desktop")
-        if getattr(screen, "desktop_state", "") == "STATE_ONLY" and (
-            not isinstance(state_version, int)
-            or isinstance(state_version, bool)
-            or state_version <= 0
-        ):
-            raise ValueError("state-only GUI intent requires a versioned source state")
         if (
             not isinstance(age_ms, (int, float))
             or isinstance(age_ms, bool)
@@ -142,57 +142,6 @@ class GUIActionIntent:
             or effective_age_ms > ttl_ms
         ):
             raise ValueError("GUI action intent requires fresh observation evidence")
-
-        controls = [
-            control
-            for control in (getattr(screen, "detected_controls", []) or [])
-            if isinstance(control, Mapping)
-        ]
-        focus_is_observed = any("focused" in control for control in controls)
-        focused_controls = [
-            {
-                key: control.get(key)
-                for key in ("name", "role", "bbox", "source")
-                if key in control
-            }
-            for control in controls
-            if control.get("focused") is True
-        ]
-        source_focus = (
-            json.dumps(
-                sorted(focused_controls, key=lambda item: json.dumps(item, sort_keys=True)),
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            if focus_is_observed
-            else None
-        )
-        target_terms = {
-            str(target).strip().casefold(),
-            str(payload.get("target") or "").strip().casefold(),
-            str(payload.get("selector") or "").strip().casefold(),
-        } - {""}
-        target_controls = [
-            control
-            for control in controls
-            if any(
-                term == str(control.get(key) or "").strip().casefold()
-                for term in target_terms
-                for key in ("name", "label", "text")
-            )
-        ]
-        target_identity = None
-        if len(target_controls) == 1:
-            target_control = target_controls[0]
-            target_identity = json.dumps(
-                {
-                    key: target_control.get(key)
-                    for key in ("name", "label", "text", "role", "bbox", "source")
-                    if key in target_control
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
 
         return cls(
             action_type=action_name,
@@ -203,9 +152,8 @@ class GUIActionIntent:
             expected_outcome=str(expected_outcome),
             source_perception_version=version,
             source_state_version=state_version,
+            source_scene_hash=scene_hash,
             source_active_window=active_window,
-            source_focus=source_focus,
-            target_identity=target_identity,
             source_width=width,
             source_height=height,
             issued_at_ns=issued_at,
@@ -283,16 +231,11 @@ class GUIActionIntent:
             or age_ms + elapsed_ms > max_age_ms
         ):
             reasons.append("fresh desktop evidence is unavailable")
-        if getattr(screen, "desktop_state", "") == "STATE_ONLY":
-            controls_age_ms = getattr(screen, "controls_age_ms", None)
-            if (
-                not isinstance(controls_age_ms, (int, float))
-                or isinstance(controls_age_ms, bool)
-                or not math.isfinite(controls_age_ms)
-                or controls_age_ms < 0
-                or controls_age_ms > 250
-            ):
-                reasons.append("fresh accessibility controls are unavailable")
+        if (
+            getattr(screen, "desktop_state", "") != "INTERACTIVE"
+            or not getattr(screen, "screenshot_base64", "")
+        ):
+            reasons.append("fresh pixel frame is unavailable")
         active_window = str(getattr(screen, "active_window", "") or "").strip()
         if active_window.casefold() != self.source_active_window.casefold():
             reasons.append("active window differs from GUI action intent")
@@ -301,51 +244,27 @@ class GUIActionIntent:
             or getattr(screen, "height", 0) != self.source_height
         ):
             reasons.append("display geometry differs from GUI action intent")
-        version = getattr(screen, "perception_version", 0)
+        avcs_state = getattr(screen, "avcs_state", None)
+        current_version = (
+            avcs_state.get("frame_index")
+            if isinstance(avcs_state, Mapping)
+            and avcs_state.get("engine") == "avcs_reflex"
+            else None
+        )
         if (
-            getattr(screen, "desktop_state", "") == "STATE_ONLY"
-            and (
-                not isinstance(version, int)
-                or isinstance(version, bool)
-                or version != self.source_state_version
-            )
+            not isinstance(current_version, int)
+            or isinstance(current_version, bool)
+            or current_version <= 0
         ):
-            reasons.append("desktop state version differs from GUI action intent")
-        controls = [
-            control
-            for control in (getattr(screen, "detected_controls", []) or [])
-            if isinstance(control, Mapping)
-        ]
-        if self.source_focus is not None:
-            if not any("focused" in control for control in controls):
-                reasons.append("current focused-control state is unavailable")
-            else:
-                focused_controls = [
-                    {
-                        key: control.get(key)
-                        for key in ("name", "role", "bbox", "source")
-                        if key in control
-                    }
-                    for control in controls
-                    if control.get("focused") is True
-                ]
-                current_focus = json.dumps(
-                    sorted(
-                        focused_controls,
-                        key=lambda item: json.dumps(item, sort_keys=True),
-                    ),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                if current_focus != self.source_focus:
-                    reasons.append("focused control differs from GUI action intent")
-        if self.target_identity is not None:
-            target = json.loads(self.target_identity)
-            if not any(
-                all(control.get(key) == value for key, value in target.items())
-                for control in controls
-            ):
-                reasons.append("target control disappeared or changed since GUI action intent")
+            reasons.append("a versioned AVCS frame is unavailable")
+        current_scene_hash = (
+            avcs_state.get("scene_hash")
+            if isinstance(avcs_state, Mapping)
+            and avcs_state.get("engine") == "avcs_reflex"
+            else None
+        )
+        if current_scene_hash != self.source_scene_hash:
+            reasons.append("AVCS scene differs from GUI action intent")
         return tuple(reasons)
 
 

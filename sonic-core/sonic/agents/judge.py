@@ -17,7 +17,7 @@ Strict Mandate & Prohibitions (AGENTS.md):
 
 from __future__ import annotations
 
-import json
+import base64
 import re
 import time
 from enum import StrEnum
@@ -100,12 +100,12 @@ class JudgeAgent:
         result: SubMissionResult,
         traces: list[Any],
     ) -> JudgeEvaluation:
-        """Independently compare the requested GUI outcome with a fresh desktop frame."""
-        if self.llm_router is None or self.computer is None:
+        """Inspect GUI evidence locally and refuse unproven semantic completion."""
+        if self.computer is None:
             return JudgeEvaluation(
                 verdict=JudgeVerdict.INCONCLUSIVE,
                 confidence=0.0,
-                notes="GUI outcome cannot be independently checked: vision Judge or desktop provider is unavailable.",
+                notes="GUI outcome cannot be checked: desktop provider is unavailable.",
                 self_attestation_rejected=True,
             )
 
@@ -149,8 +149,6 @@ class JudgeAgent:
             )
 
         try:
-            from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
-
             screen = await self.computer.screenshot(workspace_id)
             image = (
                 getattr(screen, "screenshot_base64", "")
@@ -202,69 +200,29 @@ class JudgeAgent:
                     self_attestation_rejected=True,
                 )
 
-            request = LLMRequest(
-                messages=[
-                    Message(
-                        role=MessageRole.SYSTEM,
-                        content=(
-                            "You are an independent desktop-task Judge. Compare the user's requested "
-                            "outcome with the attached fresh screenshot and typed GUI receipts. Do not "
-                            "treat the worker's claim or a successful click as proof by itself. Return "
-                            "CONFIRMED only when the requested end state is directly visible or "
-                            "unambiguously established by the screenshot and receipts. If the evidence "
-                            "is ambiguous, incomplete, or not visible, return INCONCLUSIVE. If the "
-                            "screenshot contradicts the requested outcome, return FALSIFIED. Output "
-                            "only JSON: {\"verdict\":\"CONFIRMED|INCONCLUSIVE|FALSIFIED\","
-                            "\"visible_evidence\":\"brief evidence from the screenshot\"}."
-                        ),
-                    ),
-                    Message(
-                        role=MessageRole.USER,
-                        content=(
-                            f"Requested outcome: {sub_mission.goal}\n"
-                            f"Worker outcome summary (untrusted claim): {result.findings_summary[:1200]}\n"
-                            f"Typed GUI receipts: {json.dumps(gui_actions[-12:], ensure_ascii=True)}\n"
-                            f"Current desktop state: {screen_state}; "
-                            f"active window: {getattr(screen, 'active_window', '')!r}"
-                        ),
-                        images=[ImageContent(base64=image)],
-                    ),
-                ],
-                task_type="vision",
-                max_tokens=220,
-                temperature=0.0,
-            )
-            response = await self.llm_router.complete(request)
-            raw = (response.content or "").strip()
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            parsed = json.loads(match.group(0)) if match else {}
-            verdict_text = str(parsed.get("verdict", "")).upper()
-            visible_evidence = str(parsed.get("visible_evidence", "")).strip()
+            avcs_state = getattr(screen, "avcs_state", None)
+            if not avcs_state:
+                from sonic.computer_use.avcs_perception import AVCSPerception
 
-            if verdict_text == JudgeVerdict.CONFIRMED.value and visible_evidence:
-                return JudgeEvaluation(
-                    verdict=JudgeVerdict.CONFIRMED,
-                    confidence=0.9,
-                    notes=f"Fresh desktop screenshot confirms the requested GUI outcome: {visible_evidence[:500]}",
-                    evidence_items=[visible_evidence[:500]],
+                perception = AVCSPerception()
+                avcs_state = perception.perceive_png(
+                    base64.b64decode(image.split(",", 1)[-1], validate=True)
                 )
-            if verdict_text == JudgeVerdict.FALSIFIED.value:
-                return JudgeEvaluation(
-                    verdict=JudgeVerdict.FALSIFIED,
-                    confidence=0.85,
-                    notes=(
-                        "Fresh desktop screenshot contradicts the requested GUI outcome: "
-                        f"{visible_evidence[:500] or raw[:300]}"
-                    ),
-                    self_attestation_rejected=True,
-                    evidence_items=[visible_evidence[:500]] if visible_evidence else [],
-                )
+            logger.info(
+                "judge_gui_avcs_observation_recorded",
+                workspace_id=workspace_id,
+                sub_mission_id=sub_mission.id,
+                frame_index=avcs_state.get("frame_index"),
+                scene_changed=avcs_state.get("scene_changed"),
+            )
             return JudgeEvaluation(
                 verdict=JudgeVerdict.INCONCLUSIVE,
-                confidence=0.4,
+                confidence=0.0,
                 notes=(
-                    "Fresh desktop screenshot did not provide decisive proof of the requested "
-                    f"GUI outcome: {visible_evidence[:500] or raw[:300]}"
+                    "AVCS processed the fresh desktop pixels locally, but its current "
+                    "reflex/point-grounding outputs do not establish the requested "
+                    "semantic end state. The screenshot was not sent to an LLM; GUI "
+                    "completion remains unconfirmed."
                 ),
                 self_attestation_rejected=True,
             )

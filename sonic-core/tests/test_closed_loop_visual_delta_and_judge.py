@@ -31,44 +31,43 @@ from sonic.computer_use.models_boss import SubMission, SubMissionResult
 @pytest.fixture(autouse=True)
 def _keep_visual_grounding_offline(monkeypatch):
     """Use deterministic mocked grounding; these unit tests never call a model."""
-    async def _grounded_target(*args, **kwargs):
+    async def _grounded_target(self, *args, **kwargs):
         return (240, 180)
 
     monkeypatch.setattr(
-        "sonic.computer_use.agent.resolve_ui_target_async",
+        ComputerUseAgent,
+        "_ground_target_with_avcs",
         _grounded_target,
     )
 
 
 def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
-    """Mock provider that always returns the exact same screenshot hash."""
+    """Mock provider with fresh AVCS frames and an unchanged scene fingerprint."""
     provider = AsyncMock()
     provider.observe_state = None
-    controls = [
-        {
-            "name": name,
-            "role": "entry",
-            "bbox": (220, 160, 80, 40),
-            "bbox_format": "xywh",
-            "source": "atspi",
-            "confidence": 0.95,
-            "freshness_ms": 0,
-            "editable": True,
-            "focused": True,
-        }
-        for name in ("text field", "search input", "input_box")
-    ]
-    screen_obs = ScreenObservation(
-        width=1280,
-        height=800,
-        screenshot_base64=screen_b64,
-        active_window="TextEditor",
-        capture_age_ms=0,
-        controls_age_ms=0,
-        detected_controls=controls,
-    )
-    provider.screenshot.return_value = screen_obs
-    provider.gui_action.return_value = screen_obs
+    frame_index = 0
+
+    def _screen(*_args, **_kwargs):
+        nonlocal frame_index
+        frame_index += 1
+        return ScreenObservation(
+            width=1280,
+            height=800,
+            screenshot_base64=screen_b64,
+            avcs_state={
+                "engine": "avcs_reflex",
+                "frame_index": frame_index,
+                "scene_hash": screen_b64,
+                "width": 1280,
+                "height": 800,
+            },
+            active_window="TextEditor",
+            capture_age_ms=0,
+            desktop_state="INTERACTIVE",
+        )
+
+    provider.screenshot.side_effect = _screen
+    provider.gui_action.side_effect = lambda *args, **kwargs: _screen()
     provider.status.return_value = MagicMock(
         active_application="TextEditor",
         active_window="TextEditor",
@@ -243,86 +242,35 @@ async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("updated_text", "changed_region", "expected_status", "expected_changed"),
-    [
-        ("Document - Saved", None, ActionExecutionStatus.SUCCESS, True),
-        ("Document - Untitled", None, ActionExecutionStatus.UNVERIFIED, False),
-        (
-            "Document - Untitled",
-            (10, 20, 90, 70),
-            ActionExecutionStatus.SUCCESS,
-            True,
-        ),
-    ],
-)
-async def test_state_only_gui_receipt_verifies_delta_without_screenshot(
-    updated_text, changed_region, expected_status, expected_changed
-):
-    class StateReceiptProvider:
-        async def observe_state(self, workspace_id):
-            return ScreenObservation(
-                screenshot_base64="",
-                capture_age_ms=20,
-                controls_age_ms=15,
-                perception_version=1,
-                width=1280,
-                height=800,
-                active_window="Document",
-                visible_text="Document - Untitled",
-                detected_controls=[],
-                desktop_state="STATE_ONLY",
-            )
+async def test_state_only_observation_cannot_authorize_gui_action():
+    class StateOnlyProvider:
+        def __init__(self):
+            self.gui_calls = 0
 
-        async def gui_action_state(self, workspace_id, action, actor="operator"):
+        async def screenshot(self, workspace_id):
             return ScreenObservation(
                 screenshot_base64="",
-                capture_age_ms=20,
-                controls_age_ms=15,
-                perception_version=2,
                 width=1280,
                 height=800,
                 active_window="Document",
-                visible_text=updated_text,
-                changed_region=changed_region,
-                detected_controls=[],
                 desktop_state="STATE_ONLY",
             )
 
         async def gui_action(self, workspace_id, action, actor="operator"):
-            raise AssertionError("state-only path should dispatch via gui_action_state")
+            self.gui_calls += 1
 
         async def status(self, workspace_id):
             return MagicMock(active_application="Document", active_window="Document")
 
-    provider = StateReceiptProvider()
+    provider = StateOnlyProvider()
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-    snapshot = agent.perception_bus.publish(
-        width=1280,
-        height=800,
-        active_window="Document",
-        controls=[],
-    )
-    screen = ScreenObservation(
-        screenshot_base64="",
-        capture_age_ms=20,
-        controls_age_ms=15,
-        perception_version=snapshot.version,
-        width=1280,
-        height=800,
-        active_window="Document",
-        visible_text="Document - Untitled",
-        detected_controls=[],
-        desktop_state="STATE_ONLY",
-    )
+    screen = await provider.screenshot("ws-1")
     agent._last_world_observation = ComputerWorldObservation(
         screen=screen,
         active_application="Document",
-        perception_version=snapshot.version,
+        perception_version=1,
         observation_age_ms=20,
     )
-    agent._last_observed_screen = screen
-    agent._last_gui_state_observation = screen
     agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
 
     trace = await agent.execute_action(
@@ -333,12 +281,9 @@ async def test_state_only_gui_receipt_verifies_delta_without_screenshot(
         "Save document",
     )
 
-    assert trace.status == expected_status, trace.actual_observation
-    assert trace.state_changed is expected_changed
-    assert trace.verification_evidence.startswith("accessibility_state_changed=")
-    assert "ACCESSIBILITY STATE" in trace.actual_observation or expected_changed is False
-    assert agent._last_screenshot_b64 == ""
-    assert agent._last_gui_state_observation.desktop_state == "STATE_ONLY"
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert provider.gui_calls == 0
+    assert "AVCS" in trace.actual_observation
 
 
 # =========================================================================
@@ -370,10 +315,8 @@ async def test_typing_verification_rejects_garbage_and_sentinel_text():
             "Type into input",
         )
         assert trace.status == ActionExecutionStatus.BLOCKED, f"Payload {p} was not fail-closed: {trace.status}"
-        assert (
-            "[TYPING VERIFICATION FAILED]" in trace.actual_observation
-            or "fresh accessibility evidence did not identify" in trace.actual_observation
-        )
+        assert "AVCS has no evaluated local focus-verification" in trace.actual_observation
+    assert provider.gui_action.await_count == 0
 
 
 @pytest.mark.asyncio
@@ -399,40 +342,13 @@ async def test_typing_verification_rejects_wrong_field_targets():
             f"Type into {target}",
         )
         assert trace.status == ActionExecutionStatus.BLOCKED, f"Target {target} was not fail-closed: {trace.status}"
-        assert (
-            "[TYPING VERIFICATION FAILED]" in trace.actual_observation
-            or "fresh accessibility evidence did not identify" in trace.actual_observation
-        )
+        assert "AVCS has no evaluated local focus-verification" in trace.actual_observation
+    assert provider.gui_action.await_count == 0
 
 
 @pytest.mark.asyncio
-async def test_typing_verification_accepts_valid_field_and_text():
+async def test_valid_typing_payload_remains_blocked_without_local_focus_verification():
     provider = _mock_static_gui_provider("diff_screen_3")
-    screen_obs = provider.screenshot.return_value
-    screen_obs = screen_obs.model_copy(
-        update={
-            "detected_controls": [
-                {
-                    "name": "search input",
-                    "role": "entry",
-                    "bbox": (220, 160, 80, 40),
-                    "bbox_format": "xywh",
-                    "source": "atspi",
-                    "confidence": 0.95,
-                    "freshness_ms": 0,
-                    "editable": True,
-                    "focused": True,
-                }
-            ]
-        }
-    )
-    provider.screenshot.side_effect = [
-        screen_obs,
-        screen_obs,
-        screen_obs.model_copy(
-            update={"screenshot_base64": "diff_screen_3_after_typing"}
-        ),
-    ]
     agent = ComputerUseAgent(computer_provider=provider)
     await agent.observe("ws-1")
 
@@ -443,8 +359,9 @@ async def test_typing_verification_accepts_valid_field_and_text():
         {"text": "my search query"},
         "Type query",
     )
-    assert trace.status == ActionExecutionStatus.COMPLETED, trace.actual_observation
-    assert "Typed 15 chars" in trace.actual_observation
+    assert trace.status == ActionExecutionStatus.BLOCKED, trace.actual_observation
+    assert "AVCS has no evaluated local focus-verification" in trace.actual_observation
+    assert provider.gui_action.await_count == 0
 
 
 # =========================================================================

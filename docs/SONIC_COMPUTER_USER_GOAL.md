@@ -35,16 +35,15 @@ workstation tasks.
 
 ### Perceive continuously and efficiently
 
-- Maintain a current estimate of desktop state: active window, focus, visible
-  controls, relevant text, application state, and recent changes.
-- Prefer incremental signals such as accessibility events, window changes,
-  control state, and changed screen regions where the workstation exposes them.
-- For workers assigned to the visible GUI plane, use a fresh screenshot as the
-  primary reasoning input on every decision. Do not substitute OCR,
-  accessibility controls, or window telemetry when the screenshot is absent.
-- Structured state remains useful for freshness checks, coordinate bounds,
-  action safety, and independent verification; it must not silently replace
-  visual reasoning for GUI-only work.
+- Maintain a current estimate of desktop pixels and recent visual changes.
+- Process workstation frames locally through AVCS. Do not send workstation
+  screenshots to the workstation reasoning model or use OCR, AT-SPI, DOM, or
+  accessibility controls as alternate workstation grounding sources.
+- Use AVCS reflex state as compact text context for reasoning, and use only a
+  configured, evaluated AVCS head for semantic pointer grounding. Freshness,
+  coordinate bounds, and action safety must still be checked before dispatch.
+- Do not claim that local reflex features establish visible text, focus, semantic
+  controls, or task completion. Missing AVCS capability must fail closed.
 - For non-GUI tasks, avoid unnecessary image transfer; use image reasoning when
   visual appearance, layout, icons, custom-drawn controls, or ambiguous state
   require it.
@@ -546,7 +545,7 @@ fresh, versioned perception, a working vision route interprets its pixels, and
 SONIC produces GUI action receipts plus independent Judge evidence for a
 harmless task.
 
-### Visual-first GUI reasoning and fail-closed vision routing (2026-10-08)
+### Historical visual-first GUI reasoning and fail-closed vision routing (2026-10-08; superseded below)
 
 - GUI-assigned workers now refresh and attach a fresh screenshot for every
   reasoning decision, even when NSI/accessibility controls are fresh. Their
@@ -575,3 +574,26 @@ harmless task.
   readiness is demonstrated and an isolated task passes independent Judge
   verification. Pixels-only perception still requires pixel coordinates for
   motor actions; it is not yet evidence of human-level reliability.
+
+### AVCS-only workstation perception (current contract)
+
+- Docker and Daytona workstation screenshot observations now retain pixels for
+  local AVCS processing and return no OCR-derived text or semantic control list.
+  Workstation GUI reasoning requests contain text/state only; captured frame
+  bytes are not sent to an LLM.
+- The active Daytona accessibility-tree extraction and the agent's
+  state-only/NSI intent path are removed. GUI action intents require a fresh
+  interactive pixel frame. Model-proposed coordinates are not trusted by
+  themselves; pointer actions require local AVCS grounding and are blocked if
+  it is unavailable or disagrees.
+- `GUI_TYPE` is not advertised and is blocked before any focus click because
+  AVCS currently has no evaluated local focus-verification head. The optional
+  semantic point grounder likewise needs a held-out-evaluated real-UI
+  checkpoint; no such checkpoint or real-UI demonstration is present.
+- AVCS reflex metrics do not establish task-specific semantic completion.
+  Judge therefore remains inconclusive without independent postcondition
+  evidence. There has been no live desktop acceptance run, data collection, or
+  OSWorld benchmark for this migration.
+- The privacy redaction gate and AVCS's own retinal/foveation implementation
+  are distinct from workstation OCR perception and are not removed by this
+  migration.

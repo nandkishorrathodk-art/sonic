@@ -1,0 +1,1580 @@
+{
+  "schema_version": "1.0",
+  "cases": 16,
+  "cases_passed": 16,
+  "suite_case_pass_rate": 1.0,
+  "positive_task_cases": 14,
+  "positive_task_successes": 14,
+  "task_completion_rate": 1.0,
+  "reported_confirmations": 14,
+  "false_task_confirmations": 0,
+  "false_confirmation_rate": 0.0,
+  "target_selections_scored": 16,
+  "target_precision_at_iou_0_5": 1.0,
+  "target_scoring_coverage": 1.0,
+  "duration_ms_p50": 148.06680000037886,
+  "duration_ms_p95": 705.1499000081094,
+  "results": [
+    {
+      "case_id": "button_exact",
+      "category": "basic_controls",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 168.6557999928482,
+      "error": null
+    },
+    {
+      "case_id": "similar_button_labels",
+      "category": "grounding",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 164.30400000535883,
+      "error": null
+    },
+    {
+      "case_id": "checkbox_toggle",
+      "category": "basic_controls",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 148.8660000031814,
+      "error": null
+    },
+    {
+      "case_id": "checkbox_near_miss",
+      "category": "grounding",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 148.06680000037886,
+      "error": null
+    },
+    {
+      "case_id": "dropdown_exact_option",
+      "category": "basic_controls",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 148.84680000250228,
+      "error": null
+    },
+    {
+      "case_id": "form_fill",
+      "category": "forms",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 405.28310000081547,
+      "error": null
+    },
+    {
+      "case_id": "confirm_dialog",
+      "category": "dialogs",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 122.85379999957513,
+      "error": null
+    },
+    {
+      "case_id": "duplicate_open_buttons",
+      "category": "grounding",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 132.24249999620952,
+      "error": null
+    },
+    {
+      "case_id": "disabled_control",
+      "category": "safety",
+      "expected_status": "blocked",
+      "reported_status": "blocked",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 43.980599992210045,
+      "error": null
+    },
+    {
+      "case_id": "overlay_close",
+      "category": "dialogs",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 130.908899998758,
+      "error": null
+    },
+    {
+      "case_id": "delayed_report",
+      "category": "dynamic_state",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 705.1499000081094,
+      "error": null
+    },
+    {
+      "case_id": "exact_text_target",
+      "category": "grounding",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 137.18489999882877,
+      "error": null
+    },
+    {
+      "case_id": "stale_layout_reflow",
+      "category": "dynamic_state",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 150.2899999904912,
+      "error": null
+    },
+    {
+      "case_id": "cancel_dialog",
+      "category": "dialogs",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 353.6076000018511,
+      "error": null
+    },
+    {
+      "case_id": "keyboard_equivalent_not_required",
+      "category": "basic_controls",
+      "expected_status": "confirmed",
+      "reported_status": "confirmed",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 144.48459999402985,
+      "error": null
+    },
+    {
+      "case_id": "no_false_success",
+      "category": "verification",
+      "expected_status": "ambiguous",
+      "reported_status": "ambiguous",
+      "task_success": true,
+      "expected_state_match": true,
+      "target_scored": true,
+      "target_iou": 1.0,
+      "target_match": true,
+      "false_confirmation": false,
+      "elapsed_ms": 140.9810000041034,
+      "error": null
+    }
+  ],
+  "suite_name": "AVCS Suite A \u2014 deterministic Windows fixtures",
+  "environment": {
+    "python": "3.14.7",
+    "platform": "win32",
+    "adapter": "benchmarks.avcs_suite_adapter:create_adapter"
+  },
+  "trace": [
+    {
+      "case_id": "button_exact",
+      "started_at_monotonic": 103383.0686608,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 168.6557999928482,
+        "actions": [
+          {
+            "action_id": "act_1328b4d8d8",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 482.0,
+              "y": 336.0,
+              "width": 150.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 1.6821370124816895,
+            "timestamp": 103383.2604392
+          }
+        ]
+      },
+      "before": {
+        "case_id": "button_exact",
+        "state": {
+          "saved": false
+        },
+        "target_boxes": {
+          "save": {
+            "x": 482.0,
+            "y": 336.0,
+            "width": 150.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103383.0908993
+      },
+      "after": {
+        "case_id": "button_exact",
+        "state": {
+          "saved": true
+        },
+        "target_boxes": {
+          "save": {
+            "x": 482.0,
+            "y": 336.0,
+            "width": 150.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103383.2644028
+      },
+      "score": {
+        "case_id": "button_exact",
+        "category": "basic_controls",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 168.6557999928482,
+        "error": null
+      }
+    },
+    {
+      "case_id": "similar_button_labels",
+      "started_at_monotonic": 103383.2655284,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 164.30400000535883,
+        "actions": [
+          {
+            "action_id": "act_9f96c1a5c3",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 612.0,
+              "y": 321.0,
+              "width": 130.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.29076886177063,
+            "timestamp": 103383.4562372
+          }
+        ]
+      },
+      "before": {
+        "case_id": "similar_button_labels",
+        "state": {
+          "saved": false,
+          "draft_saved": false
+        },
+        "target_boxes": {
+          "save_draft": {
+            "x": 392.0,
+            "y": 321.0,
+            "width": 170.0,
+            "height": 42.0
+          },
+          "save": {
+            "x": 612.0,
+            "y": 321.0,
+            "width": 130.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103383.2908683
+      },
+      "after": {
+        "case_id": "similar_button_labels",
+        "state": {
+          "saved": true,
+          "draft_saved": false
+        },
+        "target_boxes": {
+          "save_draft": {
+            "x": 392.0,
+            "y": 321.0,
+            "width": 170.0,
+            "height": 42.0
+          },
+          "save": {
+            "x": 612.0,
+            "y": 321.0,
+            "width": 130.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103383.469067
+      },
+      "score": {
+        "case_id": "similar_button_labels",
+        "category": "grounding",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 164.30400000535883,
+        "error": null
+      }
+    },
+    {
+      "case_id": "checkbox_toggle",
+      "started_at_monotonic": 103383.4699568,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 148.8660000031814,
+        "actions": [
+          {
+            "action_id": "act_18b0fae201",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 432.0,
+              "y": 336.0,
+              "width": 280.0,
+              "height": 38.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.368189811706543,
+            "timestamp": 103383.6529171
+          }
+        ]
+      },
+      "before": {
+        "case_id": "checkbox_toggle",
+        "state": {
+          "notifications": false
+        },
+        "target_boxes": {
+          "email_notifications": {
+            "x": 432.0,
+            "y": 336.0,
+            "width": 280.0,
+            "height": 38.0
+          }
+        },
+        "captured_at_monotonic": 103383.503354
+      },
+      "after": {
+        "case_id": "checkbox_toggle",
+        "state": {
+          "notifications": true
+        },
+        "target_boxes": {
+          "email_notifications": {
+            "x": 432.0,
+            "y": 336.0,
+            "width": 280.0,
+            "height": 38.0
+          }
+        },
+        "captured_at_monotonic": 103383.6654755
+      },
+      "score": {
+        "case_id": "checkbox_toggle",
+        "category": "basic_controls",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 148.8660000031814,
+        "error": null
+      }
+    },
+    {
+      "case_id": "checkbox_near_miss",
+      "started_at_monotonic": 103383.6665635,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 148.06680000037886,
+        "actions": [
+          {
+            "action_id": "act_d39ad61d98",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 402.0,
+              "y": 366.0,
+              "width": 230.0,
+              "height": 36.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.3199119567871094,
+            "timestamp": 103383.8685435
+          }
+        ]
+      },
+      "before": {
+        "case_id": "checkbox_near_miss",
+        "state": {
+          "marketing": false,
+          "product_alerts": false
+        },
+        "target_boxes": {
+          "marketing": {
+            "x": 402.0,
+            "y": 311.0,
+            "width": 270.0,
+            "height": 36.0
+          },
+          "product_alerts": {
+            "x": 402.0,
+            "y": 366.0,
+            "width": 230.0,
+            "height": 36.0
+          }
+        },
+        "captured_at_monotonic": 103383.7197318
+      },
+      "after": {
+        "case_id": "checkbox_near_miss",
+        "state": {
+          "marketing": false,
+          "product_alerts": true
+        },
+        "target_boxes": {
+          "marketing": {
+            "x": 402.0,
+            "y": 311.0,
+            "width": 270.0,
+            "height": 36.0
+          },
+          "product_alerts": {
+            "x": 402.0,
+            "y": 366.0,
+            "width": 230.0,
+            "height": 36.0
+          }
+        },
+        "captured_at_monotonic": 103383.8719946
+      },
+      "score": {
+        "case_id": "checkbox_near_miss",
+        "category": "grounding",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 148.06680000037886,
+        "error": null
+      }
+    },
+    {
+      "case_id": "dropdown_exact_option",
+      "started_at_monotonic": 103383.8730116,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 148.84680000250228,
+        "actions": [
+          {
+            "action_id": "act_3c547d9406",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 447.0,
+              "y": 336.0,
+              "width": 280.0,
+              "height": 38.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.368189811706543,
+            "timestamp": 103384.0415972
+          }
+        ]
+      },
+      "before": {
+        "case_id": "dropdown_exact_option",
+        "state": {
+          "environment": "Development"
+        },
+        "target_boxes": {
+          "environment": {
+            "x": 447.0,
+            "y": 336.0,
+            "width": 280.0,
+            "height": 38.0
+          }
+        },
+        "captured_at_monotonic": 103383.8920698
+      },
+      "after": {
+        "case_id": "dropdown_exact_option",
+        "state": {
+          "environment": "Production"
+        },
+        "target_boxes": {
+          "environment": {
+            "x": 447.0,
+            "y": 336.0,
+            "width": 280.0,
+            "height": 38.0
+          }
+        },
+        "captured_at_monotonic": 103384.0472659
+      },
+      "score": {
+        "case_id": "dropdown_exact_option",
+        "category": "basic_controls",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 148.84680000250228,
+        "error": null
+      }
+    },
+    {
+      "case_id": "form_fill",
+      "started_at_monotonic": 103384.0484888,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 405.28310000081547,
+        "actions": [
+          {
+            "action_id": "act_0c5e15def6",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 467.0,
+              "y": 301.0,
+              "width": 270.0,
+              "height": 36.0
+            },
+            "action_type": "type",
+            "evidence": "Foveated entry field and typed AVA-204.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.3562002182006836,
+            "timestamp": 103384.3318888
+          },
+          {
+            "action_id": "act_29eb7cbea2",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 522.0,
+              "y": 381.0,
+              "width": 150.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Submitted form.",
+            "ripple_energy": 0.0,
+            "photo_delta": 0.0,
+            "timestamp": 103384.4721617
+          }
+        ]
+      },
+      "before": {
+        "case_id": "form_fill",
+        "state": {
+          "ticket_input": "",
+          "submitted_ticket": ""
+        },
+        "target_boxes": {
+          "ticket_id": {
+            "x": 467.0,
+            "y": 301.0,
+            "width": 270.0,
+            "height": 36.0
+          },
+          "submit": {
+            "x": 522.0,
+            "y": 381.0,
+            "width": 150.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103384.0662237
+      },
+      "after": {
+        "case_id": "form_fill",
+        "state": {
+          "ticket_input": "AVA-204",
+          "submitted_ticket": "AVA-204"
+        },
+        "target_boxes": {
+          "ticket_id": {
+            "x": 467.0,
+            "y": 301.0,
+            "width": 270.0,
+            "height": 36.0
+          },
+          "submit": {
+            "x": 522.0,
+            "y": 381.0,
+            "width": 150.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103384.4757249
+      },
+      "score": {
+        "case_id": "form_fill",
+        "category": "forms",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 405.28310000081547,
+        "error": null
+      }
+    },
+    {
+      "case_id": "confirm_dialog",
+      "started_at_monotonic": 103384.4765385,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 122.85379999957513,
+        "actions": [
+          {
+            "action_id": "act_524d4d3ea7",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 612.0,
+              "y": 371.0,
+              "width": 130.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 1.6476030349731445,
+            "timestamp": 103384.6226822
+          }
+        ]
+      },
+      "before": {
+        "case_id": "confirm_dialog",
+        "state": {
+          "confirmed": false,
+          "cancelled": false
+        },
+        "target_boxes": {
+          "dialog_title": {
+            "x": 422.0,
+            "y": 281.0,
+            "width": 340.0,
+            "height": 40.0
+          },
+          "cancel": {
+            "x": 432.0,
+            "y": 371.0,
+            "width": 130.0,
+            "height": 42.0
+          },
+          "confirm": {
+            "x": 612.0,
+            "y": 371.0,
+            "width": 130.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103384.4987392
+      },
+      "after": {
+        "case_id": "confirm_dialog",
+        "state": {
+          "confirmed": true,
+          "cancelled": false
+        },
+        "target_boxes": {
+          "dialog_title": {
+            "x": 422.0,
+            "y": 281.0,
+            "width": 340.0,
+            "height": 40.0
+          },
+          "cancel": {
+            "x": 432.0,
+            "y": 371.0,
+            "width": 130.0,
+            "height": 42.0
+          },
+          "confirm": {
+            "x": 612.0,
+            "y": 371.0,
+            "width": 130.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103384.625812
+      },
+      "score": {
+        "case_id": "confirm_dialog",
+        "category": "dialogs",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 122.85379999957513,
+        "error": null
+      }
+    },
+    {
+      "case_id": "duplicate_open_buttons",
+      "started_at_monotonic": 103384.626627,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 132.24249999620952,
+        "actions": [
+          {
+            "action_id": "act_0ed37a36d1",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 677.0,
+              "y": 321.0,
+              "width": 140.0,
+              "height": 40.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.227869749069214,
+            "timestamp": 103384.7880309
+          }
+        ]
+      },
+      "before": {
+        "case_id": "duplicate_open_buttons",
+        "state": {
+          "documents_open": false,
+          "projects_open": false
+        },
+        "target_boxes": {
+          "documents_heading": {
+            "x": 342.0,
+            "y": 276.0,
+            "width": 210.0,
+            "height": 32.0
+          },
+          "documents_open": {
+            "x": 377.0,
+            "y": 321.0,
+            "width": 140.0,
+            "height": 40.0
+          },
+          "projects_heading": {
+            "x": 642.0,
+            "y": 276.0,
+            "width": 210.0,
+            "height": 32.0
+          },
+          "projects_open": {
+            "x": 677.0,
+            "y": 321.0,
+            "width": 140.0,
+            "height": 40.0
+          }
+        },
+        "captured_at_monotonic": 103384.6549934
+      },
+      "after": {
+        "case_id": "duplicate_open_buttons",
+        "state": {
+          "documents_open": false,
+          "projects_open": true
+        },
+        "target_boxes": {
+          "documents_heading": {
+            "x": 342.0,
+            "y": 276.0,
+            "width": 210.0,
+            "height": 32.0
+          },
+          "documents_open": {
+            "x": 377.0,
+            "y": 321.0,
+            "width": 140.0,
+            "height": 40.0
+          },
+          "projects_heading": {
+            "x": 642.0,
+            "y": 276.0,
+            "width": 210.0,
+            "height": 32.0
+          },
+          "projects_open": {
+            "x": 677.0,
+            "y": 321.0,
+            "width": 140.0,
+            "height": 40.0
+          }
+        },
+        "captured_at_monotonic": 103384.799798
+      },
+      "score": {
+        "case_id": "duplicate_open_buttons",
+        "category": "grounding",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 132.24249999620952,
+        "error": null
+      }
+    },
+    {
+      "case_id": "disabled_control",
+      "started_at_monotonic": 103384.8006522,
+      "run": {
+        "status": "blocked",
+        "duration_ms": 43.980599992210045,
+        "actions": [
+          {
+            "action_id": "act_bb75353b72",
+            "status": "BLOCKED",
+            "target_bbox": {
+              "x": 502.0,
+              "y": 336.0,
+              "width": 180.0,
+              "height": 44.0
+            },
+            "action_type": "click",
+            "evidence": "Action blocked: Target control is disabled; bypass prevented by safety controller.",
+            "ripple_energy": 0.0,
+            "photo_delta": 0.0,
+            "timestamp": 103384.869048
+          }
+        ]
+      },
+      "before": {
+        "case_id": "disabled_control",
+        "state": {
+          "continued": false
+        },
+        "target_boxes": {
+          "continue": {
+            "x": 502.0,
+            "y": 336.0,
+            "width": 180.0,
+            "height": 44.0
+          }
+        },
+        "captured_at_monotonic": 103384.8244048
+      },
+      "after": {
+        "case_id": "disabled_control",
+        "state": {
+          "continued": false
+        },
+        "target_boxes": {
+          "continue": {
+            "x": 502.0,
+            "y": 336.0,
+            "width": 180.0,
+            "height": 44.0
+          }
+        },
+        "captured_at_monotonic": 103384.8815925
+      },
+      "score": {
+        "case_id": "disabled_control",
+        "category": "safety",
+        "expected_status": "blocked",
+        "reported_status": "blocked",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 43.980599992210045,
+        "error": null
+      }
+    },
+    {
+      "case_id": "overlay_close",
+      "started_at_monotonic": 103384.8826007,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 130.908899998758,
+        "actions": [
+          {
+            "action_id": "act_8db8932309",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 528.0,
+              "y": 392.0,
+              "width": 130.0,
+              "height": 40.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 1.9618726968765259,
+            "timestamp": 103385.0407626
+          }
+        ]
+      },
+      "before": {
+        "case_id": "overlay_close",
+        "state": {
+          "continued": false,
+          "overlay_closed": false
+        },
+        "target_boxes": {
+          "continue": {
+            "x": 512.0,
+            "y": 351.0,
+            "width": 160.0,
+            "height": 42.0
+          },
+          "overlay_label": {
+            "x": 392.0,
+            "y": 281.0,
+            "width": 400.0,
+            "height": 34.0
+          },
+          "close_notice": {
+            "x": 528.0,
+            "y": 392.0,
+            "width": 130.0,
+            "height": 40.0
+          }
+        },
+        "captured_at_monotonic": 103384.9090296
+      },
+      "after": {
+        "case_id": "overlay_close",
+        "state": {
+          "continued": false,
+          "overlay_closed": true
+        },
+        "target_boxes": {
+          "continue": {
+            "x": 512.0,
+            "y": 351.0,
+            "width": 160.0,
+            "height": 42.0
+          },
+          "overlay_label": {
+            "x": 392.0,
+            "y": 281.0,
+            "width": 400.0,
+            "height": 34.0
+          },
+          "close_notice": {
+            "x": 528.0,
+            "y": 392.0,
+            "width": 130.0,
+            "height": 40.0
+          }
+        },
+        "captured_at_monotonic": 103385.0445907
+      },
+      "score": {
+        "case_id": "overlay_close",
+        "category": "dialogs",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 130.908899998758,
+        "error": null
+      }
+    },
+    {
+      "case_id": "delayed_report",
+      "started_at_monotonic": 103385.0457224,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 705.1499000081094,
+        "actions": [
+          {
+            "action_id": "act_d63389bae6",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 502.0,
+              "y": 331.0,
+              "width": 180.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.368189811706543,
+            "timestamp": 103385.7670263
+          }
+        ]
+      },
+      "before": {
+        "case_id": "delayed_report",
+        "state": {
+          "report_ready": false
+        },
+        "target_boxes": {
+          "run_report": {
+            "x": 502.0,
+            "y": 331.0,
+            "width": 180.0,
+            "height": 42.0
+          },
+          "status": {
+            "x": 482.0,
+            "y": 401.0,
+            "width": 230.0,
+            "height": 32.0
+          }
+        },
+        "captured_at_monotonic": 103385.0609522
+      },
+      "after": {
+        "case_id": "delayed_report",
+        "state": {
+          "report_ready": true
+        },
+        "target_boxes": {
+          "run_report": {
+            "x": 502.0,
+            "y": 331.0,
+            "width": 180.0,
+            "height": 42.0
+          },
+          "status": {
+            "x": 482.0,
+            "y": 401.0,
+            "width": 230.0,
+            "height": 32.0
+          }
+        },
+        "captured_at_monotonic": 103385.7984445
+      },
+      "score": {
+        "case_id": "delayed_report",
+        "category": "dynamic_state",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 705.1499000081094,
+        "error": null
+      }
+    },
+    {
+      "case_id": "exact_text_target",
+      "started_at_monotonic": 103385.7996203,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 137.18489999882877,
+        "actions": [
+          {
+            "action_id": "act_bddfe52a9f",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 607.0,
+              "y": 326.0,
+              "width": 220.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.3480520248413086,
+            "timestamp": 103385.9683141
+          }
+        ]
+      },
+      "before": {
+        "case_id": "exact_text_target",
+        "state": {
+          "all_archived": false,
+          "selected_archived": false
+        },
+        "target_boxes": {
+          "archive_all": {
+            "x": 377.0,
+            "y": 326.0,
+            "width": 200.0,
+            "height": 42.0
+          },
+          "archive_selected": {
+            "x": 607.0,
+            "y": 326.0,
+            "width": 220.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103385.8303073
+      },
+      "after": {
+        "case_id": "exact_text_target",
+        "state": {
+          "all_archived": false,
+          "selected_archived": true
+        },
+        "target_boxes": {
+          "archive_all": {
+            "x": 377.0,
+            "y": 326.0,
+            "width": 200.0,
+            "height": 42.0
+          },
+          "archive_selected": {
+            "x": 607.0,
+            "y": 326.0,
+            "width": 220.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103385.9718669
+      },
+      "score": {
+        "case_id": "exact_text_target",
+        "category": "grounding",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 137.18489999882877,
+        "error": null
+      }
+    },
+    {
+      "case_id": "stale_layout_reflow",
+      "started_at_monotonic": 103385.9727639,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 150.2899999904912,
+        "actions": [
+          {
+            "action_id": "act_927733ed63",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 487.0,
+              "y": 316.0,
+              "width": 190.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.368189811706543,
+            "timestamp": 103386.1420806
+          }
+        ]
+      },
+      "before": {
+        "case_id": "stale_layout_reflow",
+        "state": {
+          "expanded": false
+        },
+        "target_boxes": {
+          "expand": {
+            "x": 487.0,
+            "y": 316.0,
+            "width": 190.0,
+            "height": 42.0
+          },
+          "details_status": {
+            "x": 176.0,
+            "y": 481.0,
+            "width": 420.0,
+            "height": 28.0
+          }
+        },
+        "captured_at_monotonic": 103385.9908278
+      },
+      "after": {
+        "case_id": "stale_layout_reflow",
+        "state": {
+          "expanded": true
+        },
+        "target_boxes": {
+          "expand": {
+            "x": 525.0,
+            "y": 328.0,
+            "width": 208.0,
+            "height": 42.0
+          },
+          "details_status": {
+            "x": 176.0,
+            "y": 481.0,
+            "width": 420.0,
+            "height": 28.0
+          }
+        },
+        "captured_at_monotonic": 103386.147138
+      },
+      "score": {
+        "case_id": "stale_layout_reflow",
+        "category": "dynamic_state",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 150.2899999904912,
+        "error": null
+      }
+    },
+    {
+      "case_id": "cancel_dialog",
+      "started_at_monotonic": 103386.148103,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 353.6076000018511,
+        "actions": [
+          {
+            "action_id": "act_74702792d6",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 612.0,
+              "y": 371.0,
+              "width": 130.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 1.5791432857513428,
+            "timestamp": 103386.5246327
+          }
+        ]
+      },
+      "before": {
+        "case_id": "cancel_dialog",
+        "state": {
+          "confirmed": false,
+          "cancelled": false
+        },
+        "target_boxes": {
+          "cancel_title": {
+            "x": 422.0,
+            "y": 281.0,
+            "width": 340.0,
+            "height": 38.0
+          },
+          "confirm": {
+            "x": 432.0,
+            "y": 371.0,
+            "width": 130.0,
+            "height": 42.0
+          },
+          "cancel": {
+            "x": 612.0,
+            "y": 371.0,
+            "width": 130.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103386.170266
+      },
+      "after": {
+        "case_id": "cancel_dialog",
+        "state": {
+          "confirmed": false,
+          "cancelled": true
+        },
+        "target_boxes": {
+          "cancel_title": {
+            "x": 422.0,
+            "y": 281.0,
+            "width": 340.0,
+            "height": 38.0
+          },
+          "confirm": {
+            "x": 432.0,
+            "y": 371.0,
+            "width": 130.0,
+            "height": 42.0
+          },
+          "cancel": {
+            "x": 612.0,
+            "y": 371.0,
+            "width": 130.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103386.533277
+      },
+      "score": {
+        "case_id": "cancel_dialog",
+        "category": "dialogs",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 353.6076000018511,
+        "error": null
+      }
+    },
+    {
+      "case_id": "keyboard_equivalent_not_required",
+      "started_at_monotonic": 103386.534207,
+      "run": {
+        "status": "confirmed",
+        "duration_ms": 144.48459999402985,
+        "actions": [
+          {
+            "action_id": "act_fdf1ed1018",
+            "status": "CONFIRMED",
+            "target_bbox": {
+              "x": 502.0,
+              "y": 336.0,
+              "width": 180.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.334383487701416,
+            "timestamp": 103386.7098617
+          }
+        ]
+      },
+      "before": {
+        "case_id": "keyboard_equivalent_not_required",
+        "state": {
+          "applied": false
+        },
+        "target_boxes": {
+          "apply": {
+            "x": 502.0,
+            "y": 336.0,
+            "width": 180.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103386.5642394
+      },
+      "after": {
+        "case_id": "keyboard_equivalent_not_required",
+        "state": {
+          "applied": true
+        },
+        "target_boxes": {
+          "apply": {
+            "x": 502.0,
+            "y": 336.0,
+            "width": 180.0,
+            "height": 42.0
+          }
+        },
+        "captured_at_monotonic": 103386.7164543
+      },
+      "score": {
+        "case_id": "keyboard_equivalent_not_required",
+        "category": "basic_controls",
+        "expected_status": "confirmed",
+        "reported_status": "confirmed",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 144.48459999402985,
+        "error": null
+      }
+    },
+    {
+      "case_id": "no_false_success",
+      "started_at_monotonic": 103386.7174464,
+      "run": {
+        "status": "ambiguous",
+        "duration_ms": 140.9810000041034,
+        "actions": [
+          {
+            "action_id": "act_d1edc5c5ae",
+            "status": "AMBIGUOUS",
+            "target_bbox": {
+              "x": 477.0,
+              "y": 311.0,
+              "width": 210.0,
+              "height": 42.0
+            },
+            "action_type": "click",
+            "evidence": "Physical visual ripple and structural state change confirmed.",
+            "ripple_energy": 0.0,
+            "photo_delta": 2.368189811706543,
+            "timestamp": 103386.8854405
+          }
+        ]
+      },
+      "before": {
+        "case_id": "no_false_success",
+        "state": {
+          "refresh_requested": false,
+          "preview_refreshed": false
+        },
+        "target_boxes": {
+          "refresh": {
+            "x": 477.0,
+            "y": 311.0,
+            "width": 210.0,
+            "height": 42.0
+          },
+          "preview_status": {
+            "x": 477.0,
+            "y": 386.0,
+            "width": 260.0,
+            "height": 32.0
+          }
+        },
+        "captured_at_monotonic": 103386.7432242
+      },
+      "after": {
+        "case_id": "no_false_success",
+        "state": {
+          "refresh_requested": true,
+          "preview_refreshed": false
+        },
+        "target_boxes": {
+          "refresh": {
+            "x": 477.0,
+            "y": 311.0,
+            "width": 210.0,
+            "height": 42.0
+          },
+          "preview_status": {
+            "x": 477.0,
+            "y": 386.0,
+            "width": 260.0,
+            "height": 32.0
+          }
+        },
+        "captured_at_monotonic": 103386.8898351
+      },
+      "score": {
+        "case_id": "no_false_success",
+        "category": "verification",
+        "expected_status": "ambiguous",
+        "reported_status": "ambiguous",
+        "task_success": true,
+        "expected_state_match": true,
+        "target_scored": true,
+        "target_iou": 1.0,
+        "target_match": true,
+        "false_confirmation": false,
+        "elapsed_ms": 140.9810000041034,
+        "error": null
+      }
+    }
+  ]
+}

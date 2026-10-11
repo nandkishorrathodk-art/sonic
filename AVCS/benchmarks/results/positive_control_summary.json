@@ -1,0 +1,19 @@
+{
+  "benchmark_name": "AVCS Positive-Control Task Completion Benchmark",
+  "milestone": "Milestone 4",
+  "schema_version": "1.0",
+  "total_trials": 1000,
+  "base_seed": 2024,
+  "duration_total_seconds": 10.14,
+  "trials_per_second": 98.63,
+  "task_successes": 1000,
+  "task_completion_rate": 1.0,
+  "target_gate_threshold": 0.99,
+  "exit_gate_passed": true,
+  "latency_ms": {
+    "p50": 9.719,
+    "p95": 13.183,
+    "p99": 15.311
+  },
+  "trace_file": "C:\\Users\\nandk\\Documents\\antigravity\\splendid-babbage\\benchmarks\\results\\positive_control_trials.jsonl"
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "release_candidate": "AVCS-M7-RC1",
+  "required_modes": ["visual_only", "uia_only", "hybrid"],
+  "minimum_total_trials": 300,
+  "minimum_distinct_scenarios": 8,
+  "minimum_workflow_success_rate": 0.95,
+  "maximum_false_confirmations": 0,
+  "maximum_path_escape_events": 0,
+  "maximum_high_risk_trials": 0,
+  "required_application_categories": [
+    "native_controls",
+    "custom_drawn_no_dom",
+    "browser_canvas",
+    "legacy_form",
+    "mixed_accessibility",
+    "dynamic_ui"
+  ],
+  "manual_attestations_required": [
+    "security_review_complete",
+    "privacy_and_egress_review_complete",
+    "rollback_tested",
+    "human_supervision_defined",
+    "supported_applications_published"
+  ],
+  "warning": "These are proposed gates. Passing this harness alone does not certify general production readiness."
+}

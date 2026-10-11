@@ -14,6 +14,7 @@ RUN cargo build --locked --release
 # Stage 2: Python builder
 FROM python:3.12-slim AS builder
 WORKDIR /app
+ARG INSTALL_AVCS_GROUNDING=0
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
@@ -22,7 +23,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY sonic-core/pyproject.toml .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir .
+    if [ "$INSTALL_AVCS_GROUNDING" = "1" ]; then \
+      pip install --no-cache-dir ".[avcs-grounding]"; \
+    else \
+      pip install --no-cache-dir .; \
+    fi
 
 # Stage 3: Runtime
 FROM python:3.12-slim AS runtime
@@ -31,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     nmap \
     ca-certificates \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install compiled native Rust kernel binary
@@ -44,6 +50,8 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY --chown=sonic:sonic sonic-core /app
+COPY --chown=sonic:sonic AVCS/forge/vision /app/AVCS/forge/vision
+COPY --chown=sonic:sonic AVCS/avcs /app/AVCS/avcs
 
 USER sonic
 EXPOSE 8000

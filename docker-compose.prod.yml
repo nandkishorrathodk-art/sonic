@@ -50,6 +50,8 @@ services:
     build:
       context: .
       dockerfile: sonic-core/Dockerfile
+      args:
+        INSTALL_AVCS_GROUNDING: ${SONIC_INSTALL_AVCS_GROUNDING:-0}
     container_name: sonic-core-prod
     restart: always
     depends_on:
@@ -74,6 +76,7 @@ services:
       # SECRET_KEY must be a strong (>=32 byte) random value; the API refuses
       # to boot in production if this is unset or a known default.
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set in .env}
+      - SONIC_AVCS_GROUNDING_CHECKPOINT=${SONIC_AVCS_GROUNDING_CHECKPOINT:-}
     volumes:
       - ./configs:/app/configs:ro
       - ./evidence_store:/app/evidence_store
