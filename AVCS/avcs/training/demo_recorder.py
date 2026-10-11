@@ -106,6 +106,7 @@ class WindowsDemoRecorder:
         window_title: str,
         task: str,
         output_dir: Path,
+        target_label: Optional[str] = None,
         capture: Optional[Any] = None,
         user32: Optional[Any] = None,
         label_queue: Optional[queue.Queue[str]] = None,
@@ -117,8 +118,13 @@ class WindowsDemoRecorder:
             raise OSError("The demonstration recorder requires Windows.")
         if not task.strip():
             raise ValueError("A task description is required.")
+        if target_label is not None and (
+            not target_label.strip() or len(target_label.strip()) > 160
+        ):
+            raise ValueError("A default target label must contain 1 to 160 characters.")
         self.window_title = window_title.strip()
         self.task = task.strip()
+        self.target_label = target_label.strip() if target_label is not None else None
         self.output_dir = Path(output_dir)
         self.capture = capture
         self.user32 = user32
@@ -249,8 +255,14 @@ class WindowsDemoRecorder:
             self.capture.open()
             capture_open = True
             if self.event_sink:
+                label_hint = (
+                    f" Default label is armed: {self.target_label!r}."
+                    if self.target_label
+                    else " Enter a target label in this terminal before each click."
+                )
                 self.event_sink(
-                    "Recorder ready. Focus the selected window; only labeled left clicks are recorded."
+                    "Recorder ready. Focus the selected window; only labeled left clicks "
+                    f"are recorded.{label_hint} Enter :stop here to finish."
                 )
 
             with samples_file:
@@ -282,7 +294,8 @@ class WindowsDemoRecorder:
                         )
                         age = time.monotonic() - latest_capture_time
                         current_window = self._selected_window()
-                        label = self._next_label() if current_window.rect == latest_window_rect else None
+                        window_unchanged = current_window.rect == latest_window_rect
+                        label = self._next_label() if window_unchanged else None
                         if (
                             label
                             and latest_crop is not None
@@ -305,10 +318,20 @@ class WindowsDemoRecorder:
                             if self.event_sink:
                                 self.event_sink(f"Recorded labeled click {sample_count}: {label}")
                         elif self.event_sink:
-                            self.event_sink(
-                                "Click ignored: provide a target label and keep the click inside "
-                                "the selected window."
-                            )
+                            if not window_unchanged:
+                                reason = "the selected window moved after capture"
+                            elif not label:
+                                reason = (
+                                    "no target label is armed; enter one in the recorder "
+                                    "terminal before clicking"
+                                )
+                            elif point_norm is None:
+                                reason = "the click is outside the selected window"
+                            elif age > self.capture_interval * 3:
+                                reason = "the captured frame is stale"
+                            else:
+                                reason = "the click could not be validated against the fresh frame"
+                            self.event_sink(f"Click ignored: {reason}.")
                     previous_left_down = left_down
                     time.sleep(self.poll_interval)
             status = "stopped"
@@ -330,7 +353,7 @@ class WindowsDemoRecorder:
         try:
             label = self.label_queue.get_nowait().strip()
         except queue.Empty:
-            return None
+            return self.target_label
         if not label or len(label) > 160:
             return None
         return label
@@ -342,9 +365,13 @@ class WindowsDemoRecorder:
 def _read_target_labels(recorder: WindowsDemoRecorder) -> None:
     while not recorder._stop.is_set():
         try:
-            label = input(
-                "Next click target label (or :stop): "
-            ).strip()
+            if recorder.target_label is None:
+                prompt = "Next click target label (or :stop): "
+            else:
+                prompt = (
+                    f"Next label [{recorder.target_label}] (Enter keeps it, :stop finishes): "
+                )
+            label = input(prompt).strip()
         except EOFError:
             recorder.stop()
             return
@@ -352,6 +379,8 @@ def _read_target_labels(recorder: WindowsDemoRecorder) -> None:
             recorder.stop()
             return
         if not label:
+            if recorder.target_label is not None:
+                continue
             print("Label cannot be empty; that click will not be recorded.", file=sys.stderr)
             continue
         if len(label) > 160:
@@ -367,6 +396,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--window-title", required=True, help="Exact, unique visible window title.")
     parser.add_argument("--task", required=True, help="The operator's task for this demonstration.")
     parser.add_argument(
+        "--target-label",
+        help=(
+            "Reuse this label for every click. Useful when recording repeated "
+            "examples of one visible control."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
@@ -380,6 +416,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     if not args.confirm_isolated_window:
         parser.error("Pass --confirm-isolated-window only for a disposable, non-sensitive test window.")
+    if args.target_label is not None and (
+        not args.target_label.strip() or len(args.target_label.strip()) > 160
+    ):
+        parser.error("--target-label must contain 1 to 160 characters.")
     if not sys.stdin.isatty():
         parser.error("Interactive target labels require a terminal; no capture was started.")
 
@@ -387,6 +427,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         window_title=args.window_title,
         task=args.task,
         output_dir=args.output_dir,
+        target_label=args.target_label,
         event_sink=print,
     )
     reader = threading.Thread(target=_read_target_labels, args=(recorder,), daemon=True)
