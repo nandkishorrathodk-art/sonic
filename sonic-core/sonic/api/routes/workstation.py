@@ -345,12 +345,16 @@ def _load_workstation_state() -> None:
                                 desktop["display"] = ":99"
                             if not desktop.get("resolution"):
                                 desktop["resolution"] = {"width": 1280, "height": 800}
-                            # When running locally with Docker workstation (not Daytona Cloud),
-                            # migrate any stale cloud UUIDs so local Docker execution works immediately.
+                            # A local Docker desktop is a single shared resource and
+                            # its in-memory owner cannot be proven after restart.
+                            # Require explicit reprovisioning instead of restoring
+                            # a potentially cross-tenant workspace assignment.
                             if os.environ.get("SONIC_USE_DAYTONA_CLOUD") != "1":
-                                docker_ws = os.environ.get("SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation").strip()
-                                desktop["workspace_id"] = docker_ws
-                                desktop["sandbox_id"] = docker_ws
+                                desktop["workspace_id"] = ""
+                                desktop["sandbox_id"] = ""
+                                desktop["status"] = "NO_ACTIVE_WORKSPACE"
+                                desktop["vnc_url"] = ""
+                                desktop["novnc_url"] = ""
                                 desktop["os_name"] = "Linux Cyber Workstation (Docker XFCE4)"
                         # Reset lingering RUNNING status on restart since no background task survived
                         if session.get("status") == "RUNNING":
@@ -2046,10 +2050,7 @@ async def execute_workstation_command(
             except Exception:
                 workspace_id = ""
         else:
-            docker_container = os.environ.get(
-                "SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation"
-            ).strip()
-            workspace_id = docker_container
+            workspace_id = ""
 
     if not workspace_id:
         # No provisioned workstation is itself a fail-closed condition: we must
@@ -2058,7 +2059,7 @@ async def execute_workstation_command(
         # are unsafe, so surface the documented 503 fail-closed response.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Command execution failed-closed: no Daytona workstation is provisioned for this session. Direct host OS execution is strictly prohibited.",
+            detail="Command execution failed-closed: no tenant-owned workstation is provisioned for this session. Direct host OS execution is strictly prohibited.",
         )
     try:
         res = await comp.terminal(workspace_id, req.command, timeout=req.timeout or 30, actor=user.email)

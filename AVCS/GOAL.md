@@ -52,7 +52,7 @@ To ensure scientific integrity and eliminate false assumptions, the current syst
 ```mermaid
 flowchart TD
     Phase1["Phase 1: Goal-Conditioned Pixel Grounder<br/>(architecture + demonstration training pipeline)"]
-    Phase2["Phase 2: Isolated Demonstrations + Offline Training<br/>(recording-session-disjoint evaluation)"]
+    Phase2["Phase 2: Isolated Demonstrations + Offline Training<br/>(task/window-disjoint evaluation)"]
     Phase3["Phase 3: System-1 / System-2 Decoupled Interface<br/>(LLM Planner ↔ AVCS Tool Protocol)"]
     Phase4["Phase 4: Genuine Benchmark Evaluation<br/>(OSWorld / WindowsAgentArena tasks with 0 shortcuts)"]
 
@@ -64,13 +64,13 @@ flowchart TD
 ### Phase 1: Goal-Conditioned Pixel Grounder (Architecture Implemented; Weights Not Trained)
 - [x] Define a model that consumes raw RGB pixels and a target phrase and emits a dense spatial click-target heatmap.
 - [x] Add a UTF-8 byte-query encoder and query-conditioned visual feature modulation; no OCR or accessibility text is consumed by the model.
-- [x] Add a demonstration loader, recording-session-disjoint train/validation/test split, and recorder-manifest checks.
+- [x] Add a demonstration loader, task/window-disjoint train/validation/test split, and recorder-manifest checks.
 - [ ] Obtain recorded real-UI demonstrations before training. No trained weights are currently available for this model.
 
 ### Phase 2: Real-World Demonstrations and Grounding Training
 - [x] Build safe, isolated demonstration recorder (`avcs.training.demo_recorder`).
-- [ ] Record high-quality human demonstrations across standard Windows applications (Notepad, Calculator, Settings, File Explorer) in isolated disposable test windows. At least five separate sessions are required by the training split.
-- [ ] Curate session-disjoint Train / Validation / Test sets. The current recorder labels click points, not target bounding boxes.
+- [ ] Record high-quality human demonstrations across standard desktop applications in isolated disposable test windows. At least five distinct task/window groups are required by the training split.
+- [ ] Curate task/window-disjoint Train / Validation / Test sets. The current recorder labels click points, not target bounding boxes.
 - [ ] Train `GoalConditionedGrounder` on genuine demonstrations. The synthetic checkpoint is not used as a pretrained real-UI model.
 - [ ] Report validation click-point distance first; target-hit rate requires bounding-box labels and is not measured by the current recorder.
 - [ ] Evaluate the held-out test split only after model choices are fixed. Offline metrics do not prove end-to-end desktop autonomy.

@@ -37,8 +37,9 @@ workstation tasks.
 
 - Maintain a current estimate of desktop pixels and recent visual changes.
 - Process workstation frames locally through AVCS. Do not send workstation
-  screenshots to the workstation reasoning model or use OCR, AT-SPI, DOM, or
-  accessibility controls as alternate workstation grounding sources.
+  screenshots to any model, including workstation reasoning or the Judge, or
+  use OCR, AT-SPI, DOM, or accessibility controls as alternate workstation
+  grounding sources.
 - Use AVCS reflex state as compact text context for reasoning, and use only a
   configured, evaluated AVCS head for semantic pointer grounding. Freshness,
   coordinate bounds, and action safety must still be checked before dispatch.
@@ -616,11 +617,12 @@ harmless task.
   identity, focus, or task completion. `GUI_TYPE` remains unavailable because
   there is no evaluated local focus-verification head; do not dispatch text
   based on a reflex summary or a model's focus assertion.
-- The Judge can receive a fresh screenshot through its separate vision request
-  for independent postcondition review; this does not route screenshot bytes to
-  workstation reasoning. Scene change, motion, reflex events, or a worker's
-  completion proposal alone cannot prove the requested semantic postcondition.
-  Completion remains inconclusive without independent, task-relevant evidence.
+- The Judge processes fresh screenshot pixels locally through AVCS and must not
+  attach desktop pixels to any model request. Scene change, motion, reflex
+  events, or a worker's completion proposal alone cannot prove the requested
+  semantic postcondition. Until a validated local task-verification head exists,
+  GUI completion remains inconclusive without other independent,
+  task-relevant evidence.
 - A 1920x1080 default display is a resolution setting, not evidence of precise
   semantic grounding or successful general-purpose task completion. Evaluate
   diverse, harmless desktop tasks with fresh action receipts and independent

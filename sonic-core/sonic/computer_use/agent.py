@@ -1059,6 +1059,7 @@ class ComputerUseAgent:
             query.strip(),
             width,
             height,
+            getattr(source_screen, "active_window_geometry", None),
         )
         if result is not None:
             x, y = result.get("x"), result.get("y")
@@ -5204,6 +5205,31 @@ class ComputerUseAgent:
             self.history.append({"action": action_type.value, "result": actual_obs_str})
             return trace
 
+        if action_type == ComputerActionType.SECURITY_TOOL and not self.security_tools:
+            actual_obs_str = (
+                "SECURITY_TOOL blocked: no registered in-sandbox tool adapter is "
+                "available; unregistered tools are never sent to the terminal."
+            )
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource=target_resource,
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append({"action": action_type.value, "result": actual_obs_str})
+            return trace
+
         if (
             str(getattr(self, "execution_plane", "dual") or "dual").lower().strip() == "headless"
             and action_type in self._COMPUTER_PLANE_ACTIONS
@@ -6069,16 +6095,34 @@ class ComputerUseAgent:
                     status = ActionExecutionStatus.BLOCKED
                     action_exit_code = 126
                 else:
+                    target_window = payload.get("window") or payload.get("window_title")
+                    if self._gui_action_contract_active() and target_window:
+                        actual_obs_str = (
+                            "GUI_TYPE blocked: window activation must be performed "
+                            "as a separate visible GUI action; no shell-backed focus "
+                            "command was run."
+                        )
+                        status = ActionExecutionStatus.BLOCKED
+                        action_exit_code = 126
                     # Only treat an explicit window name as a window target;
                     # target_resource is usually a field label such as "search".
-                    if hasattr(self, "motor") and self.motor:
-                        target_window = payload.get("window") or payload.get("window_title")
+                    if (
+                        status != ActionExecutionStatus.BLOCKED
+                        and
+                        hasattr(self, "motor")
+                        and self.motor
+                        and not self._gui_action_contract_active()
+                    ):
                         if target_window and hasattr(self.motor, "settle_focus"):
                             await self.motor.settle_focus(
                                 workspace_id,
                                 target_window=str(target_window),
                             )
-                if focus_x is not None and focus_y is not None:
+                if (
+                    status != ActionExecutionStatus.BLOCKED
+                    and focus_x is not None
+                    and focus_y is not None
+                ):
                     focus_err = self._validate_coordinates(
                         ComputerActionType.GUI_CLICK,
                         {"x": focus_x, "y": focus_y},
@@ -6199,11 +6243,22 @@ class ComputerUseAgent:
                 if (
                     status != ActionExecutionStatus.BLOCKED
                     and payload.get("clear_field") is True
-                    and hasattr(self, "motor")
-                    and self.motor
-                    and hasattr(self.motor, "clear_field")
                 ):
-                    await self.motor.clear_field(workspace_id)
+                    if self._gui_action_contract_active():
+                        await self._dispatch_gui_action(
+                            workspace_id,
+                            GUIAction(action=GUIActionType.HOTKEY, key="ctrl+a"),
+                        )
+                        await self._dispatch_gui_action(
+                            workspace_id,
+                            GUIAction(action=GUIActionType.KEYPRESS, key="BackSpace"),
+                        )
+                    elif (
+                        hasattr(self, "motor")
+                        and self.motor
+                        and hasattr(self.motor, "clear_field")
+                    ):
+                        await self.motor.clear_field(workspace_id)
                 use_motor = bool(
                     hasattr(self, "motor")
                     and self.motor

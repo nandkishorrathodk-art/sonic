@@ -18,7 +18,6 @@ Strict Mandate & Prohibitions (AGENTS.md):
 from __future__ import annotations
 
 import base64
-import json
 import re
 import time
 from collections.abc import Mapping
@@ -26,13 +25,12 @@ from enum import StrEnum
 from io import BytesIO
 from typing import Any
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from sonic.computer_use.models_boss import SubMission, SubMissionResult
 from sonic.evidence.independent_verifier import AdversarialReviewer, IndependentVerifier
 from sonic.evidence.reproduction_engine import ReproductionEngine
-from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
 from sonic.logger import get_logger
 
 logger = get_logger(__name__)
@@ -83,41 +81,6 @@ def _t_val(t: Any, key: str, default: Any = "") -> Any:
     if isinstance(t, dict):
         return t.get(key, default)
     return getattr(t, key, default)
-
-
-def _parse_gui_vision_verdict(content: Any) -> dict[str, Any] | None:
-    """Parse one JSON vision-judge response without accepting prose as proof."""
-    if not isinstance(content, str):
-        return None
-
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(content):
-        if char != "{":
-            continue
-        try:
-            parsed, _ = decoder.raw_decode(content[index:])
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(parsed, dict):
-            continue
-        verdict = parsed.get("verdict")
-        evidence = parsed.get("visible_evidence")
-        confidence = parsed.get("confidence")
-        if (
-            verdict not in ("CONFIRMED", "FALSIFIED", "INCONCLUSIVE")
-            or not isinstance(evidence, str)
-            or not evidence.strip()
-            or not isinstance(confidence, (int, float))
-            or isinstance(confidence, bool)
-            or not 0.0 <= confidence <= 1.0
-        ):
-            return None
-        return {
-            "verdict": verdict,
-            "visible_evidence": evidence.strip(),
-            "confidence": float(confidence),
-        }
-    return None
 
 
 class JudgeVerdict(StrEnum):
@@ -248,7 +211,6 @@ class JudgeAgent:
                     getattr(screen, "height", None),
                 ):
                     raise ValueError("Judge screenshot dimensions do not match frame metadata")
-                media_type = "image/png" if image_format == "PNG" else "image/jpeg"
                 if image_format == "PNG":
                     avcs_image_bytes = image_bytes
                 else:
@@ -317,102 +279,17 @@ class JudgeAgent:
                 scene_hash=scene_hash,
             )
 
-            if self.llm_router is None or not hasattr(self.llm_router, "complete"):
-                return JudgeEvaluation(
-                    verdict=JudgeVerdict.INCONCLUSIVE,
-                    confidence=0.0,
-                    notes=(
-                        "AVCS processed the fresh desktop pixels locally, but reflex "
-                        "telemetry alone cannot establish the requested semantic "
-                        "end state. No vision-capable Judge route is available."
-                    ),
-                    self_attestation_rejected=True,
-                    evidence_items=[avcs_evidence],
-                )
-
-            receipt_context = "\n".join(
-                f"- {item['action']} ({item['status']}): target={item['target']!r}; "
-                f"worker observation={item['observation']!r}"
-                for item in gui_actions
-            )
-            prompt = (
-                "Independently judge whether the requested workstation task's "
-                "postcondition is visibly established in the attached fresh desktop "
-                "frame. Inspect the image itself; worker claims and AVCS reflex "
-                "telemetry are context, not proof. Confirm only when the frame "
-                "contains direct, task-relevant evidence of the requested end state. "
-                "A visible application/window or a successful click alone is not "
-                "completion evidence. If the result is ambiguous, not visible, or "
-                "cannot be established from this frame, return INCONCLUSIVE. Return "
-                "FALSIFIED only when the frame directly contradicts the requested "
-                "postcondition. Respond with exactly one JSON object containing "
-                'verdict ("CONFIRMED", "FALSIFIED", or "INCONCLUSIVE"), confidence '
-                "(0 to 1), and visible_evidence (a concise description of the "
-                "specific pixels supporting that verdict).\n\n"
-                f"Requested outcome: {sub_mission.goal}\n"
-                f"Successful GUI action receipts for context only:\n{receipt_context}"
-            )
-            request = LLMRequest(
-                messages=[
-                    Message(
-                        role=MessageRole.USER,
-                        content=prompt,
-                        images=[
-                            ImageContent(
-                                base64=encoded_image,
-                                media_type=media_type,
-                            )
-                        ],
-                    )
-                ],
-                temperature=0.0,
-                max_tokens=300,
-                task_type="vision",
-                agent_id=self.judge_id,
-            )
-            response = await self.llm_router.complete(request, task_type="vision")
-            judgment = _parse_gui_vision_verdict(
-                getattr(response, "content", response)
-            )
-            if judgment is None:
-                return JudgeEvaluation(
-                    verdict=JudgeVerdict.INCONCLUSIVE,
-                    confidence=0.0,
-                    notes=(
-                        "The vision Judge returned no valid structured, "
-                        "task-relevant assessment; GUI completion remains unconfirmed."
-                    ),
-                    self_attestation_rejected=True,
-                    evidence_items=[avcs_evidence],
-                )
-
-            confidence = judgment["confidence"]
-            verdict = judgment["verdict"]
-            direct_evidence = judgment["visible_evidence"]
-            if verdict == "CONFIRMED" and confidence < 0.9:
-                verdict = "INCONCLUSIVE"
-            elif verdict == "FALSIFIED" and confidence < 0.9:
-                verdict = "INCONCLUSIVE"
-
             return JudgeEvaluation(
-                verdict=JudgeVerdict(verdict),
-                confidence=confidence if verdict != "INCONCLUSIVE" else 0.0,
+                verdict=JudgeVerdict.INCONCLUSIVE,
+                confidence=0.0,
                 notes=(
-                    f"Independent vision Judge assessment: {direct_evidence}"
-                    if verdict != "INCONCLUSIVE"
-                    else (
-                        "Fresh AVCS-processed pixels did not provide sufficiently "
-                        f"confident task-relevant proof: {direct_evidence}"
-                    )
+                    "Fresh desktop pixels were processed locally by AVCS, but its "
+                    "reflex state cannot establish this task's semantic postcondition. "
+                    "No screenshot was sent to a model; GUI completion remains "
+                    "unconfirmed until a validated local task-verification head exists."
                 ),
-                self_attestation_rejected=verdict == "INCONCLUSIVE",
-                evidence_items=[
-                    avcs_evidence,
-                    (
-                        "Vision-model judgment (model-reported confidence "
-                        f"{confidence:.2f}): {direct_evidence}"
-                    ),
-                ],
+                self_attestation_rejected=True,
+                evidence_items=[avcs_evidence],
             )
         except Exception as exc:
             logger.warning(
@@ -438,6 +315,14 @@ class JudgeAgent:
     ) -> JudgeEvaluation:
         """Independently evaluate a worker's `SubMissionResult` from ground-truth execution receipts."""
         traces = list(result.traces or [])
+        is_gui_mission = str(getattr(sub_mission, "plane", "")).lower() == "gui"
+        if not is_gui_mission:
+            for trace in traces:
+                action_raw = _t_val(trace, "action_type", "")
+                action = action_raw.value if hasattr(action_raw, "value") else str(action_raw)
+                if action.startswith(("GUI_", "APP_", "WINDOW_", "BROWSER_")):
+                    is_gui_mission = True
+                    break
 
         # 1. Total Execution Failure Check (Zero successful traces and non-zero exit codes)
         if not result.success and not any(_t_val(t, "exit_code", 1) == 0 for t in traces):
@@ -536,9 +421,7 @@ class JudgeAgent:
             # GUI actions with exit_code is None must NOT be treated as has_concrete_proof = True
             # without verifying the target application state or artifacts.
             is_gui_action = (
-                action.startswith("GUI_")
-                or action in ("APP_LAUNCH", "APP_FOCUS", "APP_CLOSE")
-                or action.startswith("BROWSER_")
+                action.startswith(("GUI_", "APP_", "WINDOW_", "BROWSER_"))
             )
 
             if is_gui_action:
@@ -597,7 +480,6 @@ class JudgeAgent:
                 },
             )
 
-        is_gui_mission = str(getattr(sub_mission, "plane", "")).lower() == "gui"
         # 3.5 Security Vulnerability Reproduction Check:
         vuln_markers = ("sqli", "sql injection", "xss", "rce", "cve-", "idor", "flag{", "vulnerability")
         combined_findings = (result.findings_summary + " " + " ".join(result.key_discoveries)).lower()

@@ -8,6 +8,7 @@ Computer Operation -> Verification -> Replanning -> Deliverable Generation.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -68,6 +69,7 @@ class MissionDirector:
         self.missions: dict[str, MissionState] = {}
         self.events: dict[str, list[MissionEvent]] = {}
         self.deliverables: dict[str, list[MissionDeliverable]] = {}
+        self._mission_interrupts: dict[str, asyncio.Event] = {}
 
         # Persistent backing store (Redis with in-memory fallback)
         self.store = state_store or MissionStateStore()
@@ -448,6 +450,11 @@ class MissionDirector:
     async def coordinate(self, mission_id: str) -> MissionState:
         """Executes the complete long-horizon mission lifecycle autonomously."""
         state = self._require_mission(mission_id)
+        if state.status == MissionStatus.CANCELLED:
+            return state
+        interrupt_event = self._mission_interrupts.setdefault(
+            mission_id, asyncio.Event()
+        )
         t_start = time.perf_counter()
 
         try:
@@ -458,6 +465,10 @@ class MissionDirector:
                 engagement_id=state.mission_id,
                 workspace_type=ComputerWorkspaceType.MISSION_COMPUTER,
             )
+            if interrupt_event.is_set():
+                state.current_phase = MissionPhase.CANCELLED
+                await self._persist_mission(mission_id)
+                return state
             state.computer_workspaces.append(ws.id)
             self.resource_mgr.allocate_sandbox(mission_id, ws.id)
             self._record_event(mission_id, "ComputerCreated", {"workspace_id": ws.id})
@@ -600,6 +611,7 @@ class MissionDirector:
                     report = await boss.run(
                         workspace_id=ws.workspace_id,
                         objective=mission.objective,
+                        interrupt_check=interrupt_event.is_set,
                     )
                     traces = report.all_traces
                 except Exception as e:
@@ -636,7 +648,16 @@ class MissionDirector:
                     workspace_id=ws.workspace_id,
                     goal=getattr(mission.objective, "goal", str(mission.objective)),
                     steps=mission_steps,
+                    interrupt_check=interrupt_event.is_set,
                 )
+
+            if interrupt_event.is_set():
+                state.status = MissionStatus.CANCELLED
+                state.current_phase = MissionPhase.CANCELLED
+                state.outcome = MissionOutcome.FAILED
+                state.current_next_action = "Mission cancelled before verification completed."
+                await self._persist_mission(mission_id)
+                return state
 
             # Stash traces so get_knowledge_summary / re-finalize can derive
             # honest artifacts without re-running the agent.
@@ -760,6 +781,13 @@ class MissionDirector:
             await self._persist_mission(mission_id)
 
         except Exception as e:
+            if interrupt_event.is_set() or state.status == MissionStatus.CANCELLED:
+                state.status = MissionStatus.CANCELLED
+                state.current_phase = MissionPhase.CANCELLED
+                state.outcome = MissionOutcome.FAILED
+                state.current_next_action = "Mission cancelled."
+                await self._persist_mission(mission_id)
+                return state
             logger.error("mission_coordination_failed", mission_id=mission_id, error=str(e))
             if hasattr(state, "_h_primary") and hasattr(state, "_h_counter"):
                 err_summary = f"Mission coordination error: {str(e)}"
@@ -822,10 +850,19 @@ class MissionDirector:
     async def cancel_mission(self, mission_id: str, reason: str = "Operator cancelled") -> bool:
         """Cancel mission execution."""
         state = self._require_mission(mission_id)
+        if state.status in {
+            MissionStatus.COMPLETED,
+            MissionStatus.FAILED,
+            MissionStatus.CANCELLED,
+        }:
+            return state.status == MissionStatus.CANCELLED
         state.status = MissionStatus.CANCELLED
         state.current_phase = MissionPhase.CANCELLED
         state.outcome = MissionOutcome.FAILED
         state.current_next_action = f"Mission cancelled: {reason}"
+        interrupt_event = self._mission_interrupts.get(mission_id)
+        if interrupt_event:
+            interrupt_event.set()
         self._record_event(mission_id, "MissionCancelled", {"reason": reason})
         await self._persist_mission(mission_id)
         return True

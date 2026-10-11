@@ -435,8 +435,8 @@ def test_configured_avcs_grounder_binds_semantic_target_to_current_frame(monkeyp
     grounder = AVCSPerception()
     grounder.request = None
 
-    def ground_target_png(png_bytes, query, width, height):
-        grounder.request = (png_bytes, query, width, height)
+    def ground_target_png(png_bytes, query, width, height, window_geometry=None):
+        grounder.request = (png_bytes, query, width, height, window_geometry)
         return {
             "x": 321,
             "y": 123,
@@ -481,6 +481,7 @@ def test_configured_avcs_grounder_binds_semantic_target_to_current_frame(monkeyp
         agent._last_screenshot_b64 = screenshot
         agent._screen_width = screen.width
         agent._screen_height = screen.height
+        agent._last_observed_screen.active_window_geometry = (100, 80, 900, 600)
         return await agent._ground_target_with_avcs("Save button", screen=screen)
 
     result = _run(run_click())
@@ -494,6 +495,7 @@ def test_configured_avcs_grounder_binds_semantic_target_to_current_frame(monkeyp
         "Save button",
         1280,
         800,
+        (100, 80, 900, 600),
     )
 
 

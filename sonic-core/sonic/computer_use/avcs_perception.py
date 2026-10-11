@@ -91,6 +91,8 @@ class AVCSPerception:
             GROUNDING_ACCEPTANCE_THRESHOLD,
             GROUNDING_CHECKPOINT_SCHEMA,
             GROUNDING_MODEL_TYPE,
+            GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES,
+            GROUNDING_QUERY_REQUIRED_PRECISION,
         )
 
         if getattr(grounder, "is_trained", None) is not True:
@@ -104,6 +106,11 @@ class AVCSPerception:
             raise ValueError("AVCS grounding checkpoint model metadata is invalid")
         if metadata.get("dataset_provenance") != "recorded_ui_click_demonstrations":
             raise ValueError("AVCS grounding checkpoint lacks UI demonstration provenance")
+        if metadata.get("coordinate_frame") not in (
+            "cropped_target_window",
+            "full_screen",
+        ):
+            raise ValueError("AVCS grounding checkpoint has an unsupported coordinate frame")
         for name in ("training_samples", "validation_samples", "held_out_test_samples"):
             count = metadata.get(name)
             if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
@@ -141,6 +148,8 @@ class AVCSPerception:
         ):
             raise ValueError("AVCS grounding checkpoint lacks per-query confidence calibration")
         confidence_samples = confidence_evaluation.get("samples")
+        accepted_samples = confidence_evaluation.get("accepted_samples")
+        minimum_accepted_samples = confidence_evaluation.get("minimum_accepted_samples")
         confidence_threshold = confidence_evaluation.get("threshold")
         measured_precision = confidence_evaluation.get("precision")
         required_precision = confidence_evaluation.get("required_precision")
@@ -150,6 +159,14 @@ class AVCSPerception:
             or isinstance(confidence_samples, bool)
             or not isinstance(confidence_samples, int)
             or confidence_samples != metadata["held_out_test_samples"]
+            or isinstance(accepted_samples, bool)
+            or not isinstance(accepted_samples, int)
+            or accepted_samples < GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES
+            or accepted_samples > confidence_samples
+            or isinstance(minimum_accepted_samples, bool)
+            or not isinstance(minimum_accepted_samples, int)
+            or minimum_accepted_samples < GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES
+            or accepted_samples < minimum_accepted_samples
             or isinstance(confidence_threshold, bool)
             or not isinstance(confidence_threshold, (int, float))
             or not math.isfinite(float(confidence_threshold))
@@ -161,7 +178,7 @@ class AVCSPerception:
             or isinstance(required_precision, bool)
             or not isinstance(required_precision, (int, float))
             or not math.isfinite(float(required_precision))
-            or not 0 < float(required_precision) <= 1
+            or not GROUNDING_QUERY_REQUIRED_PRECISION <= float(required_precision) <= 1
             or float(measured_precision) < float(required_precision)
         ):
             raise ValueError("AVCS grounding checkpoint fails per-query confidence calibration gates")
@@ -173,6 +190,7 @@ class AVCSPerception:
         query: str,
         width: int,
         height: int,
+        window_geometry: tuple[int, int, int, int] | None = None,
     ) -> dict[str, Any] | None:
         """Resolve a target phrase from pixels using an evaluated AVCS checkpoint."""
         if not self.goal_grounder_configured:
@@ -205,8 +223,33 @@ class AVCSPerception:
             grounder = self._grounder
             checkpoint_metadata = self._validated_checkpoint_metadata(grounder)
 
+        inference_frame = frame
+        crop_origin = (0, 0)
+        if checkpoint_metadata["coordinate_frame"] == "cropped_target_window":
+            if (
+                not isinstance(window_geometry, (tuple, list))
+                or len(window_geometry) != 4
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    for value in window_geometry
+                )
+            ):
+                raise ValueError(
+                    "AVCS grounding requires current active-window geometry "
+                    "for a window-cropped checkpoint"
+                )
+            left, top, window_width, window_height = window_geometry
+            right = min(width, left + window_width)
+            bottom = min(height, top + window_height)
+            left = max(0, left)
+            top = max(0, top)
+            if right <= left or bottom <= top:
+                raise ValueError("AVCS active-window geometry does not intersect the screen")
+            crop_origin = (left, top)
+            inference_frame = frame[top:bottom, left:right]
+
         started = time.perf_counter()
-        prediction = grounder.predict(frame, query)
+        prediction = grounder.predict(inference_frame, query)
         latency_ms = (time.perf_counter() - started) * 1_000
         with self._lock:
             if (
@@ -241,8 +284,8 @@ class AVCSPerception:
             or not (0 <= x_norm < 1 and 0 <= y_norm < 1)
         ):
             raise ValueError("AVCS grounding returned an off-screen point")
-        x = int(x_norm * width)
-        y = int(y_norm * height)
+        x = crop_origin[0] + int(x_norm * inference_frame.shape[1])
+        y = crop_origin[1] + int(y_norm * inference_frame.shape[0])
         if not (0 <= x < width and 0 <= y < height):
             raise ValueError("AVCS grounding returned an off-screen point")
         return {

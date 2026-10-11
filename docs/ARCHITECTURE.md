@@ -83,13 +83,14 @@ validation is unavailable or inconclusive, the affected action must fail
 closed. GUI text entry remains unavailable without an evaluated local
 focus-verification capability.
 
-The Judge may record fresh AVCS observations, but pixel change, motion, reflex
-events, or a worker completion proposal alone are not evidence that the
-operator's semantic postcondition was met. GUI completion remains inconclusive
-without independent, task-relevant evidence. No live AVCS GUI acceptance or
-OSWorld-2 comparative benchmark is documented; these implementation
-contracts do not establish arbitrary-application success or superiority over
-another system. See the
+The GUI Judge processes a fresh screenshot locally through AVCS and does not
+send screenshot pixels to a model. AVCS pixel change, motion, reflex events, or
+a worker completion proposal alone are not evidence that the operator's
+semantic postcondition was met. Until a validated local task-verification head
+exists, GUI Judge verdicts remain inconclusive; task completion must not be
+claimed from reflex telemetry. No live AVCS GUI acceptance or OSWorld-2
+comparative benchmark is documented; these implementation contracts do not
+establish arbitrary-application success or superiority over another system. See the
 [perception contract](SONIC_COMPUTER_USER_GOAL.md#avcs-only-workstation-perception-current-contract)
 for details.
 

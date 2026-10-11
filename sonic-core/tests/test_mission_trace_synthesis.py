@@ -211,6 +211,46 @@ def test_director_finalize_honest_on_no_traces():
     assert delivs == []  # honest: no fabricated deliverables
 
 
+def test_cancel_during_workspace_creation_stays_cancelled():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from sonic.mission_engine.director import MissionDirector
+    from sonic.mission_engine.models import MissionPhase, MissionStatus
+
+    class _BlockingComputer:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def create(self, **_kwargs):
+            self.started.set()
+            await self.release.wait()
+            return type("Workspace", (), {"id": "ws-cancel"})()
+
+    async def _run():
+        computer = _BlockingComputer()
+        director = MissionDirector(computer_provider=computer)
+        director._persist_mission = AsyncMock()
+        state = await director.create_mission(
+            tenant_id="cancel-tenant",
+            goal="Create a verified artifact",
+        )
+        task = asyncio.create_task(director.coordinate(state.mission_id))
+        await computer.started.wait()
+
+        assert await director.cancel_mission(state.mission_id, "operator stop")
+        computer.release.set()
+        result = await task
+
+        assert result.status == MissionStatus.CANCELLED
+        assert result.current_phase == MissionPhase.CANCELLED
+        assert result.current_next_action == "Mission cancelled: operator stop"
+        assert not result.computer_workspaces
+
+    asyncio.run(_run())  # honest: no fabricated deliverables
+
+
 def test_director_knowledge_summary_reflects_stashed_traces():
     from sonic.mission_engine.director import MissionDirector
     import asyncio

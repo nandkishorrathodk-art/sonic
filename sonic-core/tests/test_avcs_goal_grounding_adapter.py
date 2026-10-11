@@ -25,6 +25,7 @@ def _checkpoint_metadata(
         "schema_version": 2,
         "model_type": "avcs_goal_conditioned_grounder",
         "dataset_provenance": "recorded_ui_click_demonstrations",
+        "coordinate_frame": "full_screen",
         "training_samples": 100,
         "validation_samples": 20,
         "held_out_test_samples": 20,
@@ -39,6 +40,8 @@ def _checkpoint_metadata(
             "evaluation": {
                 "metric": "empirical_precision_at_threshold",
                 "samples": 20,
+                "accepted_samples": 10,
+                "minimum_accepted_samples": 10,
                 "threshold": 0.8,
                 "precision": 0.95,
                 "required_precision": 0.9,
@@ -110,6 +113,69 @@ def test_goal_grounder_uses_checkpoint_gated_prediction_for_latest_pixel_frame(
     assert model.frame_shape == (100, 200, 3)
     assert model.query == "Save the document"
     assert perception.goal_grounder_ready is True
+
+
+def test_goal_grounder_maps_cropped_window_point_to_screen_coordinates(
+    monkeypatch, tmp_path
+):
+    perception, model = _configured_perception(monkeypatch, tmp_path)
+    model.checkpoint_metadata["coordinate_frame"] = "cropped_target_window"
+    png_bytes = _png_bytes()
+    perception.perceive_png(png_bytes)
+
+    result = perception.ground_target_png(
+        png_bytes,
+        "Save the document",
+        width=200,
+        height=100,
+        window_geometry=(50, 20, 100, 60),
+    )
+
+    assert (result["x"], result["y"]) == (125, 50)
+    assert model.frame_shape == (60, 100, 3)
+
+
+def test_goal_grounder_rejects_cropped_checkpoint_without_window_geometry(
+    monkeypatch, tmp_path
+):
+    metadata = _checkpoint_metadata()
+    metadata["coordinate_frame"] = "cropped_target_window"
+    perception, model = _configured_perception(
+        monkeypatch, tmp_path, model=_StubGrounder(metadata=metadata)
+    )
+    png_bytes = _png_bytes()
+    perception.perceive_png(png_bytes)
+
+    with pytest.raises(ValueError, match="requires current active-window geometry"):
+        perception.ground_target_png(
+            png_bytes, "Save the document", width=200, height=100
+        )
+    assert model.frame_shape is None
+
+
+def test_goal_grounder_maps_partially_offscreen_window_to_visible_pixels(
+    monkeypatch, tmp_path
+):
+    metadata = _checkpoint_metadata()
+    metadata["coordinate_frame"] = "cropped_target_window"
+    perception, model = _configured_perception(
+        monkeypatch,
+        tmp_path,
+        model=_StubGrounder(point_norm=(0.5, 0.5), metadata=metadata),
+    )
+    png_bytes = _png_bytes()
+    perception.perceive_png(png_bytes)
+
+    result = perception.ground_target_png(
+        png_bytes,
+        "Save the document",
+        width=200,
+        height=100,
+        window_geometry=(150, 50, 100, 100),
+    )
+
+    assert (result["x"], result["y"]) == (175, 75)
+    assert model.frame_shape == (50, 50, 3)
 
 
 def test_goal_grounder_not_ready_before_valid_checkpoint_load(monkeypatch):
@@ -288,6 +354,8 @@ def test_goal_grounder_rejects_checkpoint_without_calibrated_confidence_gate(
         ("precision", 0.89),
         ("passed", False),
         ("samples", 19),
+        ("accepted_samples", 9),
+        ("minimum_accepted_samples", 9),
     ],
 )
 def test_goal_grounder_rejects_unvalidated_query_score_operating_point(

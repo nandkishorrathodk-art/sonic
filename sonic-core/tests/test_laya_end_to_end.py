@@ -396,6 +396,20 @@ def test_laya_verify_execution_receipt_rejections_and_approvals():
     assert valid_score >= 0.65
 
 
+@pytest.mark.no_live_infra
+def test_laya_receipt_preset_never_uses_goal_as_evidence():
+    state, questions = llm_routes._resolve_preset_questions(
+        "receipt",
+        {"goal": "successfully create and verify the report", "evidence": ""},
+    )
+
+    assert state == ""
+    assert "successfully create" not in questions["empirical_proof"]["affirmative_anchor"]
+    engine = LayaSystem1Engine(enable_local_model=False)
+    result = engine.predict(state=state, questions=questions)
+    assert result.get_noul("empirical_proof") < 0.65
+
+
 # ============================================================================
 # 4. CuriosityLoop + LayaSystem1Engine.evaluate_curiosity_affect
 # ============================================================================

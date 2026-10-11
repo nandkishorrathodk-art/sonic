@@ -11,7 +11,7 @@ claim task completion.
 2. From an interactive PowerShell terminal, run:
 
    ```powershell
-   avcs-record-demo `
+   python -m avcs.training.demo_recorder `
      --window-title "AVCS_DEMO_WINDOW" `
      --task "Complete the harmless test form" `
      --output-dir "runs/demonstrations/form-01" `
@@ -50,22 +50,20 @@ dispatch input, or verify that a click succeeded.
 
 The architecture is implemented but **has not been trained on real UI
 demonstrations**. `predict()` intentionally refuses inference from a randomly
-initialized model. Train only after collecting at least five separate
-recording sessions; the trainer reserves complete sessions for validation and
-held-out test, so frames from one session cannot leak between splits and at
-least three sessions remain for training:
+initialized model. Train only after collecting at least five distinct
+task/window groups. The trainer reserves each complete group for one split,
+so repeated recordings of the same task in the same window cannot leak across
+training, validation, and held-out test; at least three groups remain for
+training:
 
 ```powershell
-avcs-train-grounder `
+python -m avcs.training.train_grounder `
   --data-dir "runs/demonstrations" `
   --output-dir "runs/real_ui_grounder"
 ```
 
-The same trainer is available without the installed console entry point as
-`python -m avcs.training.train_grounder --data-dir "runs/demonstrations"`.
-
 The trainer selects a checkpoint by validation loss, reloads that checkpoint,
-then evaluates it once on the session-disjoint held-out test split. Its report
+then evaluates it once on the task/window-disjoint held-out test split. Its report
 includes Top-1 point accuracy at 1%, 2%, and 5% of the screenshot diagonal.
 The requested 85% goal is reported against Top-1 accuracy within 2% of the
 diagonal; this is an explicit point-localization metric, not target-box hit
@@ -74,12 +72,21 @@ fails closed unless this held-out metric reaches 85%. The recorder labels
 clicks rather than target bounds, so target-box hit rate remains unmeasured.
 Keep the held-out test sessions away from model selection and collect examples
 across diverse applications, resolutions, control types, and tasks before
-treating the score as representative.
+treating the score as representative. Query-confidence calibration selects a
+threshold using validation predictions and checks precision on held-out
+predictions; it requires at least 10 accepted examples on each split and 90%
+held-out precision. A run that misses either the point-accuracy or
+confidence-calibration gate exits unsuccessfully and is not runtime-ready.
 
-Once trained, a checkpoint can be loaded with `load_grounding_checkpoint`;
-its output score is an uncalibrated peak probability, not a confidence
-guarantee. Do not connect candidate coordinates to live input until separate
-safety, calibration, and isolated acceptance work establishes that behavior.
+The checkpoint's query score is the spatial softmax peak, gated by a
+validation-selected threshold whose empirical precision is measured on the
+held-out split. This calibration is meaningful only for data representative
+of the intended applications and tasks. Checkpoint metadata records the
+reported metrics and coordinate frame, but is not cryptographic proof that
+the weights came from the claimed data or evaluation; use trusted training
+outputs and retain the corresponding dataset and report. Do not connect
+candidate coordinates to live input until separate safety and isolated
+acceptance work establishes that behavior.
 The 85% number is a requested acceptance target, not a current AVCS or SONIC
 result. End-to-end task success, per-action latency, and cost require a
 separate reproducible OSWorld run with receipts and a fixed task set.
@@ -92,6 +99,6 @@ To include PyTorch in the backend image, build with
 `SONIC_INSTALL_AVCS_GROUNDING=1` at build time and
 `SONIC_AVCS_GROUNDING_CHECKPOINT` at runtime.
 SONIC refuses this route when the checkpoint is absent, malformed, lacks
-session-disjoint held-out evaluation, or falls below 85% point accuracy. No
-checkpoint is bundled; keep operator-collected demonstrations and model
-weights outside source control.
+held-out evaluation or confidence calibration, or falls below
+the stated gates. No checkpoint is bundled; keep operator-collected
+demonstrations and model weights outside source control.

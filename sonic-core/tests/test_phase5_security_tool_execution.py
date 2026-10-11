@@ -21,16 +21,13 @@ sandboxes; the agent runs its REAL reasoning + execution + feedback loop.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
-
-import pytest
 
 from sonic.computer.models import ComputerState, FileEntry, GitStatusInfo, ScreenObservation
 from sonic.computer.provider import ComputerProvider
 from sonic.computer_use.agent import ComputerUseAgent, _GOAL_COMPLETE_SENTINEL
-from sonic.computer_use.models import ComputerActionType
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
 from sonic.sandbox.provider import ExecResult
-from sonic.tools.base import SecurityTool, ToolEvidence, ToolRequest, ToolResult, ToolStatus
+from sonic.tools.base import SecurityTool, ToolRequest, ToolStatus
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +147,25 @@ def test_security_tool_dispatches_to_adapter():
     # Structured findings recorded on the agent for the next reasoning step.
     assert agent._last_tool_result is not None
     assert len(agent._last_tool_result.parsed_data) == 1
+
+
+def test_unregistered_security_tool_never_falls_back_to_terminal():
+    comp = _StubComputer()
+    agent = ComputerUseAgent(computer_provider=comp)
+
+    trace = _run(
+        agent.execute_action(
+            comp.workspace_id,
+            ComputerActionType.SECURITY_TOOL,
+            "10.0.0.5",
+            {"tool": "nmap", "target": "10.0.0.5"},
+            "Scan the host",
+        )
+    )
+
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert "no registered" in trace.actual_observation.lower()
+    assert not any("nmap" in command for command in comp.commands)
 
 
 # ---------------------------------------------------------------------------

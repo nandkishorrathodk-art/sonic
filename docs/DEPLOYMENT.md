@@ -20,9 +20,11 @@ to an untrusted network.
 
 [`docker-compose.prod.yml`](../docker-compose.prod.yml) is a configuration
 template, not a production-readiness certification. It requires strong
-secrets, including `SECRET_KEY`, `NEO4J_PASSWORD` and `DAYTONA_API_KEY`, and
-sets `SONIC_USE_DAYTONA_CLOUD=1` for the workstation routes. This is distinct
-from the local Docker workstation path.
+secrets, including `SECRET_KEY`, `NEO4J_PASSWORD`, `DAYTONA_API_KEY`, and
+`GROQ_API_KEY` (the configured default model provider), and sets
+`SONIC_USE_DAYTONA_CLOUD=1` for the workstation routes. Optional provider keys
+are forwarded from the deployment environment when configured. This is
+distinct from the local Docker workstation path.
 
 Before deployment:
 

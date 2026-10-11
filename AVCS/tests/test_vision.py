@@ -14,7 +14,6 @@ import tempfile
 
 import numpy as np
 import torch
-
 from forge.vision.capture import FrameSource, ScreenCapture, SyntheticScreen, open_capture
 from forge.vision.dashboard import render_dashboard
 from forge.vision.describer import HeuristicDescriber
@@ -140,6 +139,16 @@ def test_reflex_novelty_drops_for_repeat_frame():
     f = _static_frame()
     per.perceive(f, frame_index=0)
     state = per.perceive(f.copy(), frame_index=1)
+    assert state.novelty < 0.05
+
+
+def test_reflex_novelty_drops_for_repeated_black_frames():
+    per = ReflexPerception(rows=16, cols=24, downscale=2)
+    black = np.zeros((240, 320, 3), dtype=np.uint8)
+
+    per.perceive(black, frame_index=0)
+    state = per.perceive(black.copy(), frame_index=1)
+
     assert state.novelty < 0.05
 
 
@@ -332,6 +341,28 @@ def test_pipeline_step_and_stats():
     # The full tick is measured too, so the budget cannot be quoted from
     # perception alone.
     assert s["tick_p50_ms"] >= s["reflex_p50_ms"] * 0.9
+
+
+def test_pipeline_frame_indices_continue_after_sync_step():
+    vis = ScreenVision(
+        capture=SyntheticScreen(),
+        understanding=None,
+        target_fps=30.0,
+    )
+    vis.step()
+    indices = []
+    vis.on_state(lambda state: indices.append(state.frame_index))
+    vis.start()
+    try:
+        import time
+
+        time.sleep(0.2)
+    finally:
+        vis.stop()
+
+    assert indices
+    assert indices[0] == 1
+    assert indices == sorted(set(indices))
 
 
 def test_model_describer_uses_model_output_not_fallback():

@@ -9,6 +9,7 @@ on the active desktop screen, avoiding coordinate guessing or hallucination.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -364,6 +365,7 @@ def _resolve_avcs_target(
     screenshot_b64: str,
     width: int,
     height: int,
+    window_geometry: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int] | None:
     """Ground a workstation screenshot locally, only with a validated AVCS checkpoint."""
     checkpoint = os.environ.get("SONIC_AVCS_GROUNDING_CHECKPOINT", "").strip()
@@ -383,7 +385,13 @@ def _resolve_avcs_target(
 
         encoded_image = screenshot_b64.split(",", 1)[-1]
         image_bytes = base64.b64decode(encoded_image, validate=True)
-        result = perception.ground_target_png(image_bytes, query, width, height)
+        result = perception.ground_target_png(
+            image_bytes,
+            query,
+            width,
+            height,
+            window_geometry=window_geometry,
+        )
         if not isinstance(result, dict) or result.get("engine") != "avcs_goal_grounder":
             return None
         if result.get("ambiguous") is True or result.get("not_found") is True:
@@ -550,6 +558,7 @@ async def resolve_ui_target_async(
     screen_height: int | None = None,
     perception_bus: Any | None = None,
     coordinate_space: str | None = None,
+    window_geometry: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int] | None:
     """Asynchronous variant; semantic screenshot grounding remains local AVCS-only."""
     if not query:
@@ -575,7 +584,14 @@ async def resolve_ui_target_async(
             )
 
     if screenshot_b64:
-        return _resolve_avcs_target(query, screenshot_b64, width, height)
+        return await asyncio.to_thread(
+            _resolve_avcs_target,
+            query,
+            screenshot_b64,
+            width,
+            height,
+            window_geometry,
+        )
 
     return None
 

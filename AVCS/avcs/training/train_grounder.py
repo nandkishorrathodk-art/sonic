@@ -25,6 +25,8 @@ from avcs.goal_grounder import (
     GROUNDING_ACCEPTANCE_THRESHOLD,
     GROUNDING_CHECKPOINT_SCHEMA,
     GROUNDING_MODEL_TYPE,
+    GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES,
+    GROUNDING_QUERY_REQUIRED_PRECISION,
     GoalConditionedGrounder,
 )
 from avcs.training.demonstrations import (
@@ -135,6 +137,56 @@ def _run_epoch(
     return result
 
 
+def _confidence_examples(
+    model: GoalConditionedGrounder,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[list[float], list[bool]]:
+    """Collect peak heatmap scores paired with held-out point-localization hits."""
+    scores: list[float] = []
+    hits: list[bool] = []
+    model.eval()
+    with torch.inference_mode():
+        for batch in loader:
+            logits = model(batch["image"].to(device), batch["query_tokens"].to(device))
+            peak_scores = logits[:, 0].flatten(1).softmax(dim=1).amax(dim=1)
+            canvas_points = _decode_canvas_points(logits)
+            letterbox = batch["letterbox"].to(device)
+            original_points = batch["point_norm"].to(device)
+            original_x = (canvas_points[:, 0] - letterbox[:, 0]) / letterbox[:, 2]
+            original_y = (canvas_points[:, 1] - letterbox[:, 1]) / letterbox[:, 3]
+            delta = torch.stack((original_x, original_y), dim=1) - original_points
+            aspect_ratio = letterbox[:, 2] / letterbox[:, 3]
+            diagonal_distance = torch.sqrt(
+                (delta[:, 0] * aspect_ratio).square() + delta[:, 1].square()
+            ) / torch.sqrt(aspect_ratio.square() + 1.0)
+            scores.extend(float(score) for score in peak_scores.cpu())
+            hits.extend(bool(hit) for hit in (diagonal_distance <= 0.02).cpu())
+    return scores, hits
+
+
+def _select_confidence_threshold(
+    scores: list[float],
+    hits: list[bool],
+    *,
+    required_precision: float,
+) -> tuple[float, int, float]:
+    """Select maximum validation coverage subject to the requested precision."""
+    if len(scores) != len(hits):
+        raise ValueError("confidence scores and correctness labels must have equal length")
+    best: tuple[float, int, float] | None = None
+    for threshold in sorted(set(scores)):
+        accepted = [hit for score, hit in zip(scores, hits) if score >= threshold]
+        if len(accepted) < GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES:
+            continue
+        precision = sum(accepted) / len(accepted)
+        if precision >= required_precision and (
+            best is None or len(accepted) > best[1]
+        ):
+            best = (threshold, len(accepted), precision)
+    return best if best is not None else (1.0, 0, 0.0)
+
+
 def train_grounder(
     *,
     data_dir: str,
@@ -153,6 +205,11 @@ def train_grounder(
         raise ValueError("input_size must be at least 64 and divisible by 16")
 
     sessions = discover_demonstrations(data_dir)
+    task_window_groups = {
+        (records[0].task.casefold(), records[0].target_window_title.casefold())
+        for records in sessions.values()
+        if records
+    }
     train_records, validation_records, test_records = split_sessions(sessions, seed=seed)
     train_data = DemonstrationClickDataset(train_records, input_size=input_size)
     validation_data = DemonstrationClickDataset(validation_records, input_size=input_size)
@@ -258,6 +315,52 @@ def train_grounder(
         "samples": int(test_metrics["samples"]),
     }
     best_checkpoint["evaluation"] = evaluation
+    validation_scores, validation_hits = _confidence_examples(
+        model, validation_loader, device
+    )
+    confidence_threshold, validation_accepted, validation_precision = (
+        _select_confidence_threshold(
+            validation_scores,
+            validation_hits,
+            required_precision=GROUNDING_QUERY_REQUIRED_PRECISION,
+        )
+    )
+    held_out_scores, held_out_hits = _confidence_examples(model, test_loader, device)
+    held_out_accepted = [
+        hit
+        for score, hit in zip(held_out_scores, held_out_hits)
+        if score >= confidence_threshold
+    ]
+    held_out_precision = (
+        sum(held_out_accepted) / len(held_out_accepted)
+        if held_out_accepted
+        else 0.0
+    )
+    confidence_passed = (
+        validation_accepted >= GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES
+        and len(held_out_accepted) >= GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES
+        and held_out_precision >= GROUNDING_QUERY_REQUIRED_PRECISION
+    )
+    confidence_calibration = {
+        "method": "validation_selected_peak_score_threshold",
+        "evaluation": {
+            "metric": "empirical_precision_at_threshold",
+            "samples": len(held_out_scores),
+            "accepted_samples": len(held_out_accepted),
+            "threshold": confidence_threshold,
+            "precision": held_out_precision,
+            "required_precision": GROUNDING_QUERY_REQUIRED_PRECISION,
+            "minimum_accepted_samples": GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES,
+            "passed": confidence_passed,
+        },
+        "validation": {
+            "samples": len(validation_scores),
+            "accepted_samples": validation_accepted,
+            "precision": validation_precision,
+        },
+    }
+    best_checkpoint["query_confidence_calibration"] = confidence_calibration
+    best_checkpoint["coordinate_frame"] = "cropped_target_window"
     temporary_checkpoint = checkpoint_path.with_suffix(".pt.tmp")
     torch.save(best_checkpoint, temporary_checkpoint)
     temporary_checkpoint.replace(checkpoint_path)
@@ -265,8 +368,9 @@ def train_grounder(
         "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
         "model_type": GROUNDING_MODEL_TYPE,
         "dataset_provenance": "recorded_ui_click_demonstrations",
-        "session_split": "recording_session_disjoint",
+        "session_split": "task_and_window_disjoint",
         "recording_sessions": len(sessions),
+        "task_window_groups": len(task_window_groups),
         "training_samples": len(train_records),
         "validation_samples": len(validation_records),
         "held_out_test_samples": len(test_records),
@@ -276,6 +380,8 @@ def train_grounder(
         "best_validation_loss": best_validation_loss,
         "validation_metric": "loss and Top-1 point localization accuracy",
         "held_out_test_metrics": held_out_test_metrics,
+        "query_confidence_calibration": confidence_calibration,
+        "runtime_ready": bool(evaluation["passed"] and confidence_passed),
         "held_out_test_point_samples": int(test_metrics["samples"]),
         "point_accuracy_definition": (
             "Top-1 argmax distance from the human-labeled click point, normalized "
@@ -333,7 +439,11 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: UP045
         f"({report['held_out_test_point_samples']} samples; "
         f"85% target {'met' if report['point_accuracy_target']['met'] else 'not met'})."
     )
-    return 0
+    print(
+        "Runtime grounding readiness: "
+        f"{'ready' if report['runtime_ready'] else 'not ready'}."
+    )
+    return 0 if report["runtime_ready"] else 1
 
 
 if __name__ == "__main__":

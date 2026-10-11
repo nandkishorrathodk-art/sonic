@@ -247,8 +247,13 @@ class ReflexPerception:
         flat = luma.flatten()
         ref = np.stack(self._context, axis=0)
         # Cosine distance to the closest remembered frame.
-        ref_norm = ref / (np.linalg.norm(ref, axis=1, keepdims=True) + 1e-6)
-        cur_norm = flat / (np.linalg.norm(flat) + 1e-6)
+        ref_magnitudes = np.linalg.norm(ref, axis=1, keepdims=True)
+        current_magnitude = float(np.linalg.norm(flat))
+        if current_magnitude <= 1e-6:
+            similarities = np.where(ref_magnitudes[:, 0] <= 1e-6, 1.0, 0.0)
+            return float(np.clip(1.0 - float(similarities.max()), 0.0, 1.0))
+        ref_norm = ref / (ref_magnitudes + 1e-6)
+        cur_norm = flat / (current_magnitude + 1e-6)
         sims = ref_norm @ cur_norm
         return float(np.clip(1.0 - float(sims.max()), 0.0, 1.0))
 
