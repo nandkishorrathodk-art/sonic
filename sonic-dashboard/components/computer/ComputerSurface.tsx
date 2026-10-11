@@ -162,8 +162,8 @@ export function ComputerSurface({
     const containerRect = canvasRef.current.getBoundingClientRect();
 
     const img = imgRef.current;
-    const naturalWidth = img?.naturalWidth || desktopState?.resolution?.width || 1280;
-    const naturalHeight = img?.naturalHeight || desktopState?.resolution?.height || 800;
+    const naturalWidth = img?.naturalWidth || desktopState?.resolution?.width || 1920;
+    const naturalHeight = img?.naturalHeight || desktopState?.resolution?.height || 1080;
 
     const containerRatio = containerRect.width / containerRect.height;
     const imageRatio = naturalWidth / naturalHeight;
@@ -281,7 +281,7 @@ export function ComputerSurface({
   const resolution = desktopState?.resolution;
   const displayLabel = [
     desktopState?.display,
-    resolution?.width && resolution?.height ? `${resolution.width}x${resolution.height}` : "1280x800",
+    resolution?.width && resolution?.height ? `${resolution.width}x${resolution.height}` : "1920x1080",
   ]
     .filter(Boolean)
     .join(" ");

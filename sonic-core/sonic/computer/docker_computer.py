@@ -4,7 +4,7 @@ SONIC A-SEA — Docker Cyber Workstation Provider
 First-class native Linux Workstation provider operating inside Docker
 (sonic-desktop-workstation). Replaces cloud sandboxes (Daytona/E2B)
 with a full, unrestricted, self-contained cyber environment:
-- Desktop GUI: XFCE4, Xvfb :99 (1280x800x24), xdotool, wmctrl, ImageMagick
+- Desktop GUI: XFCE4, Xvfb :99 (1920x1080x24), xdotool, wmctrl, ImageMagick
 - Interactive Streaming: x11vnc (:5900) + noVNC websockify (:6080)
 - Graphical desktop applications and an isolated operator workspace
 - Zero cloud rate limits or connection resets.
@@ -192,6 +192,7 @@ class DockerComputerProvider(ComputerProvider):
         self._workspace_owner: str | None = None
         self._exec_semaphore = asyncio.Semaphore(10)
         self._gui_lock = asyncio.Lock()
+        self._screenshot_lock = asyncio.Lock()
         self._last_screenshot: ScreenObservation | None = None
         self._last_screenshot_time: float = 0.0
         self._novnc_url: str | None = None
@@ -640,6 +641,19 @@ class DockerComputerProvider(ComputerProvider):
 
     async def screenshot(self, workspace_id: str) -> ScreenObservation:
         """Capture a real desktop frame and derive pixel-only AVCS scene state."""
+        async with self._screenshot_lock:
+            # A prior frame must never survive a failed refresh and be mistaken
+            # for the result of this capture.
+            self._last_screenshot = None
+            self._last_screenshot_time = 0.0
+            try:
+                return await self._capture_screenshot(workspace_id)
+            except BaseException:
+                self._last_screenshot = None
+                self._last_screenshot_time = 0.0
+                raise
+
+    async def _capture_screenshot(self, workspace_id: str) -> ScreenObservation:
         display = self._get_display(workspace_id)
         tmp_path = f"/tmp/sonic_screen_{uuid.uuid4().hex[:8]}.png"
         quoted_path = shlex.quote(tmp_path)
@@ -736,7 +750,7 @@ class DockerComputerProvider(ComputerProvider):
 
         try:
             png_bytes = base64.b64decode(screenshot_b64, validate=True)
-            if not hasattr(self, "_avcs_perception"):
+            if self._avcs_perception is None:
                 from sonic.computer_use.avcs_perception import AVCSPerception
                 self._avcs_perception = AVCSPerception()
             avcs_state = self._avcs_perception.perceive_png(png_bytes)
@@ -746,6 +760,52 @@ class DockerComputerProvider(ComputerProvider):
         except Exception as exc:
             logger.error("avcs_perception_failed", workspace_id=workspace_id, error=str(exc))
             raise RuntimeError("AVCS perception failed for the workstation frame") from exc
+
+        if (
+            not isinstance(avcs_state, dict)
+            or avcs_state.get("engine") != "avcs_reflex"
+            or isinstance(avcs_state.get("frame_index"), bool)
+            or not isinstance(avcs_state.get("frame_index"), int)
+            or avcs_state["frame_index"] <= 0
+            or avcs_state.get("width") != dimensions[0]
+            or avcs_state.get("height") != dimensions[1]
+            or not isinstance(avcs_state.get("scene_hash"), str)
+            or not avcs_state["scene_hash"]
+        ):
+            logger.error(
+                "avcs_perception_invalid_state",
+                workspace_id=workspace_id,
+            )
+            raise RuntimeError("AVCS returned invalid state for the workstation frame")
+
+        final_age_ns = time.time_ns() - timestamp_ns
+        final_capture_age_ms = (
+            final_age_ns / 1_000_000 if final_age_ns >= 0 else None
+        )
+        if (
+            final_capture_age_ms is None
+            or not math.isfinite(final_capture_age_ms)
+            or final_capture_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+        ):
+            logger.warning(
+                "desktop_screenshot_became_stale_during_perception",
+                workspace_id=workspace_id,
+                capture_age_ms=final_capture_age_ms,
+            )
+            return ScreenObservation(
+                screenshot_base64="",
+                capture_timestamp_ns=timestamp_ns,
+                capture_age_ms=final_capture_age_ms,
+                width=dimensions[0],
+                height=dimensions[1],
+                active_window=active_window,
+                visible_text=(
+                    "Desktop capture unavailable: frame freshness could not be "
+                    "verified after AVCS processing."
+                ),
+                desktop_state="NO_DISPLAY",
+            )
+        capture_age_ms = final_capture_age_ms
 
         observation = ScreenObservation(
             screenshot_base64=screenshot_b64,

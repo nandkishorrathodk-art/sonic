@@ -14,11 +14,15 @@ Integrates Daytona Cloud Sandboxes with full graphical Linux workstation capabil
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import math
 import os
 import re
 import shlex
+import time
+from io import BytesIO
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -55,10 +59,30 @@ from sonic.sandbox.provider import ExecResult
 
 logger = get_logger(__name__)
 
+_SCREEN_CAPTURE_FRESHNESS_BUDGET_MS = 2_000
+
 
 def _get_display(workspace_id: str | None = None) -> str:
     """Check if environment has DISPLAY, default to :99 for Daytona/Docker Xvfb."""
     return os.environ.get("DISPLAY") or ":99"
+
+
+def _validated_png_dimensions(png_bytes: bytes) -> tuple[int, int] | None:
+    """Return dimensions only when Pillow can fully verify a real PNG frame."""
+    if not png_bytes:
+        return None
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(png_bytes)) as image:
+            if image.format != "PNG":
+                return None
+            image.verify()
+        with Image.open(BytesIO(png_bytes)) as image:
+            width, height = image.size
+        return (width, height) if width > 0 and height > 0 else None
+    except Exception:
+        return None
 
 
 class DaytonaComputerProvider(ComputerProvider):
@@ -94,6 +118,10 @@ class DaytonaComputerProvider(ComputerProvider):
         self.audit_log: list[ComputerAuditEvent] = []
         self._active_windows: dict[str, str] = {}
         self._application_pids: dict[str, dict[str, set[int]]] = {}
+        self._last_screenshot: ScreenObservation | None = None
+        self._last_screenshot_time: float = 0.0
+        self._last_screenshot_workspace_id: str | None = None
+        self._avcs_perception = None
         # Persistent Body (PLAN Phase 2): the home desktop ID survives a
         # backend restart so _resolve_sandbox can re-attach via client.get(id).
         self._state_path = os.environ.get(
@@ -665,18 +693,29 @@ class DaytonaComputerProvider(ComputerProvider):
 
     async def screenshot(self, workspace_id: str) -> ScreenObservation:
         """
-        Captures a real pixel observation of the sandbox desktop.
-        Routes via Daytona computer_use.screenshot when sandbox is active,
-        or via direct X11 frame grabber (import / scrot) on DISPLAY=:0.
-        When no real display is available, returns NO_DISPLAY state with empty screenshot.
+        Capture a fresh screenshot and derive the same pixel-only AVCS state as Docker.
+        Unavailable, malformed, stale, or unprocessable frames never reuse cached pixels.
         """
+        self._last_screenshot = None
+        self._last_screenshot_time = 0.0
+        self._last_screenshot_workspace_id = None
         sandbox = await self._resolve_sandbox(workspace_id)
         if sandbox:
             b64 = ""
+            timestamp_ns: int | None = None
             if hasattr(sandbox, "computer_use"):
                 try:
+                    capture_started_ns = time.time_ns()
                     response = await sandbox.computer_use.screenshot.take_full_screen()
                     b64 = getattr(response, "screenshot", None) or ""
+                    response_timestamp = getattr(response, "capture_timestamp_ns", None)
+                    timestamp_ns = (
+                        response_timestamp
+                        if isinstance(response_timestamp, int)
+                        and not isinstance(response_timestamp, bool)
+                        and response_timestamp > 0
+                        else capture_started_ns
+                    )
                 except Exception as e:
                     logger.warning("daytona_direct_screenshot_failed", error=str(e))
 
@@ -684,40 +723,142 @@ class DaytonaComputerProvider(ComputerProvider):
                 try:
                     disp = self._get_display(workspace_id)
                     scr_cmd = (
-                        f"DISPLAY={disp} import -window root /tmp/sonic_screen.png 2>/dev/null && "
-                        f"(LOC=$(DISPLAY={disp} xdotool getmouselocation --shell 2>/dev/null); "
-                        f"if [ $? -eq 0 ] && [ -n \"$LOC\" ]; then eval \"$LOC\"; "
-                        f"DISPLAY={disp} convert /tmp/sonic_screen.png -stroke black -strokewidth 1 -fill '#00ffcc' "
-                        f"-draw \"polygon $X,$Y $(($X+15)),$(($Y+12)) $(($X+9)),$(($Y+12)) $(($X+14)),$(($Y+22)) $(($X+10)),$(($Y+24)) $(($X+5)),$(($Y+14)) $(($X)),$(($Y+18))\" "
-                        f"/tmp/sonic_screen.png 2>/dev/null; fi) && "
-                        f"base64 -w0 /tmp/sonic_screen.png"
+                        "printf '%s\\n' '___CAPTURE_TIMESTAMP_NS___'; date +%s%N; "
+                        f"DISPLAY={shlex.quote(disp)} import -window root png:- | base64 -w0"
                     )
                     res = await sandbox.process.exec(scr_cmd)
                     if res.exit_code == 0 and res.result and len(res.result.strip()) > 100:
-                        b64 = res.result.strip()
+                        marker, _, capture_result = str(res.result).partition(
+                            "___CAPTURE_TIMESTAMP_NS___"
+                        )
+                        if marker:
+                            timestamp_text, separator, encoded = capture_result.lstrip(
+                                "\r\n"
+                            ).partition("\n")
+                            if separator:
+                                try:
+                                    timestamp_ns = int(timestamp_text.strip())
+                                except ValueError:
+                                    timestamp_ns = None
+                                b64 = encoded.strip()
                 except Exception as e:
                     logger.warning("daytona_x11_screenshot_failed", error=str(e))
 
-            if b64:
-                active_window = "UNKNOWN"
-                active_result = await sandbox.process.exec(
-                    f"DISPLAY={self._get_display(workspace_id)} "
-                    "xdotool getactivewindow getwindowname"
-                )
+            try:
+                png_bytes = base64.b64decode(b64, validate=True)
+            except (binascii.Error, ValueError, TypeError):
+                png_bytes = b""
+            dimensions = _validated_png_dimensions(png_bytes)
+            if dimensions is not None and timestamp_ns is not None and timestamp_ns > 0:
+                age_ns = time.time_ns() - timestamp_ns
+                capture_age_ms = age_ns / 1_000_000 if age_ns >= 0 else None
                 if (
-                    getattr(active_result, "exit_code", 1) == 0
-                    and str(getattr(active_result, "result", "") or "").strip()
+                    capture_age_ms is not None
+                    and math.isfinite(capture_age_ms)
+                    and capture_age_ms <= _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
                 ):
-                    active_window = str(active_result.result).strip()
-                return ScreenObservation(
-                    screenshot_base64=b64,
-                    width=1280,
-                    height=800,
-                    active_window=active_window,
-                    visible_text="",
-                    detected_controls=[],
-                    desktop_state="INTERACTIVE",
-                )
+                    try:
+                        if self._avcs_perception is None:
+                            from sonic.computer_use.avcs_perception import AVCSPerception
+
+                            self._avcs_perception = AVCSPerception()
+                        avcs_state = self._avcs_perception.perceive_png(png_bytes)
+                    except Exception as e:
+                        logger.error(
+                            "daytona_avcs_perception_failed",
+                            workspace_id=workspace_id,
+                            error=str(e),
+                        )
+                        raise RuntimeError(
+                            "AVCS perception failed for the Daytona workstation frame"
+                        ) from e
+                    if (
+                        not isinstance(avcs_state, dict)
+                        or avcs_state.get("engine") != "avcs_reflex"
+                        or isinstance(avcs_state.get("frame_index"), bool)
+                        or not isinstance(avcs_state.get("frame_index"), int)
+                        or avcs_state["frame_index"] <= 0
+                        or avcs_state.get("width") != dimensions[0]
+                        or avcs_state.get("height") != dimensions[1]
+                        or not isinstance(avcs_state.get("scene_hash"), str)
+                        or not avcs_state["scene_hash"]
+                    ):
+                        logger.error(
+                            "daytona_avcs_invalid_state",
+                            workspace_id=workspace_id,
+                        )
+                        raise RuntimeError(
+                            "AVCS returned invalid state for the Daytona workstation frame"
+                        )
+
+                    active_window = "UNKNOWN"
+                    try:
+                        active_result = await sandbox.process.exec(
+                            f"DISPLAY={self._get_display(workspace_id)} "
+                            "xdotool getactivewindow getwindowname"
+                        )
+                        if (
+                            getattr(active_result, "exit_code", 1) == 0
+                            and str(getattr(active_result, "result", "") or "").strip()
+                        ):
+                            active_window = str(active_result.result).strip()
+                    except Exception as e:
+                        logger.debug("daytona_active_window_unavailable", error=str(e))
+
+                    final_age_ns = time.time_ns() - timestamp_ns
+                    final_capture_age_ms = (
+                        final_age_ns / 1_000_000 if final_age_ns >= 0 else None
+                    )
+                    if (
+                        final_capture_age_ms is None
+                        or not math.isfinite(final_capture_age_ms)
+                        or final_capture_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+                    ):
+                        logger.warning(
+                            "daytona_screenshot_became_stale_during_perception",
+                            workspace_id=workspace_id,
+                            capture_age_ms=final_capture_age_ms,
+                        )
+                        return ScreenObservation(
+                            screenshot_base64="",
+                            capture_timestamp_ns=timestamp_ns,
+                            capture_age_ms=final_capture_age_ms,
+                            width=dimensions[0],
+                            height=dimensions[1],
+                            active_window=active_window,
+                            visible_text=(
+                                "Desktop capture unavailable: frame freshness could not be "
+                                "verified after AVCS processing."
+                            ),
+                            detected_controls=[],
+                            desktop_state="NO_DISPLAY",
+                        )
+                    capture_age_ms = final_capture_age_ms
+
+                    observation = ScreenObservation(
+                        screenshot_base64=b64,
+                        avcs_state=avcs_state,
+                        capture_timestamp_ns=timestamp_ns,
+                        capture_age_ms=capture_age_ms,
+                        perception_version=int(avcs_state["frame_index"]),
+                        width=dimensions[0],
+                        height=dimensions[1],
+                        active_window=active_window,
+                        visible_text="",
+                        detected_controls=[],
+                        desktop_state="INTERACTIVE",
+                    )
+                    self._last_screenshot = observation
+                    self._last_screenshot_time = asyncio.get_running_loop().time()
+                    self._last_screenshot_workspace_id = workspace_id
+                    return observation
+
+            logger.warning(
+                "daytona_screenshot_invalid_or_stale",
+                workspace_id=workspace_id,
+                dimensions_valid=dimensions is not None,
+                timestamp_valid=timestamp_ns is not None and timestamp_ns > 0,
+            )
 
         # NO_DISPLAY: no live desktop frame exists — never fabricate a pixel
         return ScreenObservation(
@@ -725,7 +866,7 @@ class DaytonaComputerProvider(ComputerProvider):
             width=1280,
             height=800,
             active_window="UNKNOWN",
-            visible_text="",
+            visible_text="Desktop capture unavailable: a valid fresh AVCS frame could not be verified.",
             detected_controls=[],
             desktop_state="NO_DISPLAY",
         )
@@ -803,6 +944,62 @@ class DaytonaComputerProvider(ComputerProvider):
         if not sandbox:
             raise RuntimeError("GUI action cannot execute because no live sandbox is attached")
         action_type = action.action
+        pointer_points: tuple[tuple[int | None, int | None], ...] = ()
+        if action_type in (
+            GUIActionType.CLICK,
+            GUIActionType.DOUBLE_CLICK,
+            GUIActionType.RIGHT_CLICK,
+            GUIActionType.MOVE,
+            GUIActionType.SCROLL,
+        ):
+            pointer_points = ((action.x, action.y),)
+        elif action_type == GUIActionType.DRAG:
+            pointer_points = ((action.x, action.y), (action.x2, action.y2))
+        if pointer_points:
+            if any(
+                not isinstance(value, int) or isinstance(value, bool)
+                for point in pointer_points
+                for value in point
+            ):
+                raise ValueError("Pointer actions require explicit integer coordinates")
+            now = asyncio.get_running_loop().time()
+            observation = self._last_screenshot
+            cache_age_ms = (
+                max(0.0, now - self._last_screenshot_time) * 1000
+                if (
+                    observation is not None
+                    and self._last_screenshot_time > 0
+                    and self._last_screenshot_workspace_id == workspace_id
+                )
+                else float("inf")
+            )
+            if (
+                observation is None
+                or observation.desktop_state != "INTERACTIVE"
+                or cache_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+                or observation.capture_age_ms is None
+                or observation.capture_age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS
+            ):
+                observation = await self.screenshot(workspace_id)
+            if observation.desktop_state != "INTERACTIVE" or observation.capture_age_ms is None:
+                raise RuntimeError("Pointer action blocked: no fresh AVCS screen bounds")
+            for cx, cy in pointer_points:
+                if (
+                    cx is None
+                    or cy is None
+                    or cx < 0
+                    or cy < 0
+                    or cx >= observation.width
+                    or cy >= observation.height
+                ):
+                    raise ValueError(
+                        f"GUI coordinates ({cx}, {cy}) outside captured screen bounds "
+                        f"{observation.width}x{observation.height}"
+                    )
+
+        self._last_screenshot = None
+        self._last_screenshot_time = 0.0
+        self._last_screenshot_workspace_id = None
 
         supported_actions = {
             GUIActionType.CLICK,

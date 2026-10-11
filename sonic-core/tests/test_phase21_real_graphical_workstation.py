@@ -14,8 +14,11 @@ Tests and proves:
 
 import asyncio
 import base64
+from io import BytesIO
+
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from sonic.api.main import app
 from sonic.auth.google_auth import create_jwt_token
@@ -82,52 +85,86 @@ def test_daytona_computer_lifecycle(daytona_computer):
     asyncio.run(run())
 
 
+@pytest.mark.no_live_infra
 def test_daytona_screenshot_observation(daytona_computer):
     """
     Proves screenshot behavior:
-    1. Returns NO_DISPLAY and empty screenshot_base64 when no cloud sandbox is connected.
-    2. Correctly handles ScreenshotResponse from Daytona SDK (base64 .screenshot field).
+    1. Returns NO_DISPLAY when no cloud sandbox is connected.
+    2. Processes real PNG pixels with AVCS and caches fresh observation metadata.
+    3. Rejects malformed captures and clears the cached frame.
     """
     async def run():
         ws = await daytona_computer.create("tenant-alpha", "eng-01")
 
-        # 1. Unconnected / Offline or Local Container Sandbox State
+        # An unattached provider must never fabricate a screenshot.
         obs = await daytona_computer.screenshot(ws.id)
         assert obs.width == 1280
         assert obs.height == 800
-        assert obs.desktop_state in ["NO_DISPLAY", "INTERACTIVE"]
-        if obs.desktop_state == "NO_DISPLAY":
-            assert obs.screenshot_base64 == ""
-        else:
-            assert len(obs.screenshot_base64) > 100
+        assert obs.desktop_state == "NO_DISPLAY"
+        assert obs.screenshot_base64 == ""
+        assert obs.avcs_state == {}
 
-        # 2. Simulate a real Daytona SDK ScreenshotResponse (base64 string, not raw bytes)
+        image_buffer = BytesIO()
+        Image.new("RGB", (320, 200), color=(24, 48, 96)).save(image_buffer, format="PNG")
+        valid_png = image_buffer.getvalue()
+
         class MockScreenshotResponse:
-            """Mimics daytona ScreenshotResponse with .screenshot (base64) and .size_bytes"""
-            def __init__(self):
-                # Build a valid PNG and encode to base64
-                png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 1200
-                self.screenshot = base64.b64encode(png_bytes).decode("utf-8")
-                self.size_bytes = len(png_bytes)
+            def __init__(self, screenshot):
+                self.screenshot = screenshot
+                self.size_bytes = len(screenshot)
 
         class MockScreenshotService:
+            invalid_frame = False
+
             async def take_full_screen(self, **kwargs):
-                return MockScreenshotResponse()
+                payload = (
+                    "not-valid-base64"
+                    if self.invalid_frame
+                    else base64.b64encode(valid_png).decode("ascii")
+                )
+                return MockScreenshotResponse(payload)
 
         class MockComputerUse:
             screenshot = MockScreenshotService()
 
+        class MockProcess:
+            async def exec(self, command):
+                if "import -window root" in command:
+                    return type("ExecResponse", (), {"exit_code": 1, "result": ""})()
+                return type("ExecResponse", (), {"exit_code": 0, "result": "Desktop"})()
+
         class MockSandbox:
             computer_use = MockComputerUse()
+            process = MockProcess()
+
+            async def delete(self):
+                return None
 
         daytona_computer._sandboxes[ws.id] = MockSandbox()
         live_obs = await daytona_computer.screenshot(ws.id)
         assert live_obs.desktop_state == "INTERACTIVE"
-        assert len(live_obs.screenshot_base64) > 1000
-        # The screenshot_base64 should decode to valid PNG bytes
-        raw_bytes = base64.b64decode(live_obs.screenshot_base64)
-        assert raw_bytes.startswith(b"\x89PNG")
-        assert len(raw_bytes) > 1000
+        assert live_obs.width == 320
+        assert live_obs.height == 200
+        assert live_obs.avcs_state["engine"] == "avcs_reflex"
+        assert live_obs.avcs_state["width"] == 320
+        assert live_obs.avcs_state["height"] == 200
+        assert live_obs.capture_timestamp_ns is not None
+        assert 0 <= live_obs.capture_age_ms <= 2_000
+        assert live_obs.perception_version == live_obs.avcs_state["frame_index"]
+        assert daytona_computer._last_screenshot is live_obs
+        assert daytona_computer._last_screenshot_time > 0
+
+        second_obs = await daytona_computer.screenshot(ws.id)
+        assert second_obs.avcs_state["frame_index"] == live_obs.avcs_state["frame_index"] + 1
+
+        # An invalid new capture must not leave the previously-good frame usable.
+        MockComputerUse.screenshot.invalid_frame = True
+        failed_obs = await daytona_computer.screenshot(ws.id)
+        assert failed_obs.desktop_state == "NO_DISPLAY"
+        assert failed_obs.screenshot_base64 == ""
+        assert failed_obs.avcs_state == {}
+        assert daytona_computer._last_screenshot is None
+        assert daytona_computer._last_screenshot_time == 0.0
 
         await daytona_computer.destroy(ws.id)
         await daytona_computer.close()

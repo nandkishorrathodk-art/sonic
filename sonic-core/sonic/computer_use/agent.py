@@ -970,24 +970,6 @@ class ComputerUseAgent:
     # 1. Closed-Loop Observation
     # =============================================================
     def _ensure_avcs_state(self, screen: ScreenObservation) -> ScreenObservation:
-        state = getattr(screen, "avcs_state", None)
-        frame_index = state.get("frame_index") if isinstance(state, dict) else None
-        state_is_current = (
-            isinstance(state, dict)
-            and state.get("engine") == "avcs_reflex"
-            and isinstance(frame_index, int)
-            and not isinstance(frame_index, bool)
-            and frame_index > 0
-            and state.get("width") == screen.width
-            and state.get("height") == screen.height
-        )
-        if state_is_current:
-            screen.visible_text = ""
-            screen.detected_controls = []
-            screen.controls_age_ms = None
-            screen.perception_version = frame_index
-            return screen
-
         try:
             png_bytes = base64.b64decode(screen.screenshot_base64, validate=True)
             perception = getattr(self, "_avcs_perception", None)
@@ -996,7 +978,21 @@ class ComputerUseAgent:
 
                 perception = AVCSPerception()
                 self._avcs_perception = perception
+            # Re-process every screenshot in this agent's local AVCS instance.
+            # A provider-supplied state blob is not grounding evidence because
+            # it is not bound to this instance's frame fingerprint/grounder.
             state = perception.perceive_png(png_bytes)
+            if (
+                state.get("engine") != "avcs_reflex"
+                or state.get("width") != screen.width
+                or state.get("height") != screen.height
+                or not isinstance(state.get("frame_index"), int)
+                or isinstance(state.get("frame_index"), bool)
+                or state["frame_index"] <= 0
+                or not isinstance(state.get("scene_hash"), str)
+                or not state["scene_hash"]
+            ):
+                raise ValueError("AVCS returned invalid frame metadata")
         except Exception as exc:
             logger.error(
                 "avcs_agent_perception_failed",
@@ -1012,35 +1008,120 @@ class ComputerUseAgent:
         screen.perception_version = int(state["frame_index"])
         return screen
 
-    async def _ground_target_with_avcs(self, query: str) -> dict[str, Any] | None:
+    async def _ground_target_with_avcs(
+        self,
+        query: str,
+        screen: ScreenObservation | None = None,
+    ) -> dict[str, Any] | None:
         """Resolve a GUI target locally; screenshots never leave the workstation path."""
-        if not query or not self._last_screenshot_b64:
-            return None
-        width = int(getattr(self, "_screen_width", 0) or 0)
-        height = int(getattr(self, "_screen_height", 0) or 0)
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("AVCS target grounding requires a semantic target query")
+        source_screen = screen or getattr(self, "_last_observed_screen", None)
+        if source_screen is None:
+            raise RuntimeError("AVCS target grounding has no observed desktop frame")
+        if getattr(source_screen, "desktop_state", "") != "INTERACTIVE":
+            raise RuntimeError("AVCS target grounding requires an interactive desktop")
+        capture_age_ms = getattr(source_screen, "capture_age_ms", None)
+        if (
+            not isinstance(capture_age_ms, (int, float))
+            or isinstance(capture_age_ms, bool)
+            or not math.isfinite(capture_age_ms)
+            or not 0 <= capture_age_ms <= 2_000
+        ):
+            raise RuntimeError("AVCS target grounding requires a fresh pixel frame")
+        frame_b64 = str(getattr(source_screen, "screenshot_base64", "") or "")
+        if not frame_b64 or (
+            frame_b64 != str(getattr(self, "_last_screenshot_b64", "") or "")
+            and screen is None
+        ):
+            raise RuntimeError("AVCS target grounding frame is not the latest observation")
+        width = int(getattr(source_screen, "width", 0) or 0)
+        height = int(getattr(source_screen, "height", 0) or 0)
         if width <= 0 or height <= 0:
             raise ValueError("AVCS target grounding requires observed screen dimensions")
-        png_bytes = base64.b64decode(self._last_screenshot_b64, validate=True)
+        state = getattr(source_screen, "avcs_state", None)
+        if (
+            not isinstance(state, dict)
+            or state.get("engine") != "avcs_reflex"
+            or state.get("width") != width
+            or state.get("height") != height
+            or not isinstance(state.get("scene_hash"), str)
+            or not state["scene_hash"]
+        ):
+            raise RuntimeError("AVCS target grounding requires current local AVCS state")
+        png_bytes = base64.b64decode(frame_b64, validate=True)
         perception = getattr(self, "_avcs_perception", None)
         if perception is None:
-            from sonic.computer_use.avcs_perception import AVCSPerception
-
-            perception = AVCSPerception()
-            self._avcs_perception = perception
+            raise RuntimeError("local AVCS pixel processor is unavailable")
         result = await asyncio.to_thread(
             perception.ground_target_png,
             png_bytes,
-            query,
+            query.strip(),
             width,
             height,
         )
         if result is not None:
+            x, y = result.get("x"), result.get("y")
+            query_score = result.get("query_score")
+            query_score_threshold = result.get("query_score_threshold")
+            calibration = result.get("checkpoint_metadata", {}).get(
+                "query_confidence_calibration"
+            )
+            calibration_evaluation = (
+                calibration.get("evaluation")
+                if isinstance(calibration, dict)
+                else None
+            )
+            calibration_precision = (
+                calibration_evaluation.get("precision")
+                if isinstance(calibration_evaluation, dict)
+                else None
+            )
+            required_precision = (
+                calibration_evaluation.get("required_precision")
+                if isinstance(calibration_evaluation, dict)
+                else None
+            )
+            if (
+                result.get("engine") != "avcs_goal_grounder"
+                or result.get("scene_hash") != state.get("scene_hash")
+                or result.get("frame_index") != state.get("frame_index")
+                or isinstance(query_score, bool)
+                or not isinstance(query_score, (int, float))
+                or not math.isfinite(float(query_score))
+                or not 0 <= float(query_score) <= 1
+                or isinstance(query_score_threshold, bool)
+                or not isinstance(query_score_threshold, (int, float))
+                or not math.isfinite(float(query_score_threshold))
+                or not 0 < float(query_score_threshold) <= 1
+                or float(query_score) < float(query_score_threshold)
+                or not isinstance(calibration_evaluation, dict)
+                or calibration_evaluation.get("metric")
+                != "empirical_precision_at_threshold"
+                or calibration_evaluation.get("passed") is not True
+                or calibration_evaluation.get("threshold") != query_score_threshold
+                or isinstance(calibration_precision, bool)
+                or not isinstance(calibration_precision, (int, float))
+                or not math.isfinite(float(calibration_precision))
+                or isinstance(required_precision, bool)
+                or not isinstance(required_precision, (int, float))
+                or not math.isfinite(float(required_precision))
+                or float(calibration_precision) < float(required_precision)
+                or not isinstance(x, int)
+                or isinstance(x, bool)
+                or not isinstance(y, int)
+                or isinstance(y, bool)
+                or not (0 <= x < width and 0 <= y < height)
+            ):
+                raise RuntimeError("AVCS grounder returned a stale or invalid pixel target")
             logger.info(
                 "avcs_goal_grounding_target_resolved",
                 query=query,
-                resolved_x=result["x"],
-                resolved_y=result["y"],
+                resolved_x=x,
+                resolved_y=y,
                 held_out_point_accuracy=result["held_out_point_accuracy"],
+                query_score=query_score,
+                query_score_threshold=query_score_threshold,
                 grounding_latency_ms=result["latency_ms"],
             )
         return result
@@ -1757,43 +1838,44 @@ class ComputerUseAgent:
                 )
         elif action_type in coordinate_actions:
             if action_type == ComputerActionType.GUI_DRAG:
-                start = (payload.get("x"), payload.get("y"))
-                end = (
-                    payload.get("end_x", payload.get("x2")),
-                    payload.get("end_y", payload.get("y2")),
-                )
-                if any(not isinstance(value, int) or isinstance(value, bool) for value in (*start, *end)):
+                for names in (("x", "y"), ("x2", "y2"), ("end_x", "end_y")):
+                    present = [name in payload for name in names]
+                    if any(present) and not all(
+                        isinstance(payload.get(name), int)
+                        and not isinstance(payload.get(name), bool)
+                        for name in names
+                    ):
+                        return (
+                            ActionExecutionStatus.BLOCKED,
+                            "gui-invalid-response",
+                            {},
+                            "GUI_DRAG coordinate pairs must be complete integer pixel pairs when provided.",
+                        )
+                if not str(payload.get("destination_grounding_query") or "").strip():
                     return (
                         ActionExecutionStatus.BLOCKED,
                         "gui-invalid-response",
                         {},
-                        "GUI_DRAG requires integer start and destination coordinates.",
+                        "GUI_DRAG requires a semantic destination_grounding_query for local AVCS grounding.",
                     )
-            elif coordinates is None:
-                safe_semantic_target = bool(
-                    parsed[1]
-                    and self.perception_bus.resolve(parsed[1]) is not None
-                )
-                reasoning_perception = getattr(
-                    self,
-                    "_last_reasoning_perception",
+            elif not coordinates and not str(parsed[1]).strip():
+                return (
+                    ActionExecutionStatus.BLOCKED,
+                    "gui-invalid-response",
                     {},
+                    f"{action_type.value} requires an explicit pixel point or semantic target query.",
                 )
-                visual_grounding_available = bool(
-                    parsed[1]
-                    and self._last_screenshot_b64
-                    and self.llm_router
-                    and isinstance(reasoning_perception, dict)
-                    and reasoning_perception.get("image_attached")
+            if (
+                coordinates is not None
+                and _parse_pixel_coordinate_target(parsed[1]) is not None
+                and not str(payload.get("grounding_query") or "").strip()
+            ):
+                return (
+                    ActionExecutionStatus.BLOCKED,
+                    "gui-invalid-response",
+                    {},
+                    "Explicit GUI pixel coordinates require a separate semantic grounding_query.",
                 )
-                if not safe_semantic_target and not visual_grounding_available:
-                    return (
-                        ActionExecutionStatus.BLOCKED,
-                        "gui-invalid-response",
-                        {},
-                        f"{action_type.value} requires integer screen coordinates or one "
-                        "unambiguous target in the current grounded control inventory.",
-                    )
         parsed = (parsed[0], parsed[1], payload, parsed[3])
         return parsed
 
@@ -5884,7 +5966,7 @@ class ComputerUseAgent:
                         actual_obs_str = f"Clicked at ({x}, {y})"
                     if pre_screen_b64 and post_screen_b64 and pre_screen_b64 == post_screen_b64:
                         self._consecutive_unchanged_screens += 1
-                        status = ActionExecutionStatus.FAILED
+                        status = ActionExecutionStatus.UNVERIFIED
                         visual_stall_detected = True
                         actual_obs_str = (
                             f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after click; "
@@ -5923,7 +6005,7 @@ class ComputerUseAgent:
                         actual_obs_str = f"Double-clicked at ({x}, {y})"
                     if pre_screen_b64 and post_screen_b64 and pre_screen_b64 == post_screen_b64:
                         self._consecutive_unchanged_screens += 1
-                        status = ActionExecutionStatus.FAILED
+                        status = ActionExecutionStatus.UNVERIFIED
                         visual_stall_detected = True
                         actual_obs_str = (
                             f"{actual_obs_str} | [VISUAL VERIFICATION]: Screen state unchanged after double-click; "
@@ -7565,6 +7647,7 @@ class ComputerUseAgent:
                 ActionExecutionStatus.COMPLETED,
                 ActionExecutionStatus.SUCCESS,
                 ActionExecutionStatus.VERIFIED,
+                ActionExecutionStatus.UNVERIFIED,
             )
         ):
             postcondition_ok, postcondition_reason = (

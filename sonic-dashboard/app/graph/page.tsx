@@ -119,7 +119,7 @@ const DEFAULT_COGNITIVE_NODES: GraphNodeData[] = [
     type: "DesktopPlane",
     properties: {
       display: ":99",
-      resolution: "1280x800",
+      resolution: "1920x1080",
       wm: "Openbox / X11 Server",
       interaction_plane: "GUI_* / BROWSER_* / APP_*",
       active_windows: "1 active window (terminal)",

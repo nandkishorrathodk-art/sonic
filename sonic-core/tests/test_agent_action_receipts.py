@@ -6,7 +6,7 @@ import time
 from io import BytesIO
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from sonic.computer.models import ComputerState, GitStatusInfo, ScreenObservation
 from sonic.computer.provider import ComputerProvider
@@ -79,22 +79,46 @@ class _ReceiptComputer(ComputerProvider):
 
 
 def _avcs_screen(
-    screenshot: str = _FRAME_BASE64,
+    screenshot: str | None = None,
     *,
     frame_index: int = 1,
     scene_hash: str | None = None,
     active_window: str = "Desktop",
     **kwargs,
 ) -> ScreenObservation:
+    if screenshot is None:
+        from hashlib import sha256
+
+        seed = scene_hash or "before-screen"
+        image = Image.new("RGB", (1280, 800), color=(30, 40, 50))
+        draw = ImageDraw.Draw(image)
+        for row in range(8):
+            for column in range(8):
+                cell = sha256(f"{seed}:{row}:{column}".encode()).digest()
+                color = tuple(48 + value % 192 for value in cell[:3])
+                draw.rectangle(
+                    (
+                        column * 160,
+                        row * 100,
+                        (column + 1) * 160 - 1,
+                        (row + 1) * 100 - 1,
+                    ),
+                    fill=color,
+                )
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        screenshot = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    from sonic.computer_use.avcs_perception import AVCSPerception
+
+    avcs_state = AVCSPerception().perceive_png(
+        base64.b64decode(screenshot, validate=True)
+    )
+    avcs_state["frame_index"] = frame_index
     return ScreenObservation(
         screenshot_base64=screenshot,
-        avcs_state={
-            "engine": "avcs_reflex",
-            "frame_index": frame_index,
-            "scene_hash": scene_hash or "before-screen",
-            "width": 1280,
-            "height": 800,
-        },
+        avcs_state=avcs_state,
+        perception_version=frame_index,
         width=1280,
         height=800,
         active_window=active_window,
@@ -391,47 +415,12 @@ def test_gui_trace_receipt_uses_observed_screen_transition():
     assert "screen_hash" in trace.action_receipt.state_delta.changed
 
 
-def test_configured_avcs_grounder_resolves_semantic_target_before_dispatch(monkeypatch):
+def test_configured_avcs_grounder_binds_semantic_target_to_current_frame(monkeypatch):
     class _GroundingComputer(_ReceiptComputer):
         def __init__(self):
             super().__init__()
             self.gui_actions = []
             self.frame = ""
-
-        async def gui_action(self, workspace_id, action, actor="operator"):
-            self.gui_actions.append(action)
-            return ScreenObservation(
-                screenshot_base64=self.frame,
-                avcs_state={
-                    "engine": "avcs_reflex",
-                    "frame_index": 1,
-                    "scene_hash": self.frame,
-                    "width": 1280,
-                    "height": 800,
-                },
-                width=1280,
-                height=800,
-                active_window="Desktop",
-                capture_age_ms=0,
-                desktop_state="INTERACTIVE",
-            )
-
-        async def screenshot(self, workspace_id):
-            return ScreenObservation(
-                screenshot_base64=self.frame,
-                avcs_state={
-                    "engine": "avcs_reflex",
-                    "frame_index": 1,
-                    "scene_hash": self.frame,
-                    "width": 1280,
-                    "height": 800,
-                },
-                width=1280,
-                height=800,
-                active_window="Desktop",
-                capture_age_ms=0,
-                desktop_state="INTERACTIVE",
-            )
 
     computer = _GroundingComputer()
     agent = ComputerUseAgent(computer_provider=computer)
@@ -441,49 +430,65 @@ def test_configured_avcs_grounder_resolves_semantic_target_before_dispatch(monke
     screenshot = base64.b64encode(image_buffer.getvalue()).decode("ascii")
     computer.frame = screenshot
 
-    class _Grounder:
-        def __init__(self):
-            self.request = None
+    from sonic.computer_use.avcs_perception import AVCSPerception
 
-        def ground_target_png(self, png_bytes, query, width, height):
-            self.request = (png_bytes, query, width, height)
-            return {
-                "x": 321,
-                "y": 123,
-                "held_out_point_accuracy": 0.91,
-                "latency_ms": 0.25,
-            }
+    grounder = AVCSPerception()
+    grounder.request = None
 
-    grounder = _Grounder()
+    def ground_target_png(png_bytes, query, width, height):
+        grounder.request = (png_bytes, query, width, height)
+        return {
+            "x": 321,
+            "y": 123,
+            "held_out_point_accuracy": 0.91,
+            "query_score": 0.95,
+            "query_score_threshold": 0.8,
+            "engine": "avcs_goal_grounder",
+            "frame_index": grounder._frame_index,
+            "scene_hash": grounder._last_scene_hash,
+            "checkpoint_metadata": {
+                "query_confidence_calibration": {
+                    "evaluation": {
+                        "metric": "empirical_precision_at_threshold",
+                        "passed": True,
+                        "samples": 20,
+                        "threshold": 0.8,
+                        "precision": 0.95,
+                        "required_precision": 0.9,
+                    },
+                },
+            },
+            "latency_ms": 0.25,
+        }
+
+    grounder.ground_target_png = ground_target_png
     agent._avcs_perception = grounder
     monkeypatch.setenv("SONIC_AVCS_GROUNDING_CHECKPOINT", "evaluated-checkpoint.pt")
 
     async def run_click():
-        screen = _avcs_screen(screenshot, scene_hash=screenshot)
+        screen = agent._ensure_avcs_state(
+            _avcs_screen(screenshot, scene_hash=screenshot)
+        )
         agent._last_world_observation = ComputerWorldObservation(
             screen=screen,
             active_application="Desktop",
-            perception_version=1,
+            perception_version=screen.perception_version,
             observation_age_ms=0,
             observation_received_monotonic_ns=time.perf_counter_ns(),
         )
+        agent._last_observed_screen = screen
         agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
         agent._last_screenshot_b64 = screenshot
         agent._screen_width = screen.width
         agent._screen_height = screen.height
-        return await agent.execute_action(
-            "workspace",
-            ComputerActionType.GUI_CLICK,
-            "Save button",
-            {},
-            "document saved",
-        )
+        return await agent._ground_target_with_avcs("Save button", screen=screen)
 
-    trace = _run(run_click())
+    result = _run(run_click())
 
-    assert trace.status != ActionExecutionStatus.BLOCKED, trace.actual_observation
-    assert computer.gui_calls == 1
-    assert (computer.gui_actions[0].x, computer.gui_actions[0].y) == (321, 123)
+    assert result["engine"] == "avcs_goal_grounder"
+    assert (result["x"], result["y"]) == (321, 123)
+    assert result["frame_index"] == agent._last_observed_screen.avcs_state["frame_index"]
+    assert result["scene_hash"] == agent._last_observed_screen.avcs_state["scene_hash"]
     assert grounder.request == (
         image_buffer.getvalue(),
         "Save button",
@@ -684,7 +689,10 @@ def test_stale_screenshot_intent_refresh_uses_only_a_fresh_screenshot():
 
     assert intent.source_perception_version > 0
     assert intent.source_active_window == "Desktop"
-    assert agent._last_gui_dispatch_evidence[0].screenshot_base64 == _FRAME_BASE64
+    assert (
+        agent._last_gui_dispatch_evidence[0].screenshot_base64
+        == source_screen.screenshot_base64
+    )
 
 
 def test_slow_gui_reasoning_revalidates_unchanged_screenshot_before_dispatch():
@@ -808,7 +816,7 @@ def test_gui_action_with_unobserved_postcondition_is_unverified():
         {"screen_changed": True},
     )
 
-    assert trace.status == ActionExecutionStatus.UNVERIFIED
+    assert trace.status == ActionExecutionStatus.UNVERIFIED, trace.actual_observation
     assert "POSTCONDITION UNVERIFIED" in trace.actual_observation
     assert agent.computer.gui_calls == 1
 

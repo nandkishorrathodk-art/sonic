@@ -4,10 +4,10 @@ set -e
 # Remove any stale X locks
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 
-# Start virtual framebuffer at 1280x800 with 24-bit color depth
+# Start virtual framebuffer at 1920x1080 with 24-bit color depth
 echo "[*] Starting Xvfb on display :99..."
 mkdir -p /tmp/.X11-unix /usr/local/bin /workspace /home/sonic
-Xvfb :99 -screen 0 1280x800x24 &
+Xvfb :99 -screen 0 1920x1080x24 &
 XVFB_PID=$!
 for _ in $(seq 1 20); do
     [ -S /tmp/.X11-unix/X99 ] && break

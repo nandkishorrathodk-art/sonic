@@ -157,12 +157,28 @@ acceptance evidence.
 
 ## Current evidence boundary
 
-Existing SONIC components provide foundations for this direction, including a
-visible workstation, generic GUI actions, perception snapshots, accessibility
-and OCR inputs, task orchestration, action receipts, and independent Judge
-checks. Their presence does not establish reliable arbitrary-app completion.
-Each production path must be checked for actual wiring, and real multi-app
-acceptance remains the evidence required for stronger claims.
+The current Docker and Daytona workstation screenshot paths validate captured
+frames and process them locally through AVCS. In the active workstation
+reasoning path, the LLM receives a compact AVCS state summary rather than the
+workstation screenshot. This statement is scoped to those workstation paths;
+it is not a claim that OCR, NSI, accessibility, or image-processing code has
+been removed everywhere else in the repository. Older entries below describe
+earlier implementations and are retained as historical records.
+
+AVCS reflex output describes pixel-level scene and change signals. It does not
+by itself identify UI meaning, establish a grounded semantic target, verify
+keyboard focus, or prove that an operator's requested task succeeded. A
+configured optional grounding checkpoint is subject to training-provenance
+and held-out-evaluation metadata gates; no live acceptance evidence here
+establishes that such a checkpoint is available or reliable in the deployed
+workstation. Missing or inconclusive perception/grounding evidence must block
+the affected action. GUI text entry remains unavailable without an evaluated
+local focus-verification capability.
+
+Unit tests and frame-processing checks do not establish arbitrary-app task
+success. No live AVCS workstation acceptance task or OSWorld-2 comparative
+benchmark is recorded here, so no superiority or performance comparison is
+claimed.
 
 ### First implementation slice (2026-10-01)
 
@@ -577,23 +593,41 @@ harmless task.
 
 ### AVCS-only workstation perception (current contract)
 
-- Docker and Daytona workstation screenshot observations now retain pixels for
-  local AVCS processing and return no OCR-derived text or semantic control list.
-  Workstation GUI reasoning requests contain text/state only; captured frame
-  bytes are not sent to an LLM.
-- The active Daytona accessibility-tree extraction and the agent's
-  state-only/NSI intent path are removed. GUI action intents require a fresh
-  interactive pixel frame. Model-proposed coordinates are not trusted by
-  themselves; pointer actions require local AVCS grounding and are blocked if
-  it is unavailable or disagrees.
-- `GUI_TYPE` is not advertised and is blocked before any focus click because
-  AVCS currently has no evaluated local focus-verification head. The optional
-  semantic point grounder likewise needs a held-out-evaluated real-UI
-  checkpoint; no such checkpoint or real-UI demonstration is present.
-- AVCS reflex metrics do not establish task-specific semantic completion.
-  Judge therefore remains inconclusive without independent postcondition
-  evidence. There has been no live desktop acceptance run, data collection, or
-  OSWorld benchmark for this migration.
+- In the Docker and Daytona screenshot-provider paths used by workstation
+  computer-use, a validated fresh PNG is processed locally by
+  `AVCSPerception`. The resulting state contains pixel-derived fields such as
+  frame index, dimensions, scene hash, brightness/contrast, change and motion
+  estimates, regions, and reflex events. These are not OCR text or semantic
+  control labels. The workstation reasoning request receives an allowlisted
+  compact text summary; screenshot bytes are not included in that request. The
+  Docker virtual display defaults to 1920x1080; providers and action grounding
+  must still use the dimensions reported by the current captured frame.
+- The scope of this contract is the active workstation perception path. It
+  does not assert that OCR, NSI, accessibility, or DOM-related code is absent
+  from every repository component or unrelated product path.
+- GUI intents bind to fresh frame/state evidence and screen bounds. A
+  model-proposed coordinate alone is not evidence of target identity:
+  semantic target grounding is available only through the optional local AVCS
+  grounder when its checkpoint passes the configured provenance and held-out
+  evaluation checks. If the required grounding evidence is missing, invalid,
+  stale, or inconclusive, the action must fail closed. Explicit pixel points
+  still require current-frame bounds and dispatch revalidation.
+- AVCS reflex output does not establish semantic target grounding, application
+  identity, focus, or task completion. `GUI_TYPE` remains unavailable because
+  there is no evaluated local focus-verification head; do not dispatch text
+  based on a reflex summary or a model's focus assertion.
+- The Judge can receive a fresh screenshot through its separate vision request
+  for independent postcondition review; this does not route screenshot bytes to
+  workstation reasoning. Scene change, motion, reflex events, or a worker's
+  completion proposal alone cannot prove the requested semantic postcondition.
+  Completion remains inconclusive without independent, task-relevant evidence.
+- A 1920x1080 default display is a resolution setting, not evidence of precise
+  semantic grounding or successful general-purpose task completion. Evaluate
+  diverse, harmless desktop tasks with fresh action receipts and independent
+  Judge evidence before reporting OSWorld-like success rates, latency, or cost.
+- No live GUI acceptance run or OSWorld-2 comparison is documented for this
+  migration. AVCS processing, unit tests, and checkpoint metadata gates do not
+  establish arbitrary GUI task success or comparative superiority.
 - The privacy redaction gate and AVCS's own retinal/foveation implementation
   are distinct from workstation OCR perception and are not removed by this
   migration.
