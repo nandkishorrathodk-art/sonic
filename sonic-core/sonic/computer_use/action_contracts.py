@@ -23,6 +23,100 @@ if TYPE_CHECKING:
     from sonic.kernel.action_broker import ActionBroker
 
 
+_MAX_NS = (1 << 63) - 1
+
+
+def _finite_nonnegative_ms(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric < 0 or numeric > _MAX_NS / 1_000_000:
+        return None
+    return numeric
+
+
+def _valid_monotonic_ns(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= _MAX_NS
+    )
+
+
+def _encode_payload(payload: Mapping[str, Any]) -> str:
+    def validate_json_value(value: Any) -> None:
+        if isinstance(value, Mapping):
+            if any(not isinstance(key, str) for key in value):
+                raise ValueError("payload object keys must be strings")
+            for nested in value.values():
+                validate_json_value(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                validate_json_value(nested)
+        elif value is None or isinstance(value, (str, bool, int)):
+            return
+        elif isinstance(value, float) and math.isfinite(value):
+            return
+        else:
+            raise ValueError("payload values must be strict JSON data")
+
+    validate_json_value(payload)
+    return json.dumps(
+        dict(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _avcs_identity(
+    screen: Any,
+) -> tuple[int, str] | None:
+    """Return AVCS identity only when it matches the frame and version metadata."""
+    state = getattr(screen, "avcs_state", None)
+    if not isinstance(state, Mapping) or state.get("engine") != "avcs_reflex":
+        return None
+
+    frame_index = state.get("frame_index")
+    screen_version = getattr(screen, "perception_version", None)
+    if (
+        not isinstance(frame_index, int)
+        or isinstance(frame_index, bool)
+        or frame_index <= 0
+        or not isinstance(screen_version, int)
+        or isinstance(screen_version, bool)
+        or screen_version != frame_index
+    ):
+        return None
+
+    width = getattr(screen, "width", None)
+    height = getattr(screen, "height", None)
+    if (
+        not isinstance(width, int)
+        or isinstance(width, bool)
+        or width <= 0
+        or not isinstance(height, int)
+        or isinstance(height, bool)
+        or height <= 0
+        or not isinstance(state.get("width"), int)
+        or isinstance(state.get("width"), bool)
+        or not isinstance(state.get("height"), int)
+        or isinstance(state.get("height"), bool)
+        or state.get("width") != width
+        or state.get("height") != height
+    ):
+        return None
+
+    scene_hash = state.get("scene_hash")
+    if not isinstance(scene_hash, str) or not scene_hash.strip():
+        return None
+    return frame_index, scene_hash.strip()
+
+
 def _frozen(values: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return MappingProxyType(dict(values or {}))
 
@@ -63,12 +157,19 @@ class GUIActionIntent:
         ttl_ms: int = 2_000,
     ) -> GUIActionIntent:
         """Create an intent only from a fresh, identified desktop observation."""
-        action_name = str(action_type).strip()
-        if not action_name.startswith("GUI_"):
+        if not isinstance(action_type, str):
+            raise ValueError("GUI intents require a GUI action")
+        action_name = action_type.strip()
+        if not action_name.startswith("GUI_") or not action_name[4:]:
             raise ValueError("GUI intents require a GUI action")
         if not isinstance(payload, Mapping):
             raise ValueError("GUI action payload must be a mapping")
-        if ttl_ms <= 0:
+        if (
+            not isinstance(ttl_ms, int)
+            or isinstance(ttl_ms, bool)
+            or ttl_ms <= 0
+            or ttl_ms * 1_000_000 > _MAX_NS
+        ):
             raise ValueError("GUI action intent TTL must be positive")
 
         screen = getattr(observation, "screen", None)
@@ -76,50 +177,50 @@ class GUIActionIntent:
             raise ValueError("GUI action intent requires an observed screen")
         if (
             getattr(screen, "desktop_state", "") != "INTERACTIVE"
-            or not getattr(screen, "screenshot_base64", "")
+            or not isinstance(getattr(screen, "screenshot_base64", None), str)
+            or not screen.screenshot_base64.strip()
         ):
             raise ValueError("GUI action intent requires a fresh pixel frame")
-        avcs_state = getattr(screen, "avcs_state", None)
-        if not isinstance(avcs_state, Mapping) or avcs_state.get("engine") != "avcs_reflex":
-            raise ValueError("GUI action intent requires current AVCS pixel state")
-        state_version = avcs_state.get("frame_index")
+        screen_version = getattr(screen, "perception_version", None)
         if (
-            not isinstance(state_version, int)
-            or isinstance(state_version, bool)
-            or state_version <= 0
+            not isinstance(screen_version, int)
+            or isinstance(screen_version, bool)
+            or screen_version <= 0
         ):
             raise ValueError("GUI action intent requires a versioned AVCS frame")
-        scene_hash = avcs_state.get("scene_hash")
-        if not isinstance(scene_hash, str) or not scene_hash.strip():
-            raise ValueError("GUI action intent requires an AVCS scene fingerprint")
+        version = getattr(observation, "perception_version", None)
+        identity = _avcs_identity(screen)
+        if identity is None:
+            raise ValueError("GUI action intent requires trustworthy AVCS frame identity")
+        state_version, scene_hash = identity
         active_window = str(
             getattr(screen, "active_window", "")
             or getattr(observation, "active_application", "")
         ).strip()
         width = getattr(screen, "width", 0)
         height = getattr(screen, "height", 0)
-        version = getattr(observation, "perception_version", 0)
         age_ms = getattr(observation, "observation_age_ms", None)
         capture_age_ms = getattr(screen, "capture_age_ms", None)
-        if (
-            not isinstance(capture_age_ms, (int, float))
-            or isinstance(capture_age_ms, bool)
-            or not math.isfinite(capture_age_ms)
-            or capture_age_ms < 0
-        ):
+        capture_age = _finite_nonnegative_ms(capture_age_ms)
+        observation_age = _finite_nonnegative_ms(age_ms)
+        if capture_age is None:
             raise ValueError("GUI action intent requires known capture age")
         issued_at = now_ns if now_ns is not None else time.perf_counter_ns()
+        if not _valid_monotonic_ns(issued_at):
+            raise ValueError("GUI action intent requires a valid monotonic timestamp")
         received_at_ns = getattr(observation, "observation_received_monotonic_ns", None)
+        if received_at_ns is not None and (
+            not _valid_monotonic_ns(received_at_ns) or received_at_ns > issued_at
+        ):
+            raise ValueError("GUI action intent requires a valid observation timestamp")
         elapsed_ms = (
-            max(0, issued_at - received_at_ns) / 1_000_000
-            if isinstance(received_at_ns, int) and not isinstance(received_at_ns, bool)
+            (issued_at - received_at_ns) / 1_000_000
+            if received_at_ns is not None
             else 0.0
         )
         effective_age_ms = max(
-            capture_age_ms + elapsed_ms,
-            float(age_ms)
-            if isinstance(age_ms, (int, float)) and not isinstance(age_ms, bool)
-            else 0.0,
+            capture_age + elapsed_ms,
+            observation_age if observation_age is not None else 0.0,
         )
         if (
             not active_window
@@ -134,22 +235,22 @@ class GUIActionIntent:
             or version <= 0
         ):
             raise ValueError("GUI action intent requires a versioned active desktop")
-        if (
-            not isinstance(age_ms, (int, float))
-            or isinstance(age_ms, bool)
-            or not math.isfinite(age_ms)
-            or age_ms < 0
-            or effective_age_ms > ttl_ms
-        ):
+        if observation_age is None or effective_age_ms >= ttl_ms:
             raise ValueError("GUI action intent requires fresh observation evidence")
+        try:
+            payload_json = _encode_payload(payload)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("GUI action payload must be strict JSON data") from exc
+        if not isinstance(target, str) or not isinstance(expected_outcome, str):
+            raise ValueError("GUI action target and expected outcome must be strings")
+        age_ns = math.ceil(effective_age_ms * 1_000_000)
+        ttl_ns = ttl_ms * 1_000_000
 
         return cls(
             action_type=action_name,
-            target=str(target),
-            payload_json=json.dumps(
-                dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-            ),
-            expected_outcome=str(expected_outcome),
+            target=target,
+            payload_json=payload_json,
+            expected_outcome=expected_outcome,
             source_perception_version=version,
             source_state_version=state_version,
             source_scene_hash=scene_hash,
@@ -157,7 +258,7 @@ class GUIActionIntent:
             source_width=width,
             source_height=height,
             issued_at_ns=issued_at,
-            expires_at_ns=issued_at + max(0, ttl_ms - int(effective_age_ms)) * 1_000_000,
+            expires_at_ns=issued_at + ttl_ns - age_ns,
         )
 
     def validate_binding(
@@ -171,16 +272,19 @@ class GUIActionIntent:
         """Reject action substitution or an intent that expired before dispatch."""
         reasons: list[str] = []
         current = now_ns if now_ns is not None else time.perf_counter_ns()
-        if current > self.expires_at_ns:
+        if not _valid_monotonic_ns(current):
+            reasons.append("GUI action validation timestamp is invalid")
+        elif current >= self.expires_at_ns:
             reasons.append("GUI action intent expired")
-        if str(action_type).strip() != self.action_type:
+        if not isinstance(action_type, str) or action_type != self.action_type:
             reasons.append("GUI action type differs from intent")
-        if str(target) != self.target:
+        if not isinstance(target, str) or target != self.target:
             reasons.append("GUI action target differs from intent")
+        if not isinstance(payload, Mapping):
+            reasons.append("GUI action payload is not serializable")
+            return tuple(reasons)
         try:
-            encoded_payload = json.dumps(
-                dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-            )
+            encoded_payload = _encode_payload(payload)
         except (TypeError, ValueError):
             reasons.append("GUI action payload is not serializable")
         else:
@@ -196,6 +300,8 @@ class GUIActionIntent:
     ) -> GUIActionIntent:
         """Mint a continuation only after an observed, authorized UI transition."""
         current = now_ns if now_ns is not None else time.perf_counter_ns()
+        if not _valid_monotonic_ns(current):
+            raise ValueError("GUI action transition timestamp is invalid")
         remaining_ms = (self.expires_at_ns - current) // 1_000_000
         if remaining_ms <= 0:
             raise ValueError("GUI action intent expired before its verified transition")
@@ -220,20 +326,19 @@ class GUIActionIntent:
         """Require fresh evidence from the same window and display geometry."""
         current = now_ns if now_ns is not None else time.perf_counter_ns()
         reasons: list[str] = []
-        if current > self.expires_at_ns:
+        if not _valid_monotonic_ns(current):
+            reasons.append("GUI action validation timestamp is invalid")
+        elif current >= self.expires_at_ns:
             reasons.append("GUI action intent expired")
-        age_ms = getattr(screen, "capture_age_ms", None)
-        if (
-            not isinstance(age_ms, (int, float))
-            or isinstance(age_ms, bool)
-            or not math.isfinite(age_ms)
-            or age_ms < 0
-            or age_ms + elapsed_ms > max_age_ms
-        ):
+        age_ms = _finite_nonnegative_ms(getattr(screen, "capture_age_ms", None))
+        elapsed = _finite_nonnegative_ms(elapsed_ms)
+        max_age = _finite_nonnegative_ms(max_age_ms)
+        if age_ms is None or elapsed is None or max_age is None or age_ms + elapsed > max_age:
             reasons.append("fresh desktop evidence is unavailable")
         if (
             getattr(screen, "desktop_state", "") != "INTERACTIVE"
-            or not getattr(screen, "screenshot_base64", "")
+            or not isinstance(getattr(screen, "screenshot_base64", None), str)
+            or not screen.screenshot_base64.strip()
         ):
             reasons.append("fresh pixel frame is unavailable")
         active_window = str(getattr(screen, "active_window", "") or "").strip()
@@ -244,26 +349,12 @@ class GUIActionIntent:
             or getattr(screen, "height", 0) != self.source_height
         ):
             reasons.append("display geometry differs from GUI action intent")
-        avcs_state = getattr(screen, "avcs_state", None)
-        current_version = (
-            avcs_state.get("frame_index")
-            if isinstance(avcs_state, Mapping)
-            and avcs_state.get("engine") == "avcs_reflex"
-            else None
-        )
-        if (
-            not isinstance(current_version, int)
-            or isinstance(current_version, bool)
-            or current_version <= 0
-        ):
-            reasons.append("a versioned AVCS frame is unavailable")
-        current_scene_hash = (
-            avcs_state.get("scene_hash")
-            if isinstance(avcs_state, Mapping)
-            and avcs_state.get("engine") == "avcs_reflex"
-            else None
-        )
-        if current_scene_hash != self.source_scene_hash:
+        identity = _avcs_identity(screen)
+        if identity is None:
+            reasons.append("a trustworthy AVCS frame identity is unavailable")
+        elif identity[0] < self.source_state_version:
+            reasons.append("AVCS frame is older than the GUI action intent")
+        if identity is not None and identity[1] != self.source_scene_hash:
             reasons.append("AVCS scene differs from GUI action intent")
         return tuple(reasons)
 

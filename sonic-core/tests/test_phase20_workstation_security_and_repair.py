@@ -9,6 +9,7 @@ Proves:
 """
 
 import base64
+import json
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -87,6 +88,61 @@ def test_local_docker_workspace_is_not_implicitly_shared(monkeypatch):
     assert workstation._session_workspace_id_for_tenant(
         "tenant-isolation-b", "default"
     ) == ""
+
+
+def test_local_restore_does_not_reassign_persisted_shared_container(
+    tmp_path, monkeypatch
+):
+    tenant_id = "restore-isolation-tenant"
+    state_path = tmp_path / "workstations.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                tenant_id: {
+                    "default": {
+                        "desktop": {
+                            "workspace_id": "sonic-desktop-workstation",
+                            "sandbox_id": "sonic-desktop-workstation",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SONIC_USE_DAYTONA_CLOUD", "0")
+    monkeypatch.setattr(workstation, "_get_workstation_state_file", lambda: state_path)
+    workstation._tenant_workstations.pop(tenant_id, None)
+    try:
+        workstation._load_workstation_state()
+
+        desktop = workstation._tenant_workstations[tenant_id]["default"]["desktop"]
+        assert desktop["workspace_id"] == ""
+        assert desktop["sandbox_id"] == ""
+        assert desktop["status"] == "NO_ACTIVE_WORKSPACE"
+    finally:
+        workstation._tenant_workstations.pop(tenant_id, None)
+
+
+def test_workstation_command_without_owned_workspace_fails_closed(
+    client, auth_headers, monkeypatch
+):
+    monkeypatch.delenv("SONIC_USE_DAYTONA_CLOUD", raising=False)
+    terminal = AsyncMock()
+    monkeypatch.setattr(
+        workstation,
+        "get_daytona_computer",
+        lambda: type("Provider", (), {"terminal": terminal})(),
+    )
+
+    response = client.post(
+        "/workstation/command",
+        headers=auth_headers,
+        json={"command": "whoami", "session_id": "unprovisioned-session"},
+    )
+
+    assert response.status_code == 503
+    terminal.assert_not_awaited()
 
 
 def test_workstation_command_executes_in_sandbox(client, auth_headers):

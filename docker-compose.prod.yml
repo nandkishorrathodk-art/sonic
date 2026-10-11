@@ -67,6 +67,21 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env}
       - REDIS_URL=redis://redis:6379/0
+      # The default model provider in configs/models.yaml is Groq. Keep the
+      # key out of the image while requiring it at production startup.
+      - GROQ_API_KEY=${GROQ_API_KEY:?GROQ_API_KEY must be set in .env}
+      # Optional providers are injected when configured so task-specific
+      # routing and fallback models can authenticate in the API container.
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - XAI_API_KEY=${XAI_API_KEY:-}
+      - NVIDIA_BASE_URL=${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - GROQ_BASE_URL=${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       # Production workstation actions require an explicitly configured,
       # tenant-aware remote desktop provider. The API must not silently fall
       # back to a local Docker workstation without an isolated substrate.

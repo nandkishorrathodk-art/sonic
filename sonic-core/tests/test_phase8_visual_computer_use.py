@@ -7,8 +7,12 @@ includes GUI actions in its schema, that the action parser handles coordinate
 formats, and that the safety policy allows GUI actions.
 """
 import asyncio
+import base64
+import binascii
 import json
+import struct
 import pytest
+import zlib
 from unittest.mock import AsyncMock, MagicMock
 
 from sonic.computer.models import GUIActionType, ScreenObservation
@@ -26,6 +30,34 @@ from sonic.safety.action_policy import ActionPolicy
 
 # ---- Helpers ----
 
+def _png_base64(color: int = 0) -> str:
+    """Create a valid frame matching the mock display dimensions."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(
+            ">I", binascii.crc32(body) & 0xFFFFFFFF
+        )
+
+    width, height = 1280, 800
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    rows = (
+        b"\x00" + bytes([color if y >= height // 2 else 0]) * (width * 3)
+        for y in range(height)
+    )
+    image = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + chunk(b"IEND", b"")
+    )
+    return base64.b64encode(image).decode("ascii")
+
+
+_FRESH_FRAME = _png_base64()
+_AFTER_FRAME = _png_base64(255)
+_FOCUSED_FRAME = _png_base64(128)
+
+
 def _mock_provider():
     """Build a mock ComputerProvider with async methods."""
     p = AsyncMock()
@@ -33,7 +65,7 @@ def _mock_provider():
     p.screenshot.return_value = ScreenObservation(
         width=1280,
         height=800,
-        screenshot_base64="fresh-frame",
+        screenshot_base64=_FRESH_FRAME,
         capture_age_ms=0,
         controls_age_ms=0,
         active_window="Desktop",
@@ -48,7 +80,7 @@ def _mock_provider():
     p.gui_action.return_value = ScreenObservation(
         width=1280,
         height=800,
-        screenshot_base64="after-frame",
+        screenshot_base64=_AFTER_FRAME,
         capture_age_ms=0,
         controls_age_ms=0,
         active_window="Desktop",
@@ -60,7 +92,7 @@ def _seed_fresh_gui_observation(agent, *, active_window="Desktop", controls=None
     screen = ScreenObservation(
         width=1280,
         height=800,
-        screenshot_base64="fresh-frame",
+        screenshot_base64=_FRESH_FRAME,
         capture_age_ms=0,
         controls_age_ms=0,
         active_window=active_window,
@@ -115,7 +147,7 @@ class TestGUIActionDispatch:
             width=1280,
             height=800,
             active_window="workspace",
-            screenshot_base64="fresh-frame",
+            screenshot_base64=_FRESH_FRAME,
             desktop_state="INTERACTIVE",
         )
         provider.launch_application.return_value = True
@@ -201,11 +233,11 @@ class TestGUIActionDispatch:
             {"text": "hello world"}, "Type text"
         )
         assert trace.status == ActionExecutionStatus.BLOCKED
-        assert "coordinates" in trace.actual_observation
+        assert "focus-verification head" in trace.actual_observation
         provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_gui_only_type_uses_pixel_target_without_accessibility_control(self):
+    async def test_gui_only_type_fails_closed_without_evaluated_focus_head(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
         _allow_visual_focus(agent)
@@ -222,9 +254,65 @@ class TestGUIActionDispatch:
             },
             "The requested text appears",
         )
-        assert trace.status != ActionExecutionStatus.BLOCKED
-        assert any(call.args[1].action == GUIActionType.CLICK for call in provider.gui_action.await_args_list)
-        assert any(call.args[1].action == GUIActionType.TYPE for call in provider.gui_action.await_args_list)
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        assert "focus-verification head" in trace.actual_observation
+        agent.llm_router.complete.assert_not_awaited()
+        provider.gui_action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_gui_only_clear_field_fails_closed_without_using_shell_motor(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+        agent.motor.clear_field = AsyncMock()
+        await agent.observe("ws-1")
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_TYPE,
+            "320,240",
+            {
+                "x": 320,
+                "y": 240,
+                "text": "replacement",
+                "clear_field": True,
+                "postcondition": {"screen_changed": True},
+            },
+            "Replace the visible field text",
+        )
+
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        assert "focus-verification head" in trace.actual_observation
+        agent.motor.clear_field.assert_not_awaited()
+        provider.gui_action.assert_not_awaited()
+        provider.terminal.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_gui_only_type_rejects_shell_backed_window_focus_request(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+        agent.motor.settle_focus = AsyncMock()
+        await agent.observe("ws-1")
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_TYPE,
+            "320,240",
+            {
+                "x": 320,
+                "y": 240,
+                "text": "must not be sent",
+                "window_title": "Requested window",
+                "postcondition": {"screen_changed": True},
+            },
+            "Type into the requested window",
+        )
+
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        agent.motor.settle_focus.assert_not_awaited()
+        assert all(
+            call.args[1].action != GUIActionType.TYPE
+            for call in provider.gui_action.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_gui_only_type_blocks_when_pixels_do_not_confirm_focus(self):
@@ -273,14 +361,14 @@ class TestGUIActionDispatch:
             ScreenObservation(
                 width=1280,
                 height=800,
-                screenshot_base64="fresh-frame",
+                screenshot_base64=_FRESH_FRAME,
                 capture_age_ms=0,
                 active_window="Desktop",
             ),
             ScreenObservation(
                 width=1280,
                 height=800,
-                screenshot_base64="focused-frame",
+                screenshot_base64=_FOCUSED_FRAME,
                 capture_age_ms=0,
                 active_window="Desktop",
             ),
@@ -534,7 +622,7 @@ class TestGUIActionDispatch:
         provider.screenshot.return_value = ScreenObservation(
             width=1280,
             height=800,
-            screenshot_base64="fresh-frame",
+            screenshot_base64=_FRESH_FRAME,
             capture_age_ms=0,
             controls_age_ms=0,
             active_window="File Manager",
@@ -544,7 +632,7 @@ class TestGUIActionDispatch:
         def publish_scene(*, focused):
             current = {**control, "focused": focused}
             snapshot = agent.perception_bus.publish(
-                screenshot_base64="fresh-frame",
+                screenshot_base64=_FRESH_FRAME,
                 width=1280,
                 height=800,
                 active_window="File Manager",
@@ -552,7 +640,7 @@ class TestGUIActionDispatch:
             )
             observation = ComputerWorldObservation(
                 screen=ScreenObservation(
-                    screenshot_base64="fresh-frame",
+                    screenshot_base64=_FRESH_FRAME,
                     width=1280,
                     height=800,
                     active_window="File Manager",
@@ -677,7 +765,7 @@ class TestGUIActionDispatch:
         provider.screenshot.return_value = ScreenObservation(
             width=1280,
             height=800,
-            screenshot_base64="latest-frame",
+            screenshot_base64=_FRESH_FRAME,
             capture_age_ms=0,
             controls_age_ms=0,
         )
@@ -1104,7 +1192,7 @@ class TestActionParsing:
         blocked, *_ = agent._parse_gui_action_response(response, "")
         assert blocked == ActionExecutionStatus.BLOCKED
 
-        agent._last_screenshot_b64 = "fresh-frame"
+        agent._last_screenshot_b64 = _FRESH_FRAME
         agent._last_reasoning_perception = {"image_attached": True}
         agent.llm_router = MagicMock()
         action, target, *_ = agent._parse_gui_action_response(response, "")
@@ -1491,7 +1579,7 @@ class TestReasoningPrompt:
     def test_gui_reasoning_context_omits_structured_controls_from_visual_prompt(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
         snapshot = agent.perception_bus.publish(
-            screenshot_base64="frame-a",
+            screenshot_base64=_FRESH_FRAME,
             width=1280,
             height=800,
             controls=[
@@ -1507,7 +1595,7 @@ class TestReasoningPrompt:
         )
         observation = ComputerWorldObservation(
             screen=ScreenObservation(
-                screenshot_base64="frame-a",
+                screenshot_base64=_FRESH_FRAME,
                 width=1280,
                 height=800,
                 visible_text="File Edit View",
@@ -1528,9 +1616,9 @@ class TestReasoningPrompt:
     @pytest.mark.asyncio
     async def test_gui_reasoning_uses_pixels_without_exposing_control_inventory(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
-        agent._last_screenshot_b64 = "encoded-frame"
+        agent._last_screenshot_b64 = _FRESH_FRAME
         snapshot = agent.perception_bus.publish(
-            screenshot_base64="encoded-frame",
+            screenshot_base64=_FRESH_FRAME,
             width=1280,
             height=800,
             controls=[
@@ -1553,7 +1641,7 @@ class TestReasoningPrompt:
         ))
         observation = ComputerWorldObservation(
             screen=ScreenObservation(
-                screenshot_base64="encoded-frame",
+                screenshot_base64=_FRESH_FRAME,
                 width=1280,
                 height=800,
                 capture_age_ms=0,
@@ -1575,9 +1663,9 @@ class TestReasoningPrompt:
     @pytest.mark.asyncio
     async def test_gui_reasoning_keeps_screenshot_fallback_without_controls(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
-        agent._last_screenshot_b64 = "encoded-frame"
+        agent._last_screenshot_b64 = _FRESH_FRAME
         snapshot = agent.perception_bus.publish(
-            screenshot_base64="encoded-frame",
+            screenshot_base64=_FRESH_FRAME,
             width=1280,
             height=800,
         )
@@ -1591,7 +1679,7 @@ class TestReasoningPrompt:
         ))
         observation = ComputerWorldObservation(
             screen=ScreenObservation(
-                screenshot_base64="encoded-frame",
+                screenshot_base64=_FRESH_FRAME,
                 width=1280,
                 height=800,
                 capture_age_ms=0,

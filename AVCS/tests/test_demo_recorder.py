@@ -1,8 +1,12 @@
+import queue
+from pathlib import Path
+
 import numpy as np
 import pytest
-
 from avcs.training.demo_recorder import (
     WindowInfo,
+    WindowsDemoRecorder,
+    _read_target_labels,
     build_click_record,
     crop_window_frame,
     find_exact_window_title,
@@ -68,3 +72,47 @@ def test_click_record_contains_no_captured_keystrokes_or_text():
     }
     assert "typed_text" not in record
     assert "key" not in record["action"]
+
+
+def test_recorder_reuses_explicit_target_label_without_console_input():
+    labels = queue.Queue()
+    labels.put("Alternate control")
+    recorder = WindowsDemoRecorder(
+        window_title="AVCS_DEMO_WINDOW",
+        task="Click the test control",
+        output_dir=Path("unused"),
+        target_label="Target button",
+        user32=object(),
+        label_queue=labels,
+    )
+
+    assert recorder._next_label() == "Alternate control"
+    assert recorder._next_label() == "Target button"
+    assert recorder.label_queue.empty()
+
+
+def test_target_label_mode_keeps_stop_command_available(monkeypatch):
+    recorder = WindowsDemoRecorder(
+        window_title="AVCS_DEMO_WINDOW",
+        task="Click the test control",
+        output_dir=Path("unused"),
+        target_label="Target button",
+        user32=object(),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: ":stop")
+
+    _read_target_labels(recorder)
+
+    assert recorder._stop.is_set()
+
+
+@pytest.mark.parametrize("label", ["", " ", "x" * 161])
+def test_recorder_rejects_invalid_default_target_label(label):
+    with pytest.raises(ValueError, match="1 to 160 characters"):
+        WindowsDemoRecorder(
+            window_title="AVCS_DEMO_WINDOW",
+            task="Click the test control",
+            output_dir=Path("unused"),
+            target_label=label,
+            user32=object(),
+        )

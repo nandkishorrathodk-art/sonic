@@ -10,15 +10,14 @@ from typing import Any, Optional, Union
 
 import numpy as np
 import torch
-from PIL import Image
-from torch.utils.data import Dataset
-
 from avcs.goal_grounder import (
     DEFAULT_INPUT_SIZE,
     click_heatmap,
     encode_queries,
     letterbox_rgb,
 )
+from PIL import Image
+from torch.utils.data import Dataset
 
 
 @dataclass(frozen=True)
@@ -27,9 +26,17 @@ class DemoRecord:
     frame_path: Path
     target_label: str
     point_norm: tuple[float, float]
+    task: str
+    target_window_title: str
 
 
-def _load_record(session_dir: Path, raw: dict[str, Any]) -> DemoRecord:
+def _load_record(
+    session_dir: Path,
+    raw: dict[str, Any],
+    *,
+    task: str,
+    target_window_title: str,
+) -> DemoRecord:
     if raw.get("schema_version") != 1:
         raise ValueError(f"Unsupported demonstration schema in {session_dir}")
     action = raw.get("action")
@@ -60,7 +67,14 @@ def _load_record(session_dir: Path, raw: dict[str, Any]) -> DemoRecord:
         raise ValueError(f"Frame path escapes its demonstration session: {frame_value}") from exc
     if not frame_path.is_file():
         raise FileNotFoundError(f"Demonstration frame does not exist: {frame_path}")
-    return DemoRecord(session_dir, frame_path, target_label.strip(), (x, y))
+    return DemoRecord(
+        session_dir,
+        frame_path,
+        target_label.strip(),
+        (x, y),
+        task,
+        target_window_title,
+    )
 
 
 def discover_demonstrations(
@@ -102,7 +116,14 @@ def discover_demonstrations(
                     raw = json.loads(line)
                     if not isinstance(raw, dict):
                         raise TypeError("sample must be a JSON object")
-                    records.append(_load_record(samples_path.parent, raw))
+                    records.append(
+                        _load_record(
+                            samples_path.parent,
+                            raw,
+                            task=manifest["task"].strip(),
+                            target_window_title=manifest["target_window_title"].strip(),
+                        )
+                    )
                 except (json.JSONDecodeError, ValueError, TypeError, FileNotFoundError) as exc:
                     raise ValueError(f"{samples_path}:{line_number}: {exc}") from exc
         sample_count = manifest.get("sample_count")
@@ -126,28 +147,46 @@ def split_sessions(
     *,
     seed: int = 42,
 ) -> tuple[list[DemoRecord], list[DemoRecord], list[DemoRecord]]:
-    """Create deterministic train/validation/test splits without session leakage."""
-    paths = list(sessions)
-    if len(paths) < 5:
-        raise ValueError(
-            "At least 5 separate recording sessions are required for leakage-free "
-            "train/validation/test splits with at least 3 training sessions."
+    """Split by task/window group so repeated recordings cannot leak across sets."""
+    groups: dict[tuple[str, str], list[Path]] = {}
+    for path, records in sessions.items():
+        if not records:
+            continue
+        key = (
+            records[0].task.casefold().strip(),
+            records[0].target_window_title.casefold().strip(),
         )
-    random.Random(seed).shuffle(paths)
-    test_count = max(1, round(len(paths) * 0.15))
-    validation_count = max(1, round(len(paths) * 0.15))
-    if test_count + validation_count >= len(paths):
-        raise ValueError("Not enough recording sessions to create all three splits.")
-    test_paths = set(paths[:test_count])
-    validation_paths = set(paths[test_count : test_count + validation_count])
-    train_paths = set(paths[test_count + validation_count :])
-    if (train_paths & validation_paths) or (train_paths & test_paths) or (validation_paths & test_paths):
-        raise RuntimeError("Recording-session split unexpectedly overlaps")
+        groups.setdefault(key, []).append(path)
+    group_keys = list(groups)
+    if len(group_keys) < 5:
+        raise ValueError(
+            "At least 5 distinct task/window groups are required for leakage-free "
+            "train/validation/test splits with at least 3 training groups."
+        )
+    random.Random(seed).shuffle(group_keys)
+    test_count = max(1, round(len(group_keys) * 0.15))
+    validation_count = max(1, round(len(group_keys) * 0.15))
+    if test_count + validation_count >= len(group_keys):
+        raise ValueError("Not enough task/window groups to create all three splits.")
+    test_groups = set(group_keys[:test_count])
+    validation_groups = set(group_keys[test_count : test_count + validation_count])
+    train_groups = set(group_keys[test_count + validation_count :])
+    if (
+        train_groups & validation_groups
+        or train_groups & test_groups
+        or validation_groups & test_groups
+    ):
+        raise RuntimeError("Task/window group split unexpectedly overlaps")
 
-    def flatten(selected: set[Path]) -> list[DemoRecord]:
-        return [record for path in sorted(selected) for record in sessions[path]]
+    def flatten(selected: set[tuple[str, str]]) -> list[DemoRecord]:
+        return [
+            record
+            for key in sorted(selected)
+            for path in sorted(groups[key])
+            for record in sessions[path]
+        ]
 
-    return flatten(train_paths), flatten(validation_paths), flatten(test_paths)
+    return flatten(train_groups), flatten(validation_groups), flatten(test_groups)
 
 
 class DemonstrationClickDataset(Dataset):

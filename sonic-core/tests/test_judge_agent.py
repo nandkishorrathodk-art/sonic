@@ -3,12 +3,32 @@ Unit tests for JudgeAgent (Independent Verification & Anti-Self-Attestation).
 Ensures Rule 15 (Empirical Falsification) and Rule 1 (No self-attestation).
 """
 
-import pytest
+import base64
+from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from PIL import Image
 
 from sonic.agents.judge import JudgeAgent, JudgeVerdict
 from sonic.computer_use.models_boss import SubMission, SubMissionResult
 from sonic.sandbox.provider import ExecResult
+
+
+def _png_data(width=1280, height=800):
+    image = BytesIO()
+    Image.new("RGB", (width, height), color=(32, 64, 96)).save(image, format="PNG")
+    return image.getvalue()
+
+
+def _base64_png(width=1280, height=800):
+    return base64.b64encode(_png_data(width, height)).decode("ascii")
+
+
+def _jpeg_data(width=1280, height=800):
+    image = BytesIO()
+    Image.new("RGB", (width, height), color=(96, 64, 32)).save(image, format="JPEG")
+    return image.getvalue()
 
 
 @pytest.mark.asyncio
@@ -243,28 +263,77 @@ async def test_judge_falsifies_gui_mission_without_window_or_gui_action():
 
 
 @pytest.mark.asyncio
-async def test_judge_confirms_gui_mission_with_real_window():
+async def test_judge_keeps_gui_verification_local_and_inconclusive():
     mock_computer = MagicMock()
     mock_computer.screenshot = AsyncMock(return_value=type(
         "Screen", (), {
-            "screenshot_base64": "c2NyZWVu",
+            "screenshot_base64": _base64_png(),
+            "width": 1280,
+            "height": 800,
+            "avcs_state": {
+                "engine": "avcs_reflex",
+                "frame_index": 1,
+                "scene_hash": "fresh-scene",
+                "width": 1280,
+                "height": 800,
+                "scene_changed": True,
+                "regions": [{"x": 1, "y": 2}],
+                "events": [],
+            },
+            "desktop_state": "INTERACTIVE",
+            "capture_age_ms": 0,
+        }
+    )())
+    router = MagicMock()
+    router.complete = AsyncMock()
+    judge = JudgeAgent(computer_provider=mock_computer, llm_router=router)
+    sub_mission = SubMission(goal="Save the completed report", plane="gui")
+    result = SubMissionResult(
+        sub_mission_id=sub_mission.id,
+        goal=sub_mission.goal,
+        traces=[{
+            "action_type": "GUI_CLICK",
+            "target": "save control",
+            "status": "SUCCESS",
+            "actual_observation": "Click dispatched",
+        }],
+        success=True,
+    )
+
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_mission,
+        result=result,
+    )
+
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
+    assert any("AVCS frame 1" in item for item in evaluation.evidence_items)
+    assert "No screenshot was sent to a model" in evaluation.notes
+    router.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_judge_does_not_send_gui_screenshot_to_vision_model():
+    mock_computer = MagicMock()
+    mock_computer.screenshot = AsyncMock(return_value=type(
+        "Screen", (), {
+            "screenshot_base64": _base64_png(),
+            "width": 1280,
+            "height": 800,
+            "avcs_state": {
+                "engine": "avcs_reflex",
+                "frame_index": 1,
+                "scene_hash": "fresh-scene",
+                "width": 1280,
+                "height": 800,
+            },
             "desktop_state": "INTERACTIVE",
             "active_window": "Terminal",
             "capture_age_ms": 0,
         }
     )())
-    mock_computer.terminal = AsyncMock(return_value=ExecResult(
-        command="DISPLAY=:99 wmctrl -l 2>/dev/null | grep -v ' -1 '",
-        exit_code=0,
-        stdout="0x02600003  1 8e8d478afea9 Terminal - root@8e8d478afea9: /\n",
-        stderr="",
-    ))
     vision_judge = MagicMock()
-    vision_judge.complete = AsyncMock(return_value=type(
-        "Response", (), {
-            "content": '{"verdict":"CONFIRMED","visible_evidence":"Terminal window is visible"}'
-        }
-    )())
+    vision_judge.complete = AsyncMock()
     judge = JudgeAgent(computer_provider=mock_computer, llm_router=vision_judge)
     sub_m = SubMission(goal="Launch terminal window on desktop", plane="gui")
     trace = {
@@ -287,26 +356,33 @@ async def test_judge_confirms_gui_mission_with_real_window():
         result=result,
         worker_agent_id="sub-agent-gui",
     )
-    assert evaluation.verdict == JudgeVerdict.CONFIRMED
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
+    assert "No screenshot was sent to a model" in evaluation.notes
+    vision_judge.complete.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_judge_accepts_browser_actions_in_gui_mission():
+async def test_judge_keeps_browser_gui_screenshot_local():
     mock_computer = MagicMock()
     mock_computer.screenshot = AsyncMock(return_value=type(
         "Screen", (), {
-            "screenshot_base64": "c2NyZWVu",
+            "screenshot_base64": _base64_png(),
+            "width": 1280,
+            "height": 800,
+            "avcs_state": {
+                "engine": "avcs_reflex",
+                "frame_index": 1,
+                "scene_hash": "fresh-scene",
+                "width": 1280,
+                "height": 800,
+            },
             "desktop_state": "INTERACTIVE",
             "active_window": "Browser",
             "capture_age_ms": 0,
         }
     )())
     vision_judge = MagicMock()
-    vision_judge.complete = AsyncMock(return_value=type(
-        "Response", (), {
-            "content": '{"verdict":"CONFIRMED","visible_evidence":"Web page is visible in browser"}'
-        }
-    )())
+    vision_judge.complete = AsyncMock()
     judge = JudgeAgent(computer_provider=mock_computer, llm_router=vision_judge)
     sub_m = SubMission(goal="Navigate to local portal and verify dashboard", plane="gui")
     trace = {
@@ -329,7 +405,38 @@ async def test_judge_accepts_browser_actions_in_gui_mission():
         result=result,
         worker_agent_id="sub-agent-browser",
     )
-    assert evaluation.verdict == JudgeVerdict.CONFIRMED
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
+    assert "No screenshot was sent to a model" in evaluation.notes
+    vision_judge.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_judge_does_not_confirm_gui_receipt_on_headless_mission():
+    judge = JudgeAgent()
+    sub_mission = SubMission(goal="Open a document editor", plane="headless")
+    result = SubMissionResult(
+        sub_mission_id=sub_mission.id,
+        goal=sub_mission.goal,
+        traces=[
+            {
+                "action_type": "APP_LAUNCH",
+                "target": "document editor",
+                "status": "COMPLETED",
+                "exit_code": 0,
+                "actual_observation": "Launched and focused document editor",
+            }
+        ],
+        success=True,
+    )
+
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="test-ws",
+        sub_mission=sub_mission,
+        result=result,
+    )
+
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
+    assert evaluation.verdict != JudgeVerdict.CONFIRMED
 
 
 @pytest.mark.asyncio

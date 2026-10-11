@@ -983,7 +983,7 @@ export function WorklogFeed({
                   <span className="text-slate-300 font-medium">
                     {isObservation ? "🖥️ Desktop Observation Synchronized" : "🎯 Autonomous Visual Objective"}
                   </span>
-                  <span className="text-muted-dim text-[9.5px] ml-auto">1280x800</span>
+                  <span className="text-muted-dim text-[9.5px] ml-auto">1920x1080</span>
                 </div>
               );
             }

@@ -177,7 +177,6 @@ class ScreenVision:
 
     def _reflex_loop(self) -> None:
         prev: Optional[SceneState] = None
-        idx = 0
         last_seq = -1
         min_period = 1.0 / self.target_fps if self.target_fps else 0.0
         last_tick = 0.0
@@ -200,8 +199,10 @@ class ScreenVision:
             last_tick = time.perf_counter()
             last_seq = seq
             tick_start = time.perf_counter()
-            state = self.perception.perceive(frame, frame_index=idx)
-            idx += 1
+            state = self.perception.perceive(
+                frame,
+                frame_index=self.stats.frames,
+            )
             self.stats.frames += 1
             self.stats.reflex_latencies.append(state.latency_ms)
             if len(self.stats.reflex_latencies) > 2000:

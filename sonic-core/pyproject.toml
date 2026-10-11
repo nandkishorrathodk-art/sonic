@@ -27,6 +27,8 @@ dependencies = [
     "pyyaml>=6.0.2",
     "Pillow>=10.0",
     "numpy>=1.26",
+    # AVCS's eager vision package imports its cortex modules even for reflex-only use.
+    "torch>=2.0.0",
     
     # Database
     "neo4j>=5.27.0",
@@ -57,7 +59,7 @@ rag-local = [
     "sentence-transformers>=3.0.0",
 ]
 avcs-grounding = [
-    "torch>=2.0.0",
+    "torch>=2.0.0",  # Compatibility extra; AVCS requires torch at runtime.
 ]
 
 [tool.setuptools.packages.find]

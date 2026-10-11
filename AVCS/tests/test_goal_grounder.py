@@ -17,7 +17,7 @@ from avcs.training.demonstrations import (
     discover_demonstrations,
     split_sessions,
 )
-from avcs.training.train_grounder import _batch_metrics
+from avcs.training.train_grounder import _batch_metrics, _select_confidence_threshold
 from PIL import Image
 
 
@@ -84,7 +84,29 @@ def test_grounder_top1_point_accuracy_uses_screen_diagonal_tolerance():
     assert metrics["mean_normalized_click_distance"].item() == pytest.approx(0.375)
 
 
-def _write_session(root, name, point=(0.5, 0.5)):
+def test_confidence_threshold_requires_minimum_validation_coverage():
+    threshold, accepted, precision = _select_confidence_threshold(
+        [0.9] * 9,
+        [True] * 9,
+        required_precision=0.9,
+    )
+
+    assert (threshold, accepted, precision) == (1.0, 0, 0.0)
+
+
+def test_confidence_threshold_selects_widest_validation_set_at_required_precision():
+    threshold, accepted, precision = _select_confidence_threshold(
+        [0.2] * 10 + [0.5] * 10 + [0.8] * 10,
+        [True] * 10 + [False] * 10 + [True] * 10,
+        required_precision=0.9,
+    )
+
+    assert threshold == 0.8
+    assert accepted == 10
+    assert precision == 1.0
+
+
+def _write_session(root, name, point=(0.5, 0.5), *, task=None, window_title=None):
     session = root / name
     (session / "frames").mkdir(parents=True)
     Image.new("RGB", (120, 60), color=(40, 50, 60)).save(session / "frames" / "frame.png")
@@ -98,8 +120,8 @@ def _write_session(root, name, point=(0.5, 0.5)):
     manifest = {
         "schema_version": 1,
         "status": "stopped",
-        "task": "click the labeled test button",
-        "target_window_title": "AVCS disposable test fixture",
+        "task": task or f"click the labeled test button in {name}",
+        "target_window_title": window_title or f"AVCS disposable test fixture {name}",
         "sample_count": 1,
         "capture_scope": "cropped target window only",
         "keyboard_recording": False,
@@ -121,10 +143,30 @@ def test_demonstration_split_keeps_recording_sessions_disjoint(tmp_path):
     assert len(train) == 3
     assert len(validation) == len(test) == 1
     assert len({record.session_dir for record in train + validation + test}) == 5
+    split_groups = [
+        {(record.task.casefold(), record.target_window_title.casefold()) for record in split}
+        for split in (train, validation, test)
+    ]
+    assert not split_groups[0] & split_groups[1]
+    assert not split_groups[0] & split_groups[2]
+    assert not split_groups[1] & split_groups[2]
     sample = DemonstrationClickDataset(train, input_size=64)[0]
     assert sample["image"].shape == (3, 64, 64)
     assert sample["target_heatmap"].shape == (32, 32)
     assert sample["query_tokens"].shape == (96,)
+
+
+def test_demonstration_split_rejects_repeated_task_window_sessions(tmp_path):
+    for index in range(5):
+        _write_session(
+            tmp_path,
+            f"session-{index}",
+            task="complete the same form",
+            window_title="same application window",
+        )
+
+    with pytest.raises(ValueError, match="distinct task/window groups"):
+        split_sessions(discover_demonstrations(tmp_path))
 
 
 def test_dataset_rejects_frame_path_traversal(tmp_path):
@@ -161,7 +203,7 @@ def test_dataset_rejects_frame_path_traversal(tmp_path):
 
 def test_session_split_requires_multiple_recording_sessions(tmp_path):
     _write_session(tmp_path, "only-session")
-    with pytest.raises(ValueError, match="At least 5 separate recording sessions"):
+    with pytest.raises(ValueError, match="At least 5 distinct task/window groups"):
         split_sessions(discover_demonstrations(tmp_path))
 
 
@@ -191,13 +233,27 @@ def test_checkpoint_loader_accepts_demonstration_trainer_shape_and_predicts(tmp_
             "dataset_provenance": "recorded_ui_click_demonstrations",
             "training_samples": 12,
             "validation_samples": 3,
-            "held_out_test_samples": 3,
+            "held_out_test_samples": 20,
             "evaluation": {
                 "metric": GROUNDING_ACCEPTANCE_METRIC,
                 "value": 0.90,
                 "minimum": 0.85,
                 "passed": True,
-                "samples": 3,
+                "samples": 20,
+            },
+            "coordinate_frame": "cropped_target_window",
+            "query_confidence_calibration": {
+                "method": "validation_selected_peak_score_threshold",
+                "evaluation": {
+                    "metric": "empirical_precision_at_threshold",
+                    "samples": 20,
+                    "accepted_samples": 10,
+                    "threshold": 0.2,
+                    "precision": 0.9,
+                    "required_precision": 0.9,
+                    "minimum_accepted_samples": 10,
+                    "passed": True,
+                },
             },
             "input_size": 64,
             "model_state_dict": source_model.state_dict(),

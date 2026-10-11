@@ -20,7 +20,8 @@ Operator outcome
   -> API/workstation session
   -> Boss planning, delegation, evidence review and replanning
   -> ordinary ComputerUseAgent workers
-       -> fresh workstation state and, when needed, screenshot pixels
+       -> fresh workstation frame, processed locally by AVCS
+       -> compact AVCS reflex summary for workstation reasoning
        -> reason about the assigned objective
        -> ground a visible GUI action or use an allowed execution capability
        -> action policy/provider dispatch and recorded receipt
@@ -43,7 +44,7 @@ workers.
 | Orchestration | `sonic-core/sonic/computer_use/boss.py` | Task analysis, bounded worker dispatch, receipts, review and replanning |
 | Computer-use worker | `sonic-core/sonic/computer_use/agent.py` | Observation, reasoning, action dispatch and worker traces |
 | Desktop provider | `sonic-core/sonic/computer/docker_computer.py` | Local Docker workstation access and state/screenshot observations |
-| NSI state feed | `docker/` workstation entrypoint and NSI components | Compact versioned state, visible text, controls and changed-region metadata |
+| AVCS pixel reflex | `sonic-core/sonic/computer_use/avcs_perception.py` and workstation providers | Local pixel-derived scene/change state; optional checkpoint-gated target grounder |
 | Grounding | `sonic-core/sonic/computer_use/grounding.py` | Coordinate-space parsing and grounded target resolution |
 | Policy | `sonic-core/sonic/safety/` | Action policy, scope, egress and sealed-policy controls |
 | Independent review | `sonic-core/sonic/computer_use/judge.py` | Checks completion proposals against fresh evidence and worker receipts |
@@ -61,14 +62,37 @@ operator's requested outcome and live state should determine which capability
 is appropriate. A GUI-only assignment must stay GUI-only; terminal work must
 not be silently substituted for the requested visible interaction.
 
-The Docker workstation exposes a compact NSI sidecar rather than embedding
-screenshot data in every state update. `observe_state()` validates freshness;
-the worker can request a screenshot when visual evidence is needed. Fresh,
-unambiguous structured accessibility state may support some reasoning without
-full-frame transfer. GUI actions still require grounded current evidence and
-fresh post-action observation. See the
-[perception contract](SONIC_COMPUTER_USER_GOAL.md#architectural-direction)
-for coordinate and ambiguity rules.
+The current Docker and Daytona workstation screenshot paths validate a fresh
+frame and process its pixels locally through `AVCSPerception`. The resulting
+AVCS reflex state includes pixel-derived properties such as a frame index,
+dimensions, scene hash, brightness/contrast, change and motion estimates,
+regions, and reflex events. Workstation reasoning receives a compact,
+allowlisted text summary; screenshot bytes are not included in that reasoning
+request. This describes the active workstation perception path, not a
+repository-wide removal of OCR, NSI, accessibility, or DOM-related code.
+
+AVCS reflex state is not semantic UI understanding: it does not identify
+controls or application meaning, prove that a pointer target is correct, or
+verify keyboard focus. An optional local target-grounding model is accepted
+only when its checkpoint passes training-provenance, held-out point-accuracy,
+and empirical query-score operating-point checks. Each proposed target must
+also meet that checkpoint's recorded score threshold; the raw heatmap peak is
+not treated as a calibrated probability. No live acceptance evidence here
+establishes a ready, reliable grounding checkpoint. If grounding or fresh-frame
+validation is unavailable or inconclusive, the affected action must fail
+closed. GUI text entry remains unavailable without an evaluated local
+focus-verification capability.
+
+The GUI Judge processes a fresh screenshot locally through AVCS and does not
+send screenshot pixels to a model. AVCS pixel change, motion, reflex events, or
+a worker completion proposal alone are not evidence that the operator's
+semantic postcondition was met. Until a validated local task-verification head
+exists, GUI Judge verdicts remain inconclusive; task completion must not be
+claimed from reflex telemetry. No live AVCS GUI acceptance or OSWorld-2
+comparative benchmark is documented; these implementation contracts do not
+establish arbitrary-application success or superiority over another system. See the
+[perception contract](SONIC_COMPUTER_USER_GOAL.md#avcs-only-workstation-perception-current-contract)
+for details.
 
 This is not a guarantee of complete event subscriptions, zero-latency updates,
 or reliable operation in every application. Other providers may use different

@@ -29,7 +29,14 @@ class HTTPClientAdapter(SecurityTool):
         method = raw_method if re.match(r"^[A-Z]{3,10}$", raw_method) else "GET"
         headers = request.options.get("headers", {})
         data = request.options.get("data")
-        follow_redirects = bool(request.options.get("follow_redirects", True))
+        follow_redirects = request.options.get("follow_redirects", False)
+        if not isinstance(follow_redirects, bool):
+            raise ValueError("follow_redirects must be a boolean")
+        if follow_redirects:
+            raise ValueError(
+                "Automatic redirect following is disabled because each redirect "
+                "destination must be independently scope- and egress-validated."
+            )
 
         timeout_sec = max(1, min(300, int(request.timeout_seconds or 30)))
         cmd = [
@@ -37,9 +44,6 @@ class HTTPClientAdapter(SecurityTool):
             "-X", method,
             "--max-time", str(timeout_sec),
         ]
-        if follow_redirects:
-            cmd.append("-L")
-
         if isinstance(headers, dict):
             for k, v in headers.items():
                 safe_header = f"{str(k).strip()}: {str(v).strip()}"

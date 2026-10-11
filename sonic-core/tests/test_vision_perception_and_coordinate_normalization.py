@@ -8,6 +8,7 @@ Tests for AVCS-local perception and coordinate normalization in sonic-core:
 
 import base64
 import io
+import sys
 import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -15,7 +16,8 @@ from PIL import Image
 
 from sonic.computer.models import ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.grounding import extract_bbox_midpoint
+from sonic.computer_use import grounding
+from sonic.computer_use.grounding import extract_bbox_midpoint, resolve_ui_target
 from sonic.computer_use.models import ActionExecutionStatus, ComputerWorldObservation
 
 
@@ -169,6 +171,195 @@ def test_extract_bbox_midpoint_normalized_scaling_1280x800():
     # Explicit pixel coordinates (is_normalized_1000=False) preserve raw values
     coords_px = extract_bbox_midpoint("[500, 400]", width=1280, height=800, is_normalized_1000=False)
     assert coords_px == (500, 400)
+
+
+def test_extract_bbox_midpoint_normalized_scaling_1920x1080():
+    coords = extract_bbox_midpoint(
+        '{"x": 500, "y": 500}',
+        width=1920,
+        height=1080,
+        coordinate_space="normalized_1000",
+    )
+    assert coords == (960, 540)
+
+
+def test_semantic_target_uses_only_ready_evaluated_local_avcs(monkeypatch):
+    checkpoint = "evaluated-checkpoint.pt"
+    monkeypatch.setenv("SONIC_AVCS_GROUNDING_CHECKPOINT", checkpoint)
+    grounding._AVCS_PERCEPTION_CACHE.pop(checkpoint, None)
+
+    class FakeAVCSPerception:
+        goal_grounder_configured = True
+        goal_grounder_ready = True
+
+        def ground_target_png(self, image_bytes, query, width, height):
+            assert image_bytes == b"local frame"
+            assert query == "Save button"
+            assert (width, height) == (1280, 800)
+            return {
+                "engine": "avcs_goal_grounder",
+                "x": 400,
+                "y": 300,
+                "held_out_point_accuracy": 0.9,
+                "query_score": 0.95,
+                "query_score_threshold": 0.8,
+                "checkpoint_metadata": {
+                    "evaluation": {
+                        "metric": "top1_point_accuracy_within_0.02_diagonal",
+                        "passed": True,
+                        "value": 0.9,
+                        "samples": 20,
+                    },
+                    "query_confidence_calibration": {
+                        "method": "held_out_empirical_precision",
+                        "evaluation": {
+                            "metric": "empirical_precision_at_threshold",
+                            "samples": 20,
+                            "threshold": 0.8,
+                            "precision": 0.95,
+                            "required_precision": 0.9,
+                            "passed": True,
+                        },
+                    },
+                },
+            }
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sonic.computer_use.avcs_perception",
+        SimpleNamespace(AVCSPerception=FakeAVCSPerception),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "avcs.goal_grounder",
+        SimpleNamespace(
+            GROUNDING_ACCEPTANCE_METRIC="top1_point_accuracy_within_0.02_diagonal",
+            GROUNDING_ACCEPTANCE_THRESHOLD=0.85,
+        ),
+    )
+
+    try:
+        assert resolve_ui_target(
+            "Save button",
+            screenshot_b64=base64.b64encode(b"local frame").decode("ascii"),
+            width=1280,
+            height=800,
+        ) == (400, 300)
+    finally:
+        grounding._AVCS_PERCEPTION_CACHE.pop(checkpoint, None)
+
+
+def test_semantic_target_fails_closed_without_evaluated_avcs(monkeypatch):
+    monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
+    callback = MagicMock(return_value=(400, 300))
+    bus = MagicMock()
+    bus.resolve_coordinates.return_value = (400, 300)
+
+    assert resolve_ui_target(
+        "Save button",
+        screenshot_b64="aW1hZ2U=",
+        grounding_fn=callback,
+        perception_bus=bus,
+    ) is None
+    assert resolve_ui_target(
+        "Save button",
+        grounding_fn=callback,
+        perception_bus=bus,
+    ) is None
+    callback.assert_not_called()
+    bus.resolve_coordinates.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "engine": "avcs_goal_grounder",
+            "x": 400,
+            "y": 300,
+            "held_out_point_accuracy": 0.9,
+            "ambiguous": True,
+            "checkpoint_metadata": {},
+        },
+        {
+            "engine": "avcs_goal_grounder",
+            "x": 1280,
+            "y": 300,
+            "held_out_point_accuracy": 0.9,
+            "checkpoint_metadata": {
+                "evaluation": {
+                    "metric": "top1_point_accuracy_within_0.02_diagonal",
+                    "passed": True,
+                    "value": 0.9,
+                    "samples": 20,
+                }
+            },
+        },
+        {
+            "engine": "avcs_goal_grounder",
+            "x": 400,
+            "y": 300,
+            "held_out_point_accuracy": 0.7,
+            "checkpoint_metadata": {
+                "evaluation": {
+                    "metric": "top1_point_accuracy_within_0.02_diagonal",
+                    "passed": False,
+                    "value": 0.7,
+                    "samples": 20,
+                }
+            },
+        },
+    ],
+)
+def test_semantic_target_rejects_ambiguous_offscreen_or_unevaluated_results(
+    monkeypatch, result
+):
+    checkpoint = "invalid-checkpoint.pt"
+    monkeypatch.setenv("SONIC_AVCS_GROUNDING_CHECKPOINT", checkpoint)
+    grounding._AVCS_PERCEPTION_CACHE.pop(checkpoint, None)
+
+    class FakeAVCSPerception:
+        goal_grounder_configured = True
+        goal_grounder_ready = True
+
+        def ground_target_png(self, image_bytes, query, width, height):
+            return result
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sonic.computer_use.avcs_perception",
+        SimpleNamespace(AVCSPerception=FakeAVCSPerception),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "avcs.goal_grounder",
+        SimpleNamespace(
+            GROUNDING_ACCEPTANCE_METRIC="top1_point_accuracy_within_0.02_diagonal",
+            GROUNDING_ACCEPTANCE_THRESHOLD=0.85,
+        ),
+    )
+
+    try:
+        assert resolve_ui_target(
+            "Save button",
+            screenshot_b64="aW1hZ2U=",
+            width=1280,
+            height=800,
+        ) is None
+    finally:
+        grounding._AVCS_PERCEPTION_CACHE.pop(checkpoint, None)
+
+
+def test_explicit_coordinates_keep_coordinate_space_and_screen_bounds():
+    assert resolve_ui_target("500, 400", width=1280, height=800) == (500, 400)
+    assert resolve_ui_target(
+        "500, 400",
+        width=1280,
+        height=800,
+        coordinate_space="normalized_1000",
+    ) == (640, 320)
+    assert resolve_ui_target("1280, 400", width=1280, height=800) is None
+    assert resolve_ui_target("0, 0", width=1280, height=800) == (0, 0)
 
 
 # ==============================================================================

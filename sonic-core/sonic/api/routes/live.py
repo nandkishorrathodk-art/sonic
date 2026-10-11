@@ -396,7 +396,7 @@ async def get_live_graph(user: User = Depends(require_auth)):
             "type": "DesktopPlane",
             "properties": {
                 "display": ":99",
-                "resolution": "1280x800",
+                "resolution": "1920x1080",
                 "interaction": "CDP / VNC / xdotool",
                 "status": "active",
             },

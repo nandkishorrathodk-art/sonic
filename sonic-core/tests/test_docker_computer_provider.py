@@ -9,6 +9,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -332,6 +333,75 @@ async def test_docker_screenshot_processes_pixels_locally_with_avcs():
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
+async def test_docker_screenshot_rejects_frame_that_ages_during_avcs(monkeypatch):
+    provider = DockerComputerProvider(container_name="stale-avcs-test-workstation")
+    encoded = _png_base64(80, 60)
+    timestamp_ns = 1_000_000_000
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        f"___CAPTURE_TIMESTAMP_NS___\n{timestamp_ns}\n{encoded}",
+        "",
+    ))
+    provider._avcs_perception = SimpleNamespace(perceive_png=Mock(return_value={
+        "engine": "avcs_reflex",
+        "frame_index": 1,
+        "scene_hash": "stale-after-processing",
+        "width": 80,
+        "height": 60,
+    }))
+    monotonic_wall_clock = iter((timestamp_ns, timestamp_ns + 2_001_000_000))
+    monkeypatch.setattr(
+        docker_computer_module.time,
+        "time_ns",
+        lambda: next(monotonic_wall_clock),
+    )
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.desktop_state == "NO_DISPLAY"
+    assert observation.screenshot_base64 == ""
+    assert observation.capture_age_ms == pytest.approx(2_001)
+    assert provider._last_screenshot is None
+    assert provider._last_screenshot_time == 0.0
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_initializes_avcs_for_captured_pixels(monkeypatch):
+    provider = DockerComputerProvider(container_name="avcs-lazy-init-workstation")
+    encoded = _png_base64(80, 60)
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        f"___CAPTURE_TIMESTAMP_NS___\n{time.time_ns()}\n{encoded}",
+        "",
+    ))
+    avcs_state = {
+        "engine": "avcs_reflex",
+        "frame_index": 1,
+        "scene_hash": "locally-processed-scene",
+        "width": 80,
+        "height": 60,
+    }
+    perception = SimpleNamespace(perceive_png=Mock(return_value=avcs_state))
+    avcs_factory = Mock(return_value=perception)
+    monkeypatch.setitem(
+        sys.modules,
+        "sonic.computer_use.avcs_perception",
+        SimpleNamespace(AVCSPerception=avcs_factory),
+    )
+
+    observation = await provider.screenshot("ws-1")
+
+    avcs_factory.assert_called_once_with()
+    perception.perceive_png.assert_called_once_with(
+        base64.b64decode(encoded, validate=True)
+    )
+    assert observation.avcs_state == avcs_state
+    assert observation.screenshot_base64 == encoded
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
 async def test_vnc_url_uses_selected_container_published_host_port():
     provider = DockerComputerProvider(container_name="isolated-workstation")
     provider._container_is_running = AsyncMock(return_value=True)
@@ -370,6 +440,7 @@ async def test_docker_screenshot_does_not_reuse_stale_pixels_after_capture_failu
         perceive_png=Mock(return_value={
             "engine": "avcs_reflex",
             "frame_index": 1,
+            "scene_hash": "cached-frame",
             "width": 1280,
             "height": 800,
         })
@@ -389,6 +460,95 @@ async def test_docker_screenshot_does_not_reuse_stale_pixels_after_capture_failu
         await provider.screenshot("ws-1")
 
     assert first.desktop_state == "INTERACTIVE"
+    assert provider._last_screenshot is None
+    assert provider._last_screenshot_time == 0.0
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_invalidates_cached_frame_when_capture_raises():
+    provider = DockerComputerProvider(container_name="capture-error-workstation")
+    encoded = _png_base64(80, 60)
+    capture_output = (
+        0,
+        f"___CAPTURE_TIMESTAMP_NS___\n{time.time_ns()}\n{encoded}",
+        "",
+    )
+    provider._avcs_perception = SimpleNamespace(perceive_png=Mock(return_value={
+        "engine": "avcs_reflex",
+        "frame_index": 1,
+        "scene_hash": "fresh-scene",
+        "width": 80,
+        "height": 60,
+    }))
+    provider._docker_exec = AsyncMock(side_effect=[capture_output, OSError("docker unavailable")])
+
+    await provider.screenshot("ws-1")
+    assert provider._last_screenshot is not None
+
+    with pytest.raises(OSError, match="docker unavailable"):
+        await provider.screenshot("ws-1")
+
+    assert provider._last_screenshot is None
+    assert provider._last_screenshot_time == 0.0
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_invalidates_cached_frame_when_avcs_fails():
+    provider = DockerComputerProvider(container_name="avcs-error-workstation")
+    encoded = _png_base64(80, 60)
+
+    async def capture_frame(*_args, **_kwargs):
+        return (
+            0,
+            f"___CAPTURE_TIMESTAMP_NS___\n{time.time_ns()}\n{encoded}",
+            "",
+        )
+
+    provider._docker_exec = AsyncMock(side_effect=capture_frame)
+    provider._avcs_perception = SimpleNamespace(perceive_png=Mock(side_effect=[
+        {
+            "engine": "avcs_reflex",
+            "frame_index": 1,
+            "scene_hash": "fresh-scene",
+            "width": 80,
+            "height": 60,
+        },
+        RuntimeError("perception unavailable"),
+    ]))
+
+    await provider.screenshot("ws-1")
+    assert provider._last_screenshot is not None
+
+    with pytest.raises(RuntimeError, match="AVCS perception failed"):
+        await provider.screenshot("ws-1")
+
+    assert provider._last_screenshot is None
+    assert provider._last_screenshot_time == 0.0
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_rejects_invalid_avcs_state():
+    provider = DockerComputerProvider(container_name="invalid-avcs-workstation")
+    encoded = _png_base64(80, 60)
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        f"___CAPTURE_TIMESTAMP_NS___\n{time.time_ns()}\n{encoded}",
+        "",
+    ))
+    provider._avcs_perception = SimpleNamespace(perceive_png=Mock(return_value={
+        "engine": "avcs_reflex",
+        "frame_index": 1,
+        "scene_hash": "wrong-frame-dimensions",
+        "width": 1280,
+        "height": 800,
+    }))
+
+    with pytest.raises(RuntimeError, match="AVCS returned invalid state"):
+        await provider.screenshot("ws-1")
+
     assert provider._last_screenshot is None
     assert provider._last_screenshot_time == 0.0
 

@@ -12,15 +12,23 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
 from sonic.api.routes.workstation import (
+    DesktopActionRequest,
+    WorkstationGUIActionRequest,
     _append_worklog,
+    _fresh_avcs_pixel_evidence,
     _extract_recent_conversation_messages,
+    _get_or_create_session,
     _is_action_prompt,
     _is_observation_only_prompt,
-    _get_or_create_session,
     _run_prompt_reasoning,
+    dispatch_workstation_gui_action,
+    execute_desktop_action,
 )
+from sonic.auth.models import User, UserRole
+from sonic.computer.models import ScreenObservation
 from sonic.llm.prompts import WORKSTATION_CHAT_SYSTEM
 from sonic.llm.schemas import LLMResponse
 
@@ -91,28 +99,52 @@ def test_user_prompt_is_stored_as_visible_conversation_turn():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("prompt", "needs_desktop_vision"),
+    ("prompt", "needs_desktop_observation"),
     [("hi sonic", False), ("describe the current screen", True)],
 )
-async def test_desktop_vision_is_only_used_when_prompt_needs_it(
-    monkeypatch, prompt, needs_desktop_vision
+async def test_reasoning_receives_only_fresh_avcs_text_not_screenshot_pixels(
+    monkeypatch, prompt, needs_desktop_observation
 ):
-    tenant_id = f"test-tenant-desktop-vision-{needs_desktop_vision}"
-    session_id = f"desktop-vision-{needs_desktop_vision}"
+    tenant_id = f"test-tenant-desktop-vision-{needs_desktop_observation}"
+    session_id = f"desktop-vision-{needs_desktop_observation}"
     state = _get_or_create_session(tenant_id, session_id)
     state["desktop"] = {"workspace_id": "ws-conversational-vision"}
     state["worklog"] = []
 
+    avcs_state = {
+        "engine": "avcs_reflex",
+        "frame_index": 4,
+        "width": 1280,
+        "height": 800,
+        "scene_hash": "frame-hash",
+        "brightness": 0.5,
+        "regions": [
+            {
+                "row": 2,
+                "col": 3,
+                "height": 4,
+                "width": 5,
+                "salience": 0.6,
+                "kind": "must-not-be-forwarded",
+                "text": "must-not-be-forwarded",
+            }
+        ],
+        "events": [{"text": "must-not-be-forwarded"}],
+    }
     screenshot = AsyncMock(
         return_value=SimpleNamespace(
-            screenshot_base64="aGVsbG8=",
+            screenshot_base64="SECRET_SCREENSHOT_BYTES",
             timestamp="2026-09-28T12:00:00Z",
+            capture_timestamp_ns=__import__("time").time_ns(),
+            capture_age_ms=0,
             desktop_state="INTERACTIVE",
             width=1280,
             height=800,
+            perception_version=4,
+            avcs_state=avcs_state,
             active_window="Desktop",
-            visible_text="",
-            detected_controls=[],
+            visible_text="OCR MUST NOT BE SENT",
+            detected_controls=[{"label": "CONTROL MUST NOT BE SENT"}],
         )
     )
     computer = type("Computer", (), {"screenshot": screenshot})()
@@ -142,7 +174,93 @@ async def test_desktop_vision_is_only_used_when_prompt_needs_it(
     await _run_prompt_reasoning(tenant_id, session_id, prompt)
 
     assert len(requests) == 1
-    assert (requests[0].task_type == "vision") is needs_desktop_vision
-    assert any(message.images for message in requests[0].messages) is needs_desktop_vision
-    assert screenshot.await_count == int(needs_desktop_vision)
+    assert requests[0].task_type == "reasoning"
+    assert all(not message.images for message in requests[0].messages)
+    assert screenshot.await_count == int(needs_desktop_observation)
+    request_text = "\n".join(str(message.content) for message in requests[0].messages)
+    if needs_desktop_observation:
+        assert "CURRENT AVCS PIXEL-STATE SUMMARY" in request_text
+        assert '"frame_index":4' in request_text
+    for forbidden in (
+        "SECRET_SCREENSHOT_BYTES",
+        "OCR MUST NOT BE SENT",
+        "CONTROL MUST NOT BE SENT",
+        "must-not-be-forwarded",
+    ):
+        assert forbidden not in request_text
     assert state["thought_summary"] == "Hi, I'm here and ready to help."
+
+
+def _fresh_screen() -> ScreenObservation:
+    return ScreenObservation(
+        screenshot_base64="local-pixels",
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": 9,
+            "width": 1280,
+            "height": 800,
+            "scene_hash": "fresh-scene",
+            "brightness": 0.4,
+        },
+        capture_timestamp_ns=__import__("time").time_ns(),
+        capture_age_ms=0,
+        perception_version=9,
+        width=1280,
+        height=800,
+        desktop_state="INTERACTIVE",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["desktop-action", "gui-action"])
+async def test_gui_action_routes_require_fresh_avcs_before_dispatch(monkeypatch, route):
+    user = User(
+        email="operator@example.test",
+        name="Operator",
+        role=UserRole.OPERATOR,
+        tenant_id="route-avcs-test",
+    )
+    screen = ScreenObservation(
+        screenshot_base64="pixels-without-avcs",
+        capture_age_ms=0,
+        width=1280,
+        height=800,
+        desktop_state="INTERACTIVE",
+    )
+    computer = SimpleNamespace(
+        screenshot=AsyncMock(return_value=screen),
+        gui_action=AsyncMock(return_value=screen),
+    )
+    monkeypatch.setattr("sonic.api.routes.workstation.get_daytona_computer", lambda: computer)
+    monkeypatch.setattr("sonic.api.routes.workstation._assert_runtime_execution_enabled", lambda _tenant: None)
+    monkeypatch.setattr("sonic.api.routes.workstation._session_workspace_id", lambda _user, _session: "route-avcs-ws")
+
+    with pytest.raises(HTTPException) as exc:
+        if route == "desktop-action":
+            await execute_desktop_action(
+                DesktopActionRequest(action="click", coordinates=(12, 20)),
+                user=user,
+            )
+        else:
+            await dispatch_workstation_gui_action(
+                WorkstationGUIActionRequest(action="CLICK", x=12, y=20),
+                user=user,
+            )
+
+    assert exc.value.status_code == 503
+    computer.gui_action.assert_not_awaited()
+
+
+def test_fresh_avcs_evidence_summary_drops_semantic_and_unbounded_fields():
+    screen = _fresh_screen()
+    screen.avcs_state["events"] = [{"text": "screen text"}]
+    screen.avcs_state["regions"] = [
+        {"row": 1, "col": 2, "salience": 0.5, "kind": "semantic-label"}
+    ]
+
+    evidence = _fresh_avcs_pixel_evidence(screen)
+
+    assert evidence is not None
+    assert evidence["frame_index"] == 9
+    assert "events" not in evidence["summary"]
+    assert evidence["summary"]["regions"] == [{"row": 1, "col": 2, "salience": 0.5}]

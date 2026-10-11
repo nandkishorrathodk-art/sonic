@@ -22,11 +22,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY sonic-core/pyproject.toml .
+# AVCS's forge.vision package initializer eagerly imports its cortex modules,
+# so PyTorch is required even when only the pixel-reflex path is enabled.
 RUN pip install --no-cache-dir --upgrade pip && \
     if [ "$INSTALL_AVCS_GROUNDING" = "1" ]; then \
       pip install --no-cache-dir ".[avcs-grounding]"; \
     else \
-      pip install --no-cache-dir .; \
+      pip install --no-cache-dir . "torch>=2.0.0"; \
     fi
 
 # Stage 3: Runtime
@@ -52,6 +54,14 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY --chown=sonic:sonic sonic-core /app
 COPY --chown=sonic:sonic AVCS/forge/vision /app/AVCS/forge/vision
 COPY --chown=sonic:sonic AVCS/avcs /app/AVCS/avcs
+
+ENV PYTHONPATH=/app/AVCS
+
+# Exercise the same PNG capture entry point used by the workstation provider.
+# This verifies pixel-reflex packaging only; no grounding checkpoint is bundled
+# or presumed to be available.
+RUN python -c \
+    "from io import BytesIO; import numpy as np; from PIL import Image; from sonic.computer_use.avcs_perception import AVCSPerception; frame = BytesIO(); Image.fromarray(np.zeros((16, 16, 3), dtype=np.uint8)).save(frame, format='PNG'); state = AVCSPerception().perceive_png(frame.getvalue()); assert state['engine'] == 'avcs_reflex' and (state['width'], state['height']) == (16, 16)"
 
 USER sonic
 EXPOSE 8000

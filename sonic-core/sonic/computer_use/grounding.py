@@ -9,11 +9,14 @@ on the active desktop screen, avoiding coordinate guessing or hallucination.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
 import math
+import os
 import re
+import threading
 from typing import Any
 
 try:
@@ -28,6 +31,8 @@ logger = get_logger(__name__)
 
 # Compatibility dictionary kept empty per Mandate 4 (no static percentage landmarks)
 _COMMON_UI_LANDMARKS: dict[str, tuple[float, float]] = {}
+_AVCS_PERCEPTION_CACHE: dict[str, Any] = {}
+_AVCS_PERCEPTION_LOCK = threading.Lock()
 
 
 def _parse_grounding_coords(
@@ -54,7 +59,7 @@ def extract_bbox_midpoint(
     screen_height: int | None = None,
     coordinate_space: str | None = None,
 ) -> tuple[int, int] | None:
-    """Extract (x, y) pixel midpoint from multimodal model grounding output.
+    """Extract an explicitly described point or box midpoint in screen pixels.
     
     Supports:
     - Direct (x, y) tuple or list of numbers
@@ -95,8 +100,6 @@ def extract_bbox_midpoint(
         is_normalized_1000,
         force_pixels=force_pixels,
     )
-    if pt == (0, 0):
-        return None
     return pt
 
 
@@ -157,10 +160,17 @@ def _extract_bbox_midpoint_impl(
 
     if isinstance(bbox_response, (tuple, list)):
         try:
-            if any(isinstance(value, bool) for value in bbox_response):
+            if len(bbox_response) not in (2, 4) or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                for value in bbox_response
+            ):
                 return None
-            if len(bbox_response) >= 4:
+            if len(bbox_response) == 4:
                 x1, y1, x2, y2 = float(bbox_response[0]), float(bbox_response[1]), float(bbox_response[2]), float(bbox_response[3])
+                if x1 > x2 or y1 > y2:
+                    return None
                 if force_pixels:
                     mid_x = int((x1 + x2) / 2.0)
                     mid_y = int((y1 + y2) / 2.0)
@@ -176,7 +186,7 @@ def _extract_bbox_midpoint_impl(
                     mid_x = int((x1 + x2) / 2.0)
                     mid_y = int((y1 + y2) / 2.0)
                 return _screen_point(mid_x, mid_y)
-            elif len(bbox_response) >= 2:
+            else:
                 x, y = float(bbox_response[0]), float(bbox_response[1])
                 if force_pixels:
                     px, py = int(x), int(y)
@@ -193,7 +203,7 @@ def _extract_bbox_midpoint_impl(
                 else:
                     px, py = int(x), int(y)
                 return _screen_point(px, py)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             pass
 
     if not isinstance(bbox_response, str):
@@ -209,6 +219,8 @@ def _extract_bbox_midpoint_impl(
 
     if len(numbers) >= 4:
         x1, y1, x2, y2 = numbers[0], numbers[1], numbers[2], numbers[3]
+        if not all(math.isfinite(value) for value in (x1, y1, x2, y2)) or x1 > x2 or y1 > y2:
+            return None
         raw_x = (x1 + x2) / 2.0
         raw_y = (y1 + y2) / 2.0
         if force_pixels:
@@ -239,6 +251,8 @@ def _extract_bbox_midpoint_impl(
 
     elif len(numbers) >= 2:
         raw_x, raw_y = numbers[0], numbers[1]
+        if not math.isfinite(raw_x) or not math.isfinite(raw_y):
+            return None
         if force_pixels:
             px = int(raw_x)
             py = int(raw_y)
@@ -271,13 +285,24 @@ def _extract_bbox_midpoint_impl(
 
 
 def _direct_screen_point(
-    x: int,
-    y: int,
+    x: Any,
+    y: Any,
     width: int,
     height: int,
     coordinate_space: str | None,
 ) -> tuple[int, int] | None:
-    if width <= 0 or height <= 0:
+    if (
+        isinstance(width, bool)
+        or not isinstance(width, int)
+        or width <= 0
+        or isinstance(height, bool)
+        or not isinstance(height, int)
+        or height <= 0
+        or isinstance(x, bool)
+        or not isinstance(x, int)
+        or isinstance(y, bool)
+        or not isinstance(y, int)
+    ):
         return None
 
     normalized_space = (coordinate_space or "pixel").strip().lower()
@@ -335,29 +360,140 @@ def draw_action_marker(
         return image_b64
 
 
-def _invoke_grounding_fn(
-    grounding_fn: Any,
+def _resolve_avcs_target(
     query: str,
     screenshot_b64: str,
     width: int,
     height: int,
-) -> Any:
-    import inspect
+    window_geometry: tuple[int, int, int, int] | None = None,
+) -> tuple[int, int] | None:
+    """Ground a workstation screenshot locally, only with a validated AVCS checkpoint."""
+    checkpoint = os.environ.get("SONIC_AVCS_GROUNDING_CHECKPOINT", "").strip()
+    if not checkpoint or not query or width <= 0 or height <= 0:
+        return None
+
     try:
-        sig = inspect.signature(grounding_fn)
-        params = [
-            p for p in sig.parameters.values()
-            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
-        if has_varargs or len(params) >= 4:
-            return grounding_fn(query, screenshot_b64, width, height)
-        return grounding_fn(query, screenshot_b64)
-    except (ValueError, TypeError):
-        try:
-            return grounding_fn(query, screenshot_b64, width, height)
-        except TypeError:
-            return grounding_fn(query, screenshot_b64)
+        with _AVCS_PERCEPTION_LOCK:
+            perception = _AVCS_PERCEPTION_CACHE.get(checkpoint)
+            if perception is None:
+                from sonic.computer_use.avcs_perception import AVCSPerception
+
+                perception = AVCSPerception()
+                if not perception.goal_grounder_configured:
+                    return None
+                _AVCS_PERCEPTION_CACHE[checkpoint] = perception
+
+        encoded_image = screenshot_b64.split(",", 1)[-1]
+        image_bytes = base64.b64decode(encoded_image, validate=True)
+        result = perception.ground_target_png(
+            image_bytes,
+            query,
+            width,
+            height,
+            window_geometry=window_geometry,
+        )
+        if not isinstance(result, dict) or result.get("engine") != "avcs_goal_grounder":
+            return None
+        if result.get("ambiguous") is True or result.get("not_found") is True:
+            return None
+        if getattr(perception, "goal_grounder_ready", False) is not True:
+            return None
+
+        checkpoint_metadata = result.get("checkpoint_metadata")
+        evaluation = (
+            checkpoint_metadata.get("evaluation")
+            if isinstance(checkpoint_metadata, dict)
+            else None
+        )
+        if not isinstance(evaluation, dict):
+            return None
+        from avcs.goal_grounder import GROUNDING_ACCEPTANCE_METRIC, GROUNDING_ACCEPTANCE_THRESHOLD
+
+        evaluation_value = evaluation.get("value")
+        evaluation_samples = evaluation.get("samples")
+        if (
+            evaluation.get("metric") != GROUNDING_ACCEPTANCE_METRIC
+            or evaluation.get("passed") is not True
+            or isinstance(evaluation_value, bool)
+            or not isinstance(evaluation_value, (int, float))
+            or not math.isfinite(evaluation_value)
+            or evaluation_value < GROUNDING_ACCEPTANCE_THRESHOLD
+            or isinstance(evaluation_samples, bool)
+            or not isinstance(evaluation_samples, int)
+            or evaluation_samples <= 0
+        ):
+            return None
+        accuracy = result.get("held_out_point_accuracy")
+        if (
+            isinstance(accuracy, bool)
+            or not isinstance(accuracy, (int, float))
+            or not math.isfinite(accuracy)
+            or accuracy != evaluation_value
+        ):
+            return None
+        confidence_calibration = checkpoint_metadata.get(
+            "query_confidence_calibration"
+        )
+        confidence_evaluation = (
+            confidence_calibration.get("evaluation")
+            if isinstance(confidence_calibration, dict)
+            else None
+        )
+        query_score = result.get("query_score")
+        query_score_threshold = result.get("query_score_threshold")
+        measured_precision = (
+            confidence_evaluation.get("precision")
+            if isinstance(confidence_evaluation, dict)
+            else None
+        )
+        required_precision = (
+            confidence_evaluation.get("required_precision")
+            if isinstance(confidence_evaluation, dict)
+            else None
+        )
+        if (
+            not isinstance(confidence_calibration, dict)
+            or not isinstance(confidence_calibration.get("method"), str)
+            or not confidence_calibration["method"].strip()
+            or not isinstance(confidence_evaluation, dict)
+            or confidence_evaluation.get("metric")
+            != "empirical_precision_at_threshold"
+            or confidence_evaluation.get("passed") is not True
+            or isinstance(confidence_evaluation.get("samples"), bool)
+            or not isinstance(confidence_evaluation.get("samples"), int)
+            or confidence_evaluation.get("samples") <= 0
+            or confidence_evaluation.get("threshold") != query_score_threshold
+            or isinstance(measured_precision, bool)
+            or not isinstance(measured_precision, (int, float))
+            or not math.isfinite(float(measured_precision))
+            or isinstance(required_precision, bool)
+            or not isinstance(required_precision, (int, float))
+            or not math.isfinite(float(required_precision))
+            or not 0 < float(required_precision) <= 1
+            or float(measured_precision) < float(required_precision)
+            or isinstance(query_score, bool)
+            or not isinstance(query_score, (int, float))
+            or not math.isfinite(float(query_score))
+            or not 0 <= float(query_score) <= 1
+            or isinstance(query_score_threshold, bool)
+            or not isinstance(query_score_threshold, (int, float))
+            or not math.isfinite(float(query_score_threshold))
+            or not 0 < float(query_score_threshold) <= 1
+            or float(query_score) < float(query_score_threshold)
+        ):
+            return None
+        x, y = result.get("x"), result.get("y")
+        if (
+            isinstance(x, bool)
+            or not isinstance(x, int)
+            or isinstance(y, bool)
+            or not isinstance(y, int)
+        ):
+            return None
+        return _direct_screen_point(x, y, width, height, "pixel")
+    except Exception as exc:
+        logger.warning("avcs_grounding_unavailable", error=str(exc))
+        return None
 
 
 def resolve_ui_target(
@@ -374,20 +510,17 @@ def resolve_ui_target(
 ) -> tuple[int, int] | None:
     """Resolves a natural language UI target query to absolute screen coordinates (x, y).
 
-    Resolution pipeline:
-    0. In-memory fast path via PerceptionBus if available (< 0.1ms).
-    1. Direct numeric coordinate check (if query is already "640,400").
-    2. Dynamic Multimodal Grounding Function (vision LLM / ShowUI / OS-Atlas) if provided.
-    Strictly forbids falling back to arbitrary mock percentage landmarks or blind clicking.
+    Screenshot-based semantic grounding uses only the local AVCS checkpoint.
+    Without an explicitly configured, valid evaluated checkpoint, it fails closed.
+    Explicit pixel or explicitly labeled normalized coordinates remain available.
+
+    ``grounding_fn`` and ``perception_bus`` remain in the signature for
+    compatibility, but are never used for semantic grounding. Arbitrary
+    callbacks or non-AVCS control inventories are not trusted grounding
+    sources for workstation pixels.
     """
     if not query:
         return None
-
-    # 0. High-speed in-memory resolution via PerceptionBus
-    if perception_bus is not None and hasattr(perception_bus, "resolve_coordinates"):
-        coords = perception_bus.resolve_coordinates(query)
-        if coords is not None:
-            return coords
 
     if screen_width is not None:
         width = screen_width
@@ -408,33 +541,8 @@ def resolve_ui_target(
                 coordinate_space,
             )
 
-    # 2. Dynamic Grounding function (multimodal vision model callback)
-    if grounding_fn and screenshot_b64:
-        try:
-            grounding_output = _invoke_grounding_fn(grounding_fn, query, screenshot_b64, width, height)
-            if grounding_output:
-                if isinstance(grounding_output, (tuple, list)) and len(grounding_output) >= 2:
-                    return extract_bbox_midpoint(
-                        grounding_output,
-                        width,
-                        height,
-                        screen_width=screen_width,
-                        screen_height=screen_height,
-                        coordinate_space=coordinate_space,
-                    )
-                output_space = grounding_output.get("coordinate_space") if isinstance(grounding_output, dict) else coordinate_space
-                coords = extract_bbox_midpoint(
-                    grounding_output,
-                    width,
-                    height,
-                    screen_width=screen_width,
-                    screen_height=screen_height,
-                    coordinate_space=output_space,
-                )
-                if coords:
-                    return coords
-        except Exception as exc:
-            logger.warning("grounding_fn_resolution_failed", query=query, error=str(exc))
+    if screenshot_b64:
+        return _resolve_avcs_target(query, screenshot_b64, width, height)
 
     return None
 
@@ -450,16 +558,11 @@ async def resolve_ui_target_async(
     screen_height: int | None = None,
     perception_bus: Any | None = None,
     coordinate_space: str | None = None,
+    window_geometry: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int] | None:
-    """Asynchronous variant of resolve_ui_target supporting coroutine grounding functions."""
+    """Asynchronous variant; semantic screenshot grounding remains local AVCS-only."""
     if not query:
         return None
-
-    # 0. High-speed in-memory resolution via PerceptionBus
-    if perception_bus is not None and hasattr(perception_bus, "resolve_coordinates"):
-        coords = perception_bus.resolve_coordinates(query)
-        if coords is not None:
-            return coords
 
     if screen_width is not None:
         width = screen_width
@@ -480,38 +583,15 @@ async def resolve_ui_target_async(
                 coordinate_space,
             )
 
-    # 2. Dynamic Grounding function (sync or async)
-    if grounding_fn and screenshot_b64:
-        try:
-            import inspect
-            res = _invoke_grounding_fn(grounding_fn, query, screenshot_b64, width, height)
-            if inspect.isawaitable(res):
-                grounding_output = await res
-            else:
-                grounding_output = res
-            if grounding_output:
-                if isinstance(grounding_output, (tuple, list)) and len(grounding_output) >= 2:
-                    return extract_bbox_midpoint(
-                        grounding_output,
-                        width,
-                        height,
-                        screen_width=screen_width,
-                        screen_height=screen_height,
-                        coordinate_space=coordinate_space,
-                    )
-                output_space = grounding_output.get("coordinate_space") if isinstance(grounding_output, dict) else coordinate_space
-                coords = extract_bbox_midpoint(
-                    grounding_output,
-                    width,
-                    height,
-                    screen_width=screen_width,
-                    screen_height=screen_height,
-                    coordinate_space=output_space,
-                )
-                if coords:
-                    return coords
-        except Exception as exc:
-            logger.warning("grounding_fn_async_resolution_failed", query=query, error=str(exc))
+    if screenshot_b64:
+        return await asyncio.to_thread(
+            _resolve_avcs_target,
+            query,
+            screenshot_b64,
+            width,
+            height,
+            window_geometry,
+        )
 
     return None
 

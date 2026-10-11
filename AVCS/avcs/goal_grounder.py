@@ -22,6 +22,8 @@ DEFAULT_INPUT_SIZE = 256
 MAX_QUERY_BYTES = 96
 GROUNDING_ACCEPTANCE_METRIC = "top1_point_accuracy_within_0.02_diagonal"
 GROUNDING_ACCEPTANCE_THRESHOLD = 0.85
+GROUNDING_QUERY_REQUIRED_PRECISION = 0.9
+GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES = 10
 
 
 def encode_queries(queries: Sequence[str], max_length: int = MAX_QUERY_BYTES) -> torch.Tensor:
@@ -262,6 +264,7 @@ def load_grounding_checkpoint(
         or isinstance(evaluation.get("samples"), bool)
         or not isinstance(evaluation.get("samples"), int)
         or evaluation["samples"] <= 0
+        or evaluation["samples"] != checkpoint.get("held_out_test_samples")
     ):
         raise ValueError("grounding checkpoint does not meet the held-out evaluation contract")
     accuracy = evaluation.get("value")
@@ -274,6 +277,56 @@ def load_grounding_checkpoint(
         raise ValueError("grounding checkpoint is below the held-out point-accuracy threshold")
     if not isinstance(checkpoint.get("model_state_dict"), dict):
         raise TypeError("grounding checkpoint is missing its model state dictionary")
+    if checkpoint.get("coordinate_frame") != "cropped_target_window":
+        raise ValueError("grounding checkpoint has an unsupported coordinate frame")
+    confidence_calibration = checkpoint.get("query_confidence_calibration")
+    confidence_evaluation = (
+        confidence_calibration.get("evaluation")
+        if isinstance(confidence_calibration, dict)
+        else None
+    )
+    if not isinstance(confidence_calibration, dict) or not isinstance(
+        confidence_evaluation, dict
+    ):
+        raise ValueError("grounding checkpoint is missing query confidence calibration")
+    confidence_threshold = confidence_evaluation.get("threshold")
+    confidence_precision = confidence_evaluation.get("precision")
+    required_precision = confidence_evaluation.get("required_precision")
+    confidence_samples = confidence_evaluation.get("samples")
+    accepted_samples = confidence_evaluation.get("accepted_samples")
+    minimum_accepted_samples = confidence_evaluation.get("minimum_accepted_samples")
+    if (
+        not isinstance(confidence_calibration.get("method"), str)
+        or not confidence_calibration["method"].strip()
+        or confidence_evaluation.get("metric") != "empirical_precision_at_threshold"
+        or confidence_evaluation.get("passed") is not True
+        or isinstance(confidence_samples, bool)
+        or not isinstance(confidence_samples, int)
+        or confidence_samples != checkpoint.get("held_out_test_samples")
+        or isinstance(accepted_samples, bool)
+        or not isinstance(accepted_samples, int)
+        or isinstance(minimum_accepted_samples, bool)
+        or not isinstance(minimum_accepted_samples, int)
+        or minimum_accepted_samples < GROUNDING_QUERY_MIN_ACCEPTED_SAMPLES
+        or accepted_samples < minimum_accepted_samples
+        or accepted_samples > confidence_samples
+        or isinstance(confidence_threshold, bool)
+        or not isinstance(confidence_threshold, (int, float))
+        or not math.isfinite(float(confidence_threshold))
+        or not 0 < float(confidence_threshold) <= 1
+        or isinstance(confidence_precision, bool)
+        or not isinstance(confidence_precision, (int, float))
+        or not math.isfinite(float(confidence_precision))
+        or not 0 <= float(confidence_precision) <= 1
+        or isinstance(required_precision, bool)
+        or not isinstance(required_precision, (int, float))
+        or not math.isfinite(float(required_precision))
+        or not GROUNDING_QUERY_REQUIRED_PRECISION
+        <= float(required_precision)
+        <= 1
+        or float(confidence_precision) < float(required_precision)
+    ):
+        raise ValueError("grounding checkpoint fails query confidence calibration")
     input_size = checkpoint.get("input_size", DEFAULT_INPUT_SIZE)
     if isinstance(input_size, bool) or not isinstance(input_size, int):
         raise TypeError("grounding checkpoint has invalid input_size")
@@ -289,6 +342,8 @@ def load_grounding_checkpoint(
             "validation_samples",
             "held_out_test_samples",
             "evaluation",
+            "query_confidence_calibration",
+            "coordinate_frame",
         )
         if key in checkpoint
     }

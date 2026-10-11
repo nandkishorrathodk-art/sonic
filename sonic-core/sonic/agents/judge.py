@@ -20,9 +20,12 @@ from __future__ import annotations
 import base64
 import re
 import time
+from collections.abc import Mapping
 from enum import StrEnum
+from io import BytesIO
 from typing import Any
 
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from sonic.computer_use.models_boss import SubMission, SubMissionResult
@@ -39,6 +42,38 @@ _SUCCESSFUL_GUI_RECEIPT_STATUSES = {
     "RECOVERED",
     "VERIFIED",
 }
+
+
+def _is_current_avcs_state(state: Any, screen: Any) -> bool:
+    """Accept only a well-formed AVCS state attached to this fresh frame."""
+    if not isinstance(state, Mapping) or state.get("engine") != "avcs_reflex":
+        return False
+
+    frame_index = state.get("frame_index")
+    scene_hash = state.get("scene_hash")
+    if (
+        not isinstance(frame_index, int)
+        or isinstance(frame_index, bool)
+        or frame_index <= 0
+        or not isinstance(scene_hash, str)
+        or not scene_hash.strip()
+    ):
+        return False
+
+    width = state.get("width")
+    height = state.get("height")
+    screen_width = getattr(screen, "width", None)
+    screen_height = getattr(screen, "height", None)
+    return (
+        isinstance(width, int)
+        and not isinstance(width, bool)
+        and isinstance(height, int)
+        and not isinstance(height, bool)
+        and width > 0
+        and height > 0
+        and width == screen_width
+        and height == screen_height
+    )
 
 
 def _t_val(t: Any, key: str, default: Any = "") -> Any:
@@ -148,6 +183,7 @@ class JudgeAgent:
                 self_attestation_rejected=True,
             )
 
+        avcs_evidence: str | None = None
         try:
             screen = await self.computer.screenshot(workspace_id)
             image = (
@@ -161,6 +197,26 @@ class JudgeAgent:
                     notes="GUI outcome cannot be confirmed: fresh desktop screenshot is unavailable.",
                     self_attestation_rejected=True,
                 )
+
+            encoded_image = image.split(",", 1)[-1]
+            image_bytes = base64.b64decode(encoded_image, validate=True)
+            with Image.open(BytesIO(image_bytes)) as frame:
+                frame.load()
+                image_format = frame.format
+                image_dimensions = frame.size
+                if image_format not in {"PNG", "JPEG"}:
+                    raise ValueError("Judge screenshot must be PNG or JPEG")
+                if image_dimensions != (
+                    getattr(screen, "width", None),
+                    getattr(screen, "height", None),
+                ):
+                    raise ValueError("Judge screenshot dimensions do not match frame metadata")
+                if image_format == "PNG":
+                    avcs_image_bytes = image_bytes
+                else:
+                    avcs_image = BytesIO()
+                    frame.convert("RGB").save(avcs_image, format="PNG")
+                    avcs_image_bytes = avcs_image.getvalue()
 
             screen_state = str(getattr(screen, "desktop_state", "") or "UNKNOWN")
             if screen_state.upper() == "NO_DISPLAY":
@@ -200,31 +256,40 @@ class JudgeAgent:
                     self_attestation_rejected=True,
                 )
 
-            avcs_state = getattr(screen, "avcs_state", None)
-            if not avcs_state:
-                from sonic.computer_use.avcs_perception import AVCSPerception
+            from sonic.computer_use.avcs_perception import AVCSPerception
 
-                perception = AVCSPerception()
-                avcs_state = perception.perceive_png(
-                    base64.b64decode(image.split(",", 1)[-1], validate=True)
-                )
+            perception = AVCSPerception()
+            avcs_state = perception.perceive_png(avcs_image_bytes)
+            if not _is_current_avcs_state(avcs_state, screen):
+                raise ValueError("AVCS did not return valid evidence for the current frame")
+
+            scene_hash = str(avcs_state["scene_hash"])
+            avcs_evidence = (
+                f"AVCS frame {avcs_state['frame_index']}: scene {scene_hash[:16]}, "
+                f"changed={bool(avcs_state.get('scene_changed', False))}, "
+                f"regions={len(avcs_state.get('regions', []))}, "
+                f"events={len(avcs_state.get('events', []))}."
+            )
             logger.info(
                 "judge_gui_avcs_observation_recorded",
                 workspace_id=workspace_id,
                 sub_mission_id=sub_mission.id,
                 frame_index=avcs_state.get("frame_index"),
                 scene_changed=avcs_state.get("scene_changed"),
+                scene_hash=scene_hash,
             )
+
             return JudgeEvaluation(
                 verdict=JudgeVerdict.INCONCLUSIVE,
                 confidence=0.0,
                 notes=(
-                    "AVCS processed the fresh desktop pixels locally, but its current "
-                    "reflex/point-grounding outputs do not establish the requested "
-                    "semantic end state. The screenshot was not sent to an LLM; GUI "
-                    "completion remains unconfirmed."
+                    "Fresh desktop pixels were processed locally by AVCS, but its "
+                    "reflex state cannot establish this task's semantic postcondition. "
+                    "No screenshot was sent to a model; GUI completion remains "
+                    "unconfirmed until a validated local task-verification head exists."
                 ),
                 self_attestation_rejected=True,
+                evidence_items=[avcs_evidence],
             )
         except Exception as exc:
             logger.warning(
@@ -238,6 +303,7 @@ class JudgeAgent:
                 confidence=0.0,
                 notes=f"GUI outcome verification failed; no completion claim is allowed ({exc}).",
                 self_attestation_rejected=True,
+                evidence_items=[avcs_evidence] if avcs_evidence is not None else [],
             )
 
     async def evaluate_sub_mission(
@@ -249,6 +315,14 @@ class JudgeAgent:
     ) -> JudgeEvaluation:
         """Independently evaluate a worker's `SubMissionResult` from ground-truth execution receipts."""
         traces = list(result.traces or [])
+        is_gui_mission = str(getattr(sub_mission, "plane", "")).lower() == "gui"
+        if not is_gui_mission:
+            for trace in traces:
+                action_raw = _t_val(trace, "action_type", "")
+                action = action_raw.value if hasattr(action_raw, "value") else str(action_raw)
+                if action.startswith(("GUI_", "APP_", "WINDOW_", "BROWSER_")):
+                    is_gui_mission = True
+                    break
 
         # 1. Total Execution Failure Check (Zero successful traces and non-zero exit codes)
         if not result.success and not any(_t_val(t, "exit_code", 1) == 0 for t in traces):
@@ -347,9 +421,7 @@ class JudgeAgent:
             # GUI actions with exit_code is None must NOT be treated as has_concrete_proof = True
             # without verifying the target application state or artifacts.
             is_gui_action = (
-                action.startswith("GUI_")
-                or action in ("APP_LAUNCH", "APP_FOCUS", "APP_CLOSE")
-                or action.startswith("BROWSER_")
+                action.startswith(("GUI_", "APP_", "WINDOW_", "BROWSER_"))
             )
 
             if is_gui_action:
@@ -408,7 +480,6 @@ class JudgeAgent:
                 },
             )
 
-        is_gui_mission = str(getattr(sub_mission, "plane", "")).lower() == "gui"
         # 3.5 Security Vulnerability Reproduction Check:
         vuln_markers = ("sqli", "sql injection", "xss", "rce", "cve-", "idor", "flag{", "vulnerability")
         combined_findings = (result.findings_summary + " " + " ".join(result.key_discoveries)).lower()

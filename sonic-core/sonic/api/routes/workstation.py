@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -344,12 +345,16 @@ def _load_workstation_state() -> None:
                                 desktop["display"] = ":99"
                             if not desktop.get("resolution"):
                                 desktop["resolution"] = {"width": 1280, "height": 800}
-                            # When running locally with Docker workstation (not Daytona Cloud),
-                            # migrate any stale cloud UUIDs so local Docker execution works immediately.
+                            # A local Docker desktop is a single shared resource and
+                            # its in-memory owner cannot be proven after restart.
+                            # Require explicit reprovisioning instead of restoring
+                            # a potentially cross-tenant workspace assignment.
                             if os.environ.get("SONIC_USE_DAYTONA_CLOUD") != "1":
-                                docker_ws = os.environ.get("SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation").strip()
-                                desktop["workspace_id"] = docker_ws
-                                desktop["sandbox_id"] = docker_ws
+                                desktop["workspace_id"] = ""
+                                desktop["sandbox_id"] = ""
+                                desktop["status"] = "NO_ACTIVE_WORKSPACE"
+                                desktop["vnc_url"] = ""
+                                desktop["novnc_url"] = ""
                                 desktop["os_name"] = "Linux Cyber Workstation (Docker XFCE4)"
                         # Reset lingering RUNNING status on restart since no background task survived
                         if session.get("status") == "RUNNING":
@@ -710,10 +715,27 @@ def _request_operator_action_approval(
 
 
 def _summarize_recent_worklog(state: dict[str, Any], limit: int = 8) -> list[str]:
-    """Provide a compact string summary of recent workstation actions and events."""
+    """Summarize non-visual execution receipts without replaying desktop perception."""
     worklog = state.get("worklog", [])
     summaries: list[str] = []
-    for entry in worklog[-limit:]:
+    eligible_entries = [
+        entry
+        for entry in worklog
+        if entry.get("type") in ("command", "read", "write")
+        and entry.get("execution_plane") not in ("gui", "browser")
+        and not any(
+            key in entry
+            for key in (
+                "image",
+                "image_attached",
+                "perception_source",
+                "detected_controls",
+                "visible_text",
+                "accessible_scene_fresh",
+            )
+        )
+    ]
+    for entry in eligible_entries[-limit:]:
         t = entry.get("title", "")
         c = (entry.get("content") or "").strip()
         if c:
@@ -721,13 +743,19 @@ def _summarize_recent_worklog(state: dict[str, Any], limit: int = 8) -> list[str
     return summaries
 
 
-def _extract_recent_conversation_messages(state: dict[str, Any], max_turns: int = 5) -> list[Any]:
+def _extract_recent_conversation_messages(
+    state: dict[str, Any],
+    max_turns: int = 5,
+    *,
+    exclude_desktop_observations: bool = False,
+) -> list[Any]:
     """Extract prior chat dialogue turns from the session worklog to provide conversational continuity."""
     from sonic.llm.schemas import Message, MessageRole
     worklog = state.get("worklog", [])
     history: list[Message] = []
 
     turns: list[tuple[str, str]] = []
+    prior_objective_needs_desktop = False
     for entry in worklog:
         t = entry.get("title", "")
         c = (entry.get("content") or "").strip()
@@ -739,8 +767,10 @@ def _extract_recent_conversation_messages(state: dict[str, Any], max_turns: int 
                 match = re.search(r"Objective:\s*'(.*?)'\s*\(Tenant:", c)
                 obj_text = match.group(1) if match else c
             turns.append(("user", obj_text))
+            prior_objective_needs_desktop = _requires_desktop_observation(obj_text)
         elif (t in ("SONIC Response", "SONIC Boss Report") or item_type == "response") and c:
-            turns.append(("assistant", c))
+            if not (exclude_desktop_observations and prior_objective_needs_desktop):
+                turns.append(("assistant", c))
         elif item_type == "command" and c:
             cmd = entry.get("command", t)
             turns.append(("assistant", f"Executed terminal command: {cmd}\nOutput:\n{c[:300]}"))
@@ -1057,20 +1087,13 @@ async def get_workstation_state(
                     desktop_telemetry["status"] = "LIVE"
                     try:
                         observation = await comp.screenshot(target_id)
-                        age_ms = observation.capture_age_ms
-                        if age_ms is None and observation.capture_timestamp_ns:
-                            age_ms = (time.time_ns() - observation.capture_timestamp_ns) / 1_000_000
-                        fresh = (
-                            bool(observation.screenshot_base64)
-                            and observation.desktop_state != "NO_DISPLAY"
-                            and age_ms is not None
-                            and 0 <= age_ms <= 2000
-                        )
+                        avcs_evidence = _fresh_avcs_pixel_evidence(observation)
+                        fresh = avcs_evidence is not None
                         desktop_telemetry.update({
                             "perception_status": "FRESH" if fresh else "UNAVAILABLE",
-                            "capture_age_ms": age_ms if fresh else None,
+                            "capture_age_ms": avcs_evidence["capture_age_ms"] if fresh else None,
                             "capture_timestamp_ns": observation.capture_timestamp_ns,
-                            "perception_version": observation.perception_version,
+                            "perception_version": avcs_evidence["frame_index"] if fresh else None,
                             "perception_message": "" if fresh else "No fresh desktop observation is available.",
                         })
                     except Exception as exc:
@@ -1568,19 +1591,12 @@ async def get_desktop_status(
             if desktop.get("vnc_url"):
                 try:
                     observation = await comp.screenshot(target_id)
-                    age_ms = observation.capture_age_ms
-                    if age_ms is None and observation.capture_timestamp_ns:
-                        age_ms = (time.time_ns() - observation.capture_timestamp_ns) / 1_000_000
-                    fresh = (
-                        bool(observation.screenshot_base64)
-                        and observation.desktop_state != "NO_DISPLAY"
-                        and age_ms is not None
-                        and 0 <= age_ms <= 2000
-                    )
+                    avcs_evidence = _fresh_avcs_pixel_evidence(observation)
+                    fresh = avcs_evidence is not None
                     desktop["perception_status"] = "FRESH" if fresh else "UNAVAILABLE"
-                    desktop["capture_age_ms"] = age_ms if fresh else None
+                    desktop["capture_age_ms"] = avcs_evidence["capture_age_ms"] if fresh else None
                     desktop["capture_timestamp_ns"] = observation.capture_timestamp_ns
-                    desktop["perception_version"] = observation.perception_version
+                    desktop["perception_version"] = avcs_evidence["frame_index"] if fresh else None
                     if not fresh:
                         desktop["perception_message"] = "No fresh desktop observation is available."
                 except Exception as exc:
@@ -1687,12 +1703,15 @@ async def execute_desktop_action(
     }
     if action_type in coordinate_actions and not req.coordinates:
         raise HTTPException(status_code=400, detail=f"Desktop action {action_type.value} requires coordinates")
+    if action_type == GUIActionType.TYPE and not req.text:
+        raise HTTPException(status_code=400, detail="Desktop TYPE action requires text")
+    if action_type == GUIActionType.KEYPRESS and not req.key:
+        raise HTTPException(status_code=400, detail="Desktop KEYPRESS action requires a key")
+
+    screen, avcs_evidence = await _require_fresh_avcs_evidence(comp, workspace_id)
     if req.coordinates:
         x, y = req.coordinates
-        screen = await comp.screenshot(workspace_id=workspace_id)
         width, height = screen.width, screen.height
-        if width <= 0 or height <= 0:
-            raise HTTPException(status_code=503, detail="Desktop did not report valid screen dimensions")
         points = [(x, y)]
         if action_type == GUIActionType.DRAG:
             if not req.destination_coordinates:
@@ -1700,10 +1719,6 @@ async def execute_desktop_action(
             points.append(req.destination_coordinates)
         if any(px < 0 or py < 0 or px >= width or py >= height for px, py in points):
             raise HTTPException(status_code=400, detail=f"Desktop coordinates are outside the {width}x{height} screen bounds")
-    if action_type == GUIActionType.TYPE and not req.text:
-        raise HTTPException(status_code=400, detail="Desktop TYPE action requires text")
-    if action_type == GUIActionType.KEYPRESS and not req.key:
-        raise HTTPException(status_code=400, detail="Desktop KEYPRESS action requires a key")
     x = req.coordinates[0] if req.coordinates else None
     y = req.coordinates[1] if req.coordinates else None
     gui_act = GUIAction(
@@ -1716,6 +1731,9 @@ async def execute_desktop_action(
         key=req.key,
         app_name=req.app_name or req.target,
     )
+    avcs_evidence = _fresh_avcs_pixel_evidence(screen)
+    if avcs_evidence is None:
+        raise HTTPException(status_code=503, detail="Fresh AVCS pixel evidence expired before desktop action dispatch")
     obs = await comp.gui_action(workspace_id=workspace_id, action=gui_act, actor=user.email)
     state = _get_or_create_session(tenant_id, req.session_id or "default")
     real_active_window = obs.active_window or "None"
@@ -1725,6 +1743,7 @@ async def execute_desktop_action(
         "status": "success",
         "action": req.action,
         "active_window": real_active_window,
+        "avcs_evidence": avcs_evidence,
         "observation": obs.model_dump(),
     }
 
@@ -1806,10 +1825,9 @@ async def dispatch_workstation_gui_action(
             raise HTTPException(status_code=400, detail=f"Desktop {action_type.value} requires x and y coordinates")
         if action_type == GUIActionType.DRAG and (req.x2 is None or req.y2 is None):
             raise HTTPException(status_code=400, detail="Desktop DRAG requires x2 and y2 destination coordinates")
-        screen = await comp.screenshot(workspace_id=target_id)
+    screen, avcs_evidence = await _require_fresh_avcs_evidence(comp, target_id)
+    if action_type in coordinate_actions:
         width, height = screen.width, screen.height
-        if width <= 0 or height <= 0:
-            raise HTTPException(status_code=503, detail="Desktop did not report valid screen dimensions")
         points = [(req.x, req.y)]
         if action_type == GUIActionType.DRAG:
             points.append((req.x2, req.y2))
@@ -1827,8 +1845,11 @@ async def dispatch_workstation_gui_action(
         app_name=req.app_name,
         scroll_delta=req.scroll_delta,
     )
+    avcs_evidence = _fresh_avcs_pixel_evidence(screen)
+    if avcs_evidence is None:
+        raise HTTPException(status_code=503, detail="Fresh AVCS pixel evidence expired before desktop action dispatch")
     obs = await comp.gui_action(workspace_id=target_id, action=action_obj, actor=user.email)
-    return obs.model_dump()
+    return {**obs.model_dump(), "avcs_evidence": avcs_evidence}
 
 
 @router.post("/workstation/desktop/tile")
@@ -2029,10 +2050,7 @@ async def execute_workstation_command(
             except Exception:
                 workspace_id = ""
         else:
-            docker_container = os.environ.get(
-                "SONIC_DOCKER_WORKSTATION_CONTAINER", "sonic-desktop-workstation"
-            ).strip()
-            workspace_id = docker_container
+            workspace_id = ""
 
     if not workspace_id:
         # No provisioned workstation is itself a fail-closed condition: we must
@@ -2041,7 +2059,7 @@ async def execute_workstation_command(
         # are unsafe, so surface the documented 503 fail-closed response.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Command execution failed-closed: no Daytona workstation is provisioned for this session. Direct host OS execution is strictly prohibited.",
+            detail="Command execution failed-closed: no tenant-owned workstation is provisioned for this session. Direct host OS execution is strictly prohibited.",
         )
     try:
         res = await comp.terminal(workspace_id, req.command, timeout=req.timeout or 30, actor=user.email)
@@ -3028,6 +3046,191 @@ async def _run_parallel_research_swarm(
     _persist_workstation_state()
 
 
+def _avcs_pixel_state_summary(avcs_state: Any) -> dict[str, Any]:
+    """Keep only coarse pixel-derived fields suitable for workstation prompts."""
+    if not isinstance(avcs_state, dict) or avcs_state.get("engine") != "avcs_reflex":
+        return {}
+
+    frame_index = avcs_state.get("frame_index")
+    width = avcs_state.get("width")
+    height = avcs_state.get("height")
+    scene_hash = avcs_state.get("scene_hash")
+    if (
+        isinstance(frame_index, bool)
+        or not isinstance(frame_index, int)
+        or frame_index <= 0
+        or isinstance(width, bool)
+        or not isinstance(width, int)
+        or width <= 0
+        or isinstance(height, bool)
+        or not isinstance(height, int)
+        or height <= 0
+        or not isinstance(scene_hash, str)
+        or not scene_hash.strip()
+    ):
+        return {}
+
+    summary: dict[str, Any] = {
+        "engine": "avcs_reflex",
+        "frame_index": frame_index,
+        "width": width,
+        "height": height,
+        "scene_hash": scene_hash.strip()[:128],
+    }
+    for field_name in (
+        "brightness",
+        "contrast",
+        "change_fraction",
+        "global_motion",
+        "peak_motion",
+        "novelty",
+        "latency_ms",
+    ):
+        value = avcs_state.get(field_name)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        ):
+            summary[field_name] = value
+    for field_name in ("scene_changed", "overlay_suspected"):
+        value = avcs_state.get(field_name)
+        if isinstance(value, bool):
+            summary[field_name] = value
+
+    centroid = avcs_state.get("motion_centroid")
+    if (
+        isinstance(centroid, (list, tuple))
+        and len(centroid) == 2
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            for value in centroid
+        )
+    ):
+        summary["motion_centroid"] = [float(value) for value in centroid]
+
+    regions = avcs_state.get("regions")
+    if isinstance(regions, list):
+        safe_regions = []
+        for region in regions[:8]:
+            if not isinstance(region, dict):
+                continue
+            safe_region = {}
+            for field_name in (
+                "row",
+                "col",
+                "height",
+                "width",
+                "mean_luma",
+                "edge_density",
+                "salience",
+            ):
+                value = region.get(field_name)
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                ):
+                    safe_region[field_name] = value
+            if safe_region:
+                safe_regions.append(safe_region)
+        summary["regions"] = safe_regions
+    return summary
+
+
+def _fresh_avcs_pixel_evidence(screen: Any, *, max_age_ms: float = 2_000) -> dict[str, Any] | None:
+    """Return bounded AVCS evidence only for a fresh, identified pixel frame."""
+    screenshot = getattr(screen, "screenshot_base64", None)
+    if (
+        not isinstance(screenshot, str)
+        or not screenshot.strip()
+        or getattr(screen, "desktop_state", None) != "INTERACTIVE"
+    ):
+        return None
+
+    capture_age_ms = getattr(screen, "capture_age_ms", None)
+    if (
+        not isinstance(capture_age_ms, (int, float))
+        or isinstance(capture_age_ms, bool)
+        or not math.isfinite(float(capture_age_ms))
+        or capture_age_ms < 0
+    ):
+        capture_timestamp_ns = getattr(screen, "capture_timestamp_ns", None)
+        if (
+            not isinstance(capture_timestamp_ns, int)
+            or isinstance(capture_timestamp_ns, bool)
+            or capture_timestamp_ns < 0
+        ):
+            return None
+        capture_age_ms = (time.time_ns() - capture_timestamp_ns) / 1_000_000
+    else:
+        capture_timestamp_ns = getattr(screen, "capture_timestamp_ns", None)
+        if (
+            isinstance(capture_timestamp_ns, int)
+            and not isinstance(capture_timestamp_ns, bool)
+            and capture_timestamp_ns >= 0
+        ):
+            timestamp_age_ms = (time.time_ns() - capture_timestamp_ns) / 1_000_000
+            if not math.isfinite(timestamp_age_ms) or timestamp_age_ms < 0:
+                return None
+            capture_age_ms = max(float(capture_age_ms), timestamp_age_ms)
+
+    if capture_age_ms > max_age_ms:
+        return None
+
+    avcs_state = getattr(screen, "avcs_state", None)
+    summary = _avcs_pixel_state_summary(avcs_state)
+    if not summary:
+        return None
+    frame_index = summary["frame_index"]
+    if (
+        getattr(screen, "perception_version", None) != frame_index
+        or getattr(screen, "width", None) != summary["width"]
+        or getattr(screen, "height", None) != summary["height"]
+    ):
+        return None
+
+    return {
+        "frame_index": frame_index,
+        "scene_hash": summary["scene_hash"],
+        "width": summary["width"],
+        "height": summary["height"],
+        "capture_age_ms": float(capture_age_ms),
+        "summary": summary,
+    }
+
+
+async def _require_fresh_avcs_evidence(
+    computer: Any,
+    workspace_id: str,
+) -> tuple[Any, dict[str, Any]]:
+    """Capture and require a recent AVCS-processed frame before GUI dispatch."""
+    screen = await computer.screenshot(workspace_id=workspace_id)
+    evidence = _fresh_avcs_pixel_evidence(screen)
+    if evidence is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Desktop action blocked: fresh, versioned AVCS pixel evidence "
+                "is unavailable."
+            ),
+        )
+    return screen, evidence
+
+
+_WORKSTATION_PERCEPTION_CONTRACT = (
+    "Workstation visual evidence is AVCS pixel-only. The supplied AVCS summary "
+    "reports coarse image brightness, contrast, change, motion, and visual regions; "
+    "region and motion coordinates are coarse, not actionable screen pixels. It does "
+    "not identify text, controls, application names, dialog meaning, or task success. "
+    "Do not infer or claim those semantics from the summary. Treat missing or stale "
+    "AVCS state as unavailable, and treat GUI actions as attempts unless independent "
+    "Judge evidence establishes the requested postcondition."
+)
+
+
 def _generate_grounded_workstation_response(
     prompt: str,
     session_id: str,
@@ -3037,11 +3240,6 @@ def _generate_grounded_workstation_response(
     action_observations: list[str] | None = None,
 ) -> str:
     """Generate an authentic workstation status response when LLM providers are unconfigured or unavailable."""
-    if (
-        desktop_context.startswith("No tenant-owned desktop observation")
-        and state.get("last_desktop_observation")
-    ):
-        desktop_context = str(state["last_desktop_observation"])
     if action_observations:
         obs_summary = "\n\n".join(action_observations)
         return (
@@ -3057,19 +3255,16 @@ def _generate_grounded_workstation_response(
     target = state.get("active_target") or state.get("target_sandbox", {}).get("target") or "None set"
     obs_snippet = f"\n\nObservation context:\n> {desktop_context[:300]}..." if desktop_id and desktop_context else ""
 
-    has_live_observation = (
-        desktop_context.startswith("CURRENT LIVE DESKTOP OBSERVATION")
-        or desktop_context.startswith("CURRENT DESKTOP OBSERVATION")
-    )
+    has_live_observation = desktop_context.startswith("CURRENT AVCS PIXEL-STATE SUMMARY")
     if desktop_id and has_live_observation:
         return (
-            f"**SONIC Live Observation (LLM unavailable):**\n\n"
+            f"**SONIC AVCS Pixel Observation (LLM unavailable):**\n\n"
             f"- **Objective:** {prompt}\n"
             f"- **Workstation:** {ws_info}\n"
-            f"- **Observation:** {desktop_context}\n"
-            f"- **Visual analysis:** unavailable because the configured vision provider "
-            f"did not return a response. No desktop action was executed.\n"
-            f"- **Next step:** restore a vision-capable provider or retry the read-only observation."
+            f"- **Pixel-state summary:** {desktop_context}\n"
+            f"- **Limit:** AVCS does not identify screen text, controls, application "
+            f"semantics, or task completion. No semantic visual analysis or desktop "
+            f"action was performed."
         )
 
     return (
@@ -3177,37 +3372,49 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
             _persist_workstation_state()
             return
 
-        # Capture pixels locally for AVCS; workstation frames are never sent to an LLM.
+        # Capture pixels locally for AVCS; only a fresh, allowlisted AVCS
+        # pixel-state summary may enter workstation reasoning prompts.
         computer = None
         if desktop_id:
             if desktop_prompt:
                 try:
                     computer = get_daytona_computer()
                     screen = await computer.screenshot(desktop_id)
-                    avcs_state = getattr(screen, "avcs_state", {}) or {}
-                    ctx_parts = [
-                        f"CURRENT AVCS PIXEL OBSERVATION (captured {screen.timestamp}): "
-                        f"state={screen.desktop_state}; resolution={screen.width}x{screen.height}; "
-                        f"active_window={screen.active_window!r}; "
-                        f"avcs_state={json.dumps(avcs_state, ensure_ascii=True, separators=(',', ':'))}"
-                    ]
-                    desktop_context = "; ".join(ctx_parts) + "."
-                    state["last_desktop_observation"] = desktop_context
-                    state["last_desktop_observation_at"] = screen.timestamp
-                    _persist_workstation_state()
-                    if execution_prompt or observation_only:
+                    avcs_evidence = _fresh_avcs_pixel_evidence(screen)
+                    if avcs_evidence:
+                        desktop_context = (
+                            "CURRENT AVCS PIXEL-STATE SUMMARY (fresh; "
+                            f"capture_age_ms={avcs_evidence['capture_age_ms']:.1f}): "
+                            f"{json.dumps(avcs_evidence['summary'], ensure_ascii=True, separators=(',', ':'))}. "
+                            f"{_WORKSTATION_PERCEPTION_CONTRACT}"
+                        )
+                        state["last_desktop_observation"] = desktop_context
+                        state["last_desktop_observation_at"] = getattr(screen, "timestamp", "")
+                        _persist_workstation_state()
+                    else:
+                        desktop_context = (
+                            "AVCS pixel-state unavailable or stale. No screenshot pixels, "
+                            "OCR text, accessibility controls, or semantic screen description "
+                            "are available to this reasoning request."
+                        )
+                        state.pop("last_desktop_observation", None)
+                        state.pop("last_desktop_observation_at", None)
+                    if avcs_evidence and (execution_prompt or observation_only):
                         _append_worklog(
                             state,
                             "action",
                             "Agent Desktop Observation",
-                            "AVCS processed the live workstation pixels locally. " + desktop_context,
+                            "AVCS processed fresh workstation pixels locally. " + desktop_context,
                         )
                 except Exception as observation_err:
                     logger.warning("workstation_desktop_observation_failed", error=str(observation_err))
-                    if state.get("last_desktop_observation"):
-                        desktop_context = str(state["last_desktop_observation"])
-                    else:
-                        desktop_context = f"Workstation active ('{desktop_id}'), but screen capture returned: {observation_err}"
+                    desktop_context = (
+                        "AVCS pixel-state unavailable. The current desktop capture failed; "
+                        "no screenshot pixels, OCR text, accessibility controls, or semantic "
+                        "screen description are available to this reasoning request."
+                    )
+                    state.pop("last_desktop_observation", None)
+                    state.pop("last_desktop_observation_at", None)
 
             # Execute autonomous action loop if applicable
             if execution_prompt:
@@ -3542,6 +3749,11 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 initial_context={
                                     "program_profile": program_profile,
                                     "recent_history": _summarize_recent_worklog(state),
+                                    **(
+                                        {"workstation_perception_contract": _WORKSTATION_PERCEPTION_CONTRACT}
+                                        if desktop_prompt
+                                        else {}
+                                    ),
                                 },
                             )
 
@@ -3844,7 +4056,15 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 initial_context={
                                     "program_profile": program_profile,
                                     "recent_history": _summarize_recent_worklog(state),
+                                    **(
+                                        {"workstation_perception_contract": _WORKSTATION_PERCEPTION_CONTRACT}
+                                        if desktop_prompt
+                                        else {}
+                                    ),
                                 },
+                                system_prompt_overlay=(
+                                    _WORKSTATION_PERCEPTION_CONTRACT if desktop_prompt else None
+                                ),
                                 operator_approval_callback=_request_operator_action_approval(
                                     tenant_id, session_id, state
                                 ),
@@ -3911,14 +4131,27 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     import sys
                                     trace_strings = []
                                     for t in traces:
+                                        action_name = str(getattr(t.action_type, "value", t.action_type))
+                                        action_status = str(getattr(t.status, "value", t.status))
+                                        action_target = str(t.target_resource or "")
+                                        is_visual_action = action_name.startswith(
+                                            ("GUI_", "APP_", "WINDOW_", "BROWSER_")
+                                        ) or action_name == "SCREENSHOT"
+                                        if is_visual_action:
+                                            trace_strings.append(
+                                                f"- GUI action attempted: {action_name} on {action_target} "
+                                                f"(receipt status: {action_status}; AVCS does not identify "
+                                                "screen text, controls, application semantics, or task success)."
+                                            )
+                                            continue
                                         if t.actual_observation:
                                             try:
                                                 obs = t.actual_observation[:300]
                                                 if sys.platform == "win32":
                                                     obs = obs.encode('utf-8', errors='replace').decode('utf-8')
-                                                trace_strings.append(f"- Action: {t.action_type.value} on {t.target_resource} -> Output: {obs}")
+                                                trace_strings.append(f"- Action: {action_name} on {action_target} -> Output: {obs}")
                                             except Exception:
-                                                trace_strings.append(f"- Action: {t.action_type.value} on {t.target_resource} -> Output: [encoding error]")
+                                                trace_strings.append(f"- Action: {action_name} on {action_target} -> Output: [encoding error]")
                                     findings_summary = "\n".join(trace_strings)
                                     import sys
                                     prompt_safe = prompt
@@ -3929,9 +4162,12 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                             prompt_safe = "User request (encoding issue)"
                                     synth_prompt = (
                                         f"User asked: '{prompt_safe}'\n\n"
-                                        f"Autonomous actions executed and real workstation observations:\n"
+                                        f"Non-visual execution output and GUI action receipts:\n"
                                         f"{findings_summary or 'No output produced.'}\n\n"
-                                        f"Provide an authentic, clear response directly answering the user's objective based strictly on the real observations above."
+                                        f"Answer concisely using only the evidence above. GUI receipts establish only "
+                                        f"that an action was attempted; AVCS pixel metrics do not identify text, "
+                                        f"controls, application meaning, or task completion. Do not infer those "
+                                        f"semantics or claim GUI completion without independent Judge evidence."
                                     )
                                     try:
                                         from sonic.llm.schemas import (
@@ -3941,7 +4177,15 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                         )
                                         s_req = LLMRequest(
                                             messages=[
-                                                Message(role=MessageRole.SYSTEM, content="You are SONIC, an autonomous AI-Human Digital Being and computer engineer. Summarize the verified work and actions taken accurately and concisely in the user's language."),
+                                                Message(
+                                                    role=MessageRole.SYSTEM,
+                                                    content=(
+                                                        "You are SONIC, an autonomous AI-Human Digital Being "
+                                                        "and computer engineer. Summarize verified work and "
+                                                        "actions accurately and concisely in the user's language. "
+                                                        f"{_WORKSTATION_PERCEPTION_CONTRACT}"
+                                                    ),
+                                                ),
                                                 Message(role=MessageRole.USER, content=synth_prompt),
                                             ],
                                             task_type="reasoning",
@@ -3961,19 +4205,39 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
 
                                 if not summary_msg:
                                     if getattr(agent, "goal_reached", False):
-                                        summary_msg = f"Goal successfully achieved on workstation ({succeeded} actions completed)."
+                                        summary_msg = (
+                                            "The agent proposed that the goal was reached, but this execution "
+                                            "path has no independent Judge receipt. GUI completion remains unverified."
+                                            if any(
+                                                str(getattr(t.action_type, "value", t.action_type)).startswith(
+                                                    ("GUI_", "APP_", "WINDOW_", "BROWSER_")
+                                                )
+                                                for t in traces
+                                            )
+                                            else f"Goal verification passed on workstation ({succeeded} actions completed)."
+                                        )
                                     elif traces:
                                         import sys
                                         trace_summaries = []
                                         for t in traces:
-                                            if t.actual_observation:
+                                            action_name = str(getattr(t.action_type, "value", t.action_type))
+                                            action_target = str(t.target_resource or "")
+                                            is_visual_action = action_name.startswith(
+                                                ("GUI_", "APP_", "WINDOW_", "BROWSER_")
+                                            ) or action_name == "SCREENSHOT"
+                                            if is_visual_action:
+                                                trace_summaries.append(
+                                                    f"• GUI action attempted: {action_name} on {action_target}; "
+                                                    "semantic outcome not established by AVCS."
+                                                )
+                                            elif t.actual_observation:
                                                 try:
                                                     obs = t.actual_observation[:120]
                                                     if sys.platform == "win32":
                                                         obs = obs.encode('utf-8', errors='replace').decode('utf-8')
-                                                    trace_summaries.append(f"• {t.action_type.value} on {t.target_resource}: {obs}")
+                                                    trace_summaries.append(f"• {action_name} on {action_target}: {obs}")
                                                 except Exception:
-                                                    trace_summaries.append(f"• {t.action_type.value} on {t.target_resource}: [encoding error]")
+                                                    trace_summaries.append(f"• {action_name} on {action_target}: [encoding error]")
                                         summary_msg = f"Completed {succeeded} actions ({failed} failed):\n" + "\n".join(trace_summaries)
                                     else:
                                         summary_msg = "No actions were required or executed for this objective."
@@ -3986,7 +4250,16 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                     summary_msg = "Summary available (encoding issue in display)"
 
                             try:
-                                agent_success = bool(getattr(agent, "goal_reached", False) or succeeded > 0)
+                                has_unjudged_gui_actions = any(
+                                    str(getattr(t.action_type, "value", t.action_type)).startswith(
+                                        ("GUI_", "APP_", "WINDOW_", "BROWSER_")
+                                    )
+                                    for t in traces
+                                )
+                                agent_success = (
+                                    not has_unjudged_gui_actions
+                                    and bool(getattr(agent, "goal_reached", False) or succeeded > 0)
+                                )
                                 summary_text = str(summary_msg or "")
                                 if hasattr(mind, "record_mission_outcome"):
                                     mind.record_mission_outcome(
@@ -4083,9 +4356,18 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
         else:
             system_prompt = WORKSTATION_CHAT_SYSTEM
             being_brief = _being_conversation_brief(tenant_id)
-            conv_history = _extract_recent_conversation_messages(state)
+            conv_history = _extract_recent_conversation_messages(
+                state,
+                exclude_desktop_observations=desktop_prompt,
+            )
+            workstation_system_prompt = WORKSTATION_CHAT_SYSTEM
+            if desktop_prompt:
+                workstation_system_prompt = (
+                    f"{WORKSTATION_CHAT_SYSTEM}\n\n"
+                    f"{_WORKSTATION_PERCEPTION_CONTRACT}"
+                )
             messages = [
-                Message(role=MessageRole.SYSTEM, content=system_prompt),
+                Message(role=MessageRole.SYSTEM, content=workstation_system_prompt),
                 *conv_history,
                 Message(
                     role=MessageRole.USER,
@@ -4093,7 +4375,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                         f"Operator Objective:\n{prompt}\n\n"
                         f"Being self-model (answer identity and thought questions from this; "
                         f"do not invent another persona or a tool list):\n{being_brief}\n\n"
-                        f"Workstation Context & Real Terminal Output:\n{desktop_context}"
+                        f"AVCS Pixel-State Summary & Real Terminal Output:\n{desktop_context}"
                     ),
                 ),
             ]
@@ -4131,7 +4413,7 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                     # itself, not only on the optional screenshot payload.
                     has_live_desktop_observation = (
                         bool(desktop_id)
-                        and not desktop_context.startswith("No tenant-owned desktop observation")
+                        and desktop_context.startswith("CURRENT AVCS PIXEL-STATE SUMMARY")
                     )
                     if has_live_desktop_observation and _claims_missing_desktop_observation(final_content):
                         final_content = _generate_grounded_workstation_response(

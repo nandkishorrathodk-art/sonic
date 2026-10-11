@@ -6,7 +6,7 @@
 # Provides the container backing `sonic-desktop-workstation`, the default
 # MISSION_COMPUTER for the SONIC control plane (see docker-compose.yml:
 # service `workstation`). Matches docker/entrypoint-workstation.sh expectations:
-# Xvfb :99 1280x800, XFCE4 session, x11vnc on 5900, websockify/noVNC
+# Xvfb :99 1920x1080, XFCE4 session, x11vnc on 5900, websockify/noVNC
 # on 6080. Firefox ESR is installed and opened to a blank tab for visible
 # browser-based computer interaction; this does not force a browsing workflow.
 
@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     postgresql-client \
     python3 \
+    python3-numpy \
     python3-pil \
     python3-pip \
     python3-venv \
@@ -56,6 +57,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     firefox-esr \
     && rm -rf /var/lib/apt/lists/*
+
+# Bundle only AVCS's pixel-reflex runtime used by SONIC. Keeping these modules
+# as a namespace package avoids importing unrelated training/model components.
+COPY AVCS/forge/vision/reflex.py /opt/sonic/AVCS/forge/vision/reflex.py
+COPY AVCS/forge/vision/scene.py /opt/sonic/AVCS/forge/vision/scene.py
+ENV PYTHONPATH=/opt/sonic/AVCS
+RUN python3 -c \
+    "from forge.vision.reflex import ReflexPerception; import numpy as np; state = ReflexPerception().perceive(np.zeros((16, 16, 3), dtype=np.uint8)); assert (state.width, state.height) == (16, 16)"
 
 RUN useradd --create-home --shell /usr/sbin/nologin sonic-browser
 

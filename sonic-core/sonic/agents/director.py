@@ -259,6 +259,7 @@ class Director:
         self._states: dict[str, CognitiveState] = {}
         self._graphs: dict[str, TaskGraph] = {}
         self._events: dict[str, list[LifecycleEvent]] = {}
+        self._pause_events: dict[str, asyncio.Event] = {}
 
         # Replan engine & Action selector (Phase 6)
         self.replan_engine = ReplanEngine(
@@ -950,6 +951,7 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         graph = self._graphs.get(engagement_id)
         if not state or not graph:
             return {"error": f"Engagement {engagement_id} not found"}
+        pause_event = self._pause_events.setdefault(engagement_id, asyncio.Event())
 
         completed = 0
         failed = 0
@@ -959,7 +961,11 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         waiting_for_human = False
 
         for _iteration in range(max_iterations):
+            if pause_event.is_set():
+                break
             dispatchable = self.get_dispatchable_tasks(engagement_id)
+            if pause_event.is_set():
+                break
             if not dispatchable:
                 stop_evaluation = self._evaluate_stop_condition(state, graph)
                 if stop_evaluation.should_stop:
@@ -992,9 +998,38 @@ Create 1-6 initial tasks. The first task should establish the most useful target
                 except Exception as exc:
                     return exc
 
-            results = await asyncio.gather(
-                *(run_worker(task_payload) for task_payload in dispatchable)
+            worker_tasks = [
+                asyncio.create_task(run_worker(task_payload))
+                for task_payload in dispatchable
+            ]
+            workers_done = asyncio.gather(*worker_tasks, return_exceptions=True)
+            pause_waiter = asyncio.create_task(pause_event.wait())
+            done, _ = await asyncio.wait(
+                (workers_done, pause_waiter),
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if pause_waiter in done and pause_event.is_set() and not workers_done.done():
+                if inspect.iscoroutinefunction(worker_fn):
+                    for worker_task in worker_tasks:
+                        worker_task.cancel()
+                    await asyncio.gather(*worker_tasks, return_exceptions=True)
+                    for task_payload in dispatchable:
+                        task = graph.get_task(str(task_payload.get("task_id", "")))
+                        if task and task.status == TaskStatus.RUNNING:
+                            task.status = TaskStatus.READY
+                            task.started_at = None
+                            task.agent_id = ""
+                            task.execution_id = ""
+                    workers_done.cancel()
+                    await asyncio.gather(workers_done, return_exceptions=True)
+                    break
+                # Cancelling an asyncio.to_thread wrapper cannot stop its
+                # thread. Drain sync workers and record their actual outcomes
+                # rather than detaching side effects and retrying them later.
+                await workers_done
+            pause_waiter.cancel()
+            await asyncio.gather(pause_waiter, return_exceptions=True)
+            results = await workers_done
             for task_payload, res in zip(dispatchable, results, strict=True):
                 tid = task_payload.get("task_id", "")
                 try:
@@ -1065,7 +1100,9 @@ Create 1-6 initial tasks. The first task should establish the most useful target
             "findings": all_findings,
             "graph_complete": graph_complete,
             "status": (
-                "awaiting_human"
+                "paused"
+                if pause_event.is_set()
+                else "awaiting_human"
                 if waiting_for_human
                 else "completed" if graph_succeeded and completed > 0
                 else "partial" if completed > 0
@@ -1224,6 +1261,7 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         state = self._states.get(engagement_id)
         if not state:
             return False
+        self._pause_events.setdefault(engagement_id, asyncio.Event()).set()
 
         await self._persist(engagement_id)
 
@@ -1249,6 +1287,7 @@ Create 1-6 initial tasks. The first task should establish the most useful target
         state = self._states.get(engagement_id)
         if not state:
             return False
+        self._pause_events.setdefault(engagement_id, asyncio.Event()).clear()
 
         await self.memory.update_engagement(
             engagement_id, status=EngagementStatus.RUNNING,

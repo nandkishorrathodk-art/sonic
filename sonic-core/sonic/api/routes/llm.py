@@ -214,18 +214,13 @@ def _resolve_preset_questions(preset_key: str, state: str | dict[str, Any]) -> t
     """Resolve preset questions and adapted state for Laya System-1 prediction."""
     base_questions = LAYA_PRESETS[preset_key]
     if preset_key in ("receipt", "verify_receipt", "empirical_proof") and isinstance(state, dict):
-        goal = state.get("goal", "")
         evidence = state.get("evidence", "")
-        actual_state = evidence or str(state)
+        actual_state = evidence if isinstance(evidence, str) else ""
         questions = {
             "empirical_proof": {
                 "type": "noul",
                 "instructions": "Verify empirical execution receipt",
-                "affirmative_anchor": (
-                    f"{goal} FILE_VERIFIED verified success passed 200 OK exit 0 created committed running"
-                    if goal
-                    else "FILE_VERIFIED verified success passed 200 OK exit 0 created committed running"
-                ),
+                "affirmative_anchor": "FILE_VERIFIED verified success passed 200 OK exit 0 created committed running",
                 "negative_anchor": "error traceback exception failed Terminal Ready (0 procs) __sonic_obs_ready__ exit 126 blocked",
             }
         }

@@ -190,6 +190,94 @@ def test_director_deterministic_e2e_flow():
     asyncio.run(_run())
 
 
+def test_pausing_engagement_cancels_active_async_workers_and_resets_tasks():
+    async def _run():
+        memory = InMemoryGraph()
+        await memory.init_schema()
+        director = Director(
+            model_router=get_mock_router(),
+            graph_memory=memory,
+            scope_checker=ScopeChecker(),
+            state_store=StateStore(redis_client=None),
+            max_parallel=2,
+        )
+        engagement_id = await director.start_engagement(
+            target="target.example.test",
+            scope={"allowed_domains": ["target.example.test"]},
+            tenant_id="pause-tenant",
+            created_by="operator@example.test",
+        )
+        started = asyncio.Event()
+
+        async def worker(_payload):
+            started.set()
+            await asyncio.Event().wait()
+
+        loop_task = asyncio.create_task(
+            director.run_engagement_loop(engagement_id, worker)
+        )
+        await started.wait()
+        assert await director.pause_engagement(engagement_id)
+        result = await asyncio.wait_for(loop_task, timeout=1)
+
+        assert result["status"] == "paused"
+        assert not any(
+            task.status.value == "running"
+            for task in director._graphs[engagement_id].tasks.values()
+        )
+        assert await director.resume_engagement(engagement_id)
+        assert not director._pause_events[engagement_id].is_set()
+
+    asyncio.run(_run())
+
+
+def test_pausing_engagement_drains_non_interruptible_sync_workers():
+    async def _run():
+        import threading
+
+        memory = InMemoryGraph()
+        await memory.init_schema()
+        director = Director(
+            model_router=get_mock_router(),
+            graph_memory=memory,
+            scope_checker=ScopeChecker(),
+            state_store=StateStore(redis_client=None),
+            max_parallel=1,
+        )
+        engagement_id = await director.start_engagement(
+            target="target.example.test",
+            scope={"allowed_domains": ["target.example.test"]},
+            tenant_id="pause-sync-tenant",
+            created_by="operator@example.test",
+        )
+        started = threading.Event()
+        release = threading.Event()
+
+        def worker(_payload):
+            started.set()
+            release.wait(timeout=2)
+            return {"status": "completed"}
+
+        loop_task = asyncio.create_task(
+            director.run_engagement_loop(engagement_id, worker)
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        assert await director.pause_engagement(engagement_id)
+        await asyncio.sleep(0)
+        assert not loop_task.done()
+        release.set()
+        result = await asyncio.wait_for(loop_task, timeout=2)
+
+        assert result["status"] == "paused"
+        assert result["completed"] == 1
+        assert all(
+            task.status.value != "running"
+            for task in director._graphs[engagement_id].tasks.values()
+        )
+
+    asyncio.run(_run())
+
+
 @pytest.mark.asyncio
 async def test_director_rejects_callbacks_from_a_previous_retry_attempt():
     director = Director(
