@@ -121,6 +121,8 @@ async def test_agent_does_not_surface_private_reasoning_content():
     agent = ComputerUseAgent(
         computer_provider=mock_computer,
         llm_router=mock_router,
+        execution_plane="headless",
+        observe_desktop=False,
     )
 
     mock_router.complete = AsyncMock(return_value=LLMResponse(
@@ -140,7 +142,7 @@ async def test_agent_does_not_surface_private_reasoning_content():
         step_index=1,
     )
 
-    assert agent._last_thought == ""
+    assert getattr(agent, "_last_thought", "") == ""
     assert payload.get("command") == "echo 1"
 
 
@@ -189,4 +191,3 @@ async def test_agent_history_preserves_and_feeds_back_thoughts():
     )
     assert "Your Immediate Prior Thought was:" in obs_summary
     assert "Target seems to have an active HTTP service; checking ping" in obs_summary
-

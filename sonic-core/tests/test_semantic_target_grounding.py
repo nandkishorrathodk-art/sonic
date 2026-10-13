@@ -14,10 +14,9 @@ Validates:
 from __future__ import annotations
 
 import time
-from typing import Any
 import pytest
 
-from sonic.computer_use.perception_bus import PerceptionBus, TargetMatch
+from sonic.computer_use.perception_bus import PerceptionBus
 from sonic.computer_use.grounding import resolve_ui_target
 
 # Attempt to import SemanticTargetIndex from perception_bus or grounding
@@ -280,23 +279,15 @@ def test_version_isolation_and_invalidation():
 # ============================================================================
 
 def test_pairwise_grounding_fast_path_with_perception_bus():
-    """Verify grounding.resolve_ui_target queries PerceptionBus first and returns center coordinates in < 0.001ms."""
+    """Compatibility control inventories do not provide workstation grounding."""
     bus = PerceptionBus()
     control = {
         "text": "Submit Application",
         "role": "button",
         "bbox": (300, 400, 100, 40),
     }
-    if hasattr(bus, "ingest_controls"):
-        bus.ingest_controls([control])
-
-        # Test resolve_ui_target with perception_bus parameter
-        started = time.perf_counter()
-        coords = resolve_ui_target("Submit Application", perception_bus=bus)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-
-        assert coords == (350, 420), f"Expected center (350, 420), got {coords}"
-        assert elapsed_ms < 0.1, f"Fast-path resolution took {elapsed_ms:.4f}ms (must be < 0.1ms)"
+    bus.ingest_controls([control])
+    assert resolve_ui_target("Submit Application", perception_bus=bus) is None
 
 
 def test_pairwise_browser_and_desktop_controls_in_single_index():
@@ -392,4 +383,4 @@ def test_benchmark_target_resolution_latency():
         f"Average resolution latency {avg_latency_ms * 1000:.2f} microseconds per query "
         f"exceeds 0.1ms target (total for {iterations} queries: {total_elapsed_ms:.2f}ms)"
     )
-    assert avg_latency_ms < 0.5, f"Must pass acceptance criteria < 0.5ms"
+    assert avg_latency_ms < 0.5, "Must pass acceptance criteria < 0.5ms"

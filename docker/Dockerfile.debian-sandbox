@@ -1,5 +1,5 @@
 # ==============================================================================
-# SONIC-REDA — Isolated Debian 12 Sandbox (Browser & General Compute Workspace)
+# SONIC — Isolated Debian 12 Sandbox (Browser & General Compute Workspace)
 # ==============================================================================
 
 FROM debian:12-slim

@@ -338,7 +338,11 @@ class TestAgentFailureIntegration:
         """Missing or empty observation fields must truthfully render as UNKNOWN (no fake values)."""
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider)
-        empty_obs = MagicMock(
+        from sonic.computer.models import ScreenObservation
+        from sonic.computer_use.models import ComputerWorldObservation
+
+        empty_obs = ComputerWorldObservation(
+            screen=ScreenObservation(),
             visible_text="",
             terminal_output="",
             filesystem_files=[],
@@ -358,10 +362,7 @@ class TestAgentFailureIntegration:
             test_file="",
         )
 
-        assert (
-            "Screen Visible Content: UNKNOWN" in obs_summary
-            or "Screen visible text:\nUNKNOWN" in obs_summary
-        )
+        assert "Screen Visible Content: UNKNOWN" in obs_summary
         assert (
             "Last Command Output: UNKNOWN" in obs_summary
             or "Terminal output:\nUNKNOWN" in obs_summary

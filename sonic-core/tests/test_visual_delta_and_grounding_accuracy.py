@@ -13,6 +13,7 @@ from sonic.computer_use.grounding import (
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
 from sonic.computer.models import ScreenObservation
+from tests.avcs_test_helpers import png_base64
 
 
 def test_extract_bbox_midpoint_formats():
@@ -98,7 +99,7 @@ def test_landmark_substring_collision_prevention():
 async def test_visual_verification_detects_unchanged_screen():
     mock_computer = MagicMock()
     # Mock gui_action returning the EXACT same screenshot as pre-action
-    same_b64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    same_b64 = png_base64(width=1280, height=800, color="black")
     mock_obs = ScreenObservation(
         screenshot_base64=same_b64,
         width=1280,
@@ -138,5 +139,5 @@ async def test_visual_verification_detects_unchanged_screen():
     )
 
     assert "[VISUAL VERIFICATION]: Screen state unchanged" in trace.actual_observation
-    assert trace.status == ActionExecutionStatus.FAILED
+    assert trace.status == ActionExecutionStatus.UNVERIFIED
     assert trace.recovery_attempted is False

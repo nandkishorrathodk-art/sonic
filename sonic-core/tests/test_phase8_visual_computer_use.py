@@ -6,11 +6,11 @@ move, scroll, screenshot) to the computer provider, that the LLM prompt
 includes GUI actions in its schema, that the action parser handles coordinate
 formats, and that the safety policy allows GUI actions.
 """
-import asyncio
 import base64
 import binascii
 import json
 import struct
+import time
 import pytest
 import zlib
 from unittest.mock import AsyncMock, MagicMock
@@ -98,34 +98,20 @@ def _seed_fresh_gui_observation(agent, *, active_window="Desktop", controls=None
         active_window=active_window,
         detected_controls=controls or [],
     )
+    screen = agent._ensure_avcs_state(screen)
     observation = ComputerWorldObservation(
         screen=screen,
         active_application=active_window,
-        perception_version=0,
+        perception_version=screen.perception_version,
         observation_age_ms=0,
     )
     agent._last_world_observation = observation
     agent._last_gui_state_observation = screen
-    agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+    agent._last_screen_observation_received_at = time.monotonic()
     agent._last_screenshot_b64 = screen.screenshot_base64
     agent._screen_width = screen.width
     agent._screen_height = screen.height
     return observation
-
-
-def _allow_visual_focus(agent):
-    agent.llm_router = MagicMock()
-    agent.llm_router.complete = AsyncMock(
-        return_value=MagicMock(
-            content=json.dumps(
-                {
-                    "focused": True,
-                    "confidence": 0.99,
-                    "evidence": "A visible caret is present at the clicked field.",
-                }
-            )
-        )
-    )
 
 
 # ---- Tests ----
@@ -236,11 +222,33 @@ class TestGUIActionDispatch:
         assert "focus-verification head" in trace.actual_observation
         provider.gui_action.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        "action_type",
+        [ComputerActionType.GUI_TYPE, ComputerActionType.BROWSER_TYPE],
+    )
+    @pytest.mark.asyncio
+    async def test_dual_plane_typing_without_avcs_focus_head_is_blocked(self, action_type):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+
+        trace = await agent.execute_action(
+            "ws-1",
+            action_type,
+            "search field",
+            {"text": "must not be sent"},
+            "Type into the search field",
+        )
+
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        assert "no evaluated local focus-verification head" in trace.actual_observation
+        provider.gui_action.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_gui_only_type_fails_closed_without_evaluated_focus_head(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
-        _allow_visual_focus(agent)
+        agent.llm_router = MagicMock()
+        agent.llm_router.complete = AsyncMock()
         await agent.observe("ws-1")
         trace = await agent.execute_action(
             "ws-1",
@@ -346,7 +354,7 @@ class TestGUIActionDispatch:
         )
 
         assert trace.status == ActionExecutionStatus.BLOCKED
-        assert "no text was sent" in trace.actual_observation
+        assert "no evaluated local focus-verification head" in trace.actual_observation
         assert all(
             call.args[1].action != GUIActionType.TYPE
             for call in provider.gui_action.await_args_list
@@ -394,7 +402,7 @@ class TestGUIActionDispatch:
         )
 
         assert trace.status == ActionExecutionStatus.BLOCKED
-        assert "post-focus screenshot" in trace.actual_observation
+        assert "no evaluated local focus-verification head" in trace.actual_observation
         assert all(
             call.args[1].action != GUIActionType.TYPE
             for call in provider.gui_action.await_args_list
@@ -579,10 +587,9 @@ class TestGUIActionDispatch:
         assert "PAYLOAD must be a JSON object" in reason
 
     @pytest.mark.asyncio
-    async def test_gui_type_accepts_json_pixel_target_without_semantic_control(self):
+    async def test_gui_type_blocks_until_local_focus_verification_is_available(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
-        _allow_visual_focus(agent)
         await agent.observe("ws-1")
         action, target, payload, expected = agent._parse_gui_action_response(
             (
@@ -598,100 +605,9 @@ class TestGUIActionDispatch:
             "ws-1", action, target, payload, expected,
         )
 
-        assert trace.status != ActionExecutionStatus.BLOCKED
-        assert any(
-            call.args[1].action == GUIActionType.TYPE
-            for call in provider.gui_action.await_args_list
-        )
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("focused_after_click", [True, False])
-    async def test_gui_type_requires_fresh_focus_confirmation(self, focused_after_click):
-        provider = _mock_provider()
-        agent = ComputerUseAgent(computer_provider=provider, execution_plane="dual")
-        control = {
-            "name": "Folder name",
-            "role": "entry",
-            "bbox": (100, 120, 240, 32),
-            "source": "atspi",
-            "editable": True,
-            "focused": False,
-            "confidence": 0.95,
-            "freshness_ms": 0,
-        }
-        provider.screenshot.return_value = ScreenObservation(
-            width=1280,
-            height=800,
-            screenshot_base64=_FRESH_FRAME,
-            capture_age_ms=0,
-            controls_age_ms=0,
-            active_window="File Manager",
-            detected_controls=[control],
-        )
-
-        def publish_scene(*, focused):
-            current = {**control, "focused": focused}
-            snapshot = agent.perception_bus.publish(
-                screenshot_base64=_FRESH_FRAME,
-                width=1280,
-                height=800,
-                active_window="File Manager",
-                controls=[current],
-            )
-            observation = ComputerWorldObservation(
-                screen=ScreenObservation(
-                    screenshot_base64=_FRESH_FRAME,
-                    width=1280,
-                    height=800,
-                    active_window="File Manager",
-                    capture_age_ms=0,
-                    controls_age_ms=0,
-                    detected_controls=[current],
-                ),
-                active_application="File Manager",
-                perception_version=snapshot.version,
-                observation_age_ms=0,
-            )
-            agent._last_world_observation = observation
-            agent._last_gui_state_observation = observation.screen
-            agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
-            provider.status.return_value = MagicMock(
-                active_application="File Manager",
-                active_window="File Manager",
-                open_applications=["File Manager"],
-            )
-            return observation
-
-        publish_scene(focused=False)
-
-        async def refresh_after_click(_workspace_id):
-            return publish_scene(focused=focused_after_click)
-
-        agent.observe = AsyncMock(side_effect=refresh_after_click)
-        trace = await agent.execute_action(
-            "ws-1",
-            ComputerActionType.GUI_TYPE,
-            "Folder name",
-            {
-                "text": "SONIC_GUI_ACCEPTANCE",
-                "postcondition": {"screen_changed": True},
-            },
-            "Enter the requested folder name",
-        )
-
-        dispatched = [
-            call.args[1].action for call in provider.gui_action.call_args_list
-        ]
-        assert dispatched[0] == GUIActionType.CLICK
-        if focused_after_click:
-            assert trace.status == ActionExecutionStatus.SUCCESS
-            assert dispatched == [GUIActionType.CLICK, GUIActionType.TYPE]
-            assert provider.gui_action.call_args_list[1].args[1].x is None
-            assert provider.gui_action.call_args_list[1].args[1].y is None
-        else:
-            assert trace.status == ActionExecutionStatus.BLOCKED
-            assert "did not confirm focus" in trace.actual_observation
-            assert dispatched == [GUIActionType.CLICK]
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        assert "focus-verification head" in trace.actual_observation
+        provider.gui_action.assert_not_awaited()
 
     @pytest.mark.parametrize(
         "target",
@@ -758,9 +674,7 @@ class TestGUIActionDispatch:
         provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_explicit_pixel_payload_bypasses_grounding_and_uses_latest_bounds(
-        self, monkeypatch
-    ):
+    async def test_explicit_pixel_payload_bypasses_grounding_and_uses_latest_bounds(self):
         provider = _mock_provider()
         provider.screenshot.return_value = ScreenObservation(
             width=1280,
@@ -771,9 +685,6 @@ class TestGUIActionDispatch:
         )
         agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
         await agent.observe("ws-1")
-        grounding = AsyncMock(side_effect=AssertionError("pixel coordinates must not ground"))
-        monkeypatch.setattr("sonic.computer_use.agent.resolve_ui_target_async", grounding)
-
         accepted = await agent.execute_action(
             "ws-1",
             ComputerActionType.GUI_CLICK,
@@ -782,7 +693,6 @@ class TestGUIActionDispatch:
             "Click the observed point",
         )
         assert accepted.status == ActionExecutionStatus.SUCCESS
-        grounding.assert_not_awaited()
         provider.gui_action.assert_awaited_once()
 
         provider.gui_action.reset_mock()
@@ -795,7 +705,6 @@ class TestGUIActionDispatch:
         )
         assert rejected.status == ActionExecutionStatus.BLOCKED
         assert "outside screen 1280x800" in rejected.actual_observation
-        grounding.assert_not_awaited()
         provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -995,12 +904,10 @@ class TestGUIActionDispatch:
             "Open the visible browser",
         )
 
-        assert trace.status == "RECOVERED"
-        assert "could not be verified from a live screen" in trace.actual_observation.lower()
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        assert "no evaluated local focus-verification head" in trace.actual_observation.lower()
         assert provider.terminal.await_count == 0
-        assert provider.gui_action.await_count == 4
-        actions = [call.args[1].action for call in provider.gui_action.call_args_list]
-        assert [action.value for action in actions[:3]] == ["KEYPRESS", "TYPE", "KEYPRESS"]
+        provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_gui_only_modal_recovery_does_not_use_motor_backtrack(self):
@@ -1189,8 +1096,8 @@ class TestActionParsing:
             '"payload":{},"expected":"Open the file manager"}'
         )
 
-        blocked, *_ = agent._parse_gui_action_response(response, "")
-        assert blocked == ActionExecutionStatus.BLOCKED
+        parsed_without_grounding, *_ = agent._parse_gui_action_response(response, "")
+        assert parsed_without_grounding == ComputerActionType.GUI_CLICK
 
         agent._last_screenshot_b64 = _FRESH_FRAME
         agent._last_reasoning_perception = {"image_attached": True}
@@ -1245,6 +1152,7 @@ class TestActionParsing:
             action.value
             for action in ComputerActionType
             if action in agent._GUI_ONLY_ACTIONS
+            and action != ComputerActionType.GUI_TYPE
             and not action.name.startswith("BROWSER_")
         ] + ["GOAL_COMPLETE"]
         assert schema["required"] == ["action", "target", "payload", "expected"]
@@ -1293,19 +1201,11 @@ class TestReasoningPrompt:
     def test_system_prompt_includes_gui_actions(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
-        obs = MagicMock()
-        obs.visible_text = "Desktop"
-        obs.terminal_output = "ready"
-        obs.active_application = "Desktop"
-        obs.filesystem_files = []
-        obs.git_branch = "main"
-        obs.git_clean = True
-        obs.browser_state = {}
+        obs = _seed_fresh_gui_observation(agent)
         system_prompt, user_prompt = agent._build_reasoning_context(
             "test goal", obs, 1, "test.py", "test_test.py"
         )
         assert "GUI_CLICK" in system_prompt
-        assert "GUI_TYPE" in system_prompt
         assert "GUI_KEYPRESS" in system_prompt
         assert "GUI_SCROLL" in system_prompt
         assert "GUI_SCREENSHOT" in system_prompt
@@ -1313,7 +1213,7 @@ class TestReasoningPrompt:
         assert "visible cursor" in system_prompt
         assert "APP_FOCUS" in system_prompt
         assert "actual screen pixels" in user_prompt
-        assert "Only the separate multimodal grounding response uses normalized 0-1000" in user_prompt
+        assert "Semantic GUI targets are resolved locally by AVCS" in user_prompt
 
     @pytest.mark.asyncio
     async def test_gui_action_selection_distinguishes_apps_from_controls(self):
@@ -1341,14 +1241,9 @@ class TestReasoningPrompt:
         assert "TERMINAL_EXEC" not in system_prompt
         assert "Which GUI application window or terminal command" not in user_prompt
         assert "AUTONOMOUS TOOL AUTHORING" not in user_prompt
-        assert "sole source of current desktop state" in user_prompt
-        assert "Do not use OCR, accessibility controls" in user_prompt
-        assert "otherwise use only the fresh grounded control inventory" not in user_prompt
-        assert "exact integer screen-pixel coordinates" in user_prompt
         assert "Never describe a desktop shortcut as an already-open window" in system_prompt
-        assert "TARGET may be exact integer screen-pixel coordinates `x,y`" in user_prompt
-        assert "concise unique visual description" in user_prompt
-        assert "must resolve it before execution" in user_prompt
+        assert "CURRENT AVCS PIXEL STATE" in user_prompt
+        assert "no screenshot is sent" in user_prompt
         assert "Last Command Output" not in user_prompt
         assert '"command": "..."' not in user_prompt
 
@@ -1611,10 +1506,11 @@ class TestReasoningPrompt:
         assert "Grounded visible controls" not in user_prompt
         assert '"label":"File"' not in user_prompt
         assert "File Edit View" not in user_prompt
-        assert "sole source of current desktop state" in user_prompt
+        assert "CURRENT AVCS PIXEL STATE" in user_prompt
+        assert "no screenshot is sent" in user_prompt
 
     @pytest.mark.asyncio
-    async def test_gui_reasoning_uses_pixels_without_exposing_control_inventory(self):
+    async def test_gui_reasoning_uses_local_avcs_state_without_exposing_controls(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
         agent._last_screenshot_b64 = _FRESH_FRAME
         snapshot = agent.perception_bus.publish(
@@ -1639,29 +1535,32 @@ class TestReasoningPrompt:
             ),
             reasoning_content="Use the observed File menu.",
         ))
-        observation = ComputerWorldObservation(
-            screen=ScreenObservation(
+        screen = agent._ensure_avcs_state(
+            ScreenObservation(
                 screenshot_base64=_FRESH_FRAME,
                 width=1280,
                 height=800,
                 capture_age_ms=0,
                 controls_age_ms=0,
                 visible_text="File Edit View",
-            ),
-            visible_text="File Edit View",
-            perception_version=snapshot.version,
+            )
+        )
+        observation = ComputerWorldObservation(
+            screen=screen,
+            perception_version=screen.perception_version,
         )
 
         await agent._llm_choose_action("Open the File menu", observation, 1, "", "")
 
         request = agent.llm_router.complete.await_args.args[0]
-        assert len(request.messages[1].images) == 1
-        assert request.task_type == "computer_use"
+        assert not getattr(request.messages[1], "images", [])
+        assert request.task_type == "reasoning"
+        assert "CURRENT AVCS PIXEL STATE" in request.messages[1].content
         assert "Grounded visible controls" not in request.messages[1].content
         assert "File Edit View" not in request.messages[1].content
 
     @pytest.mark.asyncio
-    async def test_gui_reasoning_keeps_screenshot_fallback_without_controls(self):
+    async def test_gui_reasoning_uses_avcs_state_without_controls(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
         agent._last_screenshot_b64 = _FRESH_FRAME
         snapshot = agent.perception_bus.publish(
@@ -1677,22 +1576,26 @@ class TestReasoningPrompt:
             ),
             reasoning_content="No structured controls were detected.",
         ))
-        observation = ComputerWorldObservation(
-            screen=ScreenObservation(
+        screen = agent._ensure_avcs_state(
+            ScreenObservation(
                 screenshot_base64=_FRESH_FRAME,
                 width=1280,
                 height=800,
                 capture_age_ms=0,
                 controls_age_ms=0,
-            ),
-            perception_version=snapshot.version,
+            )
+        )
+        observation = ComputerWorldObservation(
+            screen=screen,
+            perception_version=screen.perception_version,
         )
 
         await agent._llm_choose_action("Inspect the desktop", observation, 1, "", "")
 
         request = agent.llm_router.complete.await_args.args[0]
-        assert len(request.messages[1].images) == 1
-        assert request.task_type == "computer_use"
+        assert not getattr(request.messages[1], "images", [])
+        assert "CURRENT AVCS PIXEL STATE" in request.messages[1].content
+        assert request.task_type == "reasoning"
 
 
 class TestSafetyPolicy:

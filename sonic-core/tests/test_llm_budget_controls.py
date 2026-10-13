@@ -170,7 +170,7 @@ async def test_stream_budget_is_checked_before_provider_stream_starts():
 
 
 @pytest.mark.asyncio
-async def test_stream_falls_back_before_output_and_preserves_images_for_vision_model():
+async def test_stream_skips_text_model_and_preserves_images_for_vision_model():
     router = ModelRouter()
     router.max_per_request_usd = 0.05
     router.max_per_engagement_usd = 0.05
@@ -221,18 +221,18 @@ async def test_stream_falls_back_before_output_and_preserves_images_for_vision_m
     chunks = [chunk async for chunk in router.stream(request)]
 
     assert [chunk.content for chunk in chunks if chunk.content] == ["described"]
-    assert primary_requests[0].messages[0].images == []
+    assert primary_requests == []
     assert fallback_requests[0].messages[0].images == request.messages[0].images
     assert request.messages[0].images[0].base64 == "aW1hZ2U="
     assert len(router.cost_records) == 1
     assert router.cost_records[0].model == "vision-model"
     budget = router.get_stats()["budget"]
-    assert budget["uncertain_by_engagement_usd"]["eng-1"] > 0
+    assert budget["uncertain_by_engagement_usd"].get("eng-1", 0) == 0
     assert "eng-1" not in budget["reserved_by_engagement_usd"]
 
 
 @pytest.mark.asyncio
-async def test_completion_keeps_original_image_for_vision_fallback():
+async def test_completion_skips_text_model_for_vision_fallback():
     router = ModelRouter()
     primary = _provider()
     primary.default_model = "text-model"
@@ -269,7 +269,7 @@ async def test_completion_keeps_original_image_for_vision_fallback():
     response = await router.complete(request)
 
     assert response.content == "answer"
-    assert primary_requests[0].messages[0].images == []
+    assert primary_requests == []
     assert fallback_requests[0].messages[0].images == request.messages[0].images
     assert request.messages[0].images[0].base64 == "aW1hZ2U="
 

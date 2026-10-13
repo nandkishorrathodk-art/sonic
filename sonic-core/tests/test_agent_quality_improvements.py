@@ -28,7 +28,7 @@ from sonic.computer_use.models import (
     ComputerWorldObservation,
 )
 
-_FRAME = Image.new("RGB", (1, 1), color="black")
+_FRAME = Image.new("RGB", (1920, 1080), color="black")
 _FRAME_BUFFER = BytesIO()
 _FRAME.save(_FRAME_BUFFER, format="PNG")
 _FRAME_BASE64 = base64.b64encode(_FRAME_BUFFER.getvalue()).decode("ascii")
@@ -373,7 +373,7 @@ def test_observation_caps_large_file_lists_without_screen_text():
     )
     _, obs_summary = agent._build_reasoning_context("test goal", obs, 1, "a.py", "b.py")
 
-    assert "Not extracted; current pixels are processed locally by AVCS." in obs_summary
+    assert "Screen Visible Content: UNKNOWN" in obs_summary
     assert "A" * 100 not in obs_summary
     # Files must be capped to top 60 files + more files summary
     assert "+440 more files" in obs_summary
@@ -453,7 +453,7 @@ async def test_plane_separation_in_observations():
         {"x": 640, "y": 400},
         "click search",
     )
-    assert trace_gui.status == ActionExecutionStatus.COMPLETED
+    assert trace_gui.status == ActionExecutionStatus.UNVERIFIED
     assert agent._last_action_output == {}
     assert agent._last_gui_action_result.get("action_type") == "GUI_CLICK"
     assert agent._last_gui_action_result.get("target") == "640,400"

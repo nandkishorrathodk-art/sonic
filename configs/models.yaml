@@ -1,5 +1,5 @@
 # ============================================
-# SONIC-REDA — Model Routing Configuration
+# SONIC — Model Routing Configuration
 # ============================================
 # Maps task types to preferred LLM providers/models.
 # The Model Router uses this to pick the best model for each job.

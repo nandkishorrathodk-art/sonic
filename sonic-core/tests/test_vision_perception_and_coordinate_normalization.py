@@ -19,6 +19,7 @@ from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use import grounding
 from sonic.computer_use.grounding import extract_bbox_midpoint, resolve_ui_target
 from sonic.computer_use.models import ActionExecutionStatus, ComputerWorldObservation
+from tests.avcs_test_helpers import png_base64
 
 
 def _make_test_image_b64(width: int = 1280, height: int = 800, color: str = "red") -> str:
@@ -192,8 +193,10 @@ def test_semantic_target_uses_only_ready_evaluated_local_avcs(monkeypatch):
         goal_grounder_configured = True
         goal_grounder_ready = True
 
-        def ground_target_png(self, image_bytes, query, width, height):
-            assert image_bytes == b"local frame"
+        def ground_target_png(
+            self, image_bytes, query, width, height, *, window_geometry=None
+        ):
+            assert image_bytes == base64.b64decode(png_base64())
             assert query == "Save button"
             assert (width, height) == (1280, 800)
             return {
@@ -241,7 +244,7 @@ def test_semantic_target_uses_only_ready_evaluated_local_avcs(monkeypatch):
     try:
         assert resolve_ui_target(
             "Save button",
-            screenshot_b64=base64.b64encode(b"local frame").decode("ascii"),
+            screenshot_b64=png_base64(),
             width=1280,
             height=800,
         ) == (400, 300)
@@ -322,7 +325,9 @@ def test_semantic_target_rejects_ambiguous_offscreen_or_unevaluated_results(
         goal_grounder_configured = True
         goal_grounder_ready = True
 
-        def ground_target_png(self, image_bytes, query, width, height):
+        def ground_target_png(
+            self, image_bytes, query, width, height, *, window_geometry=None
+        ):
             return result
 
     monkeypatch.setitem(

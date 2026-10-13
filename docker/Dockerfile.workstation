@@ -1,5 +1,5 @@
 # ==============================================================================
-# SONIC-REDA — Interactive Graphical Desktop Workstation (noVNC + X11)
+# SONIC — Interactive Graphical Desktop Workstation (noVNC + X11)
 # ==============================================================================
 # Build:  docker build -t sonic-workstation:latest -f docker/Dockerfile.workstation .
 #

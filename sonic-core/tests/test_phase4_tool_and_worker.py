@@ -147,8 +147,10 @@ def test_egress_security_filtering():
 # 4. Async Queue & Worker Engine Tests
 # ==========================================================
 
-def test_job_queue_and_worker_execution():
+def test_job_queue_and_worker_execution(monkeypatch):
     """Verify job enqueuing, priority ordering, and worker dispatching."""
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
     async def _run():
         queue = RedisJobQueue()  # Uses in-memory fallback
         provider = LocalDevProvider(allow_host_execution=False)

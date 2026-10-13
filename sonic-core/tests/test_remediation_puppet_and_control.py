@@ -27,16 +27,17 @@ from sonic.computer_use.models import (
 from sonic.computer_use.models_boss import SubMission
 from sonic.computer.daytona_computer import DaytonaComputerProvider
 from sonic.computer.models import ScreenObservation
+from tests.avcs_test_helpers import png_base64
 
 
-def test_extract_bbox_midpoint_rejects_zero_zero():
-    """Verify [0, 0] indicating not visible returns None rather than clicking (0, 0)."""
-    assert extract_bbox_midpoint([0.0, 0.0], width=1280, height=800) is None
-    assert extract_bbox_midpoint("<|box_start|>(0, 0, 0, 0)<|box_end|>", width=1280, height=800) is None
-    # Valid non-zero points still resolve
+def test_extract_bbox_midpoint_accepts_valid_origin_and_rejects_invalid_bounds():
+    """The pixel origin is valid; only missing or out-of-bounds points are rejected."""
+    assert extract_bbox_midpoint([0.0, 0.0], width=1280, height=800) == (0, 0)
+    assert extract_bbox_midpoint("<|box_start|>(0, 0, 0, 0)<|box_end|>", width=1280, height=800) == (0, 0)
     valid = extract_bbox_midpoint([500, 400], width=1280, height=800)
     assert valid is not None
     assert valid == (500, 400)
+    assert extract_bbox_midpoint([1280, 400], width=1280, height=800) is None
 
 
 def test_app_name_resolution_generic():
@@ -63,7 +64,12 @@ async def test_choose_action_routes_general_goals_to_llm():
     mock_resp.reasoning_content = ""
     llm.complete = AsyncMock(return_value=mock_resp)
 
-    agent = ComputerUseAgent(computer_provider=computer, llm_router=llm)
+    agent = ComputerUseAgent(
+        computer_provider=computer,
+        llm_router=llm,
+        execution_plane="headless",
+        observe_desktop=False,
+    )
     obs = ComputerWorldObservation(active_application="Terminal")
 
     action_type, target, payload, expected = await agent.choose_action(
@@ -95,11 +101,14 @@ async def test_choose_action_explicit_operator_override():
 async def test_visual_verification_records_clean_pre_screenshot():
     """pre_screen_b64 must be recorded before drawing action marker crosshairs."""
     computer = AsyncMock()
-    clean_screenshot = "data:image/png;base64,CLEAN_SCREEN_DATA"
+    clean_screenshot = png_base64()
 
     obs_after = ScreenObservation(
         screenshot_base64=clean_screenshot,
+        width=1280,
+        height=800,
         active_window="Browser",
+        desktop_state="INTERACTIVE",
     )
     computer.gui_action = AsyncMock(return_value=obs_after)
     computer.screenshot = AsyncMock(
@@ -109,6 +118,7 @@ async def test_visual_verification_records_clean_pre_screenshot():
             height=800,
             active_window="Browser",
             capture_age_ms=0,
+            desktop_state="INTERACTIVE",
         )
     )
     computer.status = AsyncMock(
@@ -129,12 +139,14 @@ async def test_visual_verification_records_clean_pre_screenshot():
         controls_age_ms=0,
         desktop_state="INTERACTIVE",
     )
+    screen = agent._ensure_avcs_state(screen)
     agent._last_world_observation = ComputerWorldObservation(
         screen=screen,
         active_application="Browser",
         perception_version=0,
         observation_age_ms=0,
     )
+    agent._last_observed_screen = screen
     agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
     agent._screen_width = screen.width
     agent._screen_height = screen.height
@@ -147,7 +159,8 @@ async def test_visual_verification_records_clean_pre_screenshot():
         predicted_outcome="click button",
     )
 
-    assert "[VISUAL VERIFICATION]: Screen state unchanged after click" in trace.actual_observation
+    assert trace.status == ActionExecutionStatus.UNVERIFIED, trace.actual_observation
+    assert "unchanged" in trace.actual_observation.lower()
 
 
 @pytest.mark.asyncio

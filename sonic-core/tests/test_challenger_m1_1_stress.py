@@ -4,20 +4,17 @@ Empirical Challenger M1-1 Stress Test Suite
 Adversarial stress harness challenging Worker M1's Computer & Interaction fixes:
 1. Cursor move verification rejection when coordinate readback is actually wrong vs right.
 2. DRAG action rejection when x2 or y2 is None vs valid bounds vs type invariants.
-3. Pre-dispatch revalidation behavior when screen is idle vs when semantic UI controls genuinely change.
-4. Target resolution (sync vs async) with screenshots and VNC contract verification.
+3. Explicit pixel-target resolution through sync and async utility entry points.
 """
 
 import asyncio
 import base64
 import binascii
-import json
-import math
 import random
 import struct
 import time
 import zlib
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -28,15 +25,9 @@ from sonic.computer.models import (
     GUIActionType,
     ScreenObservation,
 )
-from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.grounding import (
     resolve_ui_target,
     resolve_ui_target_async,
-)
-from sonic.computer_use.models import (
-    ActionExecutionStatus,
-    ComputerActionType,
-    ComputerWorldObservation,
 )
 
 pytestmark = pytest.mark.no_live_infra
@@ -314,377 +305,17 @@ async def test_stress_drag_valid_boundaries_and_command_generation():
 
 
 # ==============================================================================
-# SECTION 3: Pre-Dispatch Revalidation Stress Harness
+# SECTION 3: Target Resolution & Contracts Regression Harness
 # ==============================================================================
 
-class _TestComputerMock:
-    """Mock computer provider supporting both state_only and screenshot inspection."""
-
-    def __init__(self, state_obs=None, screen_obs=None, active_app="Desktop", active_win="Desktop"):
-        self._state_obs = state_obs
-        self._screen_obs = screen_obs
-        self._active_app = active_app
-        self._active_win = active_win
-        self.dispatched_actions = []
-
-    async def observe_state(self, workspace_id):
-        return self._state_obs
-
-    async def screenshot(self, workspace_id):
-        return self._screen_obs
-
-    async def gui_action(self, workspace_id, action, actor="operator"):
-        self.dispatched_actions.append(action)
-        return ScreenObservation(
-            screenshot_base64="after_screen_b64",
-            desktop_state="INTERACTIVE",
-            capture_age_ms=10,
-            controls_age_ms=10,
-            width=DISPLAY_WIDTH,
-            height=DISPLAY_HEIGHT,
-        )
-
-    def status(self, workspace_id):
-        return MagicMock(active_application=self._active_app, active_window=self._active_win)
-
-
-def _make_state_only_obs(
-    perception_version: int = 1,
-    capture_age_ms: float = 10,
-    controls_age_ms: float = 10,
-    active_window: str = "Desktop",
-    visible_text: str = "File Edit View",
-    controls: list = None,
-    changed_region: list = None,
-) -> ScreenObservation:
-    """Construct STATE_ONLY ScreenObservation via model_construct to allow adversarial values."""
-    if controls is None:
-        controls = [
-            {
-                "name": "OK",
-                "role": "push_button",
-                "bounds": [100, 100, 80, 30],
-                "enabled": True,
-                "focused": False,
-            }
-        ]
-    return ScreenObservation.model_construct(
-        screenshot_base64="",
-        desktop_state="STATE_ONLY",
-        width=DISPLAY_WIDTH,
-        height=DISPLAY_HEIGHT,
-        active_window=active_window,
-        visible_text=visible_text,
-        detected_controls=controls,
-        perception_version=perception_version,
-        capture_age_ms=capture_age_ms,
-        controls_age_ms=controls_age_ms,
-        changed_region=changed_region,
-    )
-
-
-@pytest.mark.asyncio
-async def test_stress_pre_dispatch_idle_screen_allowed():
-    """DEFECT-CI-02: Prove idle screen where fresh_version == previous_version is ALLOWED."""
-    initial_obs = _make_state_only_obs(perception_version=5)
-    fresh_obs = _make_state_only_obs(perception_version=5)
-
-    computer = _TestComputerMock(state_obs=fresh_obs)
-    agent = ComputerUseAgent(computer_provider=computer, gui_only=True)
-
-    agent._last_world_observation = ComputerWorldObservation(
-        screen=initial_obs,
-        active_application="Desktop",
-        perception_version=5,
-        observation_age_ms=3000,
-    )
-    agent._last_screen_observation_received_at = asyncio.get_running_loop().time() - 3
-    agent._screen_width = DISPLAY_WIDTH
-    agent._screen_height = DISPLAY_HEIGHT
-
-    trace = await agent.execute_action(
-        "ws-1",
-        ComputerActionType.GUI_CLICK,
-        "100, 100",
-        {"x": 100, "y": 100},
-        "Click OK button",
-    )
-
-    assert trace.status != ActionExecutionStatus.BLOCKED, f"Blocked: {trace.actual_observation}"
-    assert len(computer.dispatched_actions) == 1
-
-
-@pytest.mark.asyncio
-async def test_stress_pre_dispatch_version_regression_rejected():
-    """Prove stale/out-of-order version (fresh < previous) is BLOCKED."""
-    initial_obs = _make_state_only_obs(perception_version=5)
-    stale_fresh_obs = _make_state_only_obs(perception_version=4)
-
-    computer = _TestComputerMock(state_obs=stale_fresh_obs)
-    agent = ComputerUseAgent(computer_provider=computer, gui_only=True)
-
-    agent._last_world_observation = ComputerWorldObservation(
-        screen=initial_obs,
-        active_application="Desktop",
-        perception_version=5,
-        observation_age_ms=3000,
-    )
-    agent._last_screen_observation_received_at = asyncio.get_running_loop().time() - 3
-    agent._screen_width = DISPLAY_WIDTH
-    agent._screen_height = DISPLAY_HEIGHT
-
-    trace = await agent.execute_action(
-        "ws-1",
-        ComputerActionType.GUI_CLICK,
-        "100, 100",
-        {"x": 100, "y": 100},
-        "Click OK button",
-    )
-
-    assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "perception version 5 -> 4" in trace.actual_observation
-    assert len(computer.dispatched_actions) == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "invalid_capture_age,invalid_controls_age",
-    [
-        (251, 10),              # Capture age exceeds 250ms limit
-        (10, 251),              # Controls age exceeds 250ms limit
-        (-1, 10),               # Negative capture age
-        (10, -5),               # Negative controls age
-        (float("nan"), 10),     # Non-finite age
-        (10, float("inf")),     # Infinite age
-        (True, 10),             # Boolean age
-    ],
-)
-async def test_stress_pre_dispatch_stale_timing_metrics_rejected(
-    invalid_capture_age, invalid_controls_age
-):
-    """Prove capture and controls age bounds [0, 250] strictly enforced in agent."""
-    initial_obs = _make_state_only_obs(perception_version=2)
-    invalid_obs = _make_state_only_obs(
-        perception_version=2,
-        capture_age_ms=invalid_capture_age,
-        controls_age_ms=invalid_controls_age,
-    )
-
-    computer = _TestComputerMock(state_obs=invalid_obs)
-    agent = ComputerUseAgent(computer_provider=computer, gui_only=True)
-
-    agent._last_world_observation = ComputerWorldObservation(
-        screen=initial_obs,
-        active_application="Desktop",
-        perception_version=2,
-        observation_age_ms=3000,
-    )
-    agent._last_screen_observation_received_at = asyncio.get_running_loop().time() - 3
-    agent._screen_width = DISPLAY_WIDTH
-    agent._screen_height = DISPLAY_HEIGHT
-
-    trace = await agent.execute_action(
-        "ws-1",
-        ComputerActionType.GUI_CLICK,
-        "100, 100",
-        {"x": 100, "y": 100},
-        "Click button",
-    )
-
-    assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "current desktop state could not be verified" in trace.actual_observation
-    assert len(computer.dispatched_actions) == 0
-
-
-@pytest.mark.asyncio
-async def test_stress_pre_dispatch_genuine_semantic_mutations_blocked():
-    """Prove genuine semantic changes in UI controls or visible text ARE rejected."""
-    initial_obs = _make_state_only_obs(
-        perception_version=2,
-        active_window="Settings",
-        visible_text="Save Changes",
-        controls=[{"name": "Save", "role": "push_button", "enabled": True}],
-    )
-
-    mutations = [
-        # 1. New control appeared
-        _make_state_only_obs(
-            perception_version=3,
-            active_window="Settings",
-            visible_text="Save Changes",
-            controls=[
-                {"name": "Save", "role": "push_button", "enabled": True},
-                {"name": "Cancel", "role": "push_button", "enabled": True},
-            ],
-        ),
-        # 2. Control disappeared
-        _make_state_only_obs(
-            perception_version=3,
-            active_window="Settings",
-            visible_text="Save Changes",
-            controls=[],
-        ),
-        # 3. Control state mutated (disabled)
-        _make_state_only_obs(
-            perception_version=3,
-            active_window="Settings",
-            visible_text="Save Changes",
-            controls=[{"name": "Save", "role": "push_button", "enabled": False}],
-        ),
-        # 4. Visible text mutated
-        _make_state_only_obs(
-            perception_version=3,
-            active_window="Settings",
-            visible_text="Changes Saved Successfully",
-            controls=[{"name": "Save", "role": "push_button", "enabled": True}],
-        ),
-    ]
-
-    for mutated_obs in mutations:
-        computer = _TestComputerMock(
-            state_obs=mutated_obs,
-            active_app="Settings",
-            active_win="Settings",
-        )
-        agent = ComputerUseAgent(computer_provider=computer, gui_only=True)
-
-        agent._last_world_observation = ComputerWorldObservation(
-            screen=initial_obs,
-            active_application="Settings",
-            perception_version=2,
-            observation_age_ms=3000,
-        )
-        agent._last_screen_observation_received_at = asyncio.get_running_loop().time() - 3
-        agent._screen_width = DISPLAY_WIDTH
-        agent._screen_height = DISPLAY_HEIGHT
-
-        trace = await agent.execute_action(
-            "ws-1",
-            ComputerActionType.GUI_CLICK,
-            "100, 100",
-            {"x": 100, "y": 100},
-            "Click Save",
-        )
-
-        assert trace.status == ActionExecutionStatus.BLOCKED
-        assert "desktop state changed since the action was reasoned" in trace.actual_observation
-
-
-@pytest.mark.asyncio
-async def test_stress_pre_dispatch_transient_noise_resilience():
-    """DEFECT-CI-01 & CI-06: Prove transient changed_region or pixel hash delta does NOT block action."""
-    # 1. STATE_ONLY: changed_region changes (e.g. blinking cursor)
-    obs_with_noise_1 = _make_state_only_obs(
-        perception_version=2,
-        changed_region=[10, 20, 5, 15],  # cursor blink
-    )
-    obs_with_noise_2 = _make_state_only_obs(
-        perception_version=2,
-        changed_region=[10, 20, 5, 15],
-    )
-
-    computer = _TestComputerMock(state_obs=obs_with_noise_2)
-    agent = ComputerUseAgent(computer_provider=computer, gui_only=True)
-
-    agent._last_world_observation = ComputerWorldObservation(
-        screen=obs_with_noise_1,
-        active_application="Desktop",
-        perception_version=2,
-        observation_age_ms=3000,
-    )
-    agent._last_screen_observation_received_at = asyncio.get_running_loop().time() - 3
-    agent._screen_width = DISPLAY_WIDTH
-    agent._screen_height = DISPLAY_HEIGHT
-
-    trace = await agent.execute_action(
-        "ws-1",
-        ComputerActionType.GUI_CLICK,
-        "100, 100",
-        {"x": 100, "y": 100},
-        "Click button",
-    )
-    assert trace.status != ActionExecutionStatus.BLOCKED
-
-    # 2. INTERACTIVE (Screenshot mode): Pixel bytes change (ticking clock / blink)
-    # but semantic controls and active window remain identical
-    initial_shot = ScreenObservation(
-        screenshot_base64="pixel_hash_alpha",
-        desktop_state="INTERACTIVE",
-        active_window="Desktop",
-        visible_text="Taskbar",
-        controls=[{"name": "Start", "role": "button"}],
-        width=DISPLAY_WIDTH,
-        height=DISPLAY_HEIGHT,
-        capture_age_ms=10,
-    )
-    fresh_shot = ScreenObservation(
-        screenshot_base64="pixel_hash_beta_different_clock_tick",
-        desktop_state="INTERACTIVE",
-        active_window="Desktop",
-        visible_text="Taskbar",
-        controls=[{"name": "Start", "role": "button"}],
-        width=DISPLAY_WIDTH,
-        height=DISPLAY_HEIGHT,
-        capture_age_ms=10,
-    )
-
-    computer2 = _TestComputerMock(screen_obs=fresh_shot)
-    computer2.observe_state = None  # Force screenshot fallback
-    agent2 = ComputerUseAgent(computer_provider=computer2, gui_only=True)
-
-    agent2._last_world_observation = ComputerWorldObservation(
-        screen=initial_shot,
-        active_application="Desktop",
-        perception_version=0,
-        observation_age_ms=3000,
-    )
-    agent2._last_screen_observation_received_at = asyncio.get_running_loop().time() - 3
-    agent2._last_screenshot_b64 = "pixel_hash_alpha"
-    agent2._screen_width = DISPLAY_WIDTH
-    agent2._screen_height = DISPLAY_HEIGHT
-
-    trace2 = await agent2.execute_action(
-        "ws-1",
-        ComputerActionType.GUI_CLICK,
-        "100, 100",
-        {"x": 100, "y": 100},
-        "Click Start",
-    )
-    assert trace2.status != ActionExecutionStatus.BLOCKED, f"Blocked on pixel delta: {trace2.actual_observation}"
-
-
-# ==============================================================================
-# SECTION 4: Target Resolution & Contracts Regression Harness
-# ==============================================================================
-
-def test_stress_direct_numeric_coords_sync_vs_async_defect():
-    """Verify DEFECT-CI-10 resolution and empirical discovery of async discrepancy."""
+def test_stress_direct_numeric_coords_sync_and_async():
+    """Explicit pixel targets remain unchanged in both resolver entry points."""
     fake_screenshot = _png_base64(80, 60)
 
-    # Sync resolve_ui_target: Worker M1 fixed this!
     res_sync = resolve_ui_target("300, 200", screenshot_b64=fake_screenshot, width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT)
-    assert res_sync == (300, 200), "Sync resolve_ui_target correctly resolves numeric coords with screenshot"
+    assert res_sync == (300, 200)
 
-    # Async resolve_ui_target_async: EMPIRICAL DISCOVERY!
-    # Worker M1 forgot to remove line 412 in resolve_ui_target_async!
     res_async = asyncio.run(
         resolve_ui_target_async("300, 200", screenshot_b64=fake_screenshot, width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT)
     )
-    assert res_async == (300, 200), "resolve_ui_target_async now correctly resolves direct coords with screenshot!"
-
-
-@pytest.mark.asyncio
-async def test_stress_vnc_url_contract():
-    """DEFECT-CI-04: Prove VNC URL includes all 4 query parameters."""
-    provider = DockerComputerProvider(container_name="isolated-workstation")
-    provider._container_is_running = AsyncMock(return_value=True)
-    provider._resolve_nsi_frame_url = AsyncMock(
-        return_value="http://127.0.0.1:6081/nsi_frame.json"
-    )
-    provider._docker_exec = AsyncMock(return_value=(0, "0", ""))
-
-    url = await provider.get_vnc_url("isolated-workstation")
-    assert url is not None
-    expected_params = ["autoconnect=true", "resize=scale", "show_dot=true", "cursor=true"]
-    for param in expected_params:
-        assert param in url, f"Missing query parameter {param} in {url}"
+    assert res_async == (300, 200)

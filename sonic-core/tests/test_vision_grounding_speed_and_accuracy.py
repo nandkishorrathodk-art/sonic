@@ -37,6 +37,7 @@ async def test_multimodal_image_auto_routes_to_vision():
     mock_provider.fallback_models = []
     mock_provider._effective_max_tokens = lambda requested: requested
     mock_provider.pricing_for_model = lambda model: (0.001, 0.001)
+    mock_provider.model_capabilities = {"qwen2.5-vl": {"vision"}}
     mock_provider.complete_with_timing = AsyncMock()
     
     mock_response = MagicMock()
@@ -50,6 +51,11 @@ async def test_multimodal_image_auto_routes_to_vision():
     mock_provider.complete_with_timing.return_value = mock_response
 
     router.providers["groq"] = mock_provider
+    router.routing_rules["vision"] = {
+        "provider": "groq",
+        "model": "qwen2.5-vl",
+        "fallback": [],
+    }
 
     req = LLMRequest(
         messages=[

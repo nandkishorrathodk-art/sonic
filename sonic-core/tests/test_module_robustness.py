@@ -20,6 +20,7 @@ from sonic.agents.recon import _is_subdomain_of
 from sonic.safety.rate_limiter import EgressRateLimiter
 from sonic.sandbox.egress import BLOCKED_NETWORKS, is_target_allowed
 from sonic.sandbox.providers.local_dev_provider import LocalDevProvider
+from tests.avcs_test_helpers import png_base64
 
 # =====================================================================
 # egress: IPv4-mapped IPv6 SSRF bypass
@@ -598,8 +599,8 @@ class TestVerifyAndReplan:
         # After 3 consecutive failures, a replan must have been injected.
 
     @pytest.mark.asyncio
-    async def test_run_mission_stops_after_repeated_stale_gui_blocks(self):
-        """Refresh once, then stop rather than looping on stale GUI proposals."""
+    async def test_run_mission_stops_after_repeated_uncontracted_gui_blocks(self):
+        """An ungrounded proposal is blocked before it can reach provider dispatch."""
         from sonic.computer_use.agent import ComputerUseAgent
         from sonic.computer_use.models import (
             ActionExecutionStatus,
@@ -613,9 +614,7 @@ class TestVerifyAndReplan:
             async def screenshot(self, ws):
                 from sonic.computer.models import ScreenObservation
                 return ScreenObservation(
-                    screenshot_base64=(
-                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII="
-                    ),
+                    screenshot_base64=png_base64(width=1920, height=1080),
                     width=1920,
                     height=1080,
                     active_window="Application",
@@ -653,6 +652,7 @@ class TestVerifyAndReplan:
         agent.security_tools = {}
         agent.safety = None
         agent._consecutive_failures = 0
+        agent._consecutive_gui_postcondition_violations = 0
         agent._replan_count = 0
         agent.toolsmith = None
         agent.method_lab = None
@@ -699,7 +699,7 @@ class TestVerifyAndReplan:
 
         assert proposal_count == 2
         assert len(agent.traces) == 2
-        assert agent.history[-1]["action"] == "STALE_GUI_LOOP_ABORT"
+        assert agent.history[-1]["action"].startswith("GUI_CLICK 100,100 (BLOCKED)")
 
 
 # =====================================================================
@@ -862,7 +862,10 @@ class TestLessonsLedger:
             a.method_lab = None
             a.lessons_ledger = ledger
             a.agent_id = "a1"
+            a._agentic_lessons_goal = None
+            a._agentic_lessons = []
             a._files_cache = []
+            a.observe_desktop = False
             return a
 
         # Mission 1: one FAILED trace → records an AVOID lesson.

@@ -14,18 +14,16 @@ Verifies:
 
 from __future__ import annotations
 
-import base64
-import io
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from PIL import Image
 
 from sonic.computer.models import GUIAction, GUIActionType, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.models import ComputerActionType
+from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
 from sonic.computer_use.motor import MotorReflexes
 from sonic.llm import prompts
+from tests.avcs_test_helpers import png_base64
 
 
 class _MockMotorComputer:
@@ -67,9 +65,7 @@ class _MockMotorComputer:
         )
     @staticmethod
     def _image(color: str) -> str:
-        buffer = io.BytesIO()
-        Image.new("RGB", (4, 4), color=color).save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("ascii")
+        return png_base64(color=color)
 
     async def _mock_docker_exec(self, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
         self.commands_executed.append(cmd)
@@ -244,8 +240,8 @@ async def test_motor_human_type_with_clear_field():
 
 
 @pytest.mark.asyncio
-async def test_agent_gui_type_preserves_existing_field_contents_by_default():
-    """Typing into a grounded control must not clear unrelated active content."""
+async def test_agent_gui_type_blocks_without_evaluated_avcs_focus_verification():
+    """Text entry must fail closed until local AVCS focus verification is ready."""
     comp = _MockMotorComputer()
     agent = ComputerUseAgent(computer_provider=comp)
     await agent.observe("ws-1")
@@ -257,15 +253,15 @@ async def test_agent_gui_type_preserves_existing_field_contents_by_default():
         {"text": "additional text", "x": 100, "y": 200},
         "Type additional text",
     )
-    assert trace.status == "SUCCESS"
-    assert not any("ctrl+a BackSpace" in cmd for cmd in comp.commands_executed)
-    assert comp.gui_actions[0].action == GUIActionType.CLICK
-    assert (comp.gui_actions[0].x, comp.gui_actions[0].y) == (100, 200)
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert "focus-verification" in trace.actual_observation.lower()
+    assert not any("ctrl+a BackSpace" in cmd or "xdotool type" in cmd for cmd in comp.commands_executed)
+    assert all(action.action != GUIActionType.TYPE for action in comp.gui_actions)
 
 
 @pytest.mark.asyncio
-async def test_agent_gui_type_clears_only_after_grounded_target_is_focused():
-    """Explicit replacement clears the selected field after the visible focus click."""
+async def test_agent_gui_type_does_not_clear_or_type_without_focus_verification():
+    """Missing local focus verification blocks replacement before clearing or typing."""
     comp = _MockMotorComputer()
     events: list[tuple[str, object]] = []
 
@@ -289,20 +285,16 @@ async def test_agent_gui_type_clears_only_after_grounded_target_is_focused():
         {"text": "replacement text", "x": 100, "y": 200, "clear_field": True},
         "Replace the current input text",
     )
-    assert trace.status == "SUCCESS"
-    click_index = next(
-        i for i, (kind, value) in enumerate(events)
-        if kind == "gui" and value.action == GUIActionType.CLICK
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert "focus-verification" in trace.actual_observation.lower()
+    assert not any(
+        kind == "exec" and ("ctrl+a BackSpace" in value or "xdotool type" in value)
+        for kind, value in events
     )
-    clear_index = next(
-        i for i, (kind, value) in enumerate(events)
-        if kind == "exec" and "ctrl+a BackSpace" in value
+    assert not any(
+        kind == "gui" and value.action == GUIActionType.TYPE
+        for kind, value in events
     )
-    type_index = next(
-        i for i, (kind, value) in enumerate(events)
-        if kind == "exec" and "xdotool type --delay" in value
-    )
-    assert click_index < clear_index < type_index
 
 
 # ---------------------------------------------------------------------------

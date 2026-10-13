@@ -14,6 +14,15 @@ Architecture: FastAPI backend (`sonic-core/`), Next.js dashboard
 ## Computer Interaction: AVCS-Only Workstation Perception
 SONIC's workstation screenshots are captured for local AVCS processing and are not sent to the workstation reasoning model. The active perception path returns AVCS pixel-reflex metadata; it does not provide OCR, semantic controls, or task-success evidence. NSI state feeds, Tesseract/OCR fallback, AT-SPI, and browser-DOM controls must not be reintroduced into workstation reasoning or target grounding.
 
+### AVCS's role in SONIC
+AVCS (Artificial Visual Cortex System) is SONIC's local visual-perception layer: the computer's digital eye, not its planner or operator. It processes workstation pixels locally and supplies pixel-derived scene/change signals (for example, frame identity, dimensions, scene fingerprint, motion/change estimates, regions, and reflex events) as compact state for the agent. This supports privacy-conscious visual awareness and fresh-frame checks without sending workstation screenshots to the reasoning model.
+
+- **AVCS perceives; SONIC reasons.** Boss and the assigned agent interpret the task and decide what to do. AVCS signals can inform that decision but do not independently understand an application's semantics or choose a task plan.
+- **AVCS informs; the provider acts.** A grounded action still needs current evidence, validated screen-pixel coordinates, bounds checks, and pre-dispatch revalidation. The computer provider performs mouse and keyboard operations; AVCS does not click, type, or execute commands.
+- **AVCS observes effects; the Judge verifies outcomes.** Pixel change, motion, or a reflex event is not proof that the intended task succeeded. The independent Judge needs fresh, task-relevant evidence for the requested postcondition.
+- **Fail closed when capability is missing.** Reflex metadata alone is not semantic target grounding or focus verification. Semantic grounding and focus checks may be used only when the corresponding local AVCS head is configured, evaluated, and ready; otherwise block the action that depends on it.
+- **Describe implementation evidence precisely.** Local frame processing does not by itself prove continuous 60-FPS operation, zero latency, reliable grounding, or arbitrary-app task success. Do not claim those capabilities without measurements and isolated end-to-end acceptance evidence.
+
 - GUI actions require fresh pixels and pre-dispatch pixel revalidation. Pointer targets must be resolved by a configured, evaluated local AVCS grounder; model-supplied coordinates alone are not grounding evidence.
 - Text entry remains unavailable until AVCS provides a tested local focus-verification head. Missing or inconclusive AVCS output blocks the action.
 - The current AVCS reflex output and optional goal grounder do not independently establish semantic task completion. The Judge must return inconclusive unless fresh, task-relevant evidence supports the postcondition.
