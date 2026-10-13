@@ -2316,7 +2316,7 @@ wheels = [
 
 [[package]]
 name = "sonic-cli"
-version = "0.3.0"
+version = "0.4.0"
 source = { virtual = "sonic-cli" }
 dependencies = [
     { name = "httpx" },
@@ -2346,7 +2346,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "sonic-core"
-version = "0.3.0"
+version = "0.4.0"
 source = { virtual = "sonic-core" }
 dependencies = [
     { name = "aiosqlite" },
@@ -2432,7 +2432,7 @@ provides-extras = ["dev", "local-laya", "rag-local", "avcs-grounding"]
 
 [[package]]
 name = "sonic-monorepo"
-version = "0.3.0"
+version = "0.4.0"
 source = { virtual = "." }
 
 [[package]]

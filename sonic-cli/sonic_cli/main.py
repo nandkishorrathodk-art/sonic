@@ -22,7 +22,7 @@ from rich.panel import Panel
 try:
     from sonic import __version__
 except ImportError:  # pragma: no cover - core not installed in CLI-only envs
-    __version__ = "0.3.0"
+    __version__ = "0.4.0"
 
 from sonic_cli.commands import (
     auth,

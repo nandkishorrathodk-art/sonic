@@ -91,6 +91,7 @@ def test_cli_version_command():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "SONIC" in result.output
+    assert "v0.4.0" in result.output
     assert "Autonomous AI-Human Digital Being" in result.output
 
 
@@ -345,4 +346,3 @@ def test_repl_greeting_handling_instant(monkeypatch):
         elapsed_ms = (time.perf_counter() - t0) * 1000
         assert elapsed_ms < 100, f"Greeting {greeting} took {elapsed_ms}ms, expected < 100ms"
         assert any("Hello!" in p and "SONIC" in p for p in printed)
-
