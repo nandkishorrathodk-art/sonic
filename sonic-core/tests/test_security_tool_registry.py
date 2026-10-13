@@ -23,18 +23,12 @@ scans despite advertising the action to the LLM).
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
-import pytest
 
 from sonic.sandbox.provider import ComputeProvider, ExecResult, WorkspaceState
 from sonic.tools.adapters import (
-    FFUFAdapter,
     HTTPClientAdapter,
-    NmapAdapter,
-    NucleiAdapter,
 )
-from sonic.tools.base import SecurityTool, ToolRequest
 from sonic.tools.registry import (
     SecurityToolRegistry,
     build_security_tools,
@@ -159,7 +153,6 @@ def test_worker_uses_registry_for_tools(monkeypatch):
     from sonic.sandbox import factory as fac
     p = _RecordingProvider()
     monkeypatch.setattr(fac, "get_compute_provider", lambda *a, **k: p)
-    from sonic.queue.job_queue import RedisJobQueue
     monkeypatch.setattr(fac, "get_job_queue", lambda *a, **k: None, raising=False)
     # Avoid Redis in the worker constructor.
     import sonic.queue.worker as wmod
@@ -207,6 +200,8 @@ def test_agent_dispatches_real_adapter_via_registry():
             allow_security_tool_targets={"scanme.nmap.org"},
         ),
         security_tools=reg.as_dict(),
+        execution_plane="headless",
+        observe_desktop=False,
     )
 
     async def run():
@@ -251,6 +246,8 @@ def test_registry_tool_failclosed_triggers_recovery():
             allow_security_tool_targets={"scanme.nmap.org"},
         ),
         security_tools=reg.as_dict(),
+        execution_plane="headless",
+        observe_desktop=False,
     )
 
     async def run():

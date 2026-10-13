@@ -9,6 +9,7 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import subprocess
@@ -112,6 +113,7 @@ async def test_define_and_invoke_parallel_branch_subagents_merge_on_verify(tmp_p
                         '\'module A verified content\'"'
                     ),
                     "workspace_mode": "branch",
+                    "execution_plane": "headless",
                     "max_steps": 1,
                 },
                 {
@@ -125,6 +127,7 @@ async def test_define_and_invoke_parallel_branch_subagents_merge_on_verify(tmp_p
                         '\'module B verified content\'"'
                     ),
                     "workspace_mode": "branch",
+                    "execution_plane": "headless",
                     "max_steps": 1,
                 },
             ]
@@ -137,6 +140,139 @@ async def test_define_and_invoke_parallel_branch_subagents_merge_on_verify(tmp_p
         f"second artifact missing; observation={invoke_trace.actual_observation!r}; "
         f"subagents={[(c.role, c.state_detail, c.last_summary, c.merged_files) for c in parent_agent._teamwork_manager.conversations.values()]}"
     )
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_fourteen_headless_subagents_run_concurrently_and_are_independently_verified(
+    tmp_path: Path,
+):
+    """Exercise 14 real subagent loops in isolated local workspaces without a GUI."""
+
+    class BarrierLLM:
+        def __init__(self):
+            self.started: set[str] = set()
+            self.all_started = asyncio.Event()
+            self.active = 0
+            self.max_active = 0
+
+        async def complete(self, request, **kwargs):
+            combined = " ".join(str(message.content or "") for message in request.messages)
+            if request.task_type == "reasoning":
+                worker_file = next(
+                    (
+                        f"worker-{index:02d}.txt"
+                        for index in range(14)
+                        if f"worker-{index:02d}.txt" in combined
+                    ),
+                    None,
+                )
+                if worker_file is None:
+                    return LLMResponse(
+                        content="YES",
+                        model="test-model",
+                        provider="local",
+                        input_tokens=1,
+                        output_tokens=1,
+                    )
+
+                self.started.add(worker_file)
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                if len(self.started) == 14:
+                    self.all_started.set()
+                try:
+                    await asyncio.wait_for(self.all_started.wait(), timeout=30)
+                finally:
+                    self.active -= 1
+
+                content = f"verified content from {worker_file}"
+                return LLMResponse(
+                    content=(
+                        f"THOUGHT: Create the assigned isolated artifact {worker_file}.\n"
+                        "ACTION: FILE_WRITE\n"
+                        f"TARGET: {worker_file}\n"
+                        f'PAYLOAD: {{"path": "{worker_file}", "content": "{content}"}}\n'
+                        "EXPECTED: The assigned artifact exists with its required content."
+                    ),
+                    model="test-model",
+                    provider="local",
+                    input_tokens=1,
+                    output_tokens=1,
+                )
+
+            return LLMResponse(
+                content='{"passed": true, "notes": "Independent acceptance check passed."}',
+                model="test-model",
+                provider="local",
+                input_tokens=1,
+                output_tokens=1,
+            )
+
+    provider = HeadlessComputeProvider(
+        base_dir=tmp_path / "workspaces",
+        allow_host_execution=True,
+    )
+    parent_ws = await provider.create(
+        tenant_id="t-fourteen-workers",
+        engagement_id="e-fourteen-workers",
+    )
+    parent_dir = provider._get_workspace_dir(parent_ws.id)
+    safety = ActionPolicy(
+        workspace_root=str(parent_dir),
+        max_actions_per_minute=300,
+    )
+    llm = BarrierLLM()
+    parent_agent = ComputerUseAgent(
+        computer_provider=provider,
+        llm_router=llm,
+        safety=safety,
+        tenant_id="t-fourteen-workers",
+        execution_plane="headless",
+        observe_desktop=False,
+    )
+    manager = SubagentTeamworkManager(
+        parent_agent=parent_agent,
+        computer_provider=provider,
+        llm_router=llm,
+        safety=safety,
+        tenant_id="t-fourteen-workers",
+    )
+
+    specs = [
+        {
+            "role": f"Worker {index:02d}",
+            "prompt": (
+                f"Create worker-{index:02d}.txt containing "
+                f"'verified content from worker-{index:02d}.txt'."
+            ),
+            "requirements": [f"Create worker-{index:02d}.txt"],
+            "verification_command": (
+                "python -c \"from pathlib import Path; "
+                f"assert Path('worker-{index:02d}.txt').read_text() == "
+                f"'verified content from worker-{index:02d}.txt'; "
+                f"print('verified worker-{index:02d}')\""
+            ),
+            "workspace_mode": "branch",
+            "execution_plane": "headless",
+            "max_steps": 1,
+            "max_correction_rounds": 0,
+        }
+        for index in range(14)
+    ]
+
+    conversations = await manager.invoke_subagents(parent_ws.id, specs)
+
+    assert len(conversations) == 14
+    assert len(llm.started) == 14
+    assert llm.max_active == 14
+    assert all(conv.state == "idle" and conv.verified for conv in conversations)
+    assert all(conv.judge_verdict == "CONFIRMED" for conv in conversations)
+    for index in range(14):
+        name = f"worker-{index:02d}.txt"
+        assert (parent_dir / name).read_text(encoding="utf-8") == (
+            f"verified content from {name}"
+        )
 
 
 @pytest.mark.no_live_infra
@@ -191,6 +327,7 @@ async def test_judge_forcing_function_triggers_self_correction_round(tmp_path: P
                 "role": "Self-Correcting Subagent",
                 "prompt": "Write verified_output.txt in the workspace.",
                 "workspace_mode": "inherit",
+                "execution_plane": "headless",
                 "max_steps": 1,
                 "max_correction_rounds": 2,
             }
@@ -214,11 +351,8 @@ async def test_display_lease_serializes_concurrent_gui_access():
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
-async def test_subagent_default_separate_workspace_and_dual_plane_gui_and_terminal(tmp_path: Path):
-    """Proves that when a subagent is launched:
-    1. It gets its own separate workspace by default (`workspace_mode="branch"`).
-    2. It operates BOTH planes (`GUI Desktop :99` via `APP_LAUNCH` AND `Terminal/File Sandbox` via `FILE_WRITE`).
-    """
+async def test_dual_plane_subagent_requires_desktop_evidence_before_merge(tmp_path: Path):
+    """A headless provider cannot prove a requested GUI task for a dual-plane worker."""
     provider = HeadlessComputeProvider(base_dir=tmp_path, allow_host_execution=True)
     ws = await provider.create(tenant_id="t-dual", engagement_id="e-dual")
     ws_id = ws.id
@@ -286,9 +420,10 @@ async def test_subagent_default_separate_workspace_and_dual_plane_gui_and_termin
     assert conv.agent_instance.observe_desktop is True
     assert conv.agent_instance.gui_only is False
     assert conv.agent_instance.execution_plane == "dual"
-    assert conv.verified is True
-    assert "dual_plane_result.txt" in conv.merged_files
-    assert (ws_dir / "dual_plane_result.txt").read_text(encoding="utf-8") == "GUI + Terminal Dual-Plane Verified"
+    assert conv.verified is False
+    assert conv.judge_verdict != "CONFIRMED"
+    assert "dual_plane_result.txt" not in conv.merged_files
+    assert not (ws_dir / "dual_plane_result.txt").exists()
 
 
 @pytest.mark.no_live_infra
@@ -353,6 +488,7 @@ async def test_subagent_git_branch_creation_and_autostash_merge_with_uncommitted
                 "prompt": "Create service.py and verify.",
                 "verification_command": "python -c \"import service; assert service.run() == 'ok'\"",
                 "workspace_mode": "branch",
+                "execution_plane": "headless",
                 "max_steps": 1,
             }
         ],
@@ -425,6 +561,7 @@ async def test_subagent_share_mode_git_worktree_isolation(tmp_path: Path):
                 "prompt": "Create shared_feat.txt.",
                 "verification_command": "python -c \"assert open('shared_feat.txt').read() == 'shared worktree feature'\"",
                 "workspace_mode": "share",
+                "execution_plane": "headless",
                 "max_steps": 1,
             }
         ],
@@ -502,6 +639,7 @@ async def test_subagent_merges_only_modified_or_created_files_never_clobbers_unt
                 "prompt": "Update existing.txt to version 2.0 and create newly_added.txt.",
                 "verification_command": "python -c \"assert open('existing.txt').read() == 'version 2.0' and open('newly_added.txt').read() == 'newly added content'\"",
                 "workspace_mode": "branch",
+                "execution_plane": "headless",
                 "max_steps": 2,
             }
         ],
@@ -637,6 +775,7 @@ async def test_computer_use_agent_dynamic_subagent_lifecycle_actions(tmp_path: P
             "prompt": "Create part1.txt.",
             "verification_command": "python -c \"assert open('part1.txt').read() == 'part 1 done'\"",
             "workspace_mode": "branch",
+            "execution_plane": "headless",
             "max_steps": 1,
         },
         "invoked subagent",

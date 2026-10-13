@@ -166,8 +166,7 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
     focus_state = {"focused": False}
 
     def _make_screen(active_window: str, open_windows: list[str]) -> ScreenObservation:
-        image = Image.new("RGB", (1, 1), (18, 22, 31))
-        image.putpixel((0, 0), (18 + visual_revision["value"], 22, 31))
+        image = Image.new("RGB", (1280, 800), (18 + visual_revision["value"], 22, 31))
         image_buffer = BytesIO()
         image.save(image_buffer, format="PNG")
         return ScreenObservation(
@@ -335,7 +334,10 @@ async def test_multi_app_gui_launch_focus_switch_and_terminal(tmp_path, monkeypa
         payload={"text": "SONIC multi-window note"},
         predicted_outcome="Type note in App #1",
     )
-    assert t4.status == ActionExecutionStatus.COMPLETED, t4.actual_observation
+    assert t4.status == ActionExecutionStatus.BLOCKED, t4.actual_observation
+    assert not any(
+        event == "TYPE" for event, _ in ws.gui_events
+    )
 
     # 5. Switch focus to App #2 (APP_FOCUS), click canvas, then switch BACK to App #1 within 4 steps!
     t5 = await agent.execute_action(

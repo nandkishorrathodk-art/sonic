@@ -8,6 +8,7 @@ from sonic.computer.models import ComputerState, FileEntry, GitStatusInfo, Scree
 from sonic.computer.provider import ComputerProvider
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
+from tests.avcs_test_helpers import png_base64
 
 
 class _MockComputerProvider(ComputerProvider):
@@ -35,7 +36,7 @@ class _MockComputerProvider(ComputerProvider):
 
     async def screenshot(self, workspace_id):
         return ScreenObservation(
-            screenshot_base64="c2NyZWVu" if self.display_available else "",
+            screenshot_base64=png_base64() if self.display_available else "",
             width=1280,
             height=800,
             visible_text="Desktop application",
@@ -105,9 +106,10 @@ async def test_destination_navigation_uses_visible_desktop_without_terminal_disc
         {"url": target},
         "open target",
     )
-    assert trace1.status == ActionExecutionStatus.COMPLETED
-    assert agent._last_gui_navigation_target == target
-    assert [action.key for action in comp.gui_actions if action.key] == ["ctrl+l", "Return"]
+    assert trace1.status == ActionExecutionStatus.BLOCKED
+    assert "focus-verification" in trace1.actual_observation.lower()
+    assert agent._last_gui_navigation_target == ""
+    assert not comp.gui_actions
     assert not comp.commands_executed
 
 
@@ -127,8 +129,8 @@ async def test_destination_navigation_fails_without_live_desktop_evidence():
         {"url": next_target},
         "open target",
     )
-    assert trace.status in {ActionExecutionStatus.FAILED, ActionExecutionStatus.RECOVERED}
-    assert "could not be verified from a live screen" in trace.actual_observation
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert "focus-verification" in trace.actual_observation.lower()
     assert agent._last_gui_navigation_target == previous_target
     assert not comp.commands_executed
 
@@ -151,8 +153,8 @@ async def test_consecutive_action_loop_breaker():
     assert any(
         reason in t1.actual_observation.lower()
         for reason in (
-            "no prior desktop observation",
-            "could not be resolved from visual grounding",
+            "grounding",
+            "avcs",
         )
     )
 

@@ -10,14 +10,17 @@ from sonic.agents.judge import JudgeAgent, JudgeVerdict
 from sonic.computer_use.boss import BossAgent
 from sonic.computer_use.models import ComputerActionType, ComputerDecisionTrace
 from sonic.computer_use.models_boss import Phase, SubMission, SubMissionResult
+from tests.avcs_test_helpers import png_base64
 
 
 class _Desktop:
     async def screenshot(self, workspace_id):
         return SimpleNamespace(
-            screenshot_base64="dGVzdC1mcmFtZQ==",
+            screenshot_base64=png_base64(),
             capture_timestamp_ns=time.time_ns(),
             capture_age_ms=0.0,
+            width=1280,
+            height=800,
             desktop_state="INTERACTIVE",
             active_window="Document editor",
         )
@@ -50,7 +53,7 @@ def _gui_result():
 
 
 @pytest.mark.asyncio
-async def test_gui_judge_uses_fresh_screenshot_and_confirms_visible_outcome():
+async def test_gui_judge_processes_pixels_locally_but_does_not_claim_semantic_completion():
     router = _VisionJudge(
         '{"verdict":"CONFIRMED","visible_evidence":"The report is displayed in the editor."}'
     )
@@ -64,10 +67,9 @@ async def test_gui_judge_uses_fresh_screenshot_and_confirms_visible_outcome():
 
     verdict = await judge.evaluate_sub_mission("workspace", sub_mission, result)
 
-    assert verdict.verdict == JudgeVerdict.CONFIRMED
-    request = router.complete.await_args.args[0]
-    assert request.task_type == "vision"
-    assert request.messages[-1].images[0].base64 == "dGVzdC1mcmFtZQ=="
+    assert verdict.verdict == JudgeVerdict.INCONCLUSIVE
+    assert "processed locally by AVCS" in verdict.notes
+    router.complete.assert_not_awaited()
 
 
 @pytest.mark.asyncio

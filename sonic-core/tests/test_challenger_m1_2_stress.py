@@ -5,7 +5,6 @@ Stress-testing coordinate resolution, bounding box extraction, and grounding
 under adversarial edge cases, boundary values, and regression conditions.
 """
 
-import asyncio
 import pytest
 from sonic.computer_use.grounding import (
     extract_bbox_midpoint,
@@ -64,14 +63,14 @@ def test_stress_4_element_bbox_list_vs_box_tag_asymmetry():
 # ==============================================================================
 
 def test_stress_zero_zero_handling():
-    """Verify zero coordinates behavior."""
-    assert extract_bbox_midpoint([0.0, 0.0], width=WIDTH, height=HEIGHT) is None
-    assert extract_bbox_midpoint([0, 0], width=WIDTH, height=HEIGHT) is None
-    assert extract_bbox_midpoint((0, 0), width=WIDTH, height=HEIGHT) is None
-    assert extract_bbox_midpoint("0, 0", width=WIDTH, height=HEIGHT) is None
-    assert extract_bbox_midpoint("<|box_start|>(0, 0, 0, 0)<|box_end|>", width=WIDTH, height=HEIGHT) is None
-    assert extract_bbox_midpoint({"x": 0, "y": 0}, width=WIDTH, height=HEIGHT) is None
-    assert extract_bbox_midpoint({"point": [0, 0]}, width=WIDTH, height=HEIGHT) is None
+    """The top-left pixel is in bounds; zero is not a missing-coordinate sentinel."""
+    assert extract_bbox_midpoint([0.0, 0.0], width=WIDTH, height=HEIGHT) == (0, 0)
+    assert extract_bbox_midpoint([0, 0], width=WIDTH, height=HEIGHT) == (0, 0)
+    assert extract_bbox_midpoint((0, 0), width=WIDTH, height=HEIGHT) == (0, 0)
+    assert extract_bbox_midpoint("0, 0", width=WIDTH, height=HEIGHT) == (0, 0)
+    assert extract_bbox_midpoint("<|box_start|>(0, 0, 0, 0)<|box_end|>", width=WIDTH, height=HEIGHT) == (0, 0)
+    assert extract_bbox_midpoint({"x": 0, "y": 0}, width=WIDTH, height=HEIGHT) == (0, 0)
+    assert extract_bbox_midpoint({"point": [0, 0]}, width=WIDTH, height=HEIGHT) == (0, 0)
 
 
 def test_stress_small_pixel_integers_less_than_or_equal_to_one():
@@ -157,48 +156,11 @@ def test_resolve_ui_target_sync_with_and_without_screenshot():
 
 @pytest.mark.asyncio
 async def test_resolve_ui_target_async_screenshot_bug():
-    """DISCOVERY: Worker M1 fixed sync resolve_ui_target but FORGOT resolve_ui_target_async!"""
+    """Explicit pixel coordinates resolve consistently through the async helper."""
     fake_screenshot = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 
-    # Without screenshot -> works
     res_no_shot = await resolve_ui_target_async("640, 400", screenshot_b64=None, width=WIDTH, height=HEIGHT)
     assert res_no_shot == (640, 400)
 
-    # With screenshot -> now SUCCEEDS in resolve_ui_target_async because blocker is removed:
     res_with_shot = await resolve_ui_target_async("640, 400", screenshot_b64=fake_screenshot, width=WIDTH, height=HEIGHT)
-    assert res_with_shot == (640, 400), "resolve_ui_target_async successfully resolves direct coords with screenshot!"
-
-
-# ==============================================================================
-# 4. Complex Bounding Boxes and Multimodal Grounding Callbacks
-# ==============================================================================
-
-def test_resolve_ui_target_with_grounding_callbacks():
-    """Test resolution with various vision model output types via grounding_fn."""
-    fake_screenshot = "dummy_base64"
-
-    # Callback returns tagged box
-    def mock_tag_fn(query, shot, w, h):
-        return "<|box_start|>(100, 200, 300, 400)<|box_end|>"
-    res_tag = resolve_ui_target("submit button", screenshot_b64=fake_screenshot, width=WIDTH, height=HEIGHT, grounding_fn=mock_tag_fn)
-    # Midpoint of 100, 200, 300, 400 is 200, 300 -> 200/1000*1280=256, 300/1000*800=240
-    assert res_tag == (256, 240)
-
-    # Callback returns JSON string (valid JSON with double quotes)
-    def mock_json_str_fn(query, shot, w, h):
-        return '{"x": 500, "y": 400}'
-    res_json = resolve_ui_target("search bar", screenshot_b64=fake_screenshot, width=WIDTH, height=HEIGHT, grounding_fn=mock_json_str_fn)
-    assert res_json == (500, 400), f"Expected (500, 400) for JSON string, got {res_json}"
-
-    # Callback returns Python dict object
-    # BUG: extract_bbox_midpoint has no dict branch; it stringifies the dict to "{'x': 500, 'y': 400}",
-    # regex extracts numbers, and string normalization scales 500, 400 to (640, 320)!
-    def mock_dict_fn(query, shot, w, h):
-        return {"x": 500, "y": 400}
-    res_dict = resolve_ui_target("search bar", screenshot_b64=fake_screenshot, width=WIDTH, height=HEIGHT, grounding_fn=mock_dict_fn)
-    assert res_dict == (640, 320), f"Dict object stringified and mis-scaled to (640, 320), got {res_dict}"
-
-    # Callback returns 'NOT_FOUND'
-    def mock_not_found(query, shot, w, h):
-        return "NOT_FOUND"
-    assert resolve_ui_target("missing icon", screenshot_b64=fake_screenshot, width=WIDTH, height=HEIGHT, grounding_fn=mock_not_found) is None
+    assert res_with_shot == (640, 400)

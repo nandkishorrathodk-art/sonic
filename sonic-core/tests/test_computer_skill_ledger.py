@@ -1,11 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-import base64
-import io
-
 import pytest
-from PIL import Image
 
 from sonic.computer.models import ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
@@ -13,6 +9,7 @@ from sonic.computer_use.gui_world_graph import GuiWorldGraph
 from sonic.computer_use.models import ComputerActionType
 from sonic.computer_use.perception_bus import PerceptionBus
 from sonic.computer_use.skill_ledger import ComputerSkillLedger
+from tests.avcs_test_helpers import png_base64
 
 
 def test_skill_ledger_observes_and_persists_applications(tmp_path: Path):
@@ -48,13 +45,8 @@ def test_skill_ledger_handles_dynamic_inventory(tmp_path: Path, applications: li
 
 @pytest.mark.asyncio
 async def test_agent_learns_inventory_and_successful_gui_action(tmp_path: Path):
-    def image(color: str) -> str:
-        buffer = io.BytesIO()
-        Image.new("RGB", (4, 4), color=color).save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("ascii")
-
     screen_before = ScreenObservation(
-        screenshot_base64=image("white"),
+        screenshot_base64=png_base64(color="white"),
         width=1280,
         height=800,
         desktop_state="INTERACTIVE",
@@ -64,7 +56,7 @@ async def test_agent_learns_inventory_and_successful_gui_action(tmp_path: Path):
         controls_age_ms=0,
     )
     screen_after = screen_before.model_copy(
-        update={"screenshot_base64": image("black")}
+        update={"screenshot_base64": png_base64(color="black")}
     )
     provider = SimpleNamespace(
         screenshot=AsyncMock(return_value=screen_before),
@@ -101,8 +93,8 @@ async def test_agent_learns_inventory_and_successful_gui_action(tmp_path: Path):
     context = reloaded.context()
     assert "Research Desk" in context
     assert "Terminal" in context
-    assert trace.status.value == "COMPLETED"
-    assert "GUI_CLICK" in context
+    assert trace.status.value == "UNVERIFIED"
+    assert "GUI_CLICK" not in context
     provider.application_list.assert_awaited_once()
     provider.gui_action.assert_awaited_once()
 

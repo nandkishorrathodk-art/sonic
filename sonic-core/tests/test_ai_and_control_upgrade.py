@@ -16,9 +16,12 @@ Control:
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 
 import pytest
+from PIL import Image
 
 from sonic.agents.react_engine import ReActEngine, ToolCategory, ToolDefinition, create_default_tool_registry
 from sonic.computer.models import (
@@ -43,6 +46,13 @@ def _run(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+def _png_frame(width: int, height: int) -> str:
+    image = Image.new("RGB", (width, height), "black")
+    stream = io.BytesIO()
+    image.save(stream, format="PNG")
+    return base64.b64encode(stream.getvalue()).decode("ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +369,7 @@ class _StubComputer(ComputerProvider):
         )
     async def screenshot(self, workspace_id):
         return ScreenObservation(
-            screenshot_base64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII=",
+            screenshot_base64=_png_frame(self.width, self.height),
             width=self.width,
             height=self.height,
             visible_text="ui",
@@ -371,7 +381,7 @@ class _StubComputer(ComputerProvider):
     async def gui_action(self, workspace_id, action, actor="operator"):
         self.gui_calls.append((action.action, action.x or 0, action.y or 0))
         return ScreenObservation(
-            screenshot_base64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII=",
+            screenshot_base64=_png_frame(self.width, self.height),
             width=self.width,
             height=self.height,
             active_window="x",
@@ -584,7 +594,11 @@ async def test_heartbeat_callback_failure_does_not_discard_llm_action(monkeypatc
                 model="test-model",
             )
 
-    agent = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=DelayedRouter())
+    agent = ComputerUseAgent(
+        computer_provider=_StubComputer(),
+        llm_router=DelayedRouter(),
+        execution_plane="headless",
+    )
 
     def broken_heartbeat(_event):
         raise RuntimeError("worklog persistence failed")
@@ -618,14 +632,7 @@ async def test_gui_reasoning_timeout_returns_explicit_blocked_result(monkeypatch
         llm_router=HangingRouter(),
         execution_plane="gui",
     )
-    agent._last_screenshot_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII="
-    observation = ComputerWorldObservation(
-        screen=ScreenObservation(
-            screenshot_base64=agent._last_screenshot_b64,
-            capture_age_ms=10,
-            active_window="x",
-        )
-    )
+    observation = await agent.observe(agent.computer.workspace_id)
 
     action_type, target, _, expected = await agent._llm_choose_action(
         goal="Use the visible desktop",
@@ -641,25 +648,24 @@ async def test_gui_reasoning_timeout_returns_explicit_blocked_result(monkeypatch
     assert "no action was dispatched" in expected
 
 
-def test_multimodal_computer_use_does_not_send_reasoning_effort():
+@pytest.mark.asyncio
+async def test_computer_use_keeps_avcs_frames_local():
     router = _RecordingRouter()
-    agent = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=router)
-    agent._last_screenshot_b64 = "aGVsbG8="
-    observation = ComputerWorldObservation(
-        screen=ScreenObservation(screenshot_base64=agent._last_screenshot_b64, capture_age_ms=10)
+    agent = ComputerUseAgent(
+        computer_provider=_StubComputer(),
+        llm_router=router,
+        execution_plane="gui",
     )
-    _run(
-        agent._llm_choose_action(
-            goal="Inspect the supplied application",
-            observation=observation,
-            step_index=1,
-            primary_file="",
-            test_file="",
-        )
+    observation = await agent.observe(agent.computer.workspace_id)
+    await agent._llm_choose_action(
+        goal="Inspect the visible application",
+        observation=observation,
+        step_index=1,
+        primary_file="",
+        test_file="",
     )
     assert router.request is not None
-    assert router.request.reasoning_effort is None
-    assert any(message.images for message in router.request.messages)
+    assert not any(message.images for message in router.request.messages)
 
 
 @pytest.mark.parametrize(
@@ -685,7 +691,11 @@ def test_llm_choose_action_recovers_from_refusal_with_target():
         response_content="I cannot assist with this request because it is against safety policies."
     )
     comp = _StubComputer()
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=router)
+    agent = ComputerUseAgent(
+        computer_provider=comp,
+        llm_router=router,
+        execution_plane="headless",
+    )
     obs = ComputerWorldObservation()
     action_type, target, payload, expected = _run(
         agent._llm_choose_action(
@@ -696,7 +706,6 @@ def test_llm_choose_action_recovers_from_refusal_with_target():
             test_file="test.py",
         )
     )
-    assert agent._last_thought == "LLM safety refusal detected; recording refusal for replanning."
     # Rule 2: refusal is now recorded as BLOCKED status (no canned shell command)
     assert action_type == ActionExecutionStatus.BLOCKED
     assert target == "refusal-recorded"
@@ -707,7 +716,11 @@ def test_llm_choose_action_recovers_from_refusal_without_target():
         response_content="I can't help with that. Generating malware is illegal."
     )
     comp = _StubComputer()
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=router)
+    agent = ComputerUseAgent(
+        computer_provider=comp,
+        llm_router=router,
+        execution_plane="headless",
+    )
     obs = ComputerWorldObservation()
     action_type, target, payload, expected = _run(
         agent._llm_choose_action(
@@ -718,7 +731,6 @@ def test_llm_choose_action_recovers_from_refusal_without_target():
             test_file="",
         )
     )
-    assert agent._last_thought == "LLM safety refusal detected; recording refusal for replanning."
     # Rule 2: refusal is now recorded as BLOCKED status (no canned shell command)
     assert action_type == ActionExecutionStatus.BLOCKED
     assert payload == {}

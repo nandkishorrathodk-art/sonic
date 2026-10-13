@@ -102,10 +102,9 @@ def test_gui_workflow_uses_grounded_controls_in_the_shared_desktop():
         "Enter the requested document title",
     ))
 
-    assert typed.status == ActionExecutionStatus.COMPLETED, typed.actual_observation
-    assert [action.action.value for action in computer.actions] == ["CLICK", "TYPE"]
-    assert computer.actions[0].x == 100
-    assert computer.actions[1].text == "Quarterly notes"
+    assert typed.status == ActionExecutionStatus.BLOCKED, typed.actual_observation
+    assert "focus-verification" in typed.actual_observation.lower()
+    assert all(action.text != "Quarterly notes" for action in computer.actions)
 
 
 def test_gui_and_terminal_coordination_keeps_planes_distinct():

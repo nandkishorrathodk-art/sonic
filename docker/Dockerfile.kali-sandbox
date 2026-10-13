@@ -1,5 +1,5 @@
 # ==============================================================================
-# SONIC-REDA — Isolated Kali Linux Sandbox (Security Tool Plane)
+# SONIC — Isolated Kali Linux Sandbox (Security Tool Plane)
 # ==============================================================================
 # Build:  docker build -t sonic-kali-linux:v1.3.0 -f docker/Dockerfile.kali-sandbox .
 #

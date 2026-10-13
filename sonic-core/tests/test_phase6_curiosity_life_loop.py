@@ -22,9 +22,7 @@ used to pursue each proposed goal.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
-import pytest
 
 from sonic.computer.models import ComputerState, FileEntry, GitStatusInfo, ScreenObservation
 from sonic.computer.provider import ComputerProvider
@@ -32,6 +30,7 @@ from sonic.computer_use.agent import ComputerUseAgent, _GOAL_COMPLETE_SENTINEL
 from sonic.computer_use.curiosity import CuriosityLoop
 from sonic.memory.vector import VectorMemory
 from sonic.sandbox.provider import ExecResult
+from tests.avcs_test_helpers import png_base64
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +47,15 @@ class _StubComputer(ComputerProvider):
     async def create(self, tenant_id, engagement_id, **kw): return type("W", (), {"id": self.workspace_id})()
     async def destroy(self, ws): return True
     async def status(self, ws): return ComputerState(workspace_id=ws, tenant_id="t", running_processes=["sh"])
-    async def screenshot(self, ws): return ScreenObservation(visible_text=self.visible_text)
+    async def screenshot(self, ws):
+        return ScreenObservation(
+            screenshot_base64=png_base64(),
+            width=1280,
+            height=800,
+            visible_text=self.visible_text,
+            capture_age_ms=0,
+            desktop_state="INTERACTIVE",
+        )
     async def gui_action(self, *a, **k): return ScreenObservation()
     async def terminal(self, ws, command, timeout=60, actor="operator"):
         return ExecResult(command=command, exit_code=0, stdout=self.terminal_output, stderr="")
@@ -112,8 +119,8 @@ def test_curiosity_self_proposes_goal_from_observation(tmp_path):
 
     res = _run(agent.idle_cycle(comp.workspace_id, curiosity))
     # The proposal prompt embedded the live observation.
-    assert "port 9090" in llm.received_prompts[0]
-    assert "mystery service" in llm.received_prompts[0]
+    assert "AVCS pixel state: frame=" in llm.received_prompts[0]
+    assert "scene=" in llm.received_prompts[0]
     assert res.proposed_goal == "identify the protocol on port 9090"
     assert res.cycle == 1
 

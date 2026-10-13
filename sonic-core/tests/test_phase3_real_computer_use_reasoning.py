@@ -7,8 +7,8 @@ NOT a step-indexed hardcoded script:
     [x] No hardcoded JWT/SQLi/XSS patch logic remains in the agent.
     [x] Action selection is LLM-driven (the executed actions match the LLM's
         choices, not a fixed step-1/2/3/4/5 script).
-    [x] Screen observation (visible_text + terminal_output) is actually fed
-        into the reasoning prompt.
+    [x] Headless terminal output is fed into the reasoning prompt without
+        importing workstation pixels or text into the execution plane.
     [x] Goal change -> the agent chooses different actions (LLM-driven).
     [x] Observation change (same goal) -> the agent reacts with a different
         action (proves it reads the observation, not just the goal).
@@ -26,6 +26,10 @@ not a mock of the agent itself.
 from __future__ import annotations
 
 import asyncio
+import base64
+from io import BytesIO
+
+from PIL import Image
 
 from sonic.computer.models import (
     ComputerState,
@@ -41,6 +45,11 @@ from sonic.sandbox.provider import ExecResult
 # ---------------------------------------------------------------------------
 # Test doubles
 # ---------------------------------------------------------------------------
+
+_VISUAL_FRAME = BytesIO()
+Image.new("RGB", (1280, 800), (16, 24, 32)).save(_VISUAL_FRAME, format="PNG")
+_VISUAL_FRAME_B64 = base64.b64encode(_VISUAL_FRAME.getvalue()).decode("ascii")
+
 
 class _StubComputer(ComputerProvider):
     """Minimal in-memory computer that records every action the agent takes.
@@ -77,10 +86,9 @@ class _StubComputer(ComputerProvider):
 
     async def screenshot(self, workspace_id):
         return ScreenObservation(
-            screenshot_base64=(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8p8AAAAASUVORK5CYII="
-                if self.visual else ""
-            ),
+            screenshot_base64=_VISUAL_FRAME_B64 if self.visual else "",
+            width=1280 if self.visual else 0,
+            height=800 if self.visual else 0,
             visible_text=self.visible_text,
             active_window="code-server",
             capture_age_ms=0 if self.visual else None,
@@ -158,6 +166,14 @@ def _run(coro):
         loop.close()
 
 
+def _headless_agent(**kwargs):
+    return ComputerUseAgent(
+        execution_plane="headless",
+        observe_desktop=False,
+        **kwargs,
+    )
+
+
 # ---------------------------------------------------------------------------
 # [x] No hardcoded vulnerability fix logic
 # ---------------------------------------------------------------------------
@@ -181,7 +197,7 @@ def test_no_hardcoded_vuln_fixes_in_agent():
 def test_offline_fallback_is_generic_diagnostic_not_script():
     """Without an LLM, the agent probes (reads) — never writes a vuln-specific patch."""
     comp = _StubComputer()
-    agent = ComputerUseAgent(computer_provider=comp)
+    agent = _headless_agent(computer_provider=comp)
     agent.llm_router = None
     obs = _run(agent.observe(comp.workspace_id))
     action_type, target, payload, expected = _run(agent.choose_action("Fix JWT bug", obs, 1))
@@ -205,7 +221,7 @@ def test_action_selection_is_llm_driven():
         _action("GIT_COMMIT", "git-repo", '{"message": "fix auth"}', "commit"),
         _action("GOAL_COMPLETE", "goal-complete", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent = ComputerUseAgent(
+    agent = _headless_agent(
         computer_provider=comp,
         llm_router=llm,
         operator_approval_callback=lambda *_: True,
@@ -232,7 +248,7 @@ def test_reasoning_contract_exposes_full_live_action_surface():
     """The model must see every implemented action, not a reduced script menu."""
     comp = _StubComputer()
     llm = _StubLLM([_action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL)])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm)
+    agent = _headless_agent(computer_provider=comp, llm_router=llm)
     _run(agent.run_mission(comp.workspace_id, "inspect the repository", steps=1))
 
     prompt = llm.received_prompts[0]
@@ -250,20 +266,19 @@ def test_reasoning_contract_exposes_full_live_action_surface():
 
 
 # ---------------------------------------------------------------------------
-# [x] Screen observation is actually used in the reasoning prompt
+# [x] Headless execution output is used without desktop text
 # ---------------------------------------------------------------------------
 
-def test_screen_observation_used_in_reasoning():
-    """visible_text and terminal_output appear in the prompt the LLM receives."""
+def test_headless_reasoning_uses_terminal_output_not_desktop_text():
+    """Headless reasoning sees execution output, never workstation screen text."""
     comp = _StubComputer(visible_text="ERROR: alg=none accepted on /token",
                          terminal_output="2 failed, 1 passed")
     llm = _StubLLM([_action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL)])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm)
+    agent = _headless_agent(computer_provider=comp, llm_router=llm)
     _run(agent.run_mission(comp.workspace_id, "anything", steps=1))
     prompt = llm.received_prompts[0]
-    assert "ERROR: alg=none accepted on /token" in prompt, "screen visible_text not fed to LLM"
     assert "2 failed, 1 passed" in prompt, "terminal_output not fed to LLM"
-    assert "Screen Visible Content" in prompt
+    assert "ERROR: alg=none accepted on /token" not in prompt
     assert "Last Command Output" in prompt
 
 
@@ -279,11 +294,11 @@ def test_reasoning_adapts_to_goal():
     llm = _StubLLM([_action("FILE_READ", "a.py", '{"path": "a.py"}', "r"),
                     _action("TERMINAL_EXEC", "pytest", '{"command": "pytest"}', "run tests")])
 
-    agent_a = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=llm)
+    agent_a = _headless_agent(computer_provider=_StubComputer(), llm_router=llm)
     obs_a = _run(agent_a.observe("ws-stub"))
     act_a = _run(agent_a.choose_action("Find the auth bug", obs_a, 1))
 
-    agent_b = ComputerUseAgent(computer_provider=_StubComputer(), llm_router=llm)
+    agent_b = _headless_agent(computer_provider=_StubComputer(), llm_router=llm)
     obs_b = _run(agent_b.observe("ws-stub"))
     act_b = _run(agent_b.choose_action("Run the test suite", obs_b, 1))
 
@@ -310,7 +325,7 @@ def test_reasoning_reacts_to_observation_not_just_goal():
     # Run 1: tests passing -> complete.
     comp1 = _StubComputer(terminal_output="all tests passed")
     llm1 = _StubLLM([_action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL)])
-    agent1 = ComputerUseAgent(computer_provider=comp1, llm_router=llm1)
+    agent1 = _headless_agent(computer_provider=comp1, llm_router=llm1)
     traces1 = _run(agent1.run_mission("ws-stub", "Make tests green", steps=3))
     assert len(traces1) == 1  # independent typed pytest verification was executed
     assert traces1[0].action_type == ComputerActionType.VERIFY_PROBE
@@ -321,7 +336,7 @@ def test_reasoning_reacts_to_observation_not_just_goal():
         _action("FILE_WRITE", "auth.py", '{"path": "auth.py", "content": "FIX"}', "fix"),
         _action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent2 = ComputerUseAgent(computer_provider=comp2, llm_router=llm2)
+    agent2 = _headless_agent(computer_provider=comp2, llm_router=llm2)
     traces2 = _run(agent2.run_mission("ws-stub", "Make tests green", steps=3))
     assert len(traces2) == 2
     assert traces2[0].action_type == ComputerActionType.FILE_WRITE
@@ -341,7 +356,7 @@ def test_history_carried_across_steps():
         _action("FILE_READ", "auth.py", '{"path": "auth.py"}', "read"),
         _action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL),
     ])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm)
+    agent = _headless_agent(computer_provider=comp, llm_router=llm)
     _run(agent.run_mission(comp.workspace_id, "Run tests and report the results", steps=3))
     assert len(llm.received_prompts) == 2
     step2_prompt = llm.received_prompts[1]
@@ -358,7 +373,7 @@ def test_history_carried_across_steps():
 def test_goal_complete_terminates_loop_early():
     comp = _StubComputer()
     llm = _StubLLM([_action("GOAL_COMPLETE", "g", "{}", _GOAL_COMPLETE_SENTINEL)])
-    agent = ComputerUseAgent(computer_provider=comp, llm_router=llm)
+    agent = _headless_agent(computer_provider=comp, llm_router=llm)
     traces = _run(agent.run_mission(comp.workspace_id, "Run pytest", steps=5))
     assert len(traces) == 1
     assert traces[0].action_type == ComputerActionType.VERIFY_PROBE

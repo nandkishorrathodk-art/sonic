@@ -1866,17 +1866,6 @@ class ComputerUseAgent:
                     {},
                     f"{action_type.value} requires an explicit pixel point or semantic target query.",
                 )
-            if (
-                coordinates is not None
-                and _parse_pixel_coordinate_target(parsed[1]) is not None
-                and not str(payload.get("grounding_query") or "").strip()
-            ):
-                return (
-                    ActionExecutionStatus.BLOCKED,
-                    "gui-invalid-response",
-                    {},
-                    "Explicit GUI pixel coordinates require a separate semantic grounding_query.",
-                )
         parsed = (parsed[0], parsed[1], payload, parsed[3])
         return parsed
 
@@ -2169,7 +2158,11 @@ class ComputerUseAgent:
             history_text = history_text[-1200:]
 
         # Truthful observations: output UNKNOWN when missing or unavailable (no fake observations)
-        screen_text = "Not extracted; current pixels are processed locally by AVCS."
+        screen_text = (
+            "Not extracted; current pixels are processed locally by AVCS."
+            if has_live_pixels
+            else "UNKNOWN"
+        )
         screen_limit = 1200 if has_live_pixels else 4000
         if screen_text != "UNKNOWN" and len(screen_text) > screen_limit:
             screen_text = screen_text[: screen_limit - 3] + "..."
@@ -2678,7 +2671,7 @@ class ComputerUseAgent:
             f"{capability_directive}"
             f"GUI ACTION COORDINATES: In GUI action TARGET/PAYLOAD fields, use actual screen pixels "
             f"(x=0..{max(0, screen_w - 1)}, y=0..{max(0, screen_h - 1)}), not normalized values. "
-            "Only the separate multimodal grounding response uses normalized 0-1000 coordinates.\n"
+            "Semantic GUI targets are resolved locally by AVCS; do not invent coordinates.\n"
             "================================================================================\n\n"
         )
         init_ctx = getattr(self, "initial_context", {}) or {}
@@ -4938,10 +4931,13 @@ class ComputerUseAgent:
         elif not isinstance(payload, dict):
             payload = {} if payload is None else {"raw": payload}
 
-        if action_type == ComputerActionType.GUI_TYPE:
+        if action_type in (
+            ComputerActionType.GUI_TYPE,
+            ComputerActionType.BROWSER_NAVIGATE,
+        ):
             actual_obs_str = (
-                "GUI_TYPE blocked: AVCS has no evaluated local focus-verification "
-                "head, so text will not be sent."
+                f"{action_type.value} blocked: AVCS has no evaluated local "
+                "focus-verification head, so text will not be sent."
             )
             trace = ComputerDecisionTrace(
                 step_index=self.action_counter,
@@ -7652,6 +7648,7 @@ class ComputerUseAgent:
         if (
             isinstance(state_delta, dict)
             and action_type in state_verification_actions
+            and not visual_stall_detected
             and status not in (
                 ActionExecutionStatus.BLOCKED,
                 ActionExecutionStatus.FAILED,
@@ -9086,11 +9083,20 @@ class ComputerUseAgent:
     async def _observation_summary(self, workspace_id: str) -> str:
         """A compact text summary of the current world for curiosity proposals."""
         obs = await self.observe(workspace_id)
+        avcs_state = getattr(obs.screen, "avcs_state", None)
+        avcs_summary = "unavailable"
+        if isinstance(avcs_state, dict):
+            avcs_summary = (
+                f"frame={avcs_state.get('frame_index', 'unknown')}, "
+                f"scene={str(avcs_state.get('scene_hash', ''))[:16]}, "
+                f"changed={avcs_state.get('scene_changed', 'unknown')}, "
+                f"regions={len(avcs_state.get('regions', []))}"
+            )
         return (
             f"Active app: {obs.active_application}\n"
             f"Open windows: {getattr(obs, 'open_applications', [])}\n"
             f"Installed GUI apps: {(obs.installed_applications or [])[:15]}\n"
-            f"Screen: {(obs.visible_text or '')[:300]}\n"
+            f"AVCS pixel state: {avcs_summary}\n"
             f"Terminal: {(obs.terminal_output or '')[:200]}\n"
             f"Files: {obs.filesystem_files}\n"
             f"Git: branch={obs.git_branch}, clean={obs.git_clean}"

@@ -191,6 +191,7 @@ class _SmartLiveCapabilityLLM:
                             'print(\'MATH_VERIFIED\')"'
                         ),
                         "workspace_mode": "branch",
+                        "execution_plane": "headless",
                         "max_steps": 1,
                     },
                     {
@@ -207,6 +208,7 @@ class _SmartLiveCapabilityLLM:
                             'print(\'TEXT_VERIFIED\')"'
                         ),
                         "workspace_mode": "branch",
+                        "execution_plane": "headless",
                         "max_steps": 1,
                     },
                     {
@@ -222,6 +224,7 @@ class _SmartLiveCapabilityLLM:
                             'print(\'SYSTEM_VERIFIED\')"'
                         ),
                         "workspace_mode": "branch",
+                        "execution_plane": "headless",
                         "max_steps": 1,
                     },
                 ]
@@ -382,6 +385,7 @@ async def test_three_concurrent_subagents_branch_isolation_and_merge(tmp_path: P
                 'print(\'MATH_VERIFIED\')"'
             ),
             workspace_mode="branch",
+            execution_plane="headless",
             max_steps=1,
             max_correction_rounds=1,
         ),
@@ -399,6 +403,7 @@ async def test_three_concurrent_subagents_branch_isolation_and_merge(tmp_path: P
                 'print(\'TEXT_VERIFIED\')"'
             ),
             workspace_mode="branch",
+            execution_plane="headless",
             max_steps=1,
             max_correction_rounds=1,
         ),
@@ -415,6 +420,7 @@ async def test_three_concurrent_subagents_branch_isolation_and_merge(tmp_path: P
                 'print(\'SYSTEM_VERIFIED\')"'
             ),
             workspace_mode="branch",
+            execution_plane="headless",
             max_steps=1,
             max_correction_rounds=1,
         ),
@@ -488,6 +494,8 @@ async def test_computer_use_agent_end_to_end_synthesis_of_three_subagents(tmp_pa
         safety=policy,
         tenant_id="t-teamwork-synth",
         enable_llm_decomposition=False,
+        observe_desktop=False,
+        execution_plane="headless",
     )
 
     # Mission goal requiring concurrent delegation followed by synthesis
@@ -702,6 +710,7 @@ async def test_branch_isolation_prevents_unverified_files_from_polluting_parent(
                 prompt="Write unverified_draft.py in branch workspace.",
                 verification_command='python -c "assert False, \'Deliberate verification rejection\'"',
                 workspace_mode="branch",
+                execution_plane="headless",
                 max_steps=1,
                 max_correction_rounds=0,  # No correction rounds to test direct rejection
             )
@@ -807,6 +816,7 @@ async def test_subagent_self_correction_loop_on_initial_judge_falsification(tmp_
                 prompt="Implement add and factorial in math_service.py.",
                 verification_command='python -c "import math_service; assert math_service.add(2, 3) == 5; assert math_service.factorial(4) == 24; print(\'ROUND2_VERIFIED\')"',
                 workspace_mode="branch",
+                execution_plane="headless",
                 max_steps=1,
                 max_correction_rounds=2,
             )

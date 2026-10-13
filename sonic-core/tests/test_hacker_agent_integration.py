@@ -10,21 +10,17 @@ Verifies end-to-end integration of:
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from sonic.computer.models import GUIAction, GUIActionType, ScreenObservation
+from sonic.computer.models import ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionType,
     ComputerWorldObservation,
 )
-from sonic.computer_use.motor import MotorReflexes
-from sonic.computer_use.scratchpad import HackerScratchpad
-from sonic.computer_use.wire_telemetry import WireTelemetryEngine
 
 
 def _mock_provider():
@@ -183,8 +179,5 @@ class TestHackerAgentIntegration:
 
         agent.motor.enforce_tab_budget.assert_not_awaited()
         provider.terminal.assert_not_awaited()
-        assert trace.status in {
-            ActionExecutionStatus.FAILED,
-            ActionExecutionStatus.RECOVERED,
-        }
-        assert "could not be verified from a live screen" in trace.actual_observation
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        assert "no evaluated local focus-verification head" in trace.actual_observation

@@ -594,6 +594,12 @@ harmless task.
 
 ### AVCS-only workstation perception (current contract)
 
+- **Role in SONIC:** AVCS is the local visual-perception layer—the computer's
+  digital eye. It turns workstation pixels into pixel-derived scene and change
+  signals for SONIC's reasoning loop; it does not plan tasks, interpret
+  application intent by itself, or execute mouse, keyboard, or terminal
+  actions. Boss/agents reason and plan, the computer provider performs actions,
+  and the independent Judge evaluates task-relevant postconditions.
 - In the Docker and Daytona screenshot-provider paths used by workstation
   computer-use, a validated fresh PNG is processed locally by
   `AVCSPerception`. The resulting state contains pixel-derived fields such as
@@ -617,6 +623,10 @@ harmless task.
   identity, focus, or task completion. `GUI_TYPE` remains unavailable because
   there is no evaluated local focus-verification head; do not dispatch text
   based on a reflex summary or a model's focus assertion.
+- Local processing is a privacy and visual-awareness property, not evidence
+  of a continuously sustained frame rate or latency target. Claim real-time
+  streaming performance only after measuring the deployed capture and AVCS
+  pipeline under representative workstation load.
 - The Judge processes fresh screenshot pixels locally through AVCS and must not
   attach desktop pixels to any model request. Scene change, motion, reflex
   events, or a worker's completion proposal alone cannot prove the requested

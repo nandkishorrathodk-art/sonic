@@ -1,5 +1,5 @@
 # ==========================================================
-# SONIC-REDA — Multi-Container Runtime (Dev & Isolated Sandboxes)
+# SONIC — Multi-Container Runtime (Dev & Isolated Sandboxes)
 # ==========================================================
 # Architecture:
 #   • Control Plane Database: Neo4j 5 (Graph Memory)

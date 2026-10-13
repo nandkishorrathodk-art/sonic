@@ -32,8 +32,6 @@ import asyncio
 import base64
 import binascii
 import json
-import math
-import os
 import struct
 import time
 import zlib
@@ -42,23 +40,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sonic.agents.judge import JudgeAgent, JudgeEvaluation, JudgeVerdict
-from sonic.agents.task_graph import TaskGraph, TaskGraphError, TaskStatus
-from sonic.computer.models import ComputerState, GUIAction, GUIActionType, ScreenObservation
+from sonic.agents.judge import JudgeAgent, JudgeVerdict
+from sonic.agents.task_graph import TaskStatus
+from sonic.computer.models import ComputerState, ScreenObservation
 from sonic.computer.provider import ComputerProvider
-from sonic.computer_use.action_contracts import ActionReceipt, StateDelta
+from sonic.computer_use.action_contracts import ActionReceipt
 from sonic.computer_use.agent import ComputerUseAgent
-from sonic.computer_use.boss import BossAgent, BossThinking
+from sonic.computer_use.boss import BossAgent
 from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionType,
     ComputerDecisionTrace,
     ComputerWorldObservation,
 )
-from sonic.computer_use.models_boss import BossReport, Phase, SubMission, SubMissionResult
+from sonic.computer_use.models_boss import SubMission, SubMissionResult
 from sonic.computer_use.teamwork import DisplayLeaseManager
-from sonic.safety.action_policy import ActionPolicy, PolicyVerdict
-from sonic.safety.sealed import SealedActionPolicy, seal_default
+from sonic.safety.action_policy import ActionPolicy
+from sonic.safety.sealed import seal_default
 from sonic.sandbox.provider import ExecResult
 
 pytestmark = [pytest.mark.no_live_infra]
@@ -428,10 +426,10 @@ class TestTier1FeatureCoverage:
             "Click button",
         )
 
-        assert trace.status == ActionExecutionStatus.COMPLETED
+        assert trace.status == ActionExecutionStatus.UNVERIFIED
         assert len(comp.gui_calls) == 1
         assert trace.action_receipt is not None
-        assert trace.action_receipt.status == ActionExecutionStatus.COMPLETED
+        assert trace.action_receipt.status == ActionExecutionStatus.UNVERIFIED
 
     @pytest.mark.asyncio
     async def test_tier1_point5_perception_failure_propagates_without_blind_dispatch(self):
@@ -607,7 +605,7 @@ class TestTier2BoundaryAndCornerCases:
             {"x": 0, "y": 0},
             "Click at screen origin",
         )
-        assert trace_origin.status == ActionExecutionStatus.COMPLETED
+        assert trace_origin.status == ActionExecutionStatus.UNVERIFIED
         assert len(comp.gui_calls) == 1
 
     @pytest.mark.asyncio

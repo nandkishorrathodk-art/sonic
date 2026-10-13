@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import io
-
-from PIL import Image
-
 from sonic.computer.models import (
     ComputerState,
     FileEntry,
@@ -18,6 +13,7 @@ from sonic.computer.models import (
 from sonic.computer.provider import ComputerProvider
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
+from tests.avcs_test_helpers import png_base64
 
 
 class _VisibleDesktop(ComputerProvider):
@@ -28,9 +24,7 @@ class _VisibleDesktop(ComputerProvider):
         self.screen_color = "white"
 
     def _screen_image(self):
-        buffer = io.BytesIO()
-        Image.new("RGB", (4, 4), self.screen_color).save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("ascii")
+        return png_base64(color=self.screen_color)
 
     async def create(self, tenant_id, engagement_id, **kw):
         return type("Workspace", (), {"id": "ws-desktop"})()
@@ -128,16 +122,10 @@ async def test_navigation_alias_uses_live_shared_desktop():
         "Navigate in the visible application",
     )
 
-    assert trace.status == ActionExecutionStatus.COMPLETED
-    assert [action.action.value for action in computer.actions] == [
-        "KEYPRESS",
-        "TYPE",
-        "KEYPRESS",
-    ]
-    assert computer.actions[0].key == "ctrl+l"
-    assert computer.actions[1].text == "https://operator-provided.invalid"
-    assert computer.actions[2].key == "Return"
-    assert agent._last_screenshot_b64 == computer._screen_image()
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert "focus-verification" in trace.actual_observation.lower()
+    assert computer.actions == []
+    assert agent._last_gui_navigation_target == ""
 
 
 async def test_legacy_browser_screenshot_captures_desktop_not_hidden_page():
@@ -177,8 +165,8 @@ async def test_legacy_keyboard_alias_dispatches_and_unresolved_scroll_fails_clos
         "Scroll the focused application",
     )
 
-    assert key_trace.status == ActionExecutionStatus.COMPLETED
-    assert scroll_trace.status == ActionExecutionStatus.COMPLETED
+    assert key_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert scroll_trace.status == ActionExecutionStatus.UNVERIFIED
     assert [action.action.value for action in computer.actions] == ["KEYPRESS", "SCROLL"]
     unresolved_scroll = await agent.execute_action(
         "ws-desktop",

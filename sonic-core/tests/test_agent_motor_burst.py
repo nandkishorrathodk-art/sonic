@@ -1,10 +1,20 @@
+import base64
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from sonic.computer.models import GUIActionType, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
+
+
+def _frame(frame):
+    image = Image.new("RGB", (800, 600), (frame * 40, 0, 0))
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return base64.b64encode(output.getvalue()).decode("ascii")
 
 
 class _Provider:
@@ -22,7 +32,7 @@ class _Provider:
         if self.change:
             self.frame += 1
         return ScreenObservation(
-            screenshot_base64=f"frame-{self.frame}",
+            screenshot_base64=_frame(self.frame),
             width=800,
             height=600,
             active_window="Target",
@@ -33,7 +43,7 @@ class _Provider:
 
     async def screenshot(self, workspace_id):
         return ScreenObservation(
-            screenshot_base64=f"frame-{self.frame}",
+            screenshot_base64=_frame(self.frame),
             width=800,
             height=600,
             active_window="Target",
@@ -65,15 +75,15 @@ def _payload(**extra):
             {
                 "action": GUIActionType.KEYPRESS.value,
                 "key": "Tab",
-                "postcondition": {"visible_text": "step 1"},
+                "postcondition": {"screen_changed": True},
             },
             {
                 "action": GUIActionType.KEYPRESS.value,
                 "key": "Enter",
-                "postcondition": {"visible_text": "step 2"},
+                "postcondition": {"screen_changed": True},
             },
         ],
-        "postcondition": {"visible_text": "step 2"},
+        "postcondition": {"screen_changed": True},
     }
     value.update(extra)
     return value
@@ -88,7 +98,7 @@ async def test_agent_uses_motor_burst_and_verifies_live_postcondition():
         "workspace",
         ComputerActionType.GUI_KEYPRESS,
         "target",
-        _payload(postcondition={"visible_text": "step 2"}),
+        _payload(postcondition={"screen_changed": True}),
         "target advances",
     )
     assert trace.status == ActionExecutionStatus.COMPLETED
@@ -192,7 +202,7 @@ async def test_burst_checks_coordinates_before_any_action_is_dispatched():
         "action": GUIActionType.CLICK.value,
         "x": 900,
         "y": 20,
-        "postcondition": {"visible_text": "step 2"},
+        "postcondition": {"screen_changed": True},
     }
 
     trace = await agent.execute_action(

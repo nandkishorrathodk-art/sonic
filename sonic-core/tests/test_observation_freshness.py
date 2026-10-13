@@ -6,6 +6,7 @@ import pytest
 from sonic.computer.models import ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.perception_bus import PerceptionBus
+from tests.avcs_test_helpers import png_base64
 
 
 class _ObservationProvider:
@@ -16,7 +17,7 @@ class _ObservationProvider:
 
     async def screenshot(self, _workspace_id: str) -> ScreenObservation:
         return ScreenObservation(
-            screenshot_base64="frame",
+            screenshot_base64=png_base64(),
             capture_age_ms=self.capture_age_ms,
             width=1280,
             height=800,

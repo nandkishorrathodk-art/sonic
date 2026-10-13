@@ -10,10 +10,14 @@ Covers:
 """
 
 import asyncio
+import base64
+import hashlib
+import io
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from PIL import Image
 
 from sonic.agents.judge import JudgeAgent, JudgeVerdict
 from sonic.computer.models import GUIActionType, ScreenObservation
@@ -41,6 +45,14 @@ def _keep_visual_grounding_offline(monkeypatch):
     )
 
 
+def _frame_for_label(label: str) -> str:
+    color = hashlib.sha256(label.encode("utf-8")).digest()[:3]
+    image = Image.new("RGB", (1280, 800), color=tuple(color))
+    stream = io.BytesIO()
+    image.save(stream, format="PNG")
+    return base64.b64encode(stream.getvalue()).decode("ascii")
+
+
 def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
     """Mock provider with fresh AVCS frames and an unchanged scene fingerprint."""
     provider = AsyncMock()
@@ -53,7 +65,7 @@ def _mock_static_gui_provider(screen_b64: str = "same_screen_bytes"):
         return ScreenObservation(
             width=1280,
             height=800,
-            screenshot_base64=screen_b64,
+            screenshot_base64=_frame_for_label(screen_b64),
             avcs_state={
                 "engine": "avcs_reflex",
                 "frame_index": frame_index,
@@ -98,7 +110,7 @@ async def test_unchanged_click_is_unverified_without_refocusing_window():
         "Click button",
     )
     assert agent._consecutive_unchanged_screens == 1
-    assert trace1.status == ActionExecutionStatus.FAILED
+    assert trace1.status == ActionExecutionStatus.UNVERIFIED
     assert trace1.recovery_attempted is False
 
     # Re-observation is safe; the watchdog must not inject focus or key input.
@@ -110,7 +122,7 @@ async def test_unchanged_click_is_unverified_without_refocusing_window():
         "Click button again",
     )
     assert agent._consecutive_unchanged_screens == 2
-    assert trace2.status == ActionExecutionStatus.FAILED
+    assert trace2.status == ActionExecutionStatus.UNVERIFIED
     assert "No recovery input was sent" in trace2.actual_observation
     gui_calls = [call.args[1] for call in provider.gui_action.call_args_list]
     assert len(gui_calls) == 2
@@ -133,7 +145,7 @@ async def test_watchdog_never_injects_application_specific_shortcuts():
         "Click stuck element",
     )
     assert agent._consecutive_unchanged_screens == 3
-    assert trace.status == ActionExecutionStatus.FAILED
+    assert trace.status == ActionExecutionStatus.UNVERIFIED
     assert "No recovery input was sent" in trace.actual_observation
     gui_calls = [call.args[1] for call in provider.gui_action.call_args_list]
     assert len(gui_calls) == 1
@@ -185,7 +197,7 @@ async def test_unchanged_focus_click_does_not_send_escape_before_typing():
         "Focus the visible text field",
     )
 
-    assert click_trace.status == ActionExecutionStatus.FAILED
+    assert click_trace.status == ActionExecutionStatus.UNVERIFIED
     assert click_trace.recovery_attempted is False
     assert provider.gui_action.await_count == 1
     assert provider.gui_action.await_args.args[1].action == GUIActionType.CLICK
@@ -229,16 +241,12 @@ async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
         "Submit the focused field",
     )
 
-    assert typing_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert typing_trace.status == ActionExecutionStatus.BLOCKED
     assert keypress_trace.status == ActionExecutionStatus.UNVERIFIED
     assert typing_trace.recovery_attempted is False
     assert keypress_trace.recovery_attempted is False
     actions = [call.args[1].action for call in provider.gui_action.call_args_list]
-    assert actions == [
-        GUIActionType.CLICK,
-        GUIActionType.TYPE,
-        GUIActionType.KEYPRESS,
-    ]
+    assert actions == [GUIActionType.KEYPRESS]
 
 
 @pytest.mark.asyncio
