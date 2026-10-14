@@ -10,7 +10,7 @@ supports.
 2. Read the [product and GUI acceptance contract](SONIC_COMPUTER_USER_GOAL.md)
    before changing workstation, perception, orchestration or Judge behavior.
 3. Resolve subsystem ownership using
-   [`architecture.py`](../sonic-core/sonic/organization/architecture.py).
+   [`architecture.py`](../services/core/sonic/organization/architecture.py).
 4. Inspect the current call path and tests; historical phase notes are not
    proof that a module is still wired.
 5. Keep changes focused. Preserve unrelated worktree changes.
@@ -20,14 +20,14 @@ supports.
 The backend workspace requires Python 3.12 or later. From the repository root:
 
 ```powershell
-python -m pip install -e "sonic-core[dev]"
-python -m pytest sonic-core/tests/
+uv sync --locked --all-packages --extra dev
+uv run --locked --all-packages --extra dev python -m pytest
 ```
 
 For the dashboard:
 
 ```powershell
-Set-Location sonic-dashboard
+Set-Location apps/dashboard
 npm install
 npm run lint
 npm run build

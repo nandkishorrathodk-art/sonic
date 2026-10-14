@@ -3,7 +3,7 @@
 ## What this document describes
 
 SONIC's seven software departments are defined by the canonical registry at
-[`architecture.py`](../sonic-core/sonic/organization/architecture.py). The
+[`architecture.py`](../services/core/sonic/organization/architecture.py). The
 registry is code ownership metadata; it does not prove a department is staffed
 by people or that an employee is running. Staffing levels and career ladders
 below are organizational proposals, not runtime facts.

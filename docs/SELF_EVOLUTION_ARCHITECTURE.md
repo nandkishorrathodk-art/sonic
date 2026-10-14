@@ -41,7 +41,7 @@ flowchart TD
     CLI --> RUNNER["ContinuousAutoEvolutionRunner"]
 
     RUNNER --> SCAN["Signal discovery on active checkout"]
-    SCAN --> PYTEST["Run available `sonic-core/tests/` and `sonic-cli/tests/`<br/>attribute failures to editable source<br/>(timeout: `SONIC_EVOLUTION_TEST_TIMEOUT`, default 600 s)"]
+    SCAN --> PYTEST["Run available `services/core/tests/` and `apps/cli/tests/`<br/>attribute failures to editable source<br/>(timeout: `SONIC_EVOLUTION_TEST_TIMEOUT`, default 600 s)"]
     SCAN --> AUDIT["Static audit + TODO/FIXME/HACK<br/>and no-op marker scan"]
     PYTEST --> SIGNAL["Signals: test failures first,<br/>then audit and marker findings"]
     AUDIT --> SIGNAL
@@ -71,7 +71,7 @@ flowchart TD
     GATEPASS -->|Yes| REPORT["Report-only result:<br/>capture exact diff, restore worktree"]
 
     REPORT --> RETEST["CandidateStore reapplies exact diff<br/>in detached worktree"]
-    RETEST --> FULL["Import checks + full configured test dirs<br/>`sonic-core/tests` and `sonic-cli/tests`<br/>+ security regression"]
+    RETEST --> FULL["Import checks + full configured test dirs<br/>`services/core/tests` and `apps/cli/tests`<br/>+ security regression"]
     FULL --> FULLPASS{"All verification receipts pass?"}
     FULLPASS -->|No| ROLLBACK
     FULLPASS -->|Yes| RECORD["Save verified candidate + exact diff,<br/>integrity hash and test receipts;<br/>remove detached worktree"]
@@ -136,8 +136,8 @@ requires explicit `--push`.
   external repositories or test suites discoverable: the outer signal scan
   still searches the configured SONIC source roots and runs the configured test
   scan.
-- The signal scan runs the available `sonic-core/tests/` and
-  `sonic-cli/tests/` suites with the same env-overridable timeout as the verification gate
+- The signal scan runs the available `services/core/tests/` and
+  `apps/cli/tests/` suites with the same env-overridable timeout as the verification gate
   (`SONIC_EVOLUTION_TEST_TIMEOUT`, default 600 s); it is not yet an efficient
   arbitrary external-demo test selector.
 - `/auto` resolves the configured `ModelRouter` for its read-only
@@ -162,19 +162,19 @@ requires explicit `--push`.
 
 ## Source files
 
-- [`sonic-cli/sonic_cli/repl.py`](../sonic-cli/sonic_cli/repl.py) — `/auto`
+- [`apps/cli/sonic_cli/repl.py`](../apps/cli/sonic_cli/repl.py) — `/auto`
   entry point.
-- [`continuous_runner.py`](../sonic-core/sonic/evolution/continuous_runner.py) —
+- [`continuous_runner.py`](../services/core/sonic/evolution/continuous_runner.py) —
   continuous `/auto` loop.
-- [`self_coder.py`](../sonic-core/sonic/evolution/self_coder.py) — signals,
+- [`self_coder.py`](../services/core/sonic/evolution/self_coder.py) — signals,
   report-only cycles, and target test discovery.
-- [`coding_agent.py`](../sonic-core/sonic/evolution/coding_agent.py) — bounded
+- [`coding_agent.py`](../services/core/sonic/evolution/coding_agent.py) — bounded
   tool-using investigation.
-- [`patch_synthesizer.py`](../sonic-core/sonic/evolution/patch_synthesizer.py) —
+- [`patch_synthesizer.py`](../services/core/sonic/evolution/patch_synthesizer.py) —
   LLM unified-diff proposal and validation.
-- [`self_coder_candidates.py`](../sonic-core/sonic/evolution/self_coder_candidates.py) —
+- [`self_coder_candidates.py`](../services/core/sonic/evolution/self_coder_candidates.py) —
   detached worktree verification and guarded application.
-- [`codebase_evolver.py`](../sonic-core/sonic/evolution/codebase_evolver.py) —
+- [`codebase_evolver.py`](../services/core/sonic/evolution/codebase_evolver.py) —
   protected-path, AST, test, import, security, rollback, and promotion gates.
-- [`goal_director.py`](../sonic-core/sonic/evolution/goal_director.py) and
-  [`cli.py`](../sonic-core/sonic/evolution/cli.py) — queued-goal CLI path.
+- [`goal_director.py`](../services/core/sonic/evolution/goal_director.py) and
+  [`cli.py`](../services/core/sonic/evolution/cli.py) — queued-goal CLI path.

@@ -60,13 +60,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Bundle only AVCS's pixel-reflex runtime used by SONIC. Keeping these modules
 # as a namespace package avoids importing unrelated training/model components.
-COPY AVCS/forge/vision/reflex.py /opt/sonic/AVCS/forge/vision/reflex.py
-COPY AVCS/forge/vision/scene.py /opt/sonic/AVCS/forge/vision/scene.py
-ENV PYTHONPATH=/opt/sonic/AVCS
+COPY packages/avcs/forge/vision/reflex.py /opt/sonic/packages/avcs/forge/vision/reflex.py
+COPY packages/avcs/forge/vision/scene.py /opt/sonic/packages/avcs/forge/vision/scene.py
+ENV PYTHONPATH=/opt/sonic/packages/avcs
 RUN python3 -c \
     "from forge.vision.reflex import ReflexPerception; import numpy as np; state = ReflexPerception().perceive(np.zeros((16, 16, 3), dtype=np.uint8)); assert (state.width, state.height) == (16, 16)"
 
 RUN useradd --create-home --shell /usr/sbin/nologin sonic-browser
+
+# Isolate the raw X11 capture dependency from Debian's managed Python packages.
+RUN python3 -m venv --system-site-packages /opt/sonic/venv \
+    && /opt/sonic/venv/bin/pip install --no-cache-dir "mss>=10,<11"
+COPY docker/avcs_frame_stream.py /opt/sonic/avcs_frame_stream.py
 
 # Ensure python symlink exists for scripts expecting `python`
 RUN ln -sf /usr/bin/python3 /usr/local/bin/python

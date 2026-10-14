@@ -66,7 +66,7 @@ evidence_store/
 *.db
 sonic_data.db
 sonic_data/
-sonic-core/sonic_data/
+services/core/sonic_data/
 *.db-shm
 *.db-wal
 sonic_data/
@@ -77,6 +77,6 @@ PROFILE_README.md
 profile.md
 
 # ---- Cython compiled extensions (built at deploy time from *.pyx) ----
-sonic-core/sonic/research/_fast_graph*.so
-sonic-core/sonic/research/fast_graph*.so
-sonic-core/sonic/research/*.c
+services/core/sonic/research/_fast_graph*.so
+services/core/sonic/research/fast_graph*.so
+services/core/sonic/research/*.c

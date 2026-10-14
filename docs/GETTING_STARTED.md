@@ -41,11 +41,11 @@ development session, explicitly disable it in the API shell as shown below.
 From the repository root:
 
 ```powershell
-python -m pip install -e "sonic-core[dev]"
+uv sync --locked --all-packages --extra dev
 $env:APP_ENV = "development"
 $env:SONIC_SELF_CODER_ENABLED = "false"
 $env:CORS_ORIGINS = "http://127.0.0.1:12001,http://localhost:12001"
-python -m uvicorn sonic.api.main:app --host 127.0.0.1 --port 12000
+uv run --package sonic-core python -m uvicorn sonic.api.main:app --host 127.0.0.1 --port 12000
 ```
 
 Check the API at `http://127.0.0.1:12000/health`; interactive API docs are at
@@ -56,7 +56,7 @@ Check the API at `http://127.0.0.1:12000/health`; interactive API docs are at
 In a separate PowerShell window:
 
 ```powershell
-Set-Location sonic-dashboard
+Set-Location apps/dashboard
 npm install
 $env:NEXT_PUBLIC_API_URL = "http://127.0.0.1:12000"
 npm run dev
@@ -70,7 +70,7 @@ for the local environment if it differs from its default.
 From the repository root:
 
 ```powershell
-python -m pytest sonic-core/tests/
+uv run --locked --all-packages --extra dev python -m pytest
 ```
 
 Some tests require live Docker or a real workstation. Read the reported skips

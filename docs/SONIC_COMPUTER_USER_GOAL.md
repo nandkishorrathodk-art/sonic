@@ -87,21 +87,19 @@ operator outcome
   -> continue, replan, request approval, or report
 ```
 
-Perception should be a hybrid sensor system with a task-appropriate evidence
-contract:
+Workstation perception follows a pixel-only AVCS contract:
 
-1. GUI-only reasoning consumes a fresh screenshot and grounds targets from its
-   pixels; structured controls are not a substitute when pixels are missing.
-2. Reuse fresh accessibility, window, focus, and control-state information for
-   internal freshness/safety checks and for tasks that do not require visual
-   GUI reasoning.
-3. Consume desktop change signals and inspect relevant changed regions when
-   available, while retaining full-frame evidence for visual decisions.
-4. Use independent task-level verification for completion claims.
-
-No single model, OCR engine, accessibility API, or world model can fully
-represent every application. SONIC should combine sensors and expose
-uncertainty instead of pretending one source is complete.
+1. GUI decisions require a fresh workstation frame processed locally by AVCS.
+   Reasoning may receive a compact AVCS summary; raw pixels remain local unless
+   an explicitly authorized dashboard snapshot is requested.
+2. Do not use OCR, AT-SPI, browser DOM, or accessibility controls as alternate
+   workstation perception or target-grounding sources. Non-visual window
+   metadata may support telemetry and safety checks but does not identify UI
+   meaning.
+3. Use AVCS pixel-derived change signals to decide when to observe again.
+   Reflex state and coarse regions are not semantic controls or pixel targets.
+4. Use independent task-level verification for completion claims; AVCS scene
+   change alone is not proof of the requested outcome.
 
 ## Delivery and acceptance roadmap
 
@@ -114,9 +112,9 @@ results.
 
 ### 2. Incremental desktop state
 
-Publish versioned state updates from the live workstation, including window and
-focus changes, accessibility/control changes, and changed-region metadata.
-Measure observation-to-action latency and report capture or event-stream errors.
+Publish versioned AVCS frame state and pixel-derived changed-region metadata.
+Keep window metadata separate from visual grounding. Measure
+observation-to-action latency and report capture or stream errors.
 
 ### 3. Event-driven action verification
 
@@ -300,7 +298,7 @@ or a measured end-to-end latency improvement.
 Focused verification run:
 
 ```text
-python -m pytest sonic-core/tests/test_docker_computer_provider.py sonic-core/tests/test_agent_quality_improvements.py sonic-core/tests/test_vision_perception_and_coordinate_normalization.py sonic-core/tests/test_closed_loop_visual_delta_and_judge.py sonic-core/tests/test_visual_delta_and_grounding_accuracy.py sonic-core/tests/test_phase8_visual_computer_use.py sonic-core/tests/test_boss_gui_completion_gate.py sonic-core/tests/test_workstation_boss_integration.py -q -k "not docker_computer_provider_lifecycle and not docker_computer_provider_files_and_apps"
+python -m pytest services/core/tests/test_docker_computer_provider.py services/core/tests/test_agent_quality_improvements.py services/core/tests/test_vision_perception_and_coordinate_normalization.py services/core/tests/test_closed_loop_visual_delta_and_judge.py services/core/tests/test_visual_delta_and_grounding_accuracy.py services/core/tests/test_phase8_visual_computer_use.py services/core/tests/test_boss_gui_completion_gate.py services/core/tests/test_workstation_boss_integration.py -q -k "not docker_computer_provider_lifecycle and not docker_computer_provider_files_and_apps"
 179 passed, 2 deselected
 ```
 
@@ -344,7 +342,7 @@ acceptance evidence.
   outcomes whose sub-mission goals cover the operator objective; unrelated
   verified work cannot complete the mission.
 
-Focused verification from `sonic-core/`:
+Focused verification from `services/core/`:
 
 ```text
 python -m pytest tests\test_action_contracts.py tests\test_teamwork_subagents_hardening.py tests\test_motor_execute_burst.py tests\test_workstation_interrupt_and_resilience.py tests\test_docker_computer_provider.py tests\test_agent_quality_improvements.py tests\test_judge_agent.py tests\test_boss_gui_completion_gate.py tests\test_phase8_visual_computer_use.py tests\test_agent_action_receipts.py tests\test_agent_motor_burst.py tests\test_closed_loop_visual_delta_and_judge.py tests\test_security_audit_remediation.py tests\test_e2e_autonomous_loop.py tests\test_boss_concurrency_and_summaries.py tests\test_boss_agent.py -q
@@ -364,7 +362,7 @@ task reliability remains unproven.
   in both synchronous and asynchronous grounding paths; they are never clamped
   to an edge coordinate.
 
-Focused grounding validation from `sonic-core/`:
+Focused grounding validation from `services/core/`:
 
 ```text
 python -m pytest tests\test_visual_delta_and_grounding_accuracy.py tests\test_visual_grounding.py tests\test_vision_grounding_speed_and_accuracy.py tests\test_semantic_target_grounding.py tests\test_phase8_visual_computer_use.py -q
@@ -383,7 +381,7 @@ python -m pytest tests\test_visual_delta_and_grounding_accuracy.py tests\test_vi
 - If interruption is already signaled when Boss starts, it returns an
   incomplete, no-actions report before planning or dispatch.
 
-Focused verification from `sonic-core/`:
+Focused verification from `services/core/`:
 
 ```text
 python -m pytest tests\test_boss_plane_routing_and_truthfulness.py tests\test_boss_agent.py tests\test_dag_and_replan_orchestration.py tests\test_workstation_boss_integration.py tests\test_workstation_interrupt_and_resilience.py -q
@@ -402,7 +400,7 @@ python -m pytest tests\test_boss_plane_routing_and_truthfulness.py tests\test_bo
 - Tiling tests now provide discovered windows and a display size; an empty
   window listing is not accepted as a successful tiling outcome.
 
-Focused verification from `sonic-core/`:
+Focused verification from `services/core/`:
 
 ```text
 python -m pytest tests\test_docker_computer_provider.py tests\test_human_motor_reflexes_and_hotkeys.py tests\test_multi_window_management_and_structured_workflow.py -q
@@ -438,7 +436,7 @@ completion.
   classifier for all possible consequences in every application. A control
   without a grounded semantic label cannot be classified by its meaning.
 
-Focused validation from `sonic-core/`:
+Focused validation from `services/core/`:
 
 ```text
 python -m pytest tests\test_agent_action_receipts.py tests\test_workstation_action_approval.py tests\test_native_kernel_bridge.py -q
@@ -481,7 +479,7 @@ Passed with existing React hook and image optimization warnings.
 
 ### NSI and live-workstation readiness check (2026-10-07)
 
-Focused checks from `sonic-core/`:
+Focused checks from `services/core/`:
 
 ```text
 python -m pytest tests\test_observation_freshness.py tests\test_perception_bus.py tests\test_docker_computer_provider.py tests\test_action_contracts.py -q -rs
@@ -504,7 +502,7 @@ live computer-use readiness and task completion remain unverified.
   assert the concrete perception-version mismatch, and both pass.
 - The P0 security and sealed-action safety suites passed: **60 passed**.
   The separate CLI suite passed **68 tests**.
-- Ruff passed for `sonic-core/sonic` and `sonic-cli/sonic_cli`; the documented
+- Ruff passed for `services/core/sonic` and `apps/cli/sonic_cli`; the documented
   six-file mypy check reported no issues; `git diff --check` passed.
 - Local validation used Python **3.14.7**, while CI specifies Python **3.12**.
   These results therefore do not replace a CI run on its configured runtime.
@@ -553,7 +551,7 @@ Full backend command (from the repository root):
 ```powershell
 $env:APP_ENV='development'
 $env:SONIC_ALLOW_HOST_EXECUTION='false'
-python -m pytest sonic-core/tests/ -ra --tb=short
+python -m pytest services/core/tests/ -ra --tb=short
 1934 passed, 41 skipped
 ```
 
@@ -600,18 +598,37 @@ harmless task.
   application intent by itself, or execute mouse, keyboard, or terminal
   actions. Boss/agents reason and plan, the computer provider performs actions,
   and the independent Judge evaluates task-relevant postconditions.
-- In the Docker and Daytona screenshot-provider paths used by workstation
-  computer-use, a validated fresh PNG is processed locally by
-  `AVCSPerception`. The resulting state contains pixel-derived fields such as
-  frame index, dimensions, scene hash, brightness/contrast, change and motion
-  estimates, regions, and reflex events. These are not OCR text or semantic
-  control labels. The workstation reasoning request receives an allowlisted
-  compact text summary; screenshot bytes are not included in that request. The
-  Docker virtual display defaults to 1920x1080; providers and action grounding
-  must still use the dimensions reported by the current captured frame.
+- **System 3 temporal prediction:** the active AVCS reflex path now exposes a
+  persistence-baseline prediction error and a hysteretic stability label from
+  successive pixel-derived luminance grids. This is untrained advisory
+  telemetry only: it does not ground targets, authorize actions, or establish
+  task success. It is not evidence of a learned world model or measured
+  real-time performance.
+- The Docker workstation now captures timestamped RGB frames in memory through
+  a persistent X11 stream worker (`mss`), then processes frames locally through
+  `AVCSPerception`. The stream uses a bounded latest-frame queue, discarding
+  stale intermediate frames instead of building a backlog. `ScreenObservation`
+  keeps raw RGB pixels out of normal JSON serialization. The agent's GUI
+  dispatch and freshness checks accept these raw frames and use AVCS scene
+  fingerprints for action-level change checks; the raw pixels are not sent to
+  the workstation reasoning model.
+- The explicit dashboard snapshot endpoints may encode a raw frame as PNG /
+  Base64 for display. This compatibility encoding happens at that API boundary,
+  not in the agent's perception transport. The Docker worker is configured for
+  30 FPS by default (environment cap: 60); this is a requested capture rate,
+  not a measured sustained rate. No live rebuilt-container measurement has yet
+  established capture/processing FPS, latency, or resource cost.
+- This is only the raw-frame transport and AVCS reflex integration slice. It
+  does not yet provide semantic affordance discovery, trained
+  target grounding, eye-hand servoing, stability-gated action dispatch, or
+  safe autonomous retries. AVCS scene change is an action-level signal, not
+  proof that a click had the intended effect or that a task succeeded. Target
+  grounding and focus verification still require evaluated local heads, and
+  independent Judge evidence remains necessary for task completion.
 - The scope of this contract is the active workstation perception path. It
-  does not assert that OCR, NSI, accessibility, or DOM-related code is absent
-  from every repository component or unrelated product path.
+  is strictly AVCS pixel perception: do not add OCR/Tesseract, NSI,
+  accessibility, or browser-DOM extraction as alternate workstation
+  perception or grounding sources.
 - GUI intents bind to fresh frame/state evidence and screen bounds. A
   model-proposed coordinate alone is not evidence of target identity:
   semantic target grounding is available only through the optional local AVCS

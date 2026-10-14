@@ -7,11 +7,12 @@ requires-python = ">=3.12"
 license = {text = "Proprietary"}
 
 [tool.uv.workspace]
-members = ["sonic-core", "sonic-cli"]
+members = ["services/core", "apps/cli", "packages/avcs"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["sonic-core/tests", "sonic-cli/tests"]
+testpaths = ["services/core/tests", "apps/cli/tests", "packages/avcs/tests"]
+pythonpath = ["services/core", "apps/cli", "packages/avcs"]
 addopts = "--import-mode=importlib"
 
 [tool.ruff]

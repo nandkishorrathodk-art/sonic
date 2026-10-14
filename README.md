@@ -13,12 +13,29 @@ by itself prove that a real desktop task succeeded.
 
 | Area | Location | Role |
 |---|---|---|
-| Backend and APIs | [`sonic-core/`](sonic-core/) | FastAPI services, orchestration, computer-use runtime, policy and evidence |
-| Operator dashboard | [`sonic-dashboard/`](sonic-dashboard/) | Next.js workstation and operations interface |
-| CLI | [`sonic-cli/`](sonic-cli/) | Command-line client |
+| Backend and APIs | [`services/core/`](services/core/) | FastAPI services, orchestration, computer-use runtime, policy and evidence |
+| Operator dashboard | [`apps/dashboard/`](apps/dashboard/) | Next.js workstation and operations interface |
+| CLI | [`apps/cli/`](apps/cli/) | Command-line client |
+| AVCS | [`packages/avcs/`](packages/avcs/) | Visual-perception framework, adapters and evaluation |
+| Native kernel | [`packages/kernel/`](packages/kernel/) | Rust runtime, safety and IPC |
 | Desktop/container setup | [`docker/`](docker/) and [`docker-compose.yml`](docker-compose.yml) | Local graphical workstation and supporting services |
 | Product acceptance contract | [`docs/SONIC_COMPUTER_USER_GOAL.md`](docs/SONIC_COMPUTER_USER_GOAL.md) | Authoritative computer-use goal and evidence requirements |
 | Architecture and engineering docs | [`docs/`](docs/) | Setup, architecture, deployment and contributor guidance |
+
+```text
+apps/
+  dashboard/  Operator UI
+  cli/        Local developer CLI
+services/
+  core/       FastAPI backend, runtime and service tests
+packages/
+  avcs/       Visual-perception framework
+  kernel/     Native Rust runtime
+configs/      Shared runtime configuration
+docs/         Product, architecture and contributor documentation
+infra/        Deployment definitions
+docker/       Container build files and workstation support
+```
 
 ## Architecture and interface snapshots
 
@@ -49,10 +66,11 @@ grounded visible actions, post-action evidence and independent Judge
 confirmation. **Reliable end-to-end completion of representative tasks across
 multiple non-browser applications has not yet been demonstrated.**
 
-The latest backend regression run on the current development worktree completed
-with **1,699 passed and 39 skipped**. This is a unit/integration-suite result,
-not a live multi-application desktop acceptance result. Skips and live-runtime
-requirements are documented in the product contract and test configuration.
+The latest post-reorganization Python workspace regression run completed with
+**2,632 passed and 47 skipped**, with no tests deselected.
+This is a unit/integration-suite result, not a live multi-application desktop
+acceptance result. Skips and live-runtime requirements are documented in the
+product contract and test configuration.
 
 ## Quick start (local development)
 
@@ -91,11 +109,11 @@ loopback. Do not expose them directly to an untrusted network.
 From the repository root:
 
 ```powershell
-python -m pip install -e "sonic-core[dev]"
+uv sync --locked --all-packages --extra dev
 $env:APP_ENV = "development"
 $env:SONIC_SELF_CODER_ENABLED = "false"
 $env:CORS_ORIGINS = "http://127.0.0.1:12001,http://localhost:12001"
-python -m uvicorn sonic.api.main:app --host 127.0.0.1 --port 12000
+uv run --package sonic-core python -m uvicorn sonic.api.main:app --host 127.0.0.1 --port 12000
 ```
 
 Health check: `http://127.0.0.1:12000/health`
@@ -105,7 +123,7 @@ Health check: `http://127.0.0.1:12000/health`
 In another PowerShell window:
 
 ```powershell
-Set-Location sonic-dashboard
+Set-Location apps/dashboard
 npm install
 $env:NEXT_PUBLIC_API_URL = "http://127.0.0.1:12000"
 npm run dev
@@ -116,10 +134,11 @@ variables, or production deployment, see the [documentation index](docs/README.m
 
 ## Test commands
 
-Run backend tests from the repository root:
+Run the complete Python workspace suite (core, CLI, and AVCS) from the repository root:
 
 ```powershell
-python -m pytest sonic-core/tests/
+$env:APP_ENV = "development"
+uv run --locked --all-packages --extra dev python -m pytest
 ```
 
 Some tests require live Docker or workstation infrastructure and can be skipped
@@ -139,5 +158,5 @@ multi-application acceptance test described in
 ## Ownership and license
 
 The authoritative software-department and subsystem registry is
-[`architecture.py`](sonic-core/sonic/organization/architecture.py).
+[`architecture.py`](services/core/sonic/organization/architecture.py).
 This repository is proprietary; see the [license](docs/LICENSE) for its terms.

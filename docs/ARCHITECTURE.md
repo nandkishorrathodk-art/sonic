@@ -11,7 +11,7 @@ applications or end-to-end tasks are already reliable.
 The authoritative acceptance contract is
 [SONIC_COMPUTER_USER_GOAL.md](SONIC_COMPUTER_USER_GOAL.md). Ownership of
 repository subsystems is defined in
-[`architecture.py`](../sonic-core/sonic/organization/architecture.py).
+[`architecture.py`](../services/core/sonic/organization/architecture.py).
 
 ## Runtime at a glance
 
@@ -40,19 +40,50 @@ workers.
 
 | Area | Source | Responsibility |
 |---|---|---|
-| Workstation and API | `sonic-core/sonic/api/routes/workstation.py` | Sessions, workstation actions, worklog and mission entry points |
-| Orchestration | `sonic-core/sonic/computer_use/boss.py` | Task analysis, bounded worker dispatch, receipts, review and replanning |
-| Computer-use worker | `sonic-core/sonic/computer_use/agent.py` | Observation, reasoning, action dispatch and worker traces |
-| Desktop provider | `sonic-core/sonic/computer/docker_computer.py` | Local Docker workstation access and state/screenshot observations |
-| AVCS pixel reflex | `sonic-core/sonic/computer_use/avcs_perception.py` and workstation providers | Local pixel-derived scene/change state; optional checkpoint-gated target grounder |
-| Grounding | `sonic-core/sonic/computer_use/grounding.py` | Coordinate-space parsing and grounded target resolution |
-| Policy | `sonic-core/sonic/safety/` | Action policy, scope, egress and sealed-policy controls |
-| Independent review | `sonic-core/sonic/computer_use/judge.py` | Checks completion proposals against fresh evidence and worker receipts |
-| Dashboard | `sonic-dashboard/` | Operator-facing workstation and work status |
+| Workstation and API | `services/core/sonic/api/routes/workstation.py` | Sessions, workstation actions, worklog and mission entry points |
+| Orchestration | `services/core/sonic/computer_use/boss.py` | Task analysis, bounded worker dispatch, receipts, review and replanning |
+| Computer-use worker | `services/core/sonic/computer_use/agent.py` | Observation, reasoning, action dispatch and worker traces |
+| Research graph models | `services/core/sonic/research/attack_graph_models.py` | Shared typed node, edge and path contracts for graph traversal |
+| Desktop provider | `services/core/sonic/computer/docker_computer.py` | Local Docker workstation access and state/screenshot observations |
+| AVCS pixel reflex | `services/core/sonic/computer_use/avcs_perception.py` and workstation providers | Local pixel-derived scene/change state; optional checkpoint-gated target grounder |
+| Grounding | `services/core/sonic/computer_use/grounding.py` | Coordinate-space parsing and grounded target resolution |
+| Policy | `services/core/sonic/safety/` | Action policy, scope, egress and sealed-policy controls |
+| Independent review | `services/core/sonic/agents/judge.py` | Checks completion proposals against fresh evidence and worker receipts |
+| Dashboard | `apps/dashboard/` | Operator-facing workstation and work status |
+| Local developer CLI | `apps/cli/` | Repository-scoped developer agent and command-line interface |
+| Native kernel | `packages/kernel/src/` | Native safety, perception and IPC runtime |
+| AVCS | `packages/avcs/` | Visual-perception framework, adapters and evaluation |
 
 Exact wiring varies by route and provider. A component's presence in this table
 does not prove every route uses it; verify the relevant production call path
 before making behavior claims.
+
+## Dependency boundaries
+
+Keep package dependencies pointing toward stable contracts and away from
+runtime composition:
+
+```text
+API / application composition
+  -> Boss and agents
+  -> computer-use coordinator
+  -> perception, computer/provider and safety contracts
+  -> concrete providers and external runtimes
+```
+
+- Put shared immutable data contracts in leaf modules. For example,
+  `computer_use/perception_models.py` owns `PerceptionSnapshot`; the GUI world
+  graph depends on this contract rather than importing the perception bus. The
+  bus may compose the graph lazily without creating a reverse dependency.
+- Keep concrete provider selection, route registration and long-lived service
+  construction at composition boundaries. Lower-level contracts should not
+  import API routes or application startup code.
+- Prefer protocols, injected factories and typed contracts over importing a
+  large coordinator module solely for a type or construction helper.
+- Preserve intentional compatibility imports while moving implementation.
+  Remove a compatibility path only after callers and tests have migrated.
+- Do not split modules by arbitrary line count. Extract a responsibility when
+  it has a clear interface, independent lifecycle, or focused test boundary.
 
 ## Computer and execution capabilities
 

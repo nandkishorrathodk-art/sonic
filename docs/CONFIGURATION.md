@@ -1,6 +1,6 @@
 # SONIC Configuration Reference
 
-Configuration is managed via `sonic-core/sonic/config.py` (`Settings`) and environment variables.
+Configuration is managed via `services/core/sonic/config.py` (`Settings`) and environment variables.
 
 ## Core Environment Variables
 
@@ -24,7 +24,7 @@ Configuration is managed via `sonic-core/sonic/config.py` (`Settings`) and envir
 | `SONIC_SELF_CODER_TENANT` | `SONIC_BEING_TENANT` or `default` | Tenant namespace for background candidate reports |
 | `SONIC_SELF_CODER_EVERY_TICKS` | `20` | Cadence for optional direct `BeingLifeLoop` self-coder integrations (`1`–`10000`); production background self-coding uses the interval above |
 | `SONIC_SELF_CODER_CANDIDATE_DIR` | `sonic_data/self_coder_candidates` | Directory for tenant-scoped candidate records and temporary Git worktrees |
-| `NEXT_PUBLIC_API_URL` | `http://127.0.0.1:12000` | Backend URL used by `sonic-dashboard` |
+| `NEXT_PUBLIC_API_URL` | `http://127.0.0.1:12000` | Backend URL used by `apps/dashboard` |
 
 ### Semantic retrieval embeddings
 
@@ -54,7 +54,7 @@ overlap for rows not yet re-embedded. After selecting a new embedding model, cal
 batches. Back up the SQLite database first. Provider errors are explicit and
 do not silently fall back to hashed vectors.
 
-Run the fixed paraphrase-retrieval check from `sonic-core/` after configuring a
+Run the fixed paraphrase-retrieval check from `services/core/` after configuring a
 real provider:
 
 ```text

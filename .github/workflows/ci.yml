@@ -28,25 +28,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
+          enable-cache: true
+          cache-dependency-glob: |
             pyproject.toml
-            sonic-core/pyproject.toml
-            sonic-cli/pyproject.toml
+            services/core/pyproject.toml
+            apps/cli/pyproject.toml
+            packages/avcs/pyproject.toml
+            uv.lock
 
-      - name: Install backend and CLI
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e "sonic-core[dev]"
-          pip install -e "sonic-cli[dev]"
+      - name: Sync locked Python workspace
+        run: uv sync --locked --all-packages --extra dev
 
       - name: Ruff check
         run: |
-          ruff check sonic-core/sonic --output-format=github
-          ruff check sonic-cli/sonic_cli --output-format=github
+          uv run --locked --all-packages --extra dev ruff check services/core/sonic --output-format=github
+          uv run --locked --all-packages --extra dev ruff check apps/cli/sonic_cli --output-format=github
+
+      - name: Build Python distributions
+        run: uv build --all-packages --out-dir "$RUNNER_TEMP/python-dists"
 
   typecheck:
     name: Type Check (mypy)
@@ -54,22 +56,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
+          enable-cache: true
+          cache-dependency-glob: |
             pyproject.toml
-            sonic-core/pyproject.toml
-            sonic-cli/pyproject.toml
+            services/core/pyproject.toml
+            apps/cli/pyproject.toml
+            packages/avcs/pyproject.toml
+            uv.lock
 
-      - name: Install backend
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e "sonic-core[dev]"
+      - name: Sync locked Python workspace
+        run: uv sync --locked --all-packages --extra dev
 
       - name: Run mypy on the employee runtime surface
-        run: python -m mypy --config-file sonic-core/pyproject.toml --follow-imports=skip sonic-core/sonic/organization sonic-core/sonic/computer_use/teamwork.py sonic-core/sonic/api/routes/organization.py sonic-core/sonic/api/main.py
+        run: uv run --locked --all-packages --extra dev python -m mypy --config-file services/core/pyproject.toml --follow-imports=skip services/core/sonic/organization services/core/sonic/computer_use/teamwork.py services/core/sonic/api/routes/organization.py services/core/sonic/api/main.py
 
   test:
     name: Backend Tests
@@ -80,33 +82,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
+          enable-cache: true
+          cache-dependency-glob: |
             pyproject.toml
-            sonic-core/pyproject.toml
-            sonic-cli/pyproject.toml
+            services/core/pyproject.toml
+            apps/cli/pyproject.toml
+            packages/avcs/pyproject.toml
+            uv.lock
 
-      - name: Install backend and CLI
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e "sonic-core[dev]"
-          pip install -e "sonic-cli[dev]"
+      - name: Sync locked Python workspace
+        run: uv sync --locked --all-packages --extra dev
 
       - name: P0 security and safety tests
         run: |
-          python -m pytest \
-            sonic-core/tests/test_p0_security_hardening.py \
-            sonic-core/tests/test_phase_plan6_safety_envelope.py \
+          uv run --locked --all-packages --extra dev python -m pytest \
+            services/core/tests/test_p0_security_hardening.py \
+            services/core/tests/test_phase_plan6_safety_envelope.py \
             -ra --tb=short
 
-      - name: Core test suite
-        run: |
-          python -m pytest sonic-core/tests/ \
-            --ignore=sonic-core/tests/test_phase21_real_graphical_workstation.py \
-            -ra --tb=short
+      - name: Complete Python workspace test suite
+        run: uv run --locked --all-packages --extra dev python -m pytest -ra --tb=short
 
   rust:
     name: Native Kernel Tests
@@ -118,7 +116,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run kernel tests
-        run: cargo test --locked --manifest-path sonic-kernel-rs/Cargo.toml
+        run: cargo test --locked --manifest-path packages/kernel/Cargo.toml
 
   dashboard:
     name: Dashboard Lint, Audit, Type Check & Build
@@ -130,26 +128,26 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: sonic-dashboard/package-lock.json
+          cache-dependency-path: apps/dashboard/package-lock.json
 
       - name: Install dependencies
-        working-directory: sonic-dashboard
+        working-directory: apps/dashboard
         run: npm ci
 
       - name: Lint dashboard
-        working-directory: sonic-dashboard
+        working-directory: apps/dashboard
         run: npm run lint
 
       - name: Audit production dependencies
-        working-directory: sonic-dashboard
+        working-directory: apps/dashboard
         run: npm audit --omit=dev --audit-level=high
 
       - name: Type check dashboard
-        working-directory: sonic-dashboard
+        working-directory: apps/dashboard
         run: npx tsc --noEmit
 
       - name: Build dashboard
-        working-directory: sonic-dashboard
+        working-directory: apps/dashboard
         run: npm run build
         env:
           NEXT_PUBLIC_API_URL: http://127.0.0.1:12000
@@ -167,7 +165,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: sonic-core/Dockerfile
+          file: services/core/Dockerfile
           push: false
           tags: sonic-core:ci
           cache-from: type=gha,scope=sonic-core
@@ -176,8 +174,8 @@ jobs:
       - name: Build SONIC Dashboard image
         uses: docker/build-push-action@v6
         with:
-          context: sonic-dashboard
-          file: sonic-dashboard/Dockerfile
+          context: apps/dashboard
+          file: apps/dashboard/Dockerfile
           push: false
           tags: sonic-dashboard:ci
           cache-from: type=gha,scope=sonic-dashboard
@@ -207,7 +205,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: sonic-core/Dockerfile
+          file: services/core/Dockerfile
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}/sonic-core:${{ github.sha }}
@@ -218,8 +216,8 @@ jobs:
       - name: Publish SONIC Dashboard
         uses: docker/build-push-action@v6
         with:
-          context: sonic-dashboard
-          file: sonic-dashboard/Dockerfile
+          context: apps/dashboard
+          file: apps/dashboard/Dockerfile
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}/sonic-dashboard:${{ github.sha }}

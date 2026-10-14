@@ -21,10 +21,10 @@ All **9 Operational Verification Points** and **4 Progressive Test Tiers** have 
 
 ## 2. Test Execution Summary
 
-- **Test Suite Path**: `sonic-core/tests/test_e2e_autonomous_loop.py`
+- **Test Suite Path**: `services/core/tests/test_e2e_autonomous_loop.py`
 - **Execution Command**:
   ```powershell
-  python -m pytest sonic-core/tests/test_e2e_autonomous_loop.py -v
+  python -m pytest services/core/tests/test_e2e_autonomous_loop.py -v
   ```
 - **Total Tests**: 31
 - **Passed**: 31
@@ -97,7 +97,7 @@ All **9 Operational Verification Points** and **4 Progressive Test Tiers** have 
 
 ## 5. Deliverables Index
 
-1. **`sonic-core/tests/test_e2e_autonomous_loop.py`**: Complete 31-test E2E suite.
+1. **`services/core/tests/test_e2e_autonomous_loop.py`**: Complete 31-test E2E suite.
 2. **`TEST_INFRA.md`**: Complete test architecture, mock harness specification, and verification map.
 3. **`TEST_READY.md`**: This readiness report certifying verification completion.
 4. **`handoff.md`**: 5-component handoff report located in `.agents/teamwork/teamwork_preview_test_writer_e2e/handoff.md`.
