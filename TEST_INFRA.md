@@ -1,8 +1,8 @@
 # TEST_INFRA.md — Autonomous Loop Verification Track Infrastructure
 
-**Author**: E2E Test Writer (`teamwork_preview_test_writer_e2e`)  
-**Track**: Autonomous Loop Verification Track (`ORIGINAL_REQUEST.md § R4`)  
-**Target Suite**: `sonic-core/tests/test_e2e_autonomous_loop.py`  
+**Author**: E2E Test Writer (`teamwork_preview_test_writer_e2e`)
+**Track**: Autonomous Loop Verification Track (`ORIGINAL_REQUEST.md § R4`)
+**Target Suite**: `services/core/tests/test_e2e_autonomous_loop.py`
 **Status**: COMPLETE (31 / 31 Tests Passing, 100% Pass Rate)
 
 ---
@@ -35,10 +35,10 @@ The test suite exercises all **9 Operational Verification Points** mandated by `
 
 ## 3. Four-Tier Test Architecture
 
-The suite in `sonic-core/tests/test_e2e_autonomous_loop.py` is partitioned into 4 distinct classes matching the tiered testing methodology:
+The suite in `services/core/tests/test_e2e_autonomous_loop.py` is partitioned into 4 distinct classes matching the tiered testing methodology:
 
 ```
-sonic-core/tests/test_e2e_autonomous_loop.py
+services/core/tests/test_e2e_autonomous_loop.py
 ├── TestTier1FeatureCoverage              (13 tests)  -> Point-by-point primary behavior coverage
 ├── TestTier2BoundaryAndCornerCases       (10 tests)  -> Boundary conditions, malformed inputs, edge cases
 ├── TestTier3CrossFeatureCombinations     (5 tests)   -> Multi-component interactions (Boss + Worker + Judge)
@@ -135,7 +135,7 @@ To test orchestration logic without non-deterministic external LLM APIs, `_make_
 
 ### Command
 ```powershell
-python -m pytest sonic-core/tests/test_e2e_autonomous_loop.py -v
+python -m pytest services/core/tests/test_e2e_autonomous_loop.py -v
 ```
 
 ### Environment Requirements

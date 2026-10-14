@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "avcs-sdk"
+version = "0.2.0"
+description = "Artificial Visual Cortex for Screens (AVCS): Non-generative, real-time biological visual perception foundation engine and SDK for screen AI agents."
+readme = "README.md"
+authors = [
+    { name = "PARTH LAB", email = "research@praxisneural.ai" },
+]
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+]
+keywords = [
+    "avcs",
+    "visual-cortex",
+    "screen-perception",
+    "computer-use",
+    "ai-agents",
+    "v-jepa",
+    "affordance",
+    "visual-servoing",
+    "biological-vision",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.22.0",
+    "Pillow>=9.0.0",
+]
+
+[project.optional-dependencies]
+desktop = [
+    "mss>=9.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "psutil>=5.9.0",
+    "wheel",
+]
+
+[project.urls]
+Homepage = "https://github.com/Parth-labs-in/AVCS"
+Documentation = "https://github.com/Parth-labs-in/packages/avcs/tree/main/docs"
+Repository = "https://github.com/Parth-labs-in/AVCS.git"
+Issues = "https://github.com/Parth-labs-in/packages/avcs/issues"
+
+[project.scripts]
+avcs-benchmark = "avcs.benchmark:main"
+avcs-hud = "avcs.dashboard:main"
+avcs-gui = "avcs.gui:launch_gui"
+avcs-pilot = "avcs_pilot.runner:main"
+avcs-m7-validate = "avcs_m7_validation.runner:main"
+avcs-audit-evidence = "avcs_m7_validation.evidence_auditor:main"
+avcs-record-demo = "avcs.training.demo_recorder:main"
+avcs-train-grounder = "avcs.training.train_grounder:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["avcs*", "avcs_m7_validation*", "avcs_pilot*", "avcs_sdk*", "forge*"]
+
+[tool.setuptools.package-data]
+avcs = ["py.typed"]
+avcs_m7_validation = ["py.typed"]
+avcs_pilot = ["py.typed"]
+avcs_sdk = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

@@ -1,0 +1,7 @@
+{$SONIC_API_HOST} {
+    reverse_proxy sonic-api:8000
+}
+
+{$SONIC_SITE_HOST} {
+    reverse_proxy sonic-dashboard:3000
+}

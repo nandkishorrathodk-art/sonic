@@ -15,7 +15,7 @@ existing system without weakening that product intent.
 
 The organization is responsibility-first. The canonical source of repository
 ownership is
-[`architecture.py`](../sonic-core/sonic/organization/architecture.py).
+[`architecture.py`](../services/core/sonic/organization/architecture.py).
 Do not create another department, team, employee, subsystem, or ownership
 registry.
 
@@ -54,12 +54,12 @@ Department
 ```
 
 The persistent organization runtime in
-[`store.py`](../sonic-core/sonic/organization/store.py) and the
-[`organization` API](../sonic-core/sonic/api/routes/organization.py) stores
+[`store.py`](../services/core/sonic/organization/store.py) and the
+[`organization` API](../services/core/sonic/api/routes/organization.py) stores
 tenant-scoped employees, projects, work items, and ownership references.
 Employee-aware subagents receive their department, team, subsystem ownership,
 and capability mode through
-[`teamwork.py`](../sonic-core/sonic/computer_use/teamwork.py).
+[`teamwork.py`](../services/core/sonic/computer_use/teamwork.py).
 
 Ownership context is not a filesystem permission boundary. Safety policy,
 workspace isolation, tenant checks, and provider controls remain authoritative.

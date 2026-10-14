@@ -4,15 +4,15 @@
 SONIC's product goal is an **Autonomous AI-Human Digital Being** that can use a general-purpose computer like a capable human colleague: perceive the desktop, operate arbitrary installed GUI applications, switch between them, use files and other appropriate computer capabilities, and complete multi-step outcomes. The workstation provides a graphical desktop and a separate execution plane; this product goal is not proof that every arbitrary task or application already works reliably.
 
 > **PRIORITY #1 (FOUNDATIONAL MANDATE)**:
-> SONIC is a general-purpose AI computer user, not a cybersecurity-first bot. Its intended capability is to take an operator's desired outcome, understand and plan it, discover and operate relevant GUI applications, move between windows and tools, maintain progress across a long task, adapt to unexpected states, and verify the actual result. Cybersecurity is one possible workload, not SONIC's identity or default workflow.
+> SONIC is a general-purpose AI computer user. Its intended capability is to take an operator's desired outcome, understand and plan it, discover and operate relevant GUI applications, move between windows and tools, maintain progress across a long task, adapt to unexpected states, and verify the actual result. Cybersecurity is one possible workload, not SONIC's identity or default workflow.
 > Never imply that an intended capability is already reliable without task-specific evidence. Never hardcode a vendor application sequence as a substitute for general computer-use reasoning.
 
-> **Current Computer & Interaction contract:** Boss owns task analysis, delegation, evidence review, and replanning. Every actionable workstation prompt enters Boss orchestration; chat and explicit observation-only requests remain outside execution. If planning omits workers for a non-empty objective, Boss delegates one bounded adaptive worker rather than bypassing orchestration. Boss delegates to ordinary `ComputerUseAgent` workers, which operate arbitrary installed GUI applications on the shared visible desktop and retain access to the separate execution plane as permitted by the task. Workstation pixels are processed locally by AVCS and are not sent to the workstation reasoning model; AVCS reflex summaries may be supplied as text. NSI, OCR/Tesseract, AT-SPI, and DOM/control extraction are not workstation perception or grounding sources. AVCS semantic target grounding and focus verification require evaluated local heads; when unavailable, the corresponding action must fail closed. GUI completion requires independent Judge confirmation from fresh evidence and worker receipts; AVCS reflex telemetry alone is not proof of task completion. There is no dedicated BrowserAgent specialist; website and online-service tasks, when requested, are handled as ordinary visible-desktop GUI work. Historical phase notes below describe changes at the time they were made; they are not proof of present runtime readiness or arbitrary-task capability.
-Architecture: FastAPI backend (`sonic-core/`), Next.js dashboard
-(`sonic-dashboard/`), Docker desktop workstation (`sonic-desktop-workstation`), Neo4j/SQLite persistent memory, multi-tenant RBAC.
+> **Current Computer & Interaction contract:** Boss owns task analysis, delegation, evidence review, and replanning. Every actionable workstation prompt enters Boss orchestration; chat and explicit observation-only requests remain outside execution. If planning omits workers for a non-empty objective, Boss delegates one bounded adaptive worker rather than bypassing orchestration. Boss delegates to ordinary `ComputerUseAgent` workers, which operate arbitrary installed GUI applications on the shared visible desktop and retain access to the separate execution plane as permitted by the task. Workstation pixels are processed locally by AVCS and are not sent to the workstation reasoning model; AVCS reflex summaries may be supplied as text. NSI, OCR/Tesseract, AT-SPI, and DOM/control extraction are not workstation perception or grounding sources. AVCS semantic target grounding and focus verification require evaluated local heads; when unavailable, the corresponding action must fail closed. GUI completion requires independent Judge confirmation from fresh evidence and worker receipts; AVCS reflex telemetry alone is not proof of task completion. There is no dedicated BrowserAgent specialist; website and online-service tasks, when requested, are handled as ordinary visible-desktop GUI work. Historical phase notes below describe changes made at the time; they are not proof of present runtime readiness or arbitrary-task capability.
+Architecture: FastAPI backend (`services/core/`), Next.js dashboard
+(`apps/dashboard/`), Docker desktop workstation (`sonic-desktop-workstation`), Neo4j/SQLite persistent memory, multi-tenant RBAC.
 
-## Computer Interaction: AVCS-Only Workstation Perception
-SONIC's workstation screenshots are captured for local AVCS processing and are not sent to the workstation reasoning model. The active perception path returns AVCS pixel-reflex metadata; it does not provide OCR, semantic controls, or task-success evidence. NSI state feeds, Tesseract/OCR fallback, AT-SPI, and browser-DOM controls must not be reintroduced into workstation reasoning or target grounding.
+## Computer Interaction: AVCS Workstation Perception
+The active Docker path captures timestamped RGB frames through a persistent X11 stream worker, processes them locally through AVCS, and keeps raw pixels out of model requests and normal JSON serialization. Explicit dashboard snapshot responses may encode a frame as PNG/Base64 at the API boundary. The workstation perception path is AVCS-only: do not add OCR/Tesseract, NSI, AT-SPI, or browser-DOM extraction as alternate perception or grounding sources. Grounding and task completion remain separate evaluated capabilities; AVCS reflex signals alone do not prove semantic intent or task success.
 
 ### AVCS's role in SONIC
 AVCS (Artificial Visual Cortex System) is SONIC's local visual-perception layer: the computer's digital eye, not its planner or operator. It processes workstation pixels locally and supplies pixel-derived scene/change signals (for example, frame identity, dimensions, scene fingerprint, motion/change estimates, regions, and reflex events) as compact state for the agent. This supports privacy-conscious visual awareness and fresh-frame checks without sending workstation screenshots to the reasoning model.
@@ -22,6 +22,9 @@ AVCS (Artificial Visual Cortex System) is SONIC's local visual-perception layer:
 - **AVCS observes effects; the Judge verifies outcomes.** Pixel change, motion, or a reflex event is not proof that the intended task succeeded. The independent Judge needs fresh, task-relevant evidence for the requested postcondition.
 - **Fail closed when capability is missing.** Reflex metadata alone is not semantic target grounding or focus verification. Semantic grounding and focus checks may be used only when the corresponding local AVCS head is configured, evaluated, and ready; otherwise block the action that depends on it.
 - **Describe implementation evidence precisely.** Local frame processing does not by itself prove continuous 60-FPS operation, zero latency, reliable grounding, or arbitrary-app task success. Do not claim those capabilities without measurements and isolated end-to-end acceptance evidence.
+- **System 3 temporal prediction is advisory.** The current persistence-baseline
+  surprise/stability telemetry is untrained; it cannot authorize GUI actions,
+  ground targets, or prove a task completed.
 
 - GUI actions require fresh pixels and pre-dispatch pixel revalidation. Pointer targets must be resolved by a configured, evaluated local AVCS grounder; model-supplied coordinates alone are not grounding evidence.
 - Text entry remains unavailable until AVCS provides a tested local focus-verification head. Missing or inconclusive AVCS output blocks the action.
@@ -94,10 +97,13 @@ not override the general-purpose computer-user product goal or the current
 perception, execution, and verification contracts at the end of this document.
 
 ## Layout
-- `sonic-core/` — Python backend (uv workspace, Python 3.12+). `pip install -e sonic-core[dev]`.
-- `sonic-dashboard/` — Next.js 14 dashboard. `npm install` then `npm run dev`.
-- `docker-compose.prod.yml` — prod compose (secrets via env interpolation).
-- `sonic-cli/` — CLI wrapper package.
+- `services/core/` — Python backend and service-owned tests (uv workspace, Python 3.12+).
+- `apps/dashboard/` — Next.js operator dashboard.
+- `apps/cli/` — standalone local developer CLI.
+- `packages/avcs/` — AVCS perception framework and evaluation.
+- `packages/kernel/` — native Rust runtime and safety kernel.
+- `docs/`, `configs/`, `infra/`, and `docker/` — documentation, configuration, deployment, and container assets.
+- Root `pyproject.toml` defines the Python workspace; `docker-compose.prod.yml` defines production services.
 
 ## Running locally (dev)
 - Backend: `APP_ENV=development python -m uvicorn sonic.api.main:app --port 12000`
@@ -107,9 +113,9 @@ perception, execution, and verification contracts at the end of this document.
   Memory" if localhost:7687 is unreachable.
 
 ## Testing
-- `python -m pytest sonic-core/tests/`
-- Security regression suite: `sonic-core/tests/test_p0_security_hardening.py`
-- New upgrade tests: `sonic-core/tests/test_ai_and_control_upgrade.py` covers
+- `python -m pytest services/core/tests/`
+- Security regression suite: `services/core/tests/test_p0_security_hardening.py`
+- New upgrade tests: `services/core/tests/test_ai_and_control_upgrade.py` covers
   LLM retry/backoff, robust tool-argument JSON parsing, ReAct native
   function-calling with parallel tool execution, and ComputerUseAgent
   coordinate-bounds validation.
@@ -141,7 +147,7 @@ the ephemeral `InMemoryGraph`. So if Neo4j is down, memory still persists.
   `./sonic_data.db`. Tests set `SONIC_MEMORY_DB_PATH` to a temp file.
 - `reset_memory_singleton()` / `reset_vector_memory_singleton()` clear the cached
   singletons to simulate a restart (used by `test_phase1_persistent_memory.py`).
-- Done-gate test: `sonic-core/tests/test_phase1_persistent_memory.py` — proves
+- Done-gate test: `services/core/tests/test_phase1_persistent_memory.py` — proves
   graph/vector/evolution memory survive restart, tenant isolation holds across
   restart, and no host `subprocess` execution was introduced.
 - **Honesty checkpoint:** Phase 1 claims ONLY persistent memory. Reasoning,
@@ -758,7 +764,7 @@ Packages KEPT (verified live):
 
 ## Current test baseline
 - 386 passed, 37 honestly skipped (Docker-daemon / Daytona-live gated via
-  `sonic-core/tests/conftest.py`), 0 failures.
+  `services/core/tests/conftest.py`), 0 failures.
 - The previously-pre-existing 6 model-only/fail-closed contract failures were
   resolved by PR#3's simulated-provider + execution-evidence fixes (they asserted
   the OLD fake-success behavior; now correctly supplied).
@@ -1388,7 +1394,7 @@ was the artifact). Findings + fixes:
   (403 deny-proxy or code=000). Egress envelope confirmed fail-closed.
 
 ### Regression tests
-`sonic-core/tests/test_safety_envelope_regressions.py` (11 tests) reproduces
+`services/core/tests/test_safety_envelope_regressions.py` (11 tests) reproduces
 both bugs red→green and covers CIDR members, URL host extraction, out-of-scope
 URLs, and all forbidden-command classes. `11 passed`.
 
@@ -1414,11 +1420,11 @@ distinguish a live host (varied banner, higher RTT) from a deny-proxy
 (identical short 403, sub-ms RTT).
 
 ## sonic-cli audit (2026-09-03)
-Backend routes (sonic-core/sonic/api/main.py): health (/health,/health/detailed), /auth, /engagements (POST /,POST /{id}/run,GET /{id},GET /{id}/findings,GET /,POST /kill, GET /{id}/tasks, /{id}/unknowns, /{id}/decisions, /{id}/next-action, POST /{id}/replan, /{id}/pause, /{id}/resume), /findings (GET /{id}, POST /{id}/verify,/challenge,/reproduce,/review, GET /{id}/evidence,/provenance,/confidence), /agents, /graph (/stats,/search,/query,/engagement/{id}/summary,/finding/{uid}), /experiments, /terminal, /live (/experiments, /experiments/benchmark, /settings, /stats, /graph, /evidence, /scan), /jobs, /workstation (/state,/sessions,/session,/desktop/*,/command,/prompt,/tree,/file,/git-diff,/mission/*,/research-lab/*,/target-sandbox/*).
+Backend routes (services/core/sonic/api/main.py): health (/health,/health/detailed), /auth, /engagements (POST /,POST /{id}/run,GET /{id},GET /{id}/findings,GET /,POST /kill, GET /{id}/tasks, /{id}/unknowns, /{id}/decisions, /{id}/next-action, POST /{id}/replan, /{id}/pause, /{id}/resume), /findings (GET /{id}, POST /{id}/verify,/challenge,/reproduce,/review, GET /{id}/evidence,/provenance,/confidence), /agents, /graph (/stats,/search,/query,/engagement/{id}/summary,/finding/{uid}), /experiments, /terminal, /live (/experiments, /experiments/benchmark, /settings, /stats, /graph, /evidence, /scan), /jobs, /workstation (/state,/sessions,/session,/desktop/*,/command,/prompt,/tree,/file,/git-diff,/mission/*,/research-lab/*,/target-sandbox/*).
 IMPLEMENTED (real, non-fabricated): /findings router wired to GraphMemory + VerifierAgent (verify/challenge/reproduce persist verdicts; evidence/provenance/confidence read real graph data; review approves/rejects). /engagements sub-routes surface Director cognitive state + task graph when available; honest empty responses (with `note`) for linear-pipeline engagements — never fake panels. CLI finding & mission & research commands now call these real endpoints.
 Tenant isolation gotcha: JWT `tenant_id` defaults to "default" unless the User sets it explicitly; route reads/writes use `user.tenant_id` (NOT `user.email`). The live routes use `user.email` as tenant — keep this split in mind. Memory backends (InMemory/SQLite/Neo4j) all expose `find_evidence(finding_id, tenant_id)`.
 EngagementManager vs Director: EngagementManager is the linear pipeline (no task graph); Director is the autonomous pipeline with CognitiveState (unknowns, next_best_action, decisions) + TaskGraph. /engagements sub-routes try Director first, fall back to honest empty.
-Tests: sonic-cli/tests has only __init__.py (no test files); python -m pytest -> no tests ran, exit 0.
+Tests: apps/cli/tests has only __init__.py (no test files); python -m pytest -> no tests ran, exit 0.
 
 ### Round 2 CLI de-fabrication (2026-09-03)
 Full gap audit of all CLI command files + cross-check of every API path against the registered backend OpenAPI routes. Findings + fixes:
@@ -1491,13 +1497,13 @@ unchanged and still the default; the new paths are opt-in additions.
     coordinates are recorded as `BLOCKED` and never reach the provider — no
     recovery is triggered (the provider state is fine; the agent just needs to
     re-observe). Non-coordinate actions (terminal exec, etc.) are unaffected.
-  - Tests: `sonic-core/tests/test_ai_and_control_upgrade.py` (25 tests).
+  - Tests: `services/core/tests/test_ai_and_control_upgrade.py` (25 tests).
 
 ## Round 3 — Computer + Agents Bug Fixes
 
-### Computer subsystem (`sonic-core/sonic/computer/`)
+### Computer subsystem (`services/core/sonic/computer/`)
 
-- **CLI `list` crash** (`sonic-cli/sonic_cli/commands/computer.py`):
+- **CLI `list` crash** (`apps/cli/sonic_cli/commands/computer.py`):
   `/workstation/sessions` returns a bare JSON list, but the CLI called
   `data.get("sessions", [])` on it, crashing with `AttributeError`.
   Fixed to detect a list and use it directly.
@@ -1509,9 +1515,9 @@ unchanged and still the default; the new paths are opt-in additions.
 - **Dead code after `raise`** (`provider.py`): `gui_action` had
   unreachable code after `raise RuntimeError`. Removed; the raise now
   follows the audit record.
-- Tests: `sonic-core/tests/test_round3_computer_agents_fixes.py`.
+- Tests: `services/core/tests/test_round3_computer_agents_fixes.py`.
 
-### Agents subsystem (`sonic-core/sonic/agents/`, `sonic/swarm.py`)
+### Agents subsystem (`services/core/sonic/agents/`, `sonic/swarm.py`)
 
 - **Swarm failed-task routing** (`swarm.py`): the dispatch loop and the
   exception handler in `_execute_single_task` routed failures to
@@ -1538,11 +1544,11 @@ unchanged and still the default; the new paths are opt-in additions.
   via `logger.error` and includes the cause in the fallback reason.
 - **ExploitValidator dead expression** (`agents/exploit_validator.py`):
   removed a standalone `finding.get("poc", "")` no-op expression.
-- Tests: `sonic-core/tests/test_round3_computer_agents_fixes.py` (12 tests)
-  and `sonic-core/tests/test_swarm_wiring.py` (updated for the removed
+- Tests: `services/core/tests/test_round3_computer_agents_fixes.py` (12 tests)
+  and `services/core/tests/test_swarm_wiring.py` (updated for the removed
   orchestrator from the agent map).
 
-### Frontend (`sonic-dashboard/`)
+### Frontend (`apps/dashboard/`)
 
 - **New `/agents` page** (`app/agents/page.tsx`): a real Agent Swarm Registry
   view backed by `GET /agents/`. Shows live agent name/type/status/task/model
@@ -1650,14 +1656,14 @@ BugBountyClient existed but was referenced nowhere.
 ### 4. Control Plane Hardening, RBAC & Dashboard Modernization
 - Hardened `POST /workstation/session/interrupt` with `require_operator` RBAC.
 - Enforced strict tenant isolation in `_run_computer_dynamic`.
-- Modernized `sonic-dashboard/components/computer/ComputerSurface.tsx`: displays "SONIC Cyber Workstation", live feed indicator, and human takeover controls. All 21 Next.js routes compile cleanly (`npm run build`).
+- Modernized `apps/dashboard/components/computer/ComputerSurface.tsx`: displays "SONIC Cyber Workstation", live feed indicator, and human takeover controls. All 21 Next.js routes compile cleanly (`npm run build`).
 
 ### 5. Verification Test Matrix (33/33 Passed 100%)
-- `sonic-core/tests/test_visual_grounding.py` (9 tests): bbox midpoint extraction (box tags, float normalized), semantic landmarks, dynamic grounding fn, action aim marker styles, agent visual click dispatch, agent right-click dispatch — **PASSED**.
-- `sonic-core/tests/test_docker_computer_provider.py` (2 tests): lifecycle, status, terminal execution, screenshot, file read/write, application listing — **PASSED**.
-- `sonic-core/tests/test_docker_workstation_adapter.py` (3 tests): duck-typed sandbox adapter, VNC preview URL, terminal & screenshot — **PASSED**.
-- `sonic-core/tests/test_workstation_interrupt_and_resilience.py` (9 tests): interrupt flag, loop exit, RBAC authentication & rejection, tenant isolation, mission director coordination — **PASSED**.
-- `sonic-core/tests/test_phase_plan6_safety_envelope.py` (10 tests): fail-closed policy, rate limit, path confinement, egress filter, allowlist — **PASSED**.
+- `services/core/tests/test_visual_grounding.py` (9 tests): bbox midpoint extraction (box tags, float normalized), semantic landmarks, dynamic grounding fn, action aim marker styles, agent visual click dispatch, agent right-click dispatch — **PASSED**.
+- `services/core/tests/test_docker_computer_provider.py` (2 tests): lifecycle, status, terminal execution, screenshot, file read/write, application listing — **PASSED**.
+- `services/core/tests/test_docker_workstation_adapter.py` (3 tests): duck-typed sandbox adapter, VNC preview URL, terminal & screenshot — **PASSED**.
+- `services/core/tests/test_workstation_interrupt_and_resilience.py` (9 tests): interrupt flag, loop exit, RBAC authentication & rejection, tenant isolation, mission director coordination — **PASSED**.
+- `services/core/tests/test_phase_plan6_safety_envelope.py` (10 tests): fail-closed policy, rate limit, path confinement, egress filter, allowlist — **PASSED**.
 
 ## 2026-09-05 Full Audit — verified findings (for future sessions)
 - Cloned into `/workspace/project/sonic`; venv `.venv`; tests: 627P/37S/4F (4 Docker-environment failures, not code. AGENTS.md's "known failures" list matches.
@@ -1677,7 +1683,7 @@ BugBountyClient existed but was referenced nowhere.
 ## Phase 23 — Live Workstation Observability, Burp Suite Autonomy & System 1 Reflexes (DONE)
 ### 1. Workstation GUI Observability Gap Resolved (Dashboard noVNC Embedding)
 - **Problem diagnosed**: Dashboard (`localhost:12001`) previously relied solely on polling a static Base64 screenshot every 3 seconds via `/workstation/desktop/screenshot`. If the backend experienced reloads or container status checks lagged, the dashboard froze on an initial boot wallpaper (rat logo) while real GUI activities (Chrome, Burp Suite modal) were actively occurring in the background (visible only at `http://localhost:6080/vnc.html`).
-- **Solution implemented in `sonic-dashboard/components/computer/ComputerSurface.tsx`**:
+- **Solution implemented in `apps/dashboard/components/computer/ComputerSurface.tsx`**:
   - Implemented an intuitive segmented control: `[ VNC Stream ]` (live 60 FPS noVNC stream) and `[ Snapshot ]` (static inspection with interactive coordinate crosshairs).
   - Embedded live noVNC stream (`streamUrl = novnc_url || "http://localhost:6080/vnc.html?autoconnect=true&resize=scale"`) directly into the cyber workstation surface body via an iframe with clipboard and fullscreen allowances.
   - Zero polling delay, real-time visualization of container processes, and seamless human takeover capability.
@@ -1738,9 +1744,9 @@ Resolved all core architectural and security gaps identified by the 4-subagent d
 - Verified accurate coordinate midpoint scaling on 1280x800 screens.
 
 ## Phase 25 — Devin-Style Process Feed, Thinking Blocks & Real Telemetry UI (DONE)
-Replaced and modernized the frontend process stream (`sonic-dashboard/components/worklog/`) to match the Devin/Claude-Code execution feed layout, backed by 100% real, authentic, unmocked execution telemetry:
+Replaced and modernized the frontend process stream (`apps/dashboard/components/worklog/`) to match the Devin/Claude-Code execution feed layout, backed by 100% real, authentic, unmocked execution telemetry:
 
-### 1. Devin-Style Process Feed Components (`sonic-dashboard/components/worklog/`)
+### 1. Devin-Style Process Feed Components (`apps/dashboard/components/worklog/`)
 - `ThinkingBlock.tsx`:
   - Compact view: `🧠 Thought for Xs` (derived directly from real `duration_seconds` without synthetic mocking), clickable to expand.
   - Expanded `v Thinking` view: clean chevron toggle, monospace/sans typography, and left vertical guide line matching Devin.
@@ -1761,12 +1767,12 @@ Replaced and modernized the frontend process stream (`sonic-dashboard/components
 - `WorklogFeed.tsx`:
   - Unified timeline with active running spinner at the bottom (`Checking page CSS...` / `Executing terminal command...`).
 
-### 2. Backend Duration & Telemetry Invariants (`sonic-core/`)
+### 2. Backend Duration & Telemetry Invariants (`services/core/`)
 - Added `duration_seconds: float = 0.0` to `ComputerDecisionTrace` (`sonic/computer_use/models.py`).
 - `agent.py`: Measured authentic elapsed time with `time.perf_counter()` in `execute_action` and stored real seconds on traces.
 - `workstation.py`: Updated `_on_step` and `execute_workstation_command` to emit distinct `thought`, `command`, `read`, and `write` items into the session worklog with genuine duration and output fields (zero simulated/fake data).
 
-### 3. Telemetry Completeness & Dark Reality Resolution (`sonic-core/`)
+### 3. Telemetry Completeness & Dark Reality Resolution (`services/core/`)
 - `agent.py`: Completed wall-clock timing (`time.perf_counter()`) across ALL pre-flight circuit breakers (Action Loop Breaker, Coordinate Bounds Check, Substrate Outage, Strategy Exhaustion, Safety Policy Block).
 - `models.py` & `agent.py`: Added `exit_code: int | None = None` to `ComputerDecisionTrace` and captured exact exit codes directly from container processes into decision traces.
 - `workstation.py`: `_on_step` prioritizes authentic `trace.exit_code` directly from container execution, eliminating arbitrary success/failure guessing.
@@ -1798,7 +1804,7 @@ Recon does NOT require or assume external pre-packaged scanners (`nmap`, `nuclei
 - `get_summary()`: Enriched with real surface counts and target profile metrics.
 
 ### 3. Done-Gate & Test Baseline
-- `sonic-core/tests/test_target_first_recon.py` (8 tests): All passed in 0.62s.
+- `services/core/tests/test_target_first_recon.py` (8 tests): All passed in 0.62s.
 - Regression suite (`test_recon_honesty.py`, `test_phase1_central_research_brain.py`, `test_phase6`, `test_phase8`, `test_phase5`, `test_mission_planner_adaptive.py`): 52 passed, 0 failures.
 - Security hardening suite (`test_p0_security_hardening.py`): 21 passed, 0 failures.
 
@@ -1819,7 +1825,7 @@ In strict accordance with the user directives:
 - **Burp Suite Disallowed**: Removed forced download and installation branches in `docker_computer.py` and `daytona_computer.py`. Added `burpsuite` and `burp` to `forbidden_packages` in `ApplicationPolicy` (`sonic/computer/models.py`) and removed them from `allowed_packages`.
 
 ### 2. De-Puppeting Prompts & Mission Planning (Target-First Autonomy)
-- **`sonic-core/sonic/llm/prompts.py`**:
+- **`services/core/sonic/llm/prompts.py`**:
   - Eliminated the rigid `PRIMARY SECURITY ASSESSMENT STRATEGY` (`1. RECONNAISSANCE FIRST: Use SECURITY_TOOL... 4. PROFESSIONAL TOOLS: Prefer nmap...`) and `SECURITY-FIRST EXECUTION PRIORITY` checklists.
   - Replaced with **Autonomous Target-First Security Assessment Agent** directives: 100% focus on the target objective, analyzing target responses directly, and freely choosing or authoring the most direct path without any mandatory scanner checklists.
 - **`planner.py` & `director.py`**:
@@ -1842,15 +1848,15 @@ In strict accordance with the user directives:
 - **Novelty in `MethodLab`**: Zero hardcoded exploit templates. Hypotheses are synthesized from real target observations and failure context, validated strictly inside the sandbox provider, and stored in `LessonsLedger` (`[AVOID]` / `[REUSE]` directives).
 
 ### 5. Verification Test Matrix (100% Green)
-- `sonic-core/tests/test_phase_a_toolsmith.py` (24 tests) — **PASSED** (24/24)
-- `sonic-core/tests/test_phase_b_method_lab.py` (15 tests) — **PASSED** (15/15)
-- `sonic-core/tests/test_evolution_strategy_and_engine.py` (7 tests) — **PASSED** (7/7)
-- `sonic-core/tests/test_failure_engine_and_classification.py` (19 tests) — **PASSED** (19/19)
-- `sonic-core/tests/test_agent_quality_improvements.py` (21 tests) — **PASSED** (21/21)
-- `sonic-core/tests/test_phase3_real_computer_use_reasoning.py` (8 tests) — **PASSED** (8/8)
-- `sonic-core/tests/test_mission_trace_synthesis.py` (12 tests) — **PASSED** (12/12)
-- `sonic-core/tests/test_target_driven_missions.py` (5 tests) — **PASSED** (5/5)
-- `sonic-core/tests/test_target_first_recon.py` (8 tests) — **PASSED** (8/8)
+- `services/core/tests/test_phase_a_toolsmith.py` (24 tests) — **PASSED** (24/24)
+- `services/core/tests/test_phase_b_method_lab.py` (15 tests) — **PASSED** (15/15)
+- `services/core/tests/test_evolution_strategy_and_engine.py` (7 tests) — **PASSED** (7/7)
+- `services/core/tests/test_failure_engine_and_classification.py` (19 tests) — **PASSED** (19/19)
+- `services/core/tests/test_agent_quality_improvements.py` (21 tests) — **PASSED** (21/21)
+- `services/core/tests/test_phase3_real_computer_use_reasoning.py` (8 tests) — **PASSED** (8/8)
+- `services/core/tests/test_mission_trace_synthesis.py` (12 tests) — **PASSED** (12/12)
+- `services/core/tests/test_target_driven_missions.py` (5 tests) — **PASSED** (5/5)
+- `services/core/tests/test_target_first_recon.py` (8 tests) — **PASSED** (8/8)
 - GUI, motor reflexes, and application action suites (77 tests) — **PASSED** (77/77)
 
 ## Phase 28 — Autonomous Reality-Grounding & Complete De-Puppeting (DONE)
@@ -2085,31 +2091,31 @@ Eliminated RPA-style scripted workflows, hardcoded application maps, brittle fak
 ## Phase 35 — Native Rust Kernel Solidification & Real IPC Accelerator (DONE)
 Solidified and transitioned `sonic-kernel-rs` from an isolated simulation prototype into a real, high-performance native security and perception engine:
 
-### 1. Robust Typed Error Architecture (`sonic-kernel-rs/src/error.rs`)
+### 1. Robust Typed Error Architecture (`packages/kernel/src/error.rs`)
 - Created `KernelError` and `KernelResult<T>` replacing silent boolean returns and unhandled panics (`PolicyViolation`, `TamperDetected`, `InvalidStateTransition`, `BudgetExhausted`, `RateLimitExceeded`, `EgressBlocked`, `LockPoisoned`, `SerializationError`).
 
-### 2. Native CIDR Egress Filter & Safety Kernel Hardening (`sonic-kernel-rs/src/safety/mod.rs`)
+### 2. Native CIDR Egress Filter & Safety Kernel Hardening (`packages/kernel/src/safety/mod.rs`)
 - Implemented standard library bitmask CIDR matching (`is_ip_in_cidr`) enforcing RFC-1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`) and AWS/GCP cloud metadata (`169.254.169.254/32`, `metadata.google.internal`) on all `SECURITY_TOOL` and `BROWSER_NAVIGATE` targets.
 - Added in-kernel sliding 60-second rate limiter window enforcing `max_actions_per_minute`.
 - Expanded destructive command protection to catch `dd if=`, `> /dev/sd*`, `chmod -R 777 /`, `reboot`, `shutdown`, `init 0`.
 - Hardened path traversal checks (`..`, `/etc`, `/root`, `/proc`, `/sys`, `/var/run/docker.sock`).
 
-### 3. Zero-Allocation Perception Engine (`sonic-kernel-rs/src/perception/mod.rs`)
+### 3. Zero-Allocation Perception Engine (`packages/kernel/src/perception/mod.rs`)
 - Replaced per-frame regex compilation with static `std::sync::OnceLock<Regex>` for inputs, buttons, links (`<a>`), forms (`<form>`), textareas, selects, and text.
 - Added CTF flag detection (`flag{...}`, `ctf{...}`) directly in DOM perception yielding immediate `flag_captured` page state.
 
-### 4. Concurrency & Anti-Poison Blackboard (`sonic-kernel-rs/src/kernel/mod.rs`)
+### 4. Concurrency & Anti-Poison Blackboard (`packages/kernel/src/kernel/mod.rs`)
 - Migrated `Blackboard` to `RwLock<HashMap<String, String>>` with `.unwrap_or_else(|poisoned| poisoned.into_inner())` poison resilience.
 - Added typed JSON serialize/deserialize helpers (`post_json`, `get_json`).
 - Added numerical stability guards (NaN/infinity clamping) to `InformationGainCostScheduler`.
 
-### 5. Empirical Behavioral Divergence Specialist (`sonic-kernel-rs/src/specialists/mod.rs`)
+### 5. Empirical Behavioral Divergence Specialist (`packages/kernel/src/specialists/mod.rs`)
 - Replaced mock `simulate_probe` with real empirical evaluation (`evaluate_probe`) measuring length deltas, behavioral divergence, and automated secret/flag extraction via regex.
 - Expanded specialist domain coverage: `Pwn`, `Crypto`, `Network`, `Forensics`, `Auth`, `Api`, `Logic`, `Web`.
 
-### 6. JSON-RPC 2.0 Daemon & Python IPC Bridge (`sonic-kernel-rs/src/ipc.rs`, `sonic-core/sonic/kernel/native_bridge.py`)
+### 6. JSON-RPC 2.0 Daemon & Python IPC Bridge (`packages/kernel/src/ipc.rs`, `services/core/sonic/kernel/native_bridge.py`)
 - Added `--daemon` / `--json` stdio JSON-RPC interface to `sonic-kernel` (`health`, `authorize`, `fuse_perception`, `compute_custody_hash`, `verify_finding`, `evaluate_probe`).
-- Built Python client `NativeKernelClient` in `sonic-core/sonic/kernel/native_bridge.py` allowing `sonic-core` to invoke the native Rust kernel at sub-millisecond speeds with graceful fallback.
+- Built Python client `NativeKernelClient` in `services/core/sonic/kernel/native_bridge.py` allowing `sonic-core` to invoke the native Rust kernel at sub-millisecond speeds with graceful fallback.
 
 ### 7. Verification Baseline (100% Green)
 - `cargo test` in Docker (`sonic-rust-dev:latest`): **26 passed, 0 failed (100% GREEN)**.
@@ -2119,8 +2125,8 @@ Solidified and transitioned `sonic-kernel-rs` from an isolated simulation protot
 ## Phase 36 — Continuous Codebase Self-Evolution Engine (`CodebaseEvolver` & CLI Runner) (DONE)
 Empowered SONIC with an autonomous, continuous codebase self-evolution engine capable of patching bugs, upgrading logic, and optimizing non-safety modules with zero-corrupt atomic rollbacks, automated test verification, and auto-promotion (git commit + push) without manual human approval:
 
-### 1. Guarded Codebase Evolver (`sonic-core/sonic/evolution/codebase_evolver.py`)
-- **Safety Envelope Invariant Gate**: Strict fail-closed check against `_PROTECTED_COMPONENTS` (`sonic/safety`, `sonic/kernel/action_broker`, `sonic/safety/sealed`, `sonic/safety/action_policy`, `sonic/sandbox/egress`, `sonic-kernel-rs/src/safety`). Any attempt to tamper with or loosen safety envelopes is immediately rejected with a critical security violation audit log (`EvolutionStage.REJECTED`).
+### 1. Guarded Codebase Evolver (`services/core/sonic/evolution/codebase_evolver.py`)
+- **Safety Envelope Invariant Gate**: Strict fail-closed check against `_PROTECTED_COMPONENTS` (`sonic/safety`, `sonic/kernel/action_broker`, `sonic/safety/sealed`, `sonic/safety/action_policy`, `sonic/sandbox/egress`, `packages/kernel/src/safety`). Any attempt to tamper with or loosen safety envelopes is immediately rejected with a critical security violation audit log (`EvolutionStage.REJECTED`).
 - **AST & Syntax Pre-Flight**: Pre-parses Python code with `ast.parse()` to catch syntax errors before any file is touched on disk.
 - **Atomic Snapshot & Zero-Corrupt Rollback**: Maintains in-memory snapshots of all touched files; if unit tests or security regression tests fail, files are restored to their exact pre-evolution state and an `[AVOID]` lesson is recorded in `LessonsLedger`.
 - **Automated Verification Pipeline**: Automatically executes component unit tests (`pytest`) and security regression tests (`test_p0_security_hardening.py`, `test_safety_sealed_policy.py`). Requires 100% green exit code to proceed.
@@ -2128,14 +2134,14 @@ Empowered SONIC with an autonomous, continuous codebase self-evolution engine ca
 - **Autonomous Promotion & Git Push**: When `auto_promote=True` and tests pass 100%, changes are automatically committed to git (`evo(<id>): <desc>`) and optionally pushed to remote origin without requiring human operator approval.
 
 ### 2. Dedicated CLI Runners
-- **Python CLI Runner (`sonic-core/sonic/evolution/cli.py`)**:
+- **Python CLI Runner (`services/core/sonic/evolution/cli.py`)**:
   - `python -m sonic.evolution.cli patch --target <path> --diff <patch> --desc <desc> --auto-promote --push`
   - `python -m sonic.evolution.cli status`: displays evolver status and list of protected safety components.
-- **SONIC Power CLI Subcommand (`sonic-cli/sonic_cli/commands/evolution.py`)**:
+- **SONIC Power CLI Subcommand (`apps/cli/sonic_cli/commands/evolution.py`)**:
   - `sonic evolution patch --target <path> --desc <desc> --auto-promote --push`
 
 ### 3. Verification Baseline (100% Green)
-- `sonic-core/tests/test_codebase_evolution.py` (5 tests) — **5 passed in 0.69s**.
+- `services/core/tests/test_codebase_evolution.py` (5 tests) — **5 passed in 0.69s**.
 - Full evolution suite (`test_codebase_evolution.py` + `test_evolution_strategy_and_engine.py` + `test_phase8_production_kernel_and_evolution.py` — 16 tests) — **16 passed in 2.21s**.
 - Security Regression Suite (`test_safety_sealed_policy.py` + `test_phase_plan6_safety_envelope.py` — 53 tests) — **53 passed in 2.09s**.
 
@@ -2181,8 +2187,8 @@ Integrated the high-performance Rust safety daemon (`sonic-kernel-rs`) with `Act
 - **Defense in Depth**: If native checks pass, execution still verifies against Python's sealed `SafetyKernel` before reaching the sandbox provider. If the native binary is absent in dev, gracefully falls back to Python's `SafetyKernel`.
 
 ### 3. Verification Baseline (100% Green)
-- `sonic-core/tests/test_native_kernel_bridge.py` (7 tests) — **7 passed in 1.33s**.
-- `sonic-core/tests/test_phase0_safety_kernel_and_broker.py` (6 tests) — **6 passed in 1.15s**.
+- `services/core/tests/test_native_kernel_bridge.py` (7 tests) — **7 passed in 1.33s**.
+- `services/core/tests/test_phase0_safety_kernel_and_broker.py` (6 tests) — **6 passed in 1.15s**.
 - Combined regression test suite (48 tests across Evolution, Strategy, Kernel, Broker, Traces) — **48 passed in 2.50s**.
 
 ## Phase 39 — Advanced Autonomous Self-Evolution Director, Goal Queue & Live `evolution.md` Notes Logger (DONE)
@@ -2205,7 +2211,7 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
 - **Continuous Runner**: Drains queued goals in priority order autonomously without human intervention.
 
 ### 4. Verification Baseline (100% Green)
-- `sonic-core/tests/test_advanced_evolution.py` (9 tests) — **9 passed in 3.00s**.
+- `services/core/tests/test_advanced_evolution.py` (9 tests) — **9 passed in 3.00s**.
 - Full regression suite across Evolution, Kernel, Safety, and Broker (42 tests) — **42 passed in 4.56s**.
 
 ## Phase 40 — AI-Human Digital Being Identity Hardening, BeingVault Wiring & Sealed Safety Envelope (DONE)
@@ -2313,7 +2319,7 @@ Transformed SONIC from a raw diff applier into an intelligent, goal-driven, vers
 
 ## Organizational architecture invariant
 
-SONIC software ownership is formally divided by department, team and subsystem. The authoritative registry is `sonic-core/sonic/organization/architecture.py`.
+SONIC software ownership is formally divided by department, team and subsystem. The authoritative registry is `services/core/sonic/organization/architecture.py`.
 
 - Cognitive Systems owns brain, agents, llm, memory, being, evolution and swarm.
 - Computer & Interaction owns computer_use, computer, browser, perception and world.
@@ -2348,7 +2354,11 @@ Every declared subsystem has exactly one authoritative department and team. Empl
 - Focused validation for the bbox, perception, coordinate, GUI dispatch, and completion contracts: **97 passed**; Ruff and `git diff --check` clean. This validates mocked/unit contracts only, not completion of a real arbitrary GUI task.
 - Runtime check on 2026-09-29: API, Redis, SQLite, and local Docker workstation health were healthy; the LLM router was degraded with `No LLM API keys configured in environment.` No live GUI task was run because model-driven reasoning could not be verified as available. Recheck the active backend's LLM/vision readiness before attempting live GUI acceptance; do not claim SONIC's GUI task capability from unit tests alone.
 
-### GUI perception and execution regression rules (2026-09-30)
+### Historical GUI perception and execution notes (2026-09-30; superseded by AVCS-only perception contract above)
+These older implementation notes record a former NSI/OCR path and must not be
+used to reintroduce it. Current workstation perception uses AVCS raw frames
+only; the OCR/Tesseract instructions below are historical, not active guidance.
+
 - NSI frames must be read from the published port of the selected workstation
   container. Resolve its `6080/tcp` host binding dynamically; never assume
   `localhost:6080` for a named or isolated workstation, because that may read
@@ -2485,11 +2495,11 @@ are a historical engineering record and must not override it.
   acceptance. No live GUI task was run after this change.
 
 ## Self-evolution verification gate — runtime blockers fixed (2026-10-05)
-The self-evolution department (`sonic-core/sonic/evolution/`) was reported as
+The self-evolution department (`services/core/sonic/evolution/`) was reported as
 "not working at all" while its own unit tests passed. Root cause was in the
 **candidate verification gate**, not the reasoning/LLM layer: `SelfCoderCandidateStore`
 reapplies a candidate diff in a detached worktree, runs the full configured test
-dirs (`sonic-core/tests` + `sonic-cli/tests`) via `CodebaseEvolver.run_tests`, and
+dirs (`services/core/tests` + `apps/cli/tests`) via `CodebaseEvolver.run_tests`, and
 requires a 100% green exit code to promote. Three defects made promotion
 impossible, so every candidate was rolled back / reported failed:
 - `CodebaseEvolver.run_tests` used a fixed `timeout=120` s subprocess while the
@@ -2504,19 +2514,14 @@ impossible, so every candidate was rolled back / reported failed:
   It now fails closed on a differing frame only when there is no stable semantic
   evidence (`detected_controls`/`visible_text`); identical semantics confirm
   transient pixel noise (cursor blink / clock tick) and allow dispatch.
-- `sonic-cli` must be installed for `sonic-cli/tests` to collect (its `typer`
-  dependency lives in `sonic-cli/pyproject.toml`); CI installs it. Without it the
-  gate returns exit 2 (collection error). `sonic-cli` is not a member of the
-  root `uv` workspace, so `uv sync` does not install it — use
-  `uv pip install -e sonic-core -e sonic-cli`.
-- Environment reminder: a fresh checkout needs `uv sync --all-packages --extra dev`
-  then `uv pip install -e sonic-core -e sonic-cli`; otherwise `import sonic`
-  fails after a plain `uv sync`.
+- Both `services/core` and `apps/cli` are root `uv` workspace members. Install
+  both editable projects and their test dependencies from the repository root
+  with `uv sync --all-packages --extra dev`.
 
 Verified end-to-end: a stub candidate diff applied to `logger.py` promoted to
 `STATUS: applied` with `full_test_suite: True`, `security_regression: True`,
 1872 passed / 0 failed, both in the detached worktree and after applying to the
-active checkout. Full `sonic-core/tests` baseline after the fix: **1859 passed,
+active checkout. Full `services/core/tests` baseline after the fix: **1859 passed,
 41 skipped, 0 failures**.
 
 
@@ -2561,8 +2566,8 @@ Third-pass hardening across `sonic-core` (Department `cognitive_systems`) and `s
 
 1. **Safety Envelope Path Normalization & Protected Component Expansion** (`evolution/pipeline.py` & `evolution/codebase_evolver.py`):
    - Added segmented boundary path matching (`_check_path_match`, `is_protected_component`) preventing false positive blocks on paths like `sonic/authoring`.
-   - Stripped repository prefixes (`sonic-core/`, `sonic-cli/`) before boundary checks so worktree-relative paths match reliably.
-   - Expanded `_PROTECTED_COMPONENTS` to protect critical runtime gates: `sonic/agents/judge.py`, `sonic/evidence`, `sonic-core/tests/test_safety_sealed_policy.py`, `sonic/evolution/self_coder_candidates.py`, `sonic/evolution/continuous_runner.py`, and `sonic/sandbox/factory.py`.
+   - Stripped repository prefixes (`services/core/`, `apps/cli/`) before boundary checks so worktree-relative paths match reliably.
+   - Expanded `_PROTECTED_COMPONENTS` to protect critical runtime gates: `sonic/agents/judge.py`, `sonic/evidence`, `services/core/tests/test_safety_sealed_policy.py`, `sonic/evolution/self_coder_candidates.py`, `sonic/evolution/continuous_runner.py`, and `sonic/sandbox/factory.py`.
 2. **Persistent Graph Memory Hook for Candidate Approvals** (`evolution/self_coder_candidates.py` & `memory/router.py`):
    - Operator approvals (`POST /candidates/{id}/approve`) now record verified candidates directly to persistent Graph Memory via `record_verified_candidate()`, queryable via `GET /verified-history`.
    - Fixed SQLite fallback in `memory/router.py` to respect explicit `sqlite_db_path`.
@@ -2586,7 +2591,7 @@ Complete separation of `sonic-cli` (Department `platform_systems`) from `BossAge
    - Removed 14 legacy workstation and swarm subcommands (`computer`, `mission`, `agents`, `engage`, `finding`, `evidence`, `research`, `security`, `experiment`, `graph`, `prompt`, `missions`, `hypotheses`, `kill`).
    - BossAgent and Docker graphical desktop workstation remain 100% isolated to `sonic-core` and the Next.js web dashboard (`sonic-dashboard`).
 
-2. **Standalone Local `DeveloperAgent` Engine (`sonic-cli/sonic_cli/developer_agent.py`)**:
+2. **Standalone Local `DeveloperAgent` Engine (`apps/cli/sonic_cli/developer_agent.py`)**:
    - Implemented an agentic observe-reason-act coding engine with 6 native tools:
      - `view_file(path, start_line, end_line)`: Inspect file contents or list directories with 1-indexed line numbers.
      - `write_file(path, content)`: Safely write or overwrite files with automatic parent directory creation.
@@ -2599,21 +2604,21 @@ Complete separation of `sonic-cli` (Department `platform_systems`) from `BossAge
    - Secret sanitization (`sanitize_secrets`): Automatically masks API tokens (`GROQ_API_KEY`, `JWT_SECRET`, `SONIC_TOKEN`, etc.) in console output and tool arguments.
    - Signal safety: Clean `KeyboardInterrupt` / Ctrl+C handling returning `DeveloperAgentResult(interrupted=True)`.
 
-3. **Streamlined REPL & Command Surface (`sonic-cli/sonic_cli/repl.py` & `main.py`)**:
+3. **Streamlined REPL & Command Surface (`apps/cli/sonic_cli/repl.py` & `main.py`)**:
    - Free-form natural language inputs route directly to the local `DeveloperAgent` without network hops to Boss.
    - Instant Conversational Greetings: Basic greetings (`hi`, `hello`, `hii`, `hey`, etc.) respond conversationally in < 5ms without tool invocations or desktop screenshots.
    - Developer Slash Commands: `/auto [N]`, `/diff`, `/journal`, `/test [path]`, `/status`, `/help`, `/clear`, `/exit`.
    - Clean Subcommands: `sonic status`, `sonic diff`, `sonic test`, `sonic auto`, `sonic journal`, `sonic auth`, `sonic version`.
 
 4. **100% Green Verification Suite**:
-   - 66/66 tests passing in `sonic-cli/tests/`:
+   - 66/66 tests passing in `apps/cli/tests/`:
      - `test_cli_devin_mode.py` (21 passed): REPL slash commands, interactive banner, zero-arg invocation.
      - `test_developer_agent.py` (28 passed): Direct tool execution, tool loop, zero-boss isolation.
      - `test_developer_agent_safety.py` (17 passed): Path traversal protection, timeout process termination, secret sanitization, error feedback.
 
 ## Department Platform Systems & Laya System-1 Engine Hardening (2026-10-06)
 
-Fourth-pass audit and remediation across Department `platform_systems` (`sonic-core/sonic/api/`, `config.py`, `logger.py`, `computer/headless.py`, `execution/capability_router.py`) and the Laya System-1 Non-Autoregressive Decision Engine (`sonic/llm/laya_engine.py`):
+Fourth-pass audit and remediation across Department `platform_systems` (`services/core/sonic/api/`, `config.py`, `logger.py`, `computer/headless.py`, `execution/capability_router.py`) and the Laya System-1 Non-Autoregressive Decision Engine (`sonic/llm/laya_engine.py`):
 
 1. **Structured Logger Secret Scrubbing (P0 Security)** (`sonic/logger.py`):
    - Added regex-based key (`_SENSITIVE_KEY_PATTERN`) and value (`_SECRET_VALUE_PATTERN`) sanitization filters.

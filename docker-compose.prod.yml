@@ -49,7 +49,7 @@ services:
   sonic-core:
     build:
       context: .
-      dockerfile: sonic-core/Dockerfile
+      dockerfile: services/core/Dockerfile
       args:
         INSTALL_AVCS_GROUNDING: ${SONIC_INSTALL_AVCS_GROUNDING:-0}
     container_name: sonic-core-prod
@@ -63,6 +63,10 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       - APP_ENV=production
+      - DATABASE_URL=sqlite+aiosqlite:////app/sonic_data/sonic_data.db
+      - SONIC_MEMORY_DB_PATH=/app/sonic_data/sonic_data.db
+      - SONIC_DATA_DIR=/app/sonic_data
+      - SONIC_WORKSTATION_STATE_PATH=/app/sonic_data/workstations.json
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env}
@@ -94,14 +98,14 @@ services:
       - SONIC_AVCS_GROUNDING_CHECKPOINT=${SONIC_AVCS_GROUNDING_CHECKPOINT:-}
     volumes:
       - ./configs:/app/configs:ro
-      - ./evidence_store:/app/evidence_store
+      - sonic_data_prod:/app/sonic_data
     networks:
       - sonic-control-net
 
   # 4. Operator Dashboard Frontend (Next.js)
   sonic-dashboard:
     build:
-      context: ./sonic-dashboard
+      context: ./apps/dashboard
       dockerfile: Dockerfile
     container_name: sonic-dashboard-prod
     restart: always
@@ -167,3 +171,4 @@ volumes:
   redis_data_prod:
   kali_workspace_prod:
   debian_workspace_prod:
+  sonic_data_prod:

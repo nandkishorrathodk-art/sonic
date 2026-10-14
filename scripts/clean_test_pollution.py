@@ -1,6 +1,7 @@
-import sqlite3
 import shutil
+import sqlite3
 from pathlib import Path
+
 
 def clean_db(db_path: Path):
     if not db_path.exists():
@@ -32,9 +33,7 @@ def clean_craft(craft_dir: Path):
             shutil.rmtree(item, ignore_errors=True)
 
 if __name__ == "__main__":
-    clean_db(Path("sonic-core/sonic_data.db"))
-    clean_db(Path("sonic_data.db"))
-    clean_craft(Path("sonic-core/sonic_data/craft"))
-    clean_craft(Path("sonic_data/craft"))
+    repo_root = Path(__file__).resolve().parents[1]
+    clean_db(repo_root / "sonic_data.db")
+    clean_craft(repo_root / "sonic_data" / "craft")
     print("Test pollution cleanup completed.")
-

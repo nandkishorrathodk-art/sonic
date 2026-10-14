@@ -101,7 +101,7 @@ is the same issue as audit H6, restated for the self-coder.
 ## 6. Verification gate can be trivially passed / skipped (HIGH — Rule 15)
 
 `CodebaseEvolver.run_tests` (`codebase_evolver.py:334-346`): default test path is
-a single file `sonic-core/tests/test_evolution_strategy_and_engine.py`; the pass
+a single file `services/core/tests/test_evolution_strategy_and_engine.py`; the pass
 predicate is `returncode == 0 and failed == 0`.
 - 🔬/code-read: a run that collects **zero** tests (or all-skipped) yields
   `passed_tests=0, failed_tests=0, total_tests=0` → `passed=True`. A patch whose
@@ -119,7 +119,7 @@ return True` — if `test_p0_security_hardening.py` is absent, the security gate
 
 Two independent copies:
 - `pipeline.py:17-24` — 6 entries (no Rust kernel)
-- `codebase_evolver.py:45-53` — 7 entries (adds `sonic-kernel-rs/src/safety`)
+- `codebase_evolver.py:45-53` — 7 entries (adds `packages/kernel/src/safety`)
 
 So *where* the protection is enforced depends on the code path
 (`submit_proposal` vs `evolve_impl`/`apply_patch`/`analyze_goal`). Add the

@@ -26,6 +26,20 @@ secrets, including `SECRET_KEY`, `NEO4J_PASSWORD`, `DAYTONA_API_KEY`, and
 are forwarded from the deployment environment when configured. This is
 distinct from the local Docker workstation path.
 
+The staging stack in [`infra/docker-compose.staging.yml`](../infra/docker-compose.staging.yml)
+also requires configured `SONIC_SITE_HOST`, `SONIC_API_HOST`, `POSTGRES_PASSWORD`,
+`REDIS_PASSWORD`, `NEO4J_PASSWORD`, `JWT_SECRET`, `GROQ_API_KEY`, and
+`DAYTONA_API_KEY` values. Caddy terminates TLS for the two configured hostnames;
+the `.test` entries in `.env.example` are placeholders and are not deployable DNS.
+
+The production Compose template persists SQLite-backed service and Being data
+in the named `sonic_data_prod` volume mounted at `/app/sonic_data`. Include this
+volume in the deployment's backup and restore procedure. Staging mounts the
+repository's `configs/` read-only and stores local runtime state in its
+`sonic-data` named volume. Its Caddy ingress requires `SONIC_SITE_HOST` and
+`SONIC_API_HOST` to be real DNS hostnames before deployment; the `.test`
+examples in `.env.example` are placeholders only.
+
 Before deployment:
 
 1. Review the compose file, provider tenancy model, network exposure, volumes,

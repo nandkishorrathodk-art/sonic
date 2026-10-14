@@ -74,8 +74,8 @@ If an invariant must change, treat it as an architectural change and document th
 At minimum, run the relevant local checks before opening a PR:
 
 ```bash
-python -m ruff check sonic-core/sonic sonic-cli/sonic_cli
-python -m pytest sonic-core/tests/
+uv run --locked --all-packages --extra dev ruff check services/core/sonic apps/cli/sonic_cli
+uv run --locked --all-packages --extra dev python -m pytest
 ```
 
 For changes touching the safety boundary, also run the P0 security/safety suite described in the repository documentation.
