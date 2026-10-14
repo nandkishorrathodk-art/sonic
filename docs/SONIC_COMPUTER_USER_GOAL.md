@@ -612,6 +612,11 @@ harmless task.
   dispatch and freshness checks accept these raw frames and use AVCS scene
   fingerprints for action-level change checks; the raw pixels are not sent to
   the workstation reasoning model.
+- GUI action intents accept either an encoded screenshot or a dimension- and
+  frame-ID-validated raw RGB frame whose AVCS source-frame ID matches. This
+  preserves the Docker raw-frame path without converting private pixels to
+  Base64 just to satisfy the intent contract; fresh AVCS identity and dispatch
+  revalidation remain required.
 - The explicit dashboard snapshot endpoints may encode a raw frame as PNG /
   Base64 for display. This compatibility encoding happens at that API boundary,
   not in the agent's perception transport. The Docker worker is configured for

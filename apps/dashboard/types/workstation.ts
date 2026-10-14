@@ -61,6 +61,7 @@ export interface DesktopState {
   capture_timestamp_ns?: number | null;
   perception_version?: number | null;
   perception_message?: string;
+  provider_type?: string;
   active_window?: string;
   running_apps: DesktopApp[];
   vnc_url?: string;

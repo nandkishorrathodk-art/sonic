@@ -18,6 +18,7 @@ Configuration is managed via `services/core/sonic/config.py` (`Settings`) and en
 | `SONIC_BEING_DB_PATH` | `./sonic_data.db` | Persistent SQLite store for `Being`, `BeingMind`, and `BeingVault` |
 | `SONIC_BEING_VAULT_KEY` | *(required to use the vault)* | URL-safe base64 encoding of 32 random bytes; encrypts credentials, tokens, profile URLs, and saved session state |
 | `SONIC_WORKSTATION_STATE_PATH` | `sonic_data/workstations.json` | Persistent workspace attachment index |
+| `SONIC_WORKSTATION_PROVIDER` | `docker` (or `daytona` when `SONIC_USE_DAYTONA_CLOUD=1`) | Workstation provider: `docker`, `daytona`, or explicitly opted-in `windows_host_avcs` |
 | `SONIC_ENABLE_BEING_LIFE_LOOP` | `0` | Enable the optional background `BeingLifeLoop` (`1` to enable; off by default) |
 | `SONIC_SELF_CODER_ENABLED` | `true` | Enable the independent periodic self-coder loop; disabling it stops automatic code improvement |
 | `SONIC_SELF_CODER_INTERVAL_SECONDS` | `3600` | Seconds between background self-coder runs (`60`–`86400`) |
@@ -25,6 +26,33 @@ Configuration is managed via `services/core/sonic/config.py` (`Settings`) and en
 | `SONIC_SELF_CODER_EVERY_TICKS` | `20` | Cadence for optional direct `BeingLifeLoop` self-coder integrations (`1`–`10000`); production background self-coding uses the interval above |
 | `SONIC_SELF_CODER_CANDIDATE_DIR` | `sonic_data/self_coder_candidates` | Directory for tenant-scoped candidate records and temporary Git worktrees |
 | `NEXT_PUBLIC_API_URL` | `http://127.0.0.1:12000` | Backend URL used by `apps/dashboard` |
+
+### Windows host desktop (explicit opt-in)
+
+On a Windows backend host, set `SONIC_WORKSTATION_PROVIDER=windows_host_avcs`
+before starting the API to capture that host's primary desktop with the local
+AVCS frame/reflex path. Raw pixels stay local during perception; only an
+explicit dashboard screenshot response encodes a PNG. The Docker workstation
+remains the default when this variable is unset (unless the legacy Daytona
+switch is enabled).
+
+In this mode, terminal, filesystem, and Git operations remain in the Docker
+execution environment. Host pointer actions require a semantic target query,
+fresh-frame AVCS grounding, and a demonstration-trained checkpoint that passes
+its held-out point-localization and calibrated-confidence gates. Raw coordinates
+alone are blocked. Configure `SONIC_AVCS_GROUNDING_CHECKPOINT` only with a
+checkpoint produced by the AVCS demonstration trainer and passing those gates.
+The current demonstration corpus must contain at least five distinct
+task/window groups to produce leakage-resistant train/validation/test splits.
+
+Keyboard input remains blocked until AVCS provides a dedicated local focus head
+whose current-frame result is backed by recorded focus-demonstration provenance
+and held-out precision of at least 0.80 on at least 30 samples. Host application
+launch/close and software installation remain blocked. AVCS reflex output is
+not semantic grounding or focus verification, and enabling this opt-in does not
+establish reliable autonomous GUI task completion. Use a single primary display
+at the screen origin for pointer input. Restart the API after changing the
+provider setting because the provider is cached for the process lifetime.
 
 ### Semantic retrieval embeddings
 

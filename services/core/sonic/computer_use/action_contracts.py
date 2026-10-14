@@ -93,6 +93,19 @@ def _avcs_identity(
     ):
         return None
 
+    frame_id = getattr(screen, "frame_id", None)
+    if getattr(screen, "raw_rgb", b"") and frame_id is not None:
+        source_frame_id = state.get("source_frame_id")
+        if (
+            isinstance(frame_id, bool)
+            or not isinstance(frame_id, int)
+            or frame_id <= 0
+            or isinstance(source_frame_id, bool)
+            or not isinstance(source_frame_id, int)
+            or source_frame_id != frame_id
+        ):
+            return None
+
     width = getattr(screen, "width", None)
     height = getattr(screen, "height", None)
     if (
@@ -115,6 +128,32 @@ def _avcs_identity(
     if not isinstance(scene_hash, str) or not scene_hash.strip():
         return None
     return frame_index, scene_hash.strip()
+
+
+def _has_pixel_frame(screen: Any) -> bool:
+    """Accept encoded screenshots or a validated raw RGB frame from Docker."""
+    screenshot = getattr(screen, "screenshot_base64", None)
+    if isinstance(screenshot, str) and screenshot.strip():
+        return True
+
+    raw_rgb = getattr(screen, "raw_rgb", None)
+    width = getattr(screen, "width", None)
+    height = getattr(screen, "height", None)
+    frame_id = getattr(screen, "frame_id", None)
+    return bool(
+        isinstance(raw_rgb, bytes)
+        and raw_rgb
+        and isinstance(width, int)
+        and not isinstance(width, bool)
+        and width > 0
+        and isinstance(height, int)
+        and not isinstance(height, bool)
+        and height > 0
+        and len(raw_rgb) == width * height * 3
+        and isinstance(frame_id, int)
+        and not isinstance(frame_id, bool)
+        and frame_id > 0
+    )
 
 
 def _frozen(values: Mapping[str, Any] | None) -> Mapping[str, Any]:
@@ -177,8 +216,7 @@ class GUIActionIntent:
             raise ValueError("GUI action intent requires an observed screen")
         if (
             getattr(screen, "desktop_state", "") != "INTERACTIVE"
-            or not isinstance(getattr(screen, "screenshot_base64", None), str)
-            or not screen.screenshot_base64.strip()
+            or not _has_pixel_frame(screen)
         ):
             raise ValueError("GUI action intent requires a fresh pixel frame")
         screen_version = getattr(screen, "perception_version", None)
@@ -337,8 +375,7 @@ class GUIActionIntent:
             reasons.append("fresh desktop evidence is unavailable")
         if (
             getattr(screen, "desktop_state", "") != "INTERACTIVE"
-            or not isinstance(getattr(screen, "screenshot_base64", None), str)
-            or not screen.screenshot_base64.strip()
+            or not _has_pixel_frame(screen)
         ):
             reasons.append("fresh pixel frame is unavailable")
         active_window = str(getattr(screen, "active_window", "") or "").strip()

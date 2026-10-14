@@ -76,11 +76,23 @@ def _assert_runtime_execution_enabled(tenant_id: str) -> None:
 def get_computer() -> Any:
     global _primary_computer_instance, _daytona_provider_instance
     if _primary_computer_instance is None:
-        if os.environ.get("SONIC_USE_DAYTONA_CLOUD") == "1":
+        provider_kind = os.environ.get("SONIC_WORKSTATION_PROVIDER", "").strip().lower()
+        if not provider_kind:
+            provider_kind = "daytona" if os.environ.get("SONIC_USE_DAYTONA_CLOUD") == "1" else "docker"
+        if provider_kind == "windows_host_avcs":
+            from sonic.computer.windows_host import WindowsHostAVCSComputerProvider
+
+            _primary_computer_instance = WindowsHostAVCSComputerProvider()
+        elif provider_kind == "daytona":
             _primary_computer_instance = DaytonaComputerProvider()
-        else:
+        elif provider_kind == "docker":
             from sonic.computer.docker_computer import DockerComputerProvider
+
             _primary_computer_instance = DockerComputerProvider()
+        else:
+            raise RuntimeError(
+                "SONIC_WORKSTATION_PROVIDER must be one of: docker, daytona, windows_host_avcs."
+            )
         _daytona_provider_instance = _primary_computer_instance
     return _primary_computer_instance
 
@@ -629,6 +641,27 @@ def _session_target_id(user: User, session_id: str) -> str:
         return ""
     target = state.get("target_sandbox", {})
     return str(target.get("workspace_id") or target.get("sandbox_id") or "")
+
+
+async def _reattach_persisted_host_desktop(
+    computer: Any,
+    tenant_id: str,
+    session_id: str,
+    workspace_id: str,
+) -> None:
+    """Rebind a persisted host display only to its owning authenticated tenant."""
+    host_workspace_id = getattr(computer, "host_workspace_id", None)
+    if (
+        not getattr(computer, "reattach_persisted_workspace", False)
+        or workspace_id != host_workspace_id
+    ):
+        return
+    workspace = await computer.create(
+        tenant_id=tenant_id,
+        engagement_id=session_id,
+    )
+    if workspace.id != workspace_id:
+        raise HTTPException(status_code=409, detail="Persisted host desktop identity changed")
 
 
 _WORKSPACE_ROOT = "/home/sonic/workspace"
@@ -1275,10 +1308,13 @@ async def provision_desktop(
     tenant_id = _resolve_tenant_id(user)
     state = _get_or_create_session(tenant_id, session_id)
     desktop = state["desktop"]
-    if desktop.get("workspace_id"):
+    was_provisioned = bool(desktop.get("workspace_id"))
+    comp = get_daytona_computer()
+    if was_provisioned and not getattr(
+        comp, "reattach_persisted_workspace", False
+    ):
         return {"status": "already_provisioned", "desktop": desktop}
 
-    comp = get_daytona_computer()
     try:
         workspace = await comp.create(
             tenant_id=tenant_id,
@@ -1293,16 +1329,33 @@ async def provision_desktop(
         "workspace_id": workspace.id,
         "sandbox_id": workspace.id,
         "image": workspace.image,
-        "os_name": "Daytona Linux Workstation",
+        "provider_type": workspace.provider_type,
+        "os_name": (
+            "Windows Host Desktop"
+            if workspace.provider_type == "WindowsHostAVCSComputerProvider"
+            else "Daytona Linux Workstation"
+        ),
         "status": workspace.status.value,
-        "resolution": {"width": 1280, "height": 800},
-        "display": ":99",
-        "novnc_port": 6080,
+        "resolution": (
+            None
+            if workspace.provider_type == "WindowsHostAVCSComputerProvider"
+            else {"width": 1280, "height": 800}
+        ),
+        "display": "Windows host desktop" if workspace.provider_type == "WindowsHostAVCSComputerProvider" else ":99",
+        "novnc_port": None if workspace.provider_type == "WindowsHostAVCSComputerProvider" else 6080,
     })
     state["status"] = "IDLE"
-    state["current_action"] = "Daytona workstation ready."
+    state["current_action"] = (
+        "Windows host desktop connected through local AVCS."
+        if workspace.provider_type == "WindowsHostAVCSComputerProvider"
+        else "Workstation ready."
+    )
     _persist_workstation_state()
-    return {"status": "provisioned", "workspace": workspace.model_dump(), "desktop": desktop}
+    return {
+        "status": "already_provisioned" if was_provisioned else "provisioned",
+        "workspace": workspace.model_dump(),
+        "desktop": desktop,
+    }
 
 
 @router.post("/workstation/research-lab/provision")
@@ -1570,6 +1623,7 @@ async def get_desktop_status(
     desktop["status"] = "NO_ACTIVE_WORKSPACE"
     desktop["vnc_url"] = None
     desktop["novnc_url"] = None
+    desktop["provider_type"] = None
     desktop["perception_status"] = "UNAVAILABLE"
     desktop["capture_age_ms"] = None
     desktop["capture_timestamp_ns"] = None
@@ -1577,9 +1631,14 @@ async def get_desktop_status(
 
     if target_id:
         try:
+            await _reattach_persisted_host_desktop(
+                comp, tenant_id, session_id, target_id
+            )
             cstate = await comp.status(target_id)
             desktop_state = cstate.status.value if hasattr(cstate.status, "value") else str(cstate.status)
             desktop["status"] = desktop_state
+            desktop["provider_type"] = type(comp).__name__
+            is_host_avcs = target_id == getattr(comp, "host_workspace_id", None)
             running_processes = [p.name if hasattr(p, "name") else str(p) for p in (cstate.running_processes or [])]
             desktop["running_processes"] = running_processes
             desktop["active_window"] = cstate.active_window or ""
@@ -1590,9 +1649,11 @@ async def get_desktop_status(
                     desktop["vnc_url"] = vnc_url
                     desktop["novnc_url"] = vnc_url
                     desktop["status"] = "LIVE"
+                elif is_host_avcs:
+                    desktop["status"] = "LIVE"
                 else:
                     desktop["status"] = "ACTIVE_NO_DISPLAY"
-            if desktop.get("vnc_url"):
+            if desktop.get("vnc_url") or is_host_avcs:
                 try:
                     observation = await comp.screenshot(target_id)
                     avcs_evidence = _fresh_avcs_pixel_evidence(observation)
@@ -1601,6 +1662,10 @@ async def get_desktop_status(
                     desktop["capture_age_ms"] = avcs_evidence["capture_age_ms"] if fresh else None
                     desktop["capture_timestamp_ns"] = observation.capture_timestamp_ns
                     desktop["perception_version"] = avcs_evidence["frame_index"] if fresh else None
+                    desktop["resolution"] = {
+                        "width": observation.width,
+                        "height": observation.height,
+                    }
                     if not fresh:
                         desktop["perception_message"] = "No fresh desktop observation is available."
                 except Exception as exc:
@@ -1644,7 +1709,11 @@ async def execute_desktop_action(
                     "timestamp": datetime.now(UTC).isoformat(),
                 },
             }
-        screen = await get_daytona_computer().screenshot(workspace_id=workspace_id)
+        comp = get_daytona_computer()
+        await _reattach_persisted_host_desktop(
+            comp, tenant_id, req.session_id or "default", workspace_id
+        )
+        screen = await comp.screenshot(workspace_id=workspace_id)
         observation = _dashboard_screen_payload(screen)
         capture_age_ms = screen.capture_age_ms
         if capture_age_ms is None and screen.capture_timestamp_ns:
@@ -1698,6 +1767,9 @@ async def execute_desktop_action(
             },
         }
 
+    await _reattach_persisted_host_desktop(
+        comp, tenant_id, req.session_id or "default", workspace_id
+    )
     coordinate_actions = {
         GUIActionType.CLICK,
         GUIActionType.DOUBLE_CLICK,
@@ -1729,6 +1801,7 @@ async def execute_desktop_action(
         action=action_type,
         x=x,
         y=y,
+        target_query=req.target,
         x2=req.destination_coordinates[0] if req.destination_coordinates else None,
         y2=req.destination_coordinates[1] if req.destination_coordinates else None,
         text=req.text,
@@ -1759,6 +1832,7 @@ async def get_desktop_screenshot(
 ):
     """Captures a real pixel observation of the live desktop."""
     comp = get_daytona_computer()
+    tenant_id = _resolve_tenant_id(user)
     workspace_id = _session_workspace_id(user, session_id)
     if not workspace_id:
         # No provisioned workstation: return a NO_DISPLAY observation instead
@@ -1772,6 +1846,7 @@ async def get_desktop_screenshot(
             "active_window": "",
             "timestamp": datetime.now(UTC).isoformat(),
         }
+    await _reattach_persisted_host_desktop(comp, tenant_id, session_id, workspace_id)
     obs = await comp.screenshot(workspace_id=workspace_id)
     return _dashboard_screen_payload(obs)
 
@@ -1785,6 +1860,7 @@ class WorkstationGUIActionRequest(BaseModel):
     text: str | None = None
     key: str | None = None
     app_name: str | None = None
+    target_query: str | None = None
     scroll_delta: int = -3
 
 
@@ -1817,6 +1893,7 @@ async def dispatch_workstation_gui_action(
     target_id = _session_workspace_id(user, session_id)
     if not target_id:
         raise HTTPException(status_code=400, detail="No active desktop session.")
+    await _reattach_persisted_host_desktop(comp, tenant_id, session_id, target_id)
     coordinate_actions = {
         GUIActionType.CLICK,
         GUIActionType.DOUBLE_CLICK,
@@ -1842,6 +1919,7 @@ async def dispatch_workstation_gui_action(
         action=action_type,
         x=req.x,
         y=req.y,
+        target_query=req.target_query,
         x2=req.x2,
         y2=req.y2,
         text=req.text,

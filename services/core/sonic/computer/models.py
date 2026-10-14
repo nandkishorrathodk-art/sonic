@@ -133,6 +133,7 @@ class GUIAction(BaseModel):
     action: GUIActionType
     x: int | None = None
     y: int | None = None
+    target_query: str | None = None
     # Destination coordinates for DRAG (source is x,y). Lets the agent move a
     # file onto a folder, slide a wizard control, or rearrange windows — like a
     # human press-move-release gesture.

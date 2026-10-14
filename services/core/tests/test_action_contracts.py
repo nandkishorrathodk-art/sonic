@@ -208,6 +208,81 @@ def test_gui_intent_uses_pixels_and_avcs_without_accessibility_or_ocr_controls()
     assert intent.source_scene_hash == "stable-scene"
 
 
+def test_gui_intent_accepts_frame_bound_raw_rgb_without_base64_encoding():
+    frame_id = 17
+    received_at_ns = time.perf_counter_ns()
+    screen = ScreenObservation(
+        raw_rgb=bytes((24, 48, 72)) * (8 * 6),
+        frame_id=frame_id,
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": 5,
+            "source_frame_id": frame_id,
+            "scene_hash": "raw-scene",
+            "width": 8,
+            "height": 6,
+        },
+        width=8,
+        height=6,
+        active_window="Editor",
+        desktop_state="INTERACTIVE",
+        capture_age_ms=0,
+        perception_version=5,
+    )
+    observation = ComputerWorldObservation(
+        screen=screen,
+        active_application="Editor",
+        perception_version=12,
+        observation_age_ms=0,
+        observation_received_monotonic_ns=received_at_ns,
+    )
+
+    intent = GUIActionIntent.create(
+        action_type="GUI_CLICK",
+        target="40,30",
+        payload={"x": 40, "y": 30},
+        expected_outcome="target changed",
+        observation=observation,
+    )
+
+    assert screen.screenshot_base64 == ""
+    assert intent.source_state_version == 5
+    assert intent.source_active_window == "Editor"
+    assert intent.validate_observation(screen) == ()
+
+
+def test_gui_intent_rejects_raw_rgb_with_mismatched_avcs_frame_id():
+    observation = _gui_observation()
+    screen = ScreenObservation(
+        raw_rgb=bytes((24, 48, 72)) * (8 * 6),
+        frame_id=18,
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": 5,
+            "source_frame_id": 17,
+            "scene_hash": "raw-scene",
+            "width": 8,
+            "height": 6,
+        },
+        width=8,
+        height=6,
+        active_window="Editor",
+        desktop_state="INTERACTIVE",
+        capture_age_ms=0,
+        perception_version=5,
+    )
+    observation = observation.model_copy(update={"screen": screen})
+
+    with pytest.raises(ValueError, match="trustworthy AVCS frame identity"):
+        GUIActionIntent.create(
+            action_type="GUI_CLICK",
+            target="40,30",
+            payload={"x": 40, "y": 30},
+            expected_outcome="target changed",
+            observation=observation,
+        )
+
+
 def test_gui_intent_keeps_perception_bus_and_avcs_frame_versions_distinct():
     observation = _gui_observation(version=7)
     observation.perception_version = 42

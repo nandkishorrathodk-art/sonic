@@ -269,6 +269,9 @@ export function ComputerSurface({
   const hasScreenshot = Boolean(screenshotBase64 && screenshotBase64.length > 100);
   const isDesktopOnline = ["LIVE", "RUNNING", "READY"].includes(desktopState?.status || "");
   const isStreamAvailable = Boolean(isDesktopOnline && streamUrl);
+  const isHostAVCSDesktop = desktopState?.provider_type === "WindowsHostAVCSComputerProvider";
+  const isSnapshotConnected = Boolean(isHostAVCSDesktop && isDesktopOnline);
+  const isDesktopConnected = isStreamAvailable || isSnapshotConnected;
   const frameAgeMs = desktopState?.capture_timestamp_ns
     ? Date.now() - Math.floor(desktopState.capture_timestamp_ns / 1_000_000)
     : desktopState?.capture_age_ms;
@@ -279,12 +282,19 @@ export function ComputerSurface({
     && frameAgeMs <= 2000
   );
   const resolution = desktopState?.resolution;
+  const resolutionLabel = resolution?.width && resolution?.height
+    ? `${resolution.width}x${resolution.height}`
+    : isHostAVCSDesktop ? "" : "1920x1080";
   const displayLabel = [
     desktopState?.display,
-    resolution?.width && resolution?.height ? `${resolution.width}x${resolution.height}` : "1920x1080",
+    resolutionLabel,
   ]
     .filter(Boolean)
     .join(" ");
+
+  useEffect(() => {
+    if (isHostAVCSDesktop) setUseStream(false);
+  }, [isHostAVCSDesktop]);
 
   return (
     <div
@@ -300,10 +310,14 @@ export function ComputerSurface({
             <span>SONIC Cyber Workstation</span>
             {displayLabel && <span className="text-[10px] text-muted-dim font-normal">({displayLabel})</span>}
           </span>
-          {isStreamAvailable ? (
+          {isDesktopConnected ? (
             <span className="chip border border-success/40 bg-success/10 text-success">
               <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
-              <span>{isInteractive ? "HUMAN CONTROL ACTIVE" : "STREAM AVAILABLE"}</span>
+              <span>
+                {isInteractive
+                  ? "HUMAN CONTROL ACTIVE"
+                  : isStreamAvailable ? "STREAM AVAILABLE" : "AVCS SNAPSHOT"}
+              </span>
             </span>
           ) : (
             <span className="chip border border-ink-700 bg-ink-800 text-muted">
@@ -311,7 +325,7 @@ export function ComputerSurface({
               <span>DISCONNECTED</span>
             </span>
           )}
-          {isStreamAvailable && (
+          {isDesktopConnected && (
             <span className={`chip ${perceptionFresh ? "border border-success/40 bg-success/10 text-success" : "border border-amber-500/40 bg-amber-500/10 text-amber-300"}`}>
               {perceptionFresh
                 ? `FRESH FRAME${frameAgeMs != null ? ` · ${Math.round(frameAgeMs)} ms` : ""}`
@@ -322,16 +336,18 @@ export function ComputerSurface({
 
         <div className="flex flex-wrap items-center justify-end gap-2">
           <div className="flex items-center rounded bg-ink-950 border border-ink-700 p-0.5 text-[10px] font-mono">
-            <button
-              type="button"
-              onClick={() => setUseStream(true)}
-              className={`px-2 py-0.5 rounded transition ${
-                useStream ? "bg-secondary-600 text-white font-bold shadow-glow" : "text-muted hover:text-white"
-              }`}
-              title="Live 60fps interactive noVNC stream"
-            >
-              VNC Stream
-            </button>
+            {isStreamAvailable && (
+              <button
+                type="button"
+                onClick={() => setUseStream(true)}
+                className={`px-2 py-0.5 rounded transition ${
+                  useStream ? "bg-secondary-600 text-white font-bold shadow-glow" : "text-muted hover:text-white"
+                }`}
+                title="Live interactive noVNC stream"
+              >
+                VNC Stream
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setUseStream(false)}
@@ -352,7 +368,11 @@ export function ComputerSurface({
                 ? "bg-warning/20 text-warning border-warning/60 shadow-glow"
                 : "bg-ink-950 text-muted border-ink-700 hover:text-white"
             }`}
-            title="Toggle direct mouse & keyboard control"
+            title={
+              isHostAVCSDesktop
+                ? "Pause the agent; host pointer actions require a qualified local AVCS grounder."
+                : "Toggle direct mouse & keyboard control"
+            }
           >
             <MousePointer className={`w-3 h-3 ${isInteractive ? "text-warning animate-bounce" : ""}`} />
             <span>{takeoverPending ? "PAUSING AGENT..." : isInteractive ? "HUMAN TAKEOVER (ACTIVE)" : "TAKE OVER"}</span>
@@ -361,7 +381,7 @@ export function ComputerSurface({
           <button
             onClick={async (e) => { e.stopPropagation(); await fetchScreenshot(); }}
             className="p-1 hover:bg-ink-800 rounded text-muted hover:text-white transition"
-            title="Capture live screenshot from sandbox"
+            title="Capture a fresh workstation screenshot"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loadingScreen ? "animate-spin text-secondary-400" : ""}`} />
           </button>
@@ -475,7 +495,13 @@ export function ComputerSurface({
               </div>
             </div>
 
-            {isInteractive && (
+            {isInteractive && isHostAVCSDesktop && (
+              <div className="w-full max-w-[1280px] mt-2 border border-warning/40 bg-ink-850 p-2 rounded-lg text-xs font-mono text-warning">
+                Host pointer actions fail closed until a demonstration-trained local AVCS grounder passes held-out evaluation. Raw coordinates are blocked; keyboard input also requires a separately evaluated AVCS focus head.
+              </div>
+            )}
+
+            {isInteractive && !isHostAVCSDesktop && (
               <div className="w-full max-w-[1280px] mt-2 flex items-center gap-2 bg-ink-850 border border-warning/40 p-2 rounded-lg z-20">
                 <Keyboard className="w-4 h-4 text-warning shrink-0 ml-1" />
                 <form onSubmit={handleSendText} className="flex-1 flex items-center gap-2">
