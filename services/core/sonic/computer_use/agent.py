@@ -4868,21 +4868,95 @@ class ComputerUseAgent:
 
                 perception = AVCSPerception()
                 self._avcs_perception = perception
-            verifier = getattr(perception, "verify_focus_png", None)
+            raw_rgb = bytes(getattr(screen, "raw_rgb", b"") or b"")
+            verifier = getattr(perception, "verify_focus_rgb_bytes", None)
+            verifier_args = (
+                raw_rgb,
+                int(getattr(screen, "width", 0) or 0),
+                int(getattr(screen, "height", 0) or 0),
+                x,
+                y,
+                target,
+                getattr(screen, "frame_id", None),
+            )
+            if not callable(verifier):
+                verifier = getattr(perception, "verify_focus_png", None)
+                verifier_args = (
+                    base64.b64decode(
+                        str(getattr(screen, "screenshot_base64", "") or ""),
+                        validate=True,
+                    ),
+                    x,
+                    y,
+                    target,
+                )
             if not callable(verifier):
                 return False, "AVCS has no evaluated local focus-verification head"
-            image = base64.b64decode(
-                str(getattr(screen, "screenshot_base64", "") or ""),
-                validate=True,
+            if not raw_rgb and not verifier_args[0]:
+                return False, "AVCS focus verification requires current pixel data"
+            result = await asyncio.to_thread(verifier, *verifier_args)
+            checkpoint = (
+                result.get("checkpoint_metadata")
+                if isinstance(result, dict)
+                else None
             )
-            result = await asyncio.to_thread(verifier, image, x, y, target)
+            evaluation = (
+                checkpoint.get("evaluation")
+                if isinstance(checkpoint, dict)
+                else None
+            )
+            state = getattr(screen, "avcs_state", None)
+            precision = (
+                evaluation.get("precision")
+                if isinstance(evaluation, dict)
+                else None
+            )
+            samples = (
+                evaluation.get("samples")
+                if isinstance(evaluation, dict)
+                else None
+            )
+            score = result.get("decision_score") if isinstance(result, dict) else None
+            threshold = (
+                result.get("decision_threshold")
+                if isinstance(result, dict)
+                else None
+            )
             if (
                 not isinstance(result, dict)
                 or result.get("focused") is not True
                 or not isinstance(result.get("evidence"), str)
                 or not result["evidence"].strip()
+                or result.get("engine") != "avcs_focus_verifier"
+                or result.get("frame_id") != getattr(screen, "frame_id", None)
+                or not isinstance(state, dict)
+                or result.get("scene_hash") != state.get("scene_hash")
+                or not isinstance(checkpoint, dict)
+                or checkpoint.get("dataset_provenance")
+                != "recorded_ui_focus_demonstrations"
+                or not isinstance(evaluation, dict)
+                or evaluation.get("metric") != "focus_verification_precision"
+                or evaluation.get("passed") is not True
+                or isinstance(precision, bool)
+                or not isinstance(precision, (int, float))
+                or not math.isfinite(float(precision))
+                or float(precision) < 0.8
+                or isinstance(samples, bool)
+                or not isinstance(samples, int)
+                or samples < 30
+                or isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not math.isfinite(float(score))
+                or isinstance(threshold, bool)
+                or not isinstance(threshold, (int, float))
+                or not math.isfinite(float(threshold))
+                or not 0 < float(threshold) <= 1
+                or float(score) < float(threshold)
             ):
-                return False, "AVCS did not return verified focus evidence"
+                return False, (
+                    "AVCS focus head lacks current-frame evidence or a passing "
+                    "held-out focus-precision evaluation (minimum 0.80 over 30 samples)"
+                )
             return True, result["evidence"].strip()[:200]
         except Exception as exc:
             logger.warning("avcs_focus_verification_failed", reason=str(exc))
@@ -5177,6 +5251,70 @@ class ComputerUseAgent:
             ComputerActionType.GUI_SCROLL,
             ComputerActionType.GUI_DRAG,
         }
+        observed_screen = getattr(self, "_last_observed_screen", None)
+        observed_avcs = getattr(observed_screen, "avcs_state", None)
+        system3 = (
+            observed_avcs.get("system3")
+            if isinstance(observed_avcs, dict)
+            and observed_avcs.get("engine") == "avcs_reflex"
+            else None
+        )
+        surprise_score = (
+            system3.get("surprise_score")
+            if isinstance(system3, dict)
+            and system3.get("engine") == "system3_temporal_prediction"
+            and system3.get("prediction_available") is True
+            and system3.get("stability_state") == "surprise_event"
+            else None
+        )
+        mutates_desktop = action_type in gui_actions or action_type in {
+            ComputerActionType.APP_LAUNCH,
+            ComputerActionType.APP_CLOSE,
+            ComputerActionType.APP_FOCUS,
+            ComputerActionType.APP_MAXIMIZE,
+            ComputerActionType.WINDOW_MAXIMIZE,
+            ComputerActionType.WINDOW_TILE,
+        }
+        if (
+            mutates_desktop
+            and isinstance(surprise_score, (int, float))
+            and not isinstance(surprise_score, bool)
+            and math.isfinite(float(surprise_score))
+            and float(surprise_score) >= 0.85
+        ):
+            actual_obs_str = (
+                "AVCS temporal surprise detected "
+                f"(score={float(surprise_score):.3f}); desktop input was held. "
+                "Observe the new screen and re-reason before trying again. "
+                "This signal detects visual change only; it does not identify "
+                "the cause or prove an alert is present."
+            )
+            logger.info(
+                "gui_action_held_on_avcs_surprise",
+                action_type=action_type.value,
+                score=round(float(surprise_score), 4),
+            )
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource=target_resource,
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append(
+                {"action": f"HELD {action_type.value} {target_resource}", "result": actual_obs_str}
+            )
+            return trace
         status_method = getattr(self.computer, "status", None)
         is_test_double = type(self.computer).__module__ == "unittest.mock"
         if action_type in gui_actions:
@@ -6136,7 +6274,14 @@ class ComputerUseAgent:
                         )
                     obs_after = await self._dispatch_gui_action(
                         workspace_id,
-                        GUIAction(action=GUIActionType.CLICK, x=x, y=y),
+                        GUIAction(
+                            action=GUIActionType.CLICK,
+                            x=x,
+                            y=y,
+                            target_query=(
+                                target_resource if explicit_pixel_target is None else None
+                            ),
+                        ),
                     )
                     post_screen_b64 = getattr(obs_after, "screenshot_base64", "") if obs_after else ""
                     if post_screen_b64:
@@ -6185,7 +6330,14 @@ class ComputerUseAgent:
                         )
                     obs_after = await self._dispatch_gui_action(
                         workspace_id,
-                        GUIAction(action=GUIActionType.DOUBLE_CLICK, x=x, y=y),
+                        GUIAction(
+                            action=GUIActionType.DOUBLE_CLICK,
+                            x=x,
+                            y=y,
+                            target_query=(
+                                target_resource if explicit_pixel_target is None else None
+                            ),
+                        ),
                     )
                     post_screen_b64 = getattr(obs_after, "screenshot_base64", "") if obs_after else ""
                     if post_screen_b64:
@@ -6234,7 +6386,14 @@ class ComputerUseAgent:
                         )
                     obs_after = await self._dispatch_gui_action(
                         workspace_id,
-                        GUIAction(action=GUIActionType.RIGHT_CLICK, x=x, y=y),
+                        GUIAction(
+                            action=GUIActionType.RIGHT_CLICK,
+                            x=x,
+                            y=y,
+                            target_query=(
+                                target_resource if explicit_pixel_target is None else None
+                            ),
+                        ),
                     )
                     post_screen_b64 = getattr(obs_after, "screenshot_base64", "") if obs_after else ""
                     if post_screen_b64:
@@ -6560,7 +6719,14 @@ class ComputerUseAgent:
                     y = int(payload.get("y", 0))
                     obs_move = await self._dispatch_gui_action(
                         workspace_id,
-                        GUIAction(action=GUIActionType.MOVE, x=x, y=y),
+                        GUIAction(
+                            action=GUIActionType.MOVE,
+                            x=x,
+                            y=y,
+                            target_query=(
+                                target_resource if explicit_pixel_target is None else None
+                            ),
+                        ),
                     )
                     move_b64 = getattr(obs_move, "screenshot_base64", "") if obs_move else ""
                     if move_b64:

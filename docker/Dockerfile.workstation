@@ -47,6 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dbus-x11 \
     x11-utils \
     x11-xserver-utils \
+    xinput \
     xdg-utils \
     xdotool \
     wmctrl \
@@ -72,6 +73,8 @@ RUN useradd --create-home --shell /usr/sbin/nologin sonic-browser
 RUN python3 -m venv --system-site-packages /opt/sonic/venv \
     && /opt/sonic/venv/bin/pip install --no-cache-dir "mss>=10,<11"
 COPY docker/avcs_frame_stream.py /opt/sonic/avcs_frame_stream.py
+COPY packages/avcs/avcs/training/demo_recorder.py /opt/sonic/packages/avcs/avcs/training/demo_recorder.py
+COPY packages/avcs/avcs/training/vnc_demo_recorder.py /opt/sonic/avcs_vnc_demo_recorder.py
 
 # Ensure python symlink exists for scripts expecting `python`
 RUN ln -sf /usr/bin/python3 /usr/local/bin/python

@@ -757,6 +757,92 @@ def test_run_mission_creates_a_bounded_intent_for_grounded_gui_actions():
     assert traces[0].status != ActionExecutionStatus.BLOCKED, traces[0].actual_observation
 
 
+def test_run_mission_dispatches_gui_action_from_raw_avcs_rgb_observation():
+    raw_rgb = bytes((24, 48, 72)) * (128 * 80)
+
+    class RawFrameComputer(_ReceiptComputer):
+        def __init__(self):
+            super().__init__()
+            self.frame_id = 1
+
+        async def screenshot(self, workspace_id):
+            self.frame_id += 1
+            return ScreenObservation(
+                raw_rgb=raw_rgb,
+                frame_id=self.frame_id,
+                width=128,
+                height=80,
+                active_window="Desktop",
+                desktop_state="INTERACTIVE",
+                capture_age_ms=0,
+            )
+
+        async def gui_action(self, workspace_id, action, actor="operator"):
+            self.gui_calls += 1
+            self.frame_id += 1
+            return ScreenObservation(
+                raw_rgb=raw_rgb,
+                frame_id=self.frame_id,
+                width=128,
+                height=80,
+                active_window="observed window",
+                desktop_state="INTERACTIVE",
+                capture_age_ms=0,
+            )
+
+    computer = RawFrameComputer()
+    agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
+    initial_screen = agent._ensure_avcs_state(
+        ScreenObservation(
+            raw_rgb=raw_rgb,
+            frame_id=1,
+            width=128,
+            height=80,
+            active_window="Desktop",
+            desktop_state="INTERACTIVE",
+            capture_age_ms=0,
+        )
+    )
+    observation = ComputerWorldObservation(
+        screen=initial_screen,
+        active_application="Desktop",
+        perception_version=1,
+        observation_age_ms=0,
+        observation_received_monotonic_ns=time.perf_counter_ns(),
+    )
+
+    async def observe(_workspace_id):
+        agent._last_world_observation = observation
+        agent._last_screen_observation_received_at = asyncio.get_running_loop().time()
+        agent._last_screenshot_b64 = ""
+        agent._screen_width = initial_screen.width
+        agent._screen_height = initial_screen.height
+        return observation
+
+    async def choose_action(*_args):
+        return (
+            ComputerActionType.GUI_CLICK,
+            "10,10",
+            {
+                "x": 10,
+                "y": 10,
+                "postcondition": {"active_window": "observed window"},
+            },
+            "the expected window is active",
+        )
+
+    agent.observe = observe
+    agent.choose_action = choose_action
+
+    traces = _run(agent.run_mission("workspace", "activate the observed window", steps=1))
+
+    assert computer.gui_calls == 1
+    assert traces
+    assert traces[0].status != ActionExecutionStatus.BLOCKED, traces[0].actual_observation
+    assert traces[0].action_receipt is not None
+    assert traces[0].action_receipt.intent["source_perception_version"] > 0
+
+
 def test_stale_screenshot_intent_refresh_uses_only_a_fresh_screenshot():
     computer = _ReceiptComputer()
     agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")

@@ -153,6 +153,86 @@ async def test_watchdog_never_injects_application_specific_shortcuts():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action_type", "target", "payload"),
+    [
+        (ComputerActionType.GUI_CLICK, "100,100", {"x": 100, "y": 100}),
+        (ComputerActionType.APP_LAUNCH, "sample-app", {"application": "sample-app"}),
+    ],
+)
+async def test_avcs_surprise_holds_desktop_mutations(action_type, target, payload):
+    provider = _mock_static_gui_provider("surprise_screen")
+    agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+    await agent.observe("ws-1")
+    agent._last_observed_screen.avcs_state["system3"] = {
+        "engine": "system3_temporal_prediction",
+        "prediction_available": True,
+        "surprise_score": 0.92,
+        "stability_state": "surprise_event",
+        "trained": False,
+        "action_authorization": False,
+    }
+
+    trace = await agent.execute_action(
+        "ws-1",
+        action_type,
+        target,
+        payload,
+        "Perform the requested desktop action",
+    )
+
+    assert trace.status == ActionExecutionStatus.BLOCKED
+    assert trace.exit_code == 126
+    assert "Observe the new screen and re-reason" in trace.actual_observation
+    assert "does not identify the cause" in trace.actual_observation
+    assert provider.gui_action.await_count == 0
+    assert provider.launch_application.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_avcs_surprise_hold_clears_after_a_stable_observation():
+    provider = _mock_static_gui_provider("surprise_then_stable")
+    agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
+    await agent.observe("ws-1")
+    system3_state = {
+        "engine": "system3_temporal_prediction",
+        "prediction_available": True,
+        "surprise_score": 0.92,
+        "stability_state": "surprise_event",
+        "trained": False,
+        "action_authorization": False,
+    }
+    agent._last_observed_screen.avcs_state["system3"] = system3_state
+
+    held_trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_CLICK,
+        "100,100",
+        {"x": 100, "y": 100},
+        "Click the observed control",
+    )
+    assert held_trace.status == ActionExecutionStatus.BLOCKED
+    assert provider.gui_action.await_count == 0
+
+    await agent.observe("ws-1")
+    agent._last_observed_screen.avcs_state["system3"] = {
+        **system3_state,
+        "surprise_score": 0.0,
+        "stability_state": "stable",
+    }
+    resumed_trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_CLICK,
+        "100,100",
+        {"x": 100, "y": 100},
+        "Click the observed control after re-observation",
+    )
+
+    assert resumed_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert provider.gui_action.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_watchdog_aborts_run_mission_before_burning_quota():
     provider = _mock_static_gui_provider("perpetually_stuck_pixels")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)

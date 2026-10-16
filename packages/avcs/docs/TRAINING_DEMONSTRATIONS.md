@@ -39,6 +39,57 @@ reviewed, split by task/window, and used to train and independently evaluate a
 click-grounding model. Until then, AVCS must not claim general GUI task
 capability.
 
+### Docker VNC demonstrations
+
+For a Docker VNC desktop, rebuild the workstation image so it includes the
+`xinput` event listener and recorder:
+
+```powershell
+docker compose build workstation
+docker compose up -d workstation
+docker exec -it -e DISPLAY=:99 sonic-desktop-workstation `
+  /opt/sonic/venv/bin/python /opt/sonic/avcs_vnc_demo_recorder.py `
+  --window-title "EXACT_ISOLATED_WINDOW_TITLE" `
+  --task "Describe the harmless UI task" `
+  --target-label "Describe the next click target" `
+  --output-dir /workspace/avcs-demonstrations/session-01 `
+  --confirm-isolated-window
+```
+
+Before starting the recorder, bring the exact isolated target window to the
+foreground in noVNC; the recorder refuses to start unless that exact title is
+active. Keep it foreground while recording. In the recorder's interactive
+terminal, enter a short target label and press Enter before each human
+left-click in noVNC. Alternatively, pre-arm labels with one `--target-label`
+option per click, in click order; the recorder reports how many labels are
+armed, so no terminal label entry is needed for those clicks. Wait until the
+terminal confirms `Label armed` before clicking when entering labels
+interactively; clicks without a queued label are intentionally ignored. The
+previous recorder must be stopped with `:stop` before starting another, because
+the XInput raw-event listener is exclusive in this Xvfb setup.
+The recorder uses root-screen coordinates from XInput when available; Xvfb raw
+button events do not expose root coordinates, so it immediately queries the
+pointer when the button event arrives. It pairs the point with a fresh frame
+captured while the target window was foreground, checks that the target
+window geometry is unchanged, and can record a launch click even if it
+immediately activates another application.
+Enter `:stop` in the recorder terminal to finish. It
+records only pre-click crops of the exact foreground window, ignores unlabeled,
+stale, out-of-window, or non-left clicks, and never records keyboard input or
+uploads frames. Do not run SONIC actions during recording. Copy a completed
+session directory to a local research-data directory before training:
+
+```powershell
+New-Item -ItemType Directory -Force .\runs\demonstrations
+docker cp sonic-desktop-workstation:/workspace/avcs-demonstrations/session-01 `
+  .\runs\demonstrations\session-01
+```
+
+The recorder output remains local inside the workstation container until
+copied.
+Training/evaluation still requires at least five distinct task/window groups
+and the independent held-out gates described below.
+
 ## Goal-conditioned pixel grounder
 
 `GoalConditionedGrounder` (`avcs/goal_grounder.py`) is the new System-1
