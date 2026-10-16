@@ -603,7 +603,13 @@ harmless task.
   successive pixel-derived luminance grids. This is untrained advisory
   telemetry only: it does not ground targets, authorize actions, or establish
   task success. It is not evidence of a learned world model or measured
-  real-time performance.
+  real-time performance. As a one-way safety response, a fresh
+  `surprise_event` with score at least `0.85` holds desktop-mutating
+  GUI/application actions; the worker must observe again and reason before
+  trying a new action. This conservative hold detects visual change only—it
+  does not identify a popup, read its text, or prove the scene is safe once
+  the signal clears. The threshold is a stop condition, not a measured popup
+  detection or latency guarantee.
 - The Docker workstation now captures timestamped RGB frames in memory through
   a persistent X11 stream worker (`mss`), then processes frames locally through
   `AVCSPerception`. The stream uses a bounded latest-frame queue, discarding
@@ -625,8 +631,8 @@ harmless task.
   established capture/processing FPS, latency, or resource cost.
 - This is only the raw-frame transport and AVCS reflex integration slice. It
   does not yet provide semantic affordance discovery, trained
-  target grounding, eye-hand servoing, stability-gated action dispatch, or
-  safe autonomous retries. AVCS scene change is an action-level signal, not
+  target grounding, eye-hand servoing, or safe autonomous retries. AVCS scene
+  change is an action-level signal, not
   proof that a click had the intended effect or that a task succeeded. Target
   grounding and focus verification still require evaluated local heads, and
   independent Judge evidence remains necessary for task completion.

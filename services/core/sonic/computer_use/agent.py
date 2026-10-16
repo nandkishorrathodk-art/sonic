@@ -5251,6 +5251,70 @@ class ComputerUseAgent:
             ComputerActionType.GUI_SCROLL,
             ComputerActionType.GUI_DRAG,
         }
+        observed_screen = getattr(self, "_last_observed_screen", None)
+        observed_avcs = getattr(observed_screen, "avcs_state", None)
+        system3 = (
+            observed_avcs.get("system3")
+            if isinstance(observed_avcs, dict)
+            and observed_avcs.get("engine") == "avcs_reflex"
+            else None
+        )
+        surprise_score = (
+            system3.get("surprise_score")
+            if isinstance(system3, dict)
+            and system3.get("engine") == "system3_temporal_prediction"
+            and system3.get("prediction_available") is True
+            and system3.get("stability_state") == "surprise_event"
+            else None
+        )
+        mutates_desktop = action_type in gui_actions or action_type in {
+            ComputerActionType.APP_LAUNCH,
+            ComputerActionType.APP_CLOSE,
+            ComputerActionType.APP_FOCUS,
+            ComputerActionType.APP_MAXIMIZE,
+            ComputerActionType.WINDOW_MAXIMIZE,
+            ComputerActionType.WINDOW_TILE,
+        }
+        if (
+            mutates_desktop
+            and isinstance(surprise_score, (int, float))
+            and not isinstance(surprise_score, bool)
+            and math.isfinite(float(surprise_score))
+            and float(surprise_score) >= 0.85
+        ):
+            actual_obs_str = (
+                "AVCS temporal surprise detected "
+                f"(score={float(surprise_score):.3f}); desktop input was held. "
+                "Observe the new screen and re-reason before trying again. "
+                "This signal detects visual change only; it does not identify "
+                "the cause or prove an alert is present."
+            )
+            logger.info(
+                "gui_action_held_on_avcs_surprise",
+                action_type=action_type.value,
+                score=round(float(surprise_score), 4),
+            )
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource=target_resource,
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append(
+                {"action": f"HELD {action_type.value} {target_resource}", "result": actual_obs_str}
+            )
+            return trace
         status_method = getattr(self.computer, "status", None)
         is_test_double = type(self.computer).__module__ == "unittest.mock"
         if action_type in gui_actions:
