@@ -244,3 +244,77 @@ def test_edit_file_on_directory_rejected(tmp_path: Path):
 
     res = edit_file(sub_dir, target_content="x", replacement_content="y", workspace_dir=tmp_path)
     assert "is a directory, not a file" in res
+
+
+@pytest.mark.parametrize("provider", ["groq", "openai", "openrouter", "deepseek", "nvidia"])
+def test_llm_config_does_not_borrow_another_providers_key(monkeypatch, provider, tmp_path):
+    """A missing provider key must not send unrelated credentials to its API."""
+    key_vars = {
+        "groq": "GROQ_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "nvidia": "NVIDIA_API_KEY",
+    }
+    for name, variable in key_vars.items():
+        if name == provider:
+            monkeypatch.delenv(variable, raising=False)
+        else:
+            monkeypatch.setenv(variable, f"synthetic-{name}-credential")
+
+    config = LLMConfig.from_env(provider=provider)
+    assert config.api_key == ""
+    agent = DeveloperAgent(workspace_dir=tmp_path, config=config)
+    monkeypatch.setattr(agent, "_get_client", lambda: pytest.fail("Missing key must block HTTP requests"))
+    with pytest.raises(ValueError, match=key_vars[provider]):
+        agent._call_single_llm([])
+    assert LLMConfig.from_env(provider=provider, api_key="explicit-test-key").api_key == "explicit-test-key"
+
+
+@pytest.mark.parametrize("file_newline", ["\n", "\r\n"])
+@pytest.mark.parametrize("target_newline", ["\n", "\r\n"])
+@pytest.mark.parametrize("replacement_newline", ["\n", "\r\n"])
+def test_edit_file_preserves_line_endings(tmp_path, file_newline, target_newline, replacement_newline):
+    """Edits from a model must preserve the existing file's newline convention."""
+    target = tmp_path / "code.py"
+    target.write_bytes(file_newline.join(["before", "old", "value", "after", ""]).encode())
+    result = edit_file(
+        target,
+        target_newline.join(["old", "value"]),
+        replacement_newline.join(["new", "value"]),
+        workspace_dir=tmp_path,
+    )
+    assert "Successfully edited" in result
+    assert target.read_bytes() == file_newline.join(["before", "new", "value", "after", ""]).encode()
+
+
+def test_edit_file_rejects_invalid_utf8_without_corrupting_file(tmp_path):
+    target = tmp_path / "legacy.txt"
+    original = b"old value\nlegacy byte: \xff\n"
+    target.write_bytes(original)
+
+    result = edit_file(target, "old value", "new value", workspace_dir=tmp_path)
+
+    assert result.startswith("Error")
+    assert target.read_bytes() == original
+
+
+def test_edit_file_preserves_unedited_mixed_line_endings(tmp_path):
+    target = tmp_path / "mixed.txt"
+    target.write_bytes(b"before\r\nold\r\nvalue\r\nafter\n")
+
+    result = edit_file(target, "old\nvalue", "new\nvalue", workspace_dir=tmp_path)
+
+    assert "Successfully edited" in result
+    assert target.read_bytes() == b"before\r\nnew\r\nvalue\r\nafter\n"
+
+
+def test_edit_file_rejects_ambiguous_mixed_line_endings(tmp_path):
+    target = tmp_path / "mixed.txt"
+    original = b"old\r\nvalue\r\nold\nvalue\n"
+    target.write_bytes(original)
+
+    result = edit_file(target, "old\nvalue", "new\nvalue", workspace_dir=tmp_path)
+
+    assert "occurs 2 times" in result
+    assert target.read_bytes() == original

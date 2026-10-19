@@ -1427,3 +1427,24 @@ def test_multi_file_atomic_rollback(repo: Path):
     assert report.stage != EvolutionStage.PROMOTED
     assert f1.read_text(encoding="utf-8") == "VALUE_A = 10\n"
     assert f2.read_text(encoding="utf-8") == "VALUE_B = 20\n"
+
+
+@pytest.mark.parametrize("original", [b"value = 1\r\n", b"legacy: \xff\r\n"])
+def test_report_only_rollback_preserves_exact_original_bytes(tmp_path, original):
+    coder = SelfCoder(repo_root=tmp_path, agentic=False)
+    target = tmp_path / "module.py"
+    target.write_bytes(original)
+
+    snapshot = coder._tree_fingerprint(["module.py", "new.py"])
+    target.write_bytes(b"changed\n")
+    (tmp_path / "new.py").write_bytes(b"created\n")
+    coder._restore_tree(snapshot)
+
+    assert target.read_bytes() == original
+    assert not (tmp_path / "new.py").exists()
+
+
+def test_report_only_snapshot_rejects_repository_escape(tmp_path):
+    coder = SelfCoder(repo_root=tmp_path, agentic=False)
+    with pytest.raises(ValueError, match="escapes repository root"):
+        coder._tree_fingerprint(["../outside.py"])

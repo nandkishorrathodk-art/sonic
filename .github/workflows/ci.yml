@@ -138,6 +138,10 @@ jobs:
         working-directory: apps/dashboard
         run: npm run lint
 
+      - name: Test dashboard API client
+        working-directory: apps/dashboard
+        run: npm test
+
       - name: Audit production dependencies
         working-directory: apps/dashboard
         run: npm audit --omit=dev --audit-level=high

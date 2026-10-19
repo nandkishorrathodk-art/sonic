@@ -46,7 +46,7 @@ export function getUserSession(): UserSession | null {
  * Ensures a valid JWT token is stored in localStorage.
  * If absent, fetches a signed JWT from /auth/dev-token.
  */
-export async function ensureAuthToken(apiBase: string, force: boolean = false): Promise<string> {
+export async function ensureAuthToken(apiBase: string, force: boolean = false, signal?: AbortSignal): Promise<string> {
   if (!force) {
     const existing = getAuthToken();
     if (existing) return existing;
@@ -54,7 +54,7 @@ export async function ensureAuthToken(apiBase: string, force: boolean = false): 
   clearAuth();
 
   try {
-    const res = await fetch(`${apiBase}/auth/dev-token`, { method: "POST" });
+    const res = await fetch(`${apiBase}/auth/dev-token`, { method: "POST", signal });
     if (res.ok) {
       const data = await res.json();
       if (data?.access_token) {
@@ -65,6 +65,7 @@ export async function ensureAuthToken(apiBase: string, force: boolean = false): 
       }
     }
   } catch (err) {
+    if (signal?.aborted) throw err;
     console.error("Failed to auto-provision session token:", err);
   }
   return "";

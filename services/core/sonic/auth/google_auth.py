@@ -272,6 +272,10 @@ async def authenticate_with_google(code: str) -> AuthToken:
     email = google_user.get("email", "")
     logger.info("google_auth_attempt", email=email)
 
+    # Roles and tenant membership rely on ownership of this email address.
+    if google_user.get("verified_email") is not True:
+        raise PermissionError("Access denied: Google email must be verified.")
+
     # Step 3: Check allowlist
     if not is_email_allowed(email):
         logger.warning("auth_denied_not_in_allowlist", email=email)

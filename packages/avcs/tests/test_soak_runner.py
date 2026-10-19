@@ -76,3 +76,28 @@ def test_soak_runner_short_run():
         assert summary_path.is_file()
         assert trace_path.is_file()
 
+
+
+@pytest.mark.parametrize(
+    ("baseline_mb", "growth_mb", "expected_stable"),
+    [(1500.0, 0.0, True), (1500.0, 26.0, False), (500.0, 26.0, False)],
+)
+def test_short_soak_measures_growth_from_warm_baseline(
+    tmp_path, monkeypatch, baseline_mb, growth_mb, expected_stable
+):
+    """Other tests' model allocations must not masquerade as a soak memory leak."""
+    runner = SoakTestRunner(max_cycles=1, warmup_cycles=0, base_seed=999)
+    readings = iter([baseline_mb])
+    monkeypatch.setattr(
+        runner.tracker,
+        "get_metrics",
+        lambda: (next(readings, baseline_mb + growth_mb), 2000.0, 0, 0, 0),
+    )
+
+    summary = runner.run(
+        summary_path=str(tmp_path / "summary.json"),
+        trace_jsonl_path=str(tmp_path / "trace.jsonl"),
+    )
+
+    assert summary["acceptance_gates"]["memory_stable"] is expected_stable
+    assert summary["acceptance_gates"]["exit_gate_passed"] is expected_stable

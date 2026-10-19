@@ -136,7 +136,7 @@ class AVCSPerception:
             or isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(float(value))
-            or float(value) < GROUNDING_ACCEPTANCE_THRESHOLD
+            or not GROUNDING_ACCEPTANCE_THRESHOLD <= float(value) <= 1
         ):
             raise ValueError("AVCS grounding checkpoint does not meet held-out evaluation gates")
         confidence_calibration = metadata.get("query_confidence_calibration")

@@ -657,3 +657,30 @@ class TestZeroBossIsolation:
                 call_str = str(call)
                 assert "workstation" not in call_str
                 assert "boss" not in call_str.lower()
+
+
+def test_history_pruning_preserves_objective_and_complete_tool_exchanges(tmp_path):
+    agent = DeveloperAgent(workspace_dir=tmp_path)
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "Fix the requested bug and verify it"},
+    ]
+    for index in range(10):
+        call_id = f"call_{index}"
+        messages.extend([
+            {"role": "assistant", "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "view_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": call_id, "content": "file contents"},
+        ])
+
+    pruned = agent._prune_messages(messages, max_history=7)
+
+    assert pruned[0] == messages[0]
+    assert pruned[1] == messages[1]
+    pending = set()
+    for message in pruned[2:]:
+        pending.update(call["id"] for call in message.get("tool_calls", []))
+        if message["role"] == "tool":
+            assert message["tool_call_id"] in pending
+            pending.remove(message["tool_call_id"])
+    assert not pending
+    assert messages[-1] == pruned[-1]

@@ -392,35 +392,26 @@ def edit_file(
         return "Error: target_content cannot be empty. Please provide the exact text block to replace."
 
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
+        # Preserve the original bytes outside the edit and refuse lossy decoding.
+        with target.open("r", encoding="utf-8", newline="") as stream:
+            text = stream.read()
 
-        # 1. Exact match check
-        count = text.count(target_content)
-        if count == 1:
-            new_text = text.replace(target_content, replacement_content, 1)
-            target.write_text(new_text, encoding="utf-8")
-            return f"Successfully edited '{path}'. Replaced unique occurrence of target content."
-        elif count > 1:
-            return (
-                f"Error: target_content occurs {count} times in '{path}'. "
-                f"Please include more surrounding context lines to provide unique surrounding context. "
-                f"Use view_file('{path}') to inspect surrounding lines."
-            )
-
-        # 2. Resilient newline check (CRLF vs LF)
-        text_lf = text.replace("\r\n", "\n")
+        # Match either newline convention without rewriting the rest of the file.
         target_lf = target_content.replace("\r\n", "\n")
-        count_lf = text_lf.count(target_lf)
+        pattern = r"\r?\n".join(re.escape(line) for line in target_lf.split("\n"))
+        matches = list(re.finditer(pattern, text))
 
-        if count_lf == 1:
-            repl_lf = replacement_content.replace("\r\n", "\n")
-            new_text_lf = text_lf.replace(target_lf, repl_lf, 1)
-            new_text = new_text_lf.replace("\n", "\r\n") if "\r\n" in text else new_text_lf
-            target.write_text(new_text, encoding="utf-8")
+        if len(matches) == 1:
+            match = matches[0]
+            newline = "\r\n" if "\r\n" in text else "\n"
+            replacement = replacement_content.replace("\r\n", "\n").replace("\n", newline)
+            new_text = text[:match.start()] + replacement + text[match.end():]
+            with target.open("w", encoding="utf-8", newline="") as stream:
+                stream.write(new_text)
             return f"Successfully edited '{path}'. Replaced unique occurrence of target content."
-        elif count_lf > 1:
+        elif len(matches) > 1:
             return (
-                f"Error: target_content occurs {count_lf} times in '{path}'. "
+                f"Error: target_content occurs {len(matches)} times in '{path}'. "
                 f"Please include more surrounding context lines to provide unique surrounding context. "
                 f"Use view_file('{path}') to inspect surrounding lines."
             )
@@ -680,16 +671,6 @@ class LLMConfig:
             elif prov in ("local", "ollama"):
                 resolved_key = os.environ.get("LOCAL_API_KEY", "ollama")
 
-            # Fallback checks if primary was empty
-            if not resolved_key:
-                resolved_key = (
-                    os.environ.get("GROQ_API_KEY")
-                    or os.environ.get("OPENAI_API_KEY")
-                    or os.environ.get("OPENROUTER_API_KEY")
-                    or os.environ.get("DEEPSEEK_API_KEY")
-                    or ""
-                )
-
         # Resolve Base URL
         resolved_base_url = (
             base_url
@@ -903,7 +884,7 @@ class DeveloperAgent:
         if not self.config.api_key:
             raise ValueError(
                 f"Missing API key for provider '{self.config.provider}'. "
-                f"Please set GROQ_API_KEY in your .env or system environment."
+                f"Please set {self.config.provider.upper()}_API_KEY in your .env or system environment."
             )
 
         active_model = model or self.config.model
@@ -1186,6 +1167,12 @@ class DeveloperAgent:
         else:
             while suffix and suffix[0].get("role") == "tool":
                 suffix = suffix[1:]
+            # Long tool-driven turns can fill the entire window. Retain the
+            # operator's objective before the remaining complete tool exchanges.
+            for message in reversed(messages[:-max_history]):
+                if message.get("role") == "user":
+                    suffix = [message, *suffix]
+                    break
         return prefix + suffix
 
     def chat(self, prompt: str) -> str:

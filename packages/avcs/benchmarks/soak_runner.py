@@ -292,11 +292,12 @@ class SoakTestRunner:
         handle_delta = final_handles - init_handles
 
         # Memory leak gate:
-        # If running short test run (< 50 cycles), verify RSS remains bounded (< 1000MB, delta <= 25MB).
+        # For short runs (< 50 cycles), bound growth from the post-warmup baseline.
+        # Existing allocations (e.g. models loaded by other tests) are not leaks.
         # If running short CI soak (>= 50 cycles, < 300s), check slope per cycle <= 0.02 MB/cycle (20 KB/cycle).
         # If running sustained soak (>= 300s), check hourly slope <= 5.0 MB/hour.
         if cycle < 50:
-            memory_stable = ((final_rss - init_rss) <= 25.0) and (final_rss < 1000.0)
+            memory_stable = (final_rss - init_rss) <= 25.0
         elif total_elapsed < 300.0:
             memory_stable = (slope_mb_per_cycle <= 0.02)
         else:

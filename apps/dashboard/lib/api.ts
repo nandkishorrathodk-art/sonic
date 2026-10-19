@@ -4,8 +4,7 @@ import { getAuthToken, ensureAuthToken, clearAuth } from "./auth";
 import { SessionItem, normalizeSessionList } from "../types/workstation";
 
 function resolveApiBase(): string {
-  // Explicit env override wins: prod docker-compose passes http://sonic-core:8000;
-  // nginx/proxy deployments pass their API origin here too.
+  // Public API origin is embedded during the build and must be browser reachable.
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
 
   // Documented local topology (AI_AGENT_GUIDE.md): backend serves on 12000,
@@ -21,44 +20,38 @@ interface RequestOptions extends RequestInit {
 }
 
 export async function apiClient<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-  const { timeout = 15000, headers = {}, ...rest } = options;
-
-  // Ensure an authenticated token exists
-  let token = getAuthToken();
-  if (!token && typeof window !== "undefined" && !endpoint.includes("/auth/")) {
-    token = await ensureAuthToken(API_BASE);
-  }
-
+  const { timeout = 15000, headers = {}, signal, ...rest } = options;
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-
-  const requestHeaders: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(headers as Record<string, string>),
-  };
-
-  const url = endpoint.startsWith("http") ? endpoint : `${API_BASE}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
+  let timedOut = false;
+  const id = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeout);
+  const cancel = () => controller.abort(signal?.reason);
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener("abort", cancel, { once: true });
 
   try {
-    const res = await fetch(url, {
-      ...rest,
-      headers: requestHeaders,
-      signal: controller.signal,
-    });
-
-    clearTimeout(id);
+    controller.signal.throwIfAborted();
+    let token = getAuthToken();
+    if (!token && typeof window !== "undefined" && !endpoint.includes("/auth/")) {
+      token = await ensureAuthToken(API_BASE, false, controller.signal);
+    }
+    controller.signal.throwIfAborted();
+    const requestHeaders = new Headers(headers);
+    if (!requestHeaders.has("Content-Type")) requestHeaders.set("Content-Type", "application/json");
+    if (token && !requestHeaders.has("Authorization")) requestHeaders.set("Authorization", `Bearer ${token}`);
+    const url = endpoint.startsWith("http") ? endpoint : `${API_BASE}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
+    const request = () => fetch(url, { ...rest, headers: requestHeaders, signal: controller.signal });
+    let res = await request();
 
     if (res.status === 401) {
-      // Re-provision token if expired and retry once
       clearAuth();
-      const newToken = await ensureAuthToken(API_BASE, true);
-      if (newToken) {
-        requestHeaders.Authorization = `Bearer ${newToken}`;
-        const retryRes = await fetch(url, { ...rest, headers: requestHeaders });
-        if (retryRes.ok) return (await retryRes.json()) as T;
-      }
-      throw new Error("Authentication required (401 Unauthorized)");
+      const newToken = await ensureAuthToken(API_BASE, true, controller.signal);
+      controller.signal.throwIfAborted();
+      if (!newToken) throw new Error("Authentication required (401 Unauthorized)");
+      requestHeaders.set("Authorization", `Bearer ${newToken}`);
+      res = await request();
     }
 
     if (!res.ok) {
@@ -85,11 +78,13 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
       return { events } as unknown as T;
     }
   } catch (err: any) {
-    clearTimeout(id);
-    if (err.name === "AbortError") {
+    if (timedOut) {
       throw new Error(`Request timeout (${timeout}ms) on ${endpoint}`);
     }
     throw err;
+  } finally {
+    clearTimeout(id);
+    signal?.removeEventListener("abort", cancel);
   }
 }
 

@@ -826,6 +826,32 @@ class SubagentTeamworkManager:
         merged: list[str] = []
         is_git_repo = parent_dir is not None and (parent_dir / ".git").exists()
 
+        baseline = self._baseline_snapshots.get(conv.conversation_id, {})
+        current_snapshot = self._snapshot_dir(conv.isolated_dir) if conv.isolated_dir.exists() else {}
+        changes = {
+            path: digest for path, digest in current_snapshot.items()
+            if path not in baseline or baseline[path] != digest
+        }
+        # Check every changed path before merging anything. Another worker or
+        # the operator may have edited the parent since isolation was prepared.
+        if parent_dir is not None:
+            for relative_path, digest in changes.items():
+                source = conv.isolated_dir / relative_path
+                destination = parent_dir / relative_path
+                if (
+                    not source.resolve().is_relative_to(conv.isolated_dir.resolve())
+                    or not destination.resolve().is_relative_to(parent_dir.resolve())
+                    or (destination.exists() and not destination.is_file())
+                ):
+                    raise RuntimeError(f"Subagent merge conflict on {relative_path}: unsafe file path")
+                contents = destination.read_bytes() if destination.is_file() else None
+                parent_digest = (
+                    (len(contents), hashlib.sha256(contents).hexdigest())
+                    if contents is not None else None
+                )
+                if parent_digest not in (baseline.get(relative_path), digest):
+                    raise RuntimeError(f"Subagent merge conflict on {relative_path}: parent changed")
+
         # 1. Clean Git Merge if a git branch exists and has commits ahead of parent
         if is_git_repo and parent_dir is not None and conv.git_branch:
             try:
@@ -843,6 +869,8 @@ class SubagentTeamworkManager:
                         capture_output=True,
                         text=True,
                     )
+                    if m_res.returncode != 0:
+                        raise RuntimeError(f"Subagent git merge conflict: {m_res.stderr.strip()}")
                     if m_res.returncode == 0:
                         r_files = subprocess.run(
                             ["git", "diff", "--name-only", "HEAD~1..HEAD"],
@@ -855,11 +883,9 @@ class SubagentTeamworkManager:
                                 merged.append(line.strip().replace("\\", "/"))
             except Exception as e:
                 logger.warning("subagent_git_merge_failed", error=str(e), branch=conv.git_branch)
+                raise RuntimeError(f"Subagent git merge conflict: {e}") from e
 
         # 2. File-level delta merge: ONLY merge new or genuinely modified files, preserving parent uncommitted files
-        baseline = self._baseline_snapshots.get(conv.conversation_id, {})
-        current_snapshot = self._snapshot_dir(conv.isolated_dir) if conv.isolated_dir.exists() else {}
-
         if parent_dir is not None and conv.isolated_dir.exists():
             for rel_str, (size, h) in current_snapshot.items():
                 # If file did not exist in baseline OR its content/hash changed, it was created/modified by subagent!
@@ -873,6 +899,7 @@ class SubagentTeamworkManager:
                             merged.append(rel_str)
                     except Exception as e:
                         logger.warning("subagent_file_merge_error", src=str(src_file), error=str(e))
+                        raise RuntimeError(f"Subagent file merge failed for {rel_str}: {e}") from e
 
             # Clean up git worktree if share mode was used
             if conv.workspace_mode == "share" and is_git_repo and conv.git_branch:
@@ -903,6 +930,7 @@ class SubagentTeamworkManager:
             except Exception:
                 pass
 
+        self._baseline_snapshots[conv.conversation_id] = current_snapshot
         return merged
 
     async def _execute_and_verify_loop(

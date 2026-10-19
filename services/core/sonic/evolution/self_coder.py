@@ -631,27 +631,25 @@ class SelfCoder:
         return cycle
 
     # ------------------------------------------------------------------
-    def _tree_fingerprint(self, files: list[str]) -> dict[str, str | None]:
+    def _tree_fingerprint(self, files: list[str]) -> dict[str, bytes | None]:
         """Capture current content of the given files (None = did not exist)."""
-        snap: dict[str, str | None] = {}
+        snap: dict[str, bytes | None] = {}
         for rel in files:
-            p = (self.repo_root / rel).resolve()
-            try:
-                snap[rel] = p.read_text(encoding="utf-8", errors="replace") if p.exists() else None
-            except Exception:
-                snap[rel] = None
+            p = self.evolver._resolve_repo_path(rel, check_protected=False)
+            # A read failure must abort the cycle, not record the file as absent.
+            snap[rel] = p.read_bytes() if p.exists() else None
         return snap
 
-    def _restore_tree(self, snap: dict[str, str | None]) -> None:
+    def _restore_tree(self, snap: dict[str, bytes | None]) -> None:
         """Restore files to their snapshotted content (report-only guarantee)."""
         for rel, content in snap.items():
-            p = (self.repo_root / rel).resolve()
+            p = self.evolver._resolve_repo_path(rel, check_protected=False)
             try:
                 if content is None:
                     if p.exists():
                         p.unlink()
                 else:
-                    p.write_text(content, encoding="utf-8")
+                    p.write_bytes(content)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("self_coder_restore_failed", file=rel, error=str(exc))
 

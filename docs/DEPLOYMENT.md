@@ -26,6 +26,17 @@ secrets, including `SECRET_KEY`, `NEO4J_PASSWORD`, `DAYTONA_API_KEY`, and
 are forwarded from the deployment environment when configured. This is
 distinct from the local Docker workstation path.
 
+The dashboard listens on container port 3000. Set `NEXT_PUBLIC_API_URL` to an
+API origin reachable from the operator's browser before building production
+images (default `http://localhost:8000`). Rebuild the dashboard after changing
+it; Next.js embeds this public value during the build. Set `CORS_ORIGINS` to
+the dashboard's browser origin when using a remote hostname. Staging derives
+both origins from `SONIC_API_HOST` and `SONIC_SITE_HOST`.
+
+The core image runs one API worker because OAuth state and active workstation
+sessions are process-local. Multiple workers or API replicas require shared
+state coordination before scaling.
+
 The staging stack in [`infra/docker-compose.staging.yml`](../infra/docker-compose.staging.yml)
 also requires configured `SONIC_SITE_HOST`, `SONIC_API_HOST`, `POSTGRES_PASSWORD`,
 `REDIS_PASSWORD`, `NEO4J_PASSWORD`, `JWT_SECRET`, `GROQ_API_KEY`, and

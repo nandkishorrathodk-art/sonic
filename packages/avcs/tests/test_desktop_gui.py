@@ -1,8 +1,9 @@
 """Unit Tests for Native Desktop Computer GUI Application."""
 from __future__ import annotations
 
-import tkinter as tk
 import pytest
+
+tk = pytest.importorskip("tkinter", reason="Native desktop test requires Tkinter")
 
 from avcs.gui import AVCSDesktopApp
 from avcs import SyntheticScreen, ScreenEye
@@ -10,7 +11,10 @@ from avcs import SyntheticScreen, ScreenEye
 
 def test_desktop_gui_app_initialization_and_widgets():
     """Verify AVCSDesktopApp builds native window, widgets, and bindings."""
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Native desktop display unavailable: {exc}")
     root.withdraw()  # keep window off-screen during headless test
 
     app = AVCSDesktopApp(root=root, fps=10, source=SyntheticScreen(640, 480))

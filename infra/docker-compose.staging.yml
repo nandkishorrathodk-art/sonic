@@ -61,7 +61,9 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set}
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+      - CORS_ORIGINS=https://${SONIC_SITE_HOST:?SONIC_SITE_HOST must be set}
       - GROQ_API_KEY=${GROQ_API_KEY:?GROQ_API_KEY must be set}
+      - SONIC_USE_DAYTONA_CLOUD=1
       - DAYTONA_API_KEY=${DAYTONA_API_KEY:?DAYTONA_API_KEY must be set}
       - DAYTONA_API_URL=${DAYTONA_API_URL:-https://app.daytona.io/api}
     networks:
@@ -104,6 +106,7 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set}
       - GROQ_API_KEY=${GROQ_API_KEY:?GROQ_API_KEY must be set}
+      - SONIC_USE_DAYTONA_CLOUD=1
       - DAYTONA_API_KEY=${DAYTONA_API_KEY:?DAYTONA_API_KEY must be set}
       - DAYTONA_API_URL=${DAYTONA_API_URL:-https://app.daytona.io/api}
     volumes:
@@ -127,10 +130,10 @@ services:
     build:
       context: ../apps/dashboard
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://${SONIC_API_HOST:?SONIC_API_HOST must be set}
     container_name: sonic-mission-control-ui
     restart: unless-stopped
-    environment:
-      - NEXT_PUBLIC_API_URL=https://${SONIC_API_HOST:?SONIC_API_HOST must be set}
     networks:
       - sonic-dmz
 

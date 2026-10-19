@@ -294,6 +294,7 @@ def test_goal_grounder_requires_explicit_checkpoint_configuration(monkeypatch):
     [
         (_checkpoint_metadata(passed=False), True),
         (_checkpoint_metadata(accuracy=0.84), True),
+        (_checkpoint_metadata(accuracy=1.1), True),
         (_checkpoint_metadata(metric="training_accuracy"), True),
         (_checkpoint_metadata(samples=0), True),
         (_checkpoint_metadata(samples=19), True),

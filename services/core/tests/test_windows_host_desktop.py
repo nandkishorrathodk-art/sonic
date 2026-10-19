@@ -407,9 +407,12 @@ def test_host_workstation_provider_is_explicitly_opt_in(monkeypatch):
     monkeypatch.setattr("sonic.api.routes.workstation._daytona_provider_instance", None)
     monkeypatch.setenv("SONIC_WORKSTATION_PROVIDER", "windows_host_avcs")
 
-    computer = get_computer()
+    provider, _, _ = _provider()
+    monkeypatch.setattr(
+        "sonic.computer.windows_host.WindowsHostAVCSComputerProvider", lambda: provider
+    )
 
-    assert isinstance(computer, WindowsHostAVCSComputerProvider)
+    assert get_computer() is provider
 
 
 def test_docker_remains_the_default_workstation_provider(monkeypatch):
@@ -421,3 +424,10 @@ def test_docker_remains_the_default_workstation_provider(monkeypatch):
     monkeypatch.delenv("SONIC_USE_DAYTONA_CLOUD", raising=False)
 
     assert isinstance(get_computer(), DockerComputerProvider)
+
+
+def test_host_provider_requires_windows_without_injected_adapters(monkeypatch):
+    monkeypatch.setattr("sonic.computer.windows_host.sys.platform", "linux")
+
+    with pytest.raises(RuntimeError, match="requires Windows"):
+        WindowsHostAVCSComputerProvider()

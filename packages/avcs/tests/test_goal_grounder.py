@@ -223,7 +223,7 @@ def test_checkpoint_loader_rejects_non_demonstration_provenance(tmp_path):
         load_grounding_checkpoint(checkpoint)
 
 
-def test_checkpoint_loader_accepts_demonstration_trainer_shape_and_predicts(tmp_path):
+def _save_valid_grounding_checkpoint(tmp_path):
     source_model = GoalConditionedGrounder(input_size=64)
     checkpoint = tmp_path / "grounder.pt"
     torch.save(
@@ -261,6 +261,11 @@ def test_checkpoint_loader_accepts_demonstration_trainer_shape_and_predicts(tmp_
         checkpoint,
     )
 
+    return checkpoint
+
+
+def test_checkpoint_loader_accepts_demonstration_trainer_shape_and_predicts(tmp_path):
+    checkpoint = _save_valid_grounding_checkpoint(tmp_path)
     loaded = load_grounding_checkpoint(checkpoint)
     result = loaded.predict(np.zeros((48, 96, 3), dtype=np.uint8), "Save button")
 
@@ -294,4 +299,21 @@ def test_checkpoint_loader_rejects_grounder_below_held_out_accuracy_target(tmp_p
     )
 
     with pytest.raises(ValueError, match="does not meet the held-out evaluation contract"):
+        load_grounding_checkpoint(checkpoint)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("accuracy", 1.1), ("training_samples", True), ("validation_samples", "3")],
+)
+def test_checkpoint_loader_rejects_invalid_evaluation_numbers(tmp_path, field, value):
+    checkpoint = _save_valid_grounding_checkpoint(tmp_path)
+    payload = torch.load(checkpoint, weights_only=True)
+    if field == "accuracy":
+        payload["evaluation"]["value"] = value
+    else:
+        payload[field] = value
+    torch.save(payload, checkpoint)
+
+    with pytest.raises(ValueError):
         load_grounding_checkpoint(checkpoint)

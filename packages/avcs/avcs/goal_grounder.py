@@ -251,10 +251,10 @@ def load_grounding_checkpoint(
     for key, expected in required.items():
         if checkpoint.get(key) != expected:
             raise ValueError(f"grounding checkpoint has invalid {key!r} provenance")
-    if int(checkpoint.get("training_samples", 0)) <= 0:
-        raise ValueError("grounding checkpoint reports no training demonstrations")
-    if int(checkpoint.get("validation_samples", 0)) <= 0:
-        raise ValueError("grounding checkpoint reports no validation demonstrations")
+    for name in ("training_samples", "validation_samples"):
+        count = checkpoint.get(name)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError(f"grounding checkpoint has invalid {name}")
     evaluation = checkpoint.get("evaluation")
     if not isinstance(evaluation, dict):
         raise ValueError("grounding checkpoint is missing held-out test evaluation")
@@ -272,7 +272,7 @@ def load_grounding_checkpoint(
         isinstance(accuracy, bool)
         or not isinstance(accuracy, (int, float))
         or not math.isfinite(float(accuracy))
-        or float(accuracy) < GROUNDING_ACCEPTANCE_THRESHOLD
+        or not GROUNDING_ACCEPTANCE_THRESHOLD <= float(accuracy) <= 1
     ):
         raise ValueError("grounding checkpoint is below the held-out point-accuracy threshold")
     if not isinstance(checkpoint.get("model_state_dict"), dict):

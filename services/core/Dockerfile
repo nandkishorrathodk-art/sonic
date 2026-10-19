@@ -72,4 +72,6 @@ ENV APP_ENV=production \
     PYTHONUNBUFFERED=1 \
     SONIC_KERNEL_BIN=/usr/local/bin/sonic-kernel
 
-CMD ["uvicorn", "sonic.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+# OAuth state and active workstation sessions are process-local. Keep requests
+# in one worker until these stores support coordination across processes.
+CMD ["uvicorn", "sonic.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

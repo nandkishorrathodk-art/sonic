@@ -500,3 +500,78 @@ async def test_transparent_subagent_error_reporting_on_launch_failure(tmp_path: 
     assert convs[2].role == "Worker 3"
     assert convs[2].state in ("idle", "running", "completed")
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_change", ["modified", "deleted", "created"])
+async def test_subagent_merge_preserves_concurrent_parent_changes(tmp_path, parent_change):
+    from types import SimpleNamespace
+    from sonic.computer_use.teamwork import SubagentConversation
+
+    parent = tmp_path / "parent"
+    isolated = tmp_path / "worker"
+    parent.mkdir()
+    isolated.mkdir()
+    if parent_change != "created":
+        (parent / "shared.txt").write_text("baseline")
+        (isolated / "shared.txt").write_text("baseline")
+    manager = SubagentTeamworkManager(
+        parent_agent=SimpleNamespace(),
+        computer_provider=SimpleNamespace(_get_workspace_dir=lambda _: parent),
+        llm_router=None,
+        safety=None,
+    )
+    manager._baseline_snapshots["worker"] = manager._snapshot_dir(isolated)
+    (isolated / "first.txt").write_text("must not be partially merged")
+    (isolated / "shared.txt").write_text("worker change")
+    if parent_change == "deleted":
+        (parent / "shared.txt").unlink()
+    else:
+        (parent / "shared.txt").write_text("parent change")
+    conversation = SubagentConversation(
+        conversation_id="worker", type_name="self", role="Worker", workspace_mode="branch",
+        parent_workspace_id="parent", effective_workspace_id="worker", isolated_dir=isolated,
+    )
+
+    with pytest.raises(RuntimeError, match="conflict"):
+        await manager._merge_isolated_workspace(conversation)
+
+    assert not (parent / "first.txt").exists()
+    if parent_change == "deleted":
+        assert not (parent / "shared.txt").exists()
+    else:
+        assert (parent / "shared.txt").read_text() == "parent change"
+
+
+@pytest.mark.asyncio
+async def test_subagent_merge_updates_baseline_and_blocks_symlink_escape(tmp_path):
+    from types import SimpleNamespace
+    from sonic.computer_use.teamwork import SubagentConversation
+
+    parent = tmp_path / "parent"
+    isolated = tmp_path / "worker"
+    parent.mkdir()
+    isolated.mkdir()
+    manager = SubagentTeamworkManager(
+        parent_agent=SimpleNamespace(),
+        computer_provider=SimpleNamespace(_get_workspace_dir=lambda _: parent),
+        llm_router=None, safety=None,
+    )
+    conversation = SubagentConversation(
+        conversation_id="worker", type_name="self", role="Worker", workspace_mode="branch",
+        parent_workspace_id="parent", effective_workspace_id="worker", isolated_dir=isolated,
+    )
+    manager._baseline_snapshots["worker"] = {}
+    for content in ("first change", "continued change"):
+        (isolated / "shared.txt").write_text(content)
+        assert await manager._merge_isolated_workspace(conversation) == ["shared.txt"]
+        assert (parent / "shared.txt").read_text() == content
+
+    external = tmp_path / "outside.txt"
+    external.write_text("keep outside content")
+    (parent / "shared.txt").unlink()
+    (parent / "shared.txt").symlink_to(external)
+    (isolated / "shared.txt").write_text("must not escape")
+    with pytest.raises(RuntimeError, match="unsafe file path"):
+        await manager._merge_isolated_workspace(conversation)
+    assert external.read_text() == "keep outside content"

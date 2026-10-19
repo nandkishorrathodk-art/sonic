@@ -63,6 +63,7 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       - APP_ENV=production
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       - DATABASE_URL=sqlite+aiosqlite:////app/sonic_data/sonic_data.db
       - SONIC_MEMORY_DB_PATH=/app/sonic_data/sonic_data.db
       - SONIC_DATA_DIR=/app/sonic_data
@@ -107,6 +108,9 @@ services:
     build:
       context: ./apps/dashboard
       dockerfile: Dockerfile
+      args:
+        # Must be reachable from the operator's browser; rebuild when changed.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     container_name: sonic-dashboard-prod
     restart: always
     depends_on:
@@ -115,7 +119,6 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     networks:
       - sonic-control-net
 

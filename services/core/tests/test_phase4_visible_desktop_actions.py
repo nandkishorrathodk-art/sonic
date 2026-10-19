@@ -145,7 +145,7 @@ async def test_legacy_browser_screenshot_captures_desktop_not_hidden_page():
     assert agent._last_screenshot_b64 == computer._screen_image()
 
 
-async def test_legacy_keyboard_alias_dispatches_and_unresolved_scroll_fails_closed():
+async def test_legacy_keyboard_alias_dispatches_and_scroll_on_changed_pixels_fails_closed():
     computer = _VisibleDesktop()
     agent = ComputerUseAgent(computer_provider=computer)
     await agent.observe("ws-desktop")
@@ -166,8 +166,9 @@ async def test_legacy_keyboard_alias_dispatches_and_unresolved_scroll_fails_clos
     )
 
     assert key_trace.status == ActionExecutionStatus.UNVERIFIED
-    assert scroll_trace.status == ActionExecutionStatus.UNVERIFIED
-    assert [action.action.value for action in computer.actions] == ["KEYPRESS", "SCROLL"]
+    assert scroll_trace.status == ActionExecutionStatus.BLOCKED
+    assert "AVCS temporal surprise" in scroll_trace.actual_observation
+    assert [action.action.value for action in computer.actions] == ["KEYPRESS"]
     unresolved_scroll = await agent.execute_action(
         "ws-desktop",
         ComputerActionType.BROWSER_SCROLL,
@@ -176,7 +177,7 @@ async def test_legacy_keyboard_alias_dispatches_and_unresolved_scroll_fails_clos
         "Scroll the focused application",
     )
     assert unresolved_scroll.status == ActionExecutionStatus.BLOCKED
-    assert [action.action.value for action in computer.actions] == ["KEYPRESS", "SCROLL"]
+    assert [action.action.value for action in computer.actions] == ["KEYPRESS"]
 
 
 async def test_wait_refreshes_gui_but_does_not_claim_selector_verified():

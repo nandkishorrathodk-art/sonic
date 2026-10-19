@@ -169,19 +169,31 @@ async def google_callback(
     try:
         auth_token = await authenticate_with_google(code)
         if redirect_target:
-            from urllib.parse import quote, urlparse
-            parsed = urlparse(redirect_target)
-            # Only permit relative paths on the same origin (e.g. /dashboard) to prevent token exfiltration
-            if parsed.scheme or parsed.netloc or not redirect_target.startswith("/") or redirect_target.startswith("//"):
+            from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+            # Browsers normalize backslashes and strip controls when resolving
+            # URLs; reject them before checking for a same-origin path.
+            if (
+                not redirect_target.startswith("/")
+                or redirect_target.startswith("//")
+                or "\\" in redirect_target
+                or any(ord(char) <= 32 or ord(char) == 127 for char in redirect_target)
+            ):
                 redirect_target = "/dashboard"
-            separator = "&" if "?" in redirect_target else "?"
-            target = (
-                f"{redirect_target}{separator}token={auth_token.access_token}"
-                f"&email={quote(auth_token.user.email)}"
-                f"&name={quote(auth_token.user.name)}"
-                f"&role={auth_token.user.role.value}"
-                f"&tenant_id={auth_token.user.tenant_id}"
-            )
+            parsed = urlsplit(redirect_target)
+            if parsed.scheme or parsed.netloc:
+                parsed = urlsplit("/dashboard")
+            credentials = {
+                "token": auth_token.access_token,
+                "email": auth_token.user.email,
+                "name": auth_token.user.name,
+                "role": auth_token.user.role.value,
+                "tenant_id": auth_token.user.tenant_id,
+            }
+            query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                     if key not in credentials]
+            query.extend(credentials.items())
+            target = urlunsplit(("", "", parsed.path, urlencode(query), parsed.fragment))
             return RedirectResponse(url=target)
         return {
             "status": "success",

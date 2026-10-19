@@ -187,9 +187,15 @@ impl SealedPolicy {
             let normalized = target.replace('\\', "/");
             let has_traversal_segment = normalized.split('/').any(|seg| seg == "..");
             let ws_root = self.workspace_root.replace('\\', "/");
-            let outside_workspace = normalized.starts_with('/')
-                && !ws_root.is_empty()
-                && !normalized.starts_with(&ws_root);
+            let ws_root = ws_root.trim_end_matches('/');
+            // Use component boundaries, including Windows drive paths. A shared
+            // text prefix (e.g. /workspace-other) does not confer access.
+            let is_absolute = normalized.starts_with('/')
+                || normalized.as_bytes().get(1) == Some(&b':');
+            let inside_workspace = normalized == ws_root
+                || normalized.strip_prefix(ws_root).is_some_and(|suffix| suffix.starts_with('/'));
+            let outside_workspace = is_absolute
+                && (self.workspace_root.is_empty() || !inside_workspace);
             if has_traversal_segment
                 || outside_workspace
                 || normalized.starts_with("/etc")
@@ -415,6 +421,19 @@ mod tests {
 
         let auth_traversal = kernel.authorize("FILE_READ", "../../../etc/passwd", true);
         assert_eq!(auth_traversal.verdict, KernelVerdict::Deny);
+    }
+
+    #[test]
+    fn test_workspace_confinement_checks_path_components() {
+        for root in ["/workspace", "/workspace/", "C:\\workspace"] {
+            let policy = SealedPolicy::new_default(root);
+            let prefix = root.trim_end_matches('/').replace('\\', "/");
+            for action in ["FILE_READ", "FILE_WRITE", "FILE_EDIT", "FILE_PATCH"] {
+                assert_eq!(policy.evaluate(action, &format!("{prefix}/file.txt")).0, KernelVerdict::Allow);
+                assert_eq!(policy.evaluate(action, &format!("{prefix}-other/file.txt")).0, KernelVerdict::Deny);
+                assert_eq!(policy.evaluate(action, "D:/outside/file.txt").0, KernelVerdict::Deny);
+            }
+        }
     }
 
     #[test]
