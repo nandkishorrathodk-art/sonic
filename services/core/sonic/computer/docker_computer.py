@@ -967,6 +967,40 @@ class DockerComputerProvider(ComputerProvider):
         return round((len(samples) - 1) / elapsed, 2) if elapsed > 0 else 0.0
 
     async def _capture_screenshot(self, workspace_id: str) -> ScreenObservation:
+        code, output, error = await self._docker_exec(
+            "printf '%s\\n' '___ACTIVE_WINDOW___'; "
+            "xdotool getactivewindow getwindowname; "
+            "printf '%s\\n' '___OPEN_WINDOWS___'; wmctrl -l",
+            timeout=5,
+        )
+        active_window = ""
+        windows: list[str] = []
+        if code == 0:
+            active_part, separator, windows_part = output.partition(
+                "___OPEN_WINDOWS___"
+            )
+            active_window = (
+                active_part.split("___ACTIVE_WINDOW___", 1)[-1].strip()
+                if "___ACTIVE_WINDOW___" in active_part
+                else ""
+            )
+            if separator:
+                for line in windows_part.splitlines():
+                    fields = line.strip().split(maxsplit=3)
+                    if len(fields) == 4 and fields[3] not in {
+                        "xfce4-panel",
+                        "Desktop",
+                        "desktop",
+                    }:
+                        windows.append(fields[3])
+        else:
+            logger.warning(
+                "avcs_stream_window_metadata_unavailable",
+                workspace_id=workspace_id,
+                exit_code=code,
+                error=error.strip()[:300],
+            )
+
         try:
             await self._start_raw_frame_stream(workspace_id)
             deadline = asyncio.get_running_loop().time() + 5
@@ -1034,40 +1068,6 @@ class DockerComputerProvider(ComputerProvider):
                 desktop_state="NO_DISPLAY",
             )
 
-        code, output, error = await self._docker_exec(
-            "printf '%s\\n' '___ACTIVE_WINDOW___'; "
-            "xdotool getactivewindow getwindowname; "
-            "printf '%s\\n' '___OPEN_WINDOWS___'; wmctrl -l",
-            timeout=5,
-        )
-        active_window = ""
-        windows: list[str] = []
-        if code == 0:
-            active_part, separator, windows_part = output.partition(
-                "___OPEN_WINDOWS___"
-            )
-            active_window = (
-                active_part.split("___ACTIVE_WINDOW___", 1)[-1].strip()
-                if "___ACTIVE_WINDOW___" in active_part
-                else ""
-            )
-            if separator:
-                for line in windows_part.splitlines():
-                    fields = line.strip().split(maxsplit=3)
-                    if len(fields) == 4 and fields[3] not in {
-                        "xfce4-panel",
-                        "Desktop",
-                        "desktop",
-                    }:
-                        windows.append(fields[3])
-        else:
-            logger.warning(
-                "avcs_stream_window_metadata_unavailable",
-                workspace_id=workspace_id,
-                exit_code=code,
-                error=error.strip()[:300],
-            )
-
         age_ms = (time.time_ns() - frame.capture_timestamp_ns) / 1_000_000
         if age_ms < 0 or age_ms > _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS:
             return ScreenObservation(
@@ -1091,7 +1091,7 @@ class DockerComputerProvider(ComputerProvider):
             active_window=active_window,
             visible_text="",
             detected_controls=[],
-            desktop_state="INTERACTIVE" if active_window else "NO_DISPLAY",
+            desktop_state="INTERACTIVE",
         )
         self._last_screenshot = observation
         self._last_screenshot_time = asyncio.get_running_loop().time()
