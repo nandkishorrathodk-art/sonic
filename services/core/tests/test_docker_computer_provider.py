@@ -351,6 +351,60 @@ async def test_docker_screenshot_returns_fresh_raw_rgb_without_png_encoding():
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
+async def test_docker_screenshot_waits_for_fresh_frame_after_window_metadata(monkeypatch):
+    provider = DockerComputerProvider(container_name="avcs-metadata-delay-workstation")
+    now_ns = [time.time_ns()]
+    _seed_raw_frame(provider, frame_id=1, timestamp_ns=now_ns[0])
+    monkeypatch.setattr(
+        docker_computer_module.time,
+        "time_ns",
+        lambda: now_ns[0],
+    )
+
+    async def delayed_window_metadata(*args, **kwargs):
+        now_ns[0] += 2_100_000_000
+        _seed_raw_frame(
+            provider,
+            frame_id=2,
+            timestamp_ns=now_ns[0],
+        )
+        return (
+            0,
+            "___ACTIVE_WINDOW___\nDesktop\n___OPEN_WINDOWS___\n",
+            "",
+        )
+
+    provider._docker_exec = AsyncMock(side_effect=delayed_window_metadata)
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.frame_id == 2
+    assert observation.capture_age_ms == pytest.approx(0)
+    assert observation.desktop_state == "INTERACTIVE"
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_does_not_require_window_title_for_live_pixels():
+    provider = DockerComputerProvider(container_name="avcs-no-window-title-workstation")
+    raw_rgb = _seed_raw_frame(provider)
+    provider._docker_exec = AsyncMock(
+        return_value=(
+            0,
+            "___ACTIVE_WINDOW___\n\n___OPEN_WINDOWS___\n",
+            "",
+        )
+    )
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.active_window == ""
+    assert observation.raw_rgb == raw_rgb
+    assert observation.desktop_state == "INTERACTIVE"
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
 async def test_docker_screenshot_rejects_frame_that_ages_during_avcs(monkeypatch):
     provider = DockerComputerProvider(container_name="stale-avcs-test-workstation")
     timestamp_ns = time.time_ns()
