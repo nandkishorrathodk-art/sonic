@@ -23,7 +23,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Deque, List, Optional, Tuple
+from typing import Any, Deque, List, Optional, Tuple
 from collections import deque
 
 import numpy as np

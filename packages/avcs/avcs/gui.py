@@ -12,7 +12,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageTk, ImageDraw

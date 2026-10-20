@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn

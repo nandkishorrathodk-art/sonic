@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 class Mode(str, Enum):
     VISUAL_ONLY = "visual_only"

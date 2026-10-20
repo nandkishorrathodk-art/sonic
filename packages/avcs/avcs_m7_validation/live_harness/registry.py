@@ -1,7 +1,7 @@
 """Registry mapping all 12 Milestone 7/8 benchmark scenarios to their live harnesses."""
 from __future__ import annotations
 
-from typing import Dict, List, Type
+from typing import Dict, List, Tuple, Type
 
 from avcs_m7_validation.catalog import SCENARIOS
 from avcs_m7_validation.live_harness.contracts import BaseLiveHarness
