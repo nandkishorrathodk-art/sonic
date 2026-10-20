@@ -1092,6 +1092,33 @@ class TestActionParsing:
         assert payload.get("x") == 640
         assert payload.get("y") == 400
 
+    def test_parse_empty_target_does_not_swallow_payload(self):
+        """An empty `TARGET:` line must not absorb the following PAYLOAD text.
+
+        Regression: with a `\\s*` separator after the field colon the newline was
+        consumed, so TARGET captured "PAYLOAD: {...}" and the coordinate payload
+        was lost, turning a motor MOVE/CLICK into an unresolvable semantic target.
+        """
+        text = 'ACTION: GUI_MOVE\nTARGET:\nPAYLOAD: {"x": 500, "y": 300}\nEXPECTED: move cursor'
+        action_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "test.py")
+        assert action_type == ComputerActionType.GUI_MOVE
+        assert target == ""
+        assert payload.get("x") == 500
+        assert payload.get("y") == 300
+
+    def test_parse_empty_target_with_trailing_space_keeps_payload(self):
+        text = 'ACTION: GUI_CLICK\nTARGET: \nPAYLOAD: {"x": 140, "y": 260}\nEXPECTED: click'
+        action_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "test.py")
+        assert action_type == ComputerActionType.GUI_CLICK
+        assert target == ""
+        assert payload.get("x") == 140 and payload.get("y") == 260
+
+    def test_parse_terminal_exec_empty_target_keeps_command(self):
+        text = 'ACTION: TERMINAL_EXEC\nTARGET:\nPAYLOAD: {"command": "hostname"}\nEXPECTED: print'
+        action_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "test.py")
+        assert action_type == ComputerActionType.TERMINAL_EXEC
+        assert payload.get("command") == "hostname"
+
     def test_parse_gui_type(self):
         text = 'ACTION: GUI_TYPE\nTARGET: keyboard\nPAYLOAD: {"text": "hello"}\nEXPECTED: Type text'
         action_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "test.py")

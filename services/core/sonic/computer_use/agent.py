@@ -3781,7 +3781,11 @@ class ComputerUseAgent:
             except Exception:
                 pass
 
-        pattern = r'(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:\s*(.*?)(?=(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:|$)'
+        # NOTE: the separator after the field name is `[ \t]*` (not `\s*`) so an
+        # empty field like "TARGET:\nPAYLOAD: {...}" does not swallow the next
+        # field's text into this one. With `\s*` the newline is consumed and
+        # TARGET captures "PAYLOAD: {...}", dropping the payload entirely.
+        pattern = r'(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:[ \t]*(.*?)(?=(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:|$)'
         matches = re.findall(pattern, parse_target_text, re.DOTALL | re.IGNORECASE)
         # Use setdefault to preserve the FIRST action in case of multiple blocks
         raw_fields: dict[str, str] = {}
