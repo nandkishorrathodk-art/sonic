@@ -1,5 +1,13 @@
 # Artificial Visual Cortex for Screens (AVCS)
 
+> **Implementation-status note:** This document describes an experimental
+> neural-cortex architecture and prototype modules. It is not the active
+> SONIC workstation perception path, and its model heads or latency descriptions
+> are not evidence of trained semantic grounding or task success. SONIC's
+> current pixel-reflex integration and capability boundaries are documented in
+> [SONIC_AVCS_SYSTEM_FLOW.md](../../../docs/SONIC_AVCS_SYSTEM_FLOW.md) and the
+> [AVCS package README](../README.md).
+
 ## Overview
 
 **AVCS (Artificial Visual Cortex for Screens)** is a biologically inspired, non-generative, real-time vision-language perception system designed specifically for computer screens.
@@ -153,4 +161,3 @@ export_onnx(model, save_path="runs/avcs_cortex.onnx")
 ```bash
 python -m pytest tests/test_cortex.py -v
 ```
-

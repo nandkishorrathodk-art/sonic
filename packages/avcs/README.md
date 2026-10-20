@@ -1,17 +1,23 @@
 # AVCS // Artificial Visual Cortex System
-### Universal Real-Time Biological Human Eye Intelligence Platform for Computer Agents & AI
+### Local visual-perception components for computer-use systems
 
-[![Test Suite](https://img.shields.io/badge/tests-351%20passed-brightgreen.svg)](tests/)
-[![Latency](https://img.shields.io/badge/latency-8.13ms%20p50-blue.svg)](GOAL.md)
-[![Frame Rate](https://img.shields.io/badge/throughput-60--120%20FPS-success.svg)](GOAL.md)
-[![Hardware](https://img.shields.io/badge/hardware-CPU%20native%20(no%20GPU)-orange.svg)](GOAL.md)
-[![Architecture](https://img.shields.io/badge/architecture-Two--Streams%20Neuromorphic-purple.svg)](GOAL.md)
+AVCS contains frame-capture, pixel-processing, and experimental grounding
+components. Repository tests and prototype benchmarks do not establish
+real-time performance or reliable task completion in SONIC's workstation.
 
 ---
 
 ## What is AVCS?
 
-**AVCS (Artificial Visual Cortex System)** is a real-time, non-generative biological visual perception foundation designed to operate as the **Human Eye** for computer-operating AI agents, multi-modal LLMs, and autonomous systems.
+**AVCS (Artificial Visual Cortex System)** is a local visual-perception layer
+intended to supply pixel-derived state to computer-use agents. It does not plan
+tasks, choose actions, or establish that a requested task succeeded.
+
+For the current SONIC integration, see
+[`../../docs/SONIC_AVCS_SYSTEM_FLOW.md`](../../docs/SONIC_AVCS_SYSTEM_FLOW.md).
+The neural-cortex diagrams, SDK examples and prototype demonstrations later in
+this README describe AVCS package experiments; they are not a description or
+performance measurement of SONIC's active workstation path.
 
 ### Cortex-2M model readiness
 
@@ -35,35 +41,52 @@ closed until a demonstration-trained checkpoint is loaded. This model produces
 a candidate click heatmap only; it is not a task planner, input driver, or
 verified end-to-end desktop agent.
 
-Today's "Computer Use" agents (like Claude Computer Use or OpenAI Operator) are severely bottlenecked by naive vision: they take screenshots every 2–4 seconds, burn \$15–\$30 per workflow in cloud tokens, freeze during animations, and hallucinate coordinate clicks.
+SONIC's Docker workstation captures frames continuously at a configurable target
+rate (30 FPS by default), processes them locally, and may drop queued frames if
+processing falls behind. The configured target is not a measured throughput
+claim. SONIC's active AVCS reflex output is not a semantic UI tree or a
+natural-language target grounder.
 
-AVCS solves this by decoupling high-frequency visual perception from slow cognitive reasoning:
-- **AVCS acts as System 1 (Visual Cortex & Brainstem):** Perceives continuous desktop pixels at **60–120 FPS** with **sub-10ms latency** on standard CPU, extracts optical flow, tracks dynamic entities, grounds natural language queries, and detects interactive affordances for **\$0.00**.
-- **Downstream Agents / LLMs act as System 2 (Cerebral Cortex):** Receive lightweight **Differential Visual Events (<50 tokens)** and compact **DOM-less UIML trees (<150 tokens)** only when state transitions occur, reducing agent latency by **$95\%$** and token costs by **$>98\%$**.
+### System 1 and System 2
 
----
-
-## Verified Benchmarks (Measured on Live Desktop)
-
-Every number is measured and verified on standard hardware (Intel quad-core CPU, 15 GB RAM, no GPU):
-
-| Metric | Measured Result | Significance |
-| :--- | :--- | :--- |
-| **Median Perception Latency (p50)** | **$8.13\text{ ms}$** | Real-time human visual reaction speed ($<16\text{ ms}$ $60\text{ Hz}$ budget) |
-| **Real Desktop Frame Rate** | **$55.9 - 118.8\text{ FPS}$** | Smooth, continuous desktop perception (dynamic vs. static) |
-| **Hardware Readback Overhead** | **$< 0.01\text{ ms}$** | Win32 GDI DIBSection zero-copy memory mapping |
-| **Magnocellular Optical Flow** | **$0.82\text{ ms}$** | Sub-millisecond velocity fields and sudden surprise spikes |
-| **Language Gaze Grounding** | **$3.37\text{ ms}$** | Fast open-vocabulary spatial resolution on CPU |
-| **Foveal Acuity Head** | **$3.12\text{ ms}$** | High-resolution foveal zoom crop & element categorization |
-| **DOM-less Scene Tree Extraction** | **$0.30\text{ ms}$** | Pure-pixel spatial clustering into compact UIML (<150 tokens) |
-| **Neuromuscular Servoing Plan** | **$0.43\text{ ms}$** | Flash & Hogan 5th-order minimum jerk trajectory generation |
-| **Shared Memory IPC Transfer** | **$< 0.05\text{ ms}$** | Sub-microsecond zero-copy mmap broadcast with CRC32 |
-| **Multi-Turn Token Reduction** | **$> 98\%$** | $158,266$ tokens saved across 100 turns via Visual Diff Engine |
-| **Test Suite Coverage** | **351 passed, 3 skipped** | Full unit, regression, and hardware integration coverage across Phases 1–5 |
+AVCS is intended to be SONIC's fast visual System 1: it processes the whole
+screen image locally and reports frame-bound visual structure and change,
+including coarse regions, motion, and scene identity. SONIC's System 2 uses
+that compact evidence together with the operator's goal to decide what to do.
+In the active workstation path, pixel-reflex signals do not identify the
+application by name, read screen text, or recognize a specific control. Those
+claims require a separately evaluated local semantic model; target coordinates
+are an internal motor representation, not a substitute for visual grounding.
+AVCS observes action effects, while task-level verification decides whether
+the requested outcome was achieved.
 
 ---
 
-## Architecture Overview
+## Current capability and evidence limits
+
+| Area | Current evidence |
+| :--- | :--- |
+| Docker capture | A streaming process targets 30 FPS by default; sustained achieved FPS and end-to-end latency are not established here. |
+| Pixel processing | The active Docker provider processes raw RGB frames locally and rejects stale or invalid AVCS state. |
+| Semantic GUI grounding | The goal-conditioned grounder is not ready for live SONIC actions until trained on real demonstrations and it passes held-out accuracy and confidence-calibration gates. |
+| Task completion | A frame, scene change, or successful input dispatch is not proof of the requested GUI postcondition. No arbitrary-app live acceptance result is claimed. |
+
+The older prototype benchmark figures and milestone reports are not evidence of
+current SONIC workstation performance or autonomous GUI task success. See
+[`docs/TRAINING_DEMONSTRATIONS.md`](docs/TRAINING_DEMONSTRATIONS.md) for the
+grounder acceptance requirements.
+
+---
+
+## Experimental Architecture Overview
+
+The following diagram is a conceptual/prototype architecture, not the active
+SONIC runtime. In particular, it must not be read as evidence that the current
+SONIC path performs semantic app classification, OCR, language-conditioned
+grounding, affordance prediction, or biological-speed inference. SONIC's
+active path and measured evidence are described in
+[`../../docs/SONIC_AVCS_SYSTEM_FLOW.md`](../../docs/SONIC_AVCS_SYSTEM_FLOW.md)
+and the capability table above.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -180,7 +203,7 @@ AVCS provides a high-level developer SDK designed for seamless agent and multi-m
 ```python
 import avcs
 
-# 1. Initialize the Biological Human Eye Client (60-120 FPS on desktop)
+# 1. Initialize the AVCS SDK (example code; performance is not implied)
 client = avcs.eye(source="desktop", fps=60)
 
 # 2. Phase 2: Open-Vocabulary Natural Language Gaze Grounding (<3.5ms)

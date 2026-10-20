@@ -1,0 +1,150 @@
+# SONIC + AVCS: Current Desktop Perception and Action Flow
+
+**Status:** Current implementation description, checked 2026-10-20. This
+document describes the normal SONIC workstation path; it does not claim that
+arbitrary desktop tasks are reliable or that every optional model is ready.
+The [computer-user goal](SONIC_COMPUTER_USER_GOAL.md) remains the acceptance
+contract.
+
+## The four roles
+
+| Role | Component | Responsibility | Does not prove |
+|---|---|---|---|
+| Eye / System 1 | AVCS pixel-reflex perception | Process a fresh desktop frame locally and derive bounded pixel/scene-change signals. | App identity, readable screen text, semantic control identity, or task success. |
+| Brain / System 2 | SONIC workstation reasoning | Interpret the operator's goal and available evidence, then propose the next action. | That the proposed action was dispatched or worked. |
+| Hands | Computer/action provider plus policy | Validate and dispatch an allowed GUI or other task-appropriate action; record the result. | That a dispatch changed the intended application state. |
+| Independent check | Boss/Judge and task-specific evidence | Review worker receipts and fresh evidence; the current AVCS-only GUI Judge returns inconclusive because it has no validated task-verification head. | Universal reliability or success from scene change alone. |
+
+“System 1” and “System 2” are architectural roles here, not a claim that the
+current reflex implementation has human-level perception or cognition.
+
+## End-to-end flow
+
+```mermaid
+flowchart TD
+    U["Operator's desired outcome"] --> API["Workstation API / session"]
+    API --> B["Boss: analyze, delegate, review, replan"]
+    B --> W["ComputerUseAgent worker"]
+    W --> F["Request fresh frame"]
+    F --> P["Workstation provider<br/>normal local path: DockerComputerProvider"]
+    P --> RGB["Timestamped RGB frame + frame identity"]
+    RGB --> AVCS["AVCSPerception<br/>local pixel-reflex processing"]
+    AVCS --> V{"Frame fresh, valid,<br/>and matched?"}
+    V -- "No" --> STOP["Stop / report unavailable;<br/>do not reason or click on stale state"]
+    V -- "Yes" --> S["Allowlisted, bounded AVCS summary"]
+    S --> LLM["System 2 reasoning<br/>goal + summary + task history"]
+    LLM --> INTENT["One proposed next action"]
+    INTENT --> G{"Grounded with current<br/>evaluated capability?"}
+    G -- "No / ambiguous" --> STOP2["Block and re-observe or replan"]
+    G -- "Yes" --> POLICY["Action policy and<br/>pre-dispatch validation"]
+    POLICY --> HAND["Provider dispatch + action receipt"]
+    HAND --> FRESH["Fresh post-action observation"]
+    FRESH --> J["Boss/Judge processes fresh pixels locally<br/>and reviews worker receipt"]
+    J --> RESULT["Current AVCS-only GUI verdict:<br/>INCONCLUSIVE"]
+    RESULT --> LOOP["Do not claim task completion;<br/>report uncertainty, replan,<br/>or ask for human help"]
+    LOOP --> B
+```
+
+### 1. Capture and local perception
+
+The normal local workstation provider is `DockerComputerProvider`. The
+workstation-side frame stream captures timestamped RGB frames; the provider's
+frame-processing worker runs `AVCSPerception` locally on those RGB bytes and
+binds the resulting state to the source frame ID. The provider checks that a
+frame is new and fresh before returning it. If waiting for a processed frame
+times out, it restarts the stream once and retries; a second failure is
+reported as unavailable, not as a successful observation.
+
+`ComputerUseAgent.observe()` validates the pixels, dimensions, freshness and
+AVCS state. AVCS derives a frame-bound reflex state from pixels locally. The
+summary can include frame/screen identity, scene fingerprint, coarse
+change/motion values, coarse region kinds, allowlisted event categories and
+advisory temporal telemetry. It does not forward arbitrary event text.
+
+### 2. System 2 reasoning
+
+For GUI reasoning, `ComputerUseAgent` builds the prompt after any frame
+refresh. The model receives the operator objective, a bounded AVCS text
+summary, and task history. It does **not** receive workstation screenshot
+pixels through this reasoning request. If pixels or matching fresh AVCS state
+are missing, stale, malformed or inconsistent, GUI reasoning fails closed.
+
+The reflex summary is evidence about pixel-derived change, not a natural
+language description of the desktop. It must not be interpreted as proof that
+the screen contains a named application, text label, button, or requested
+result.
+
+### 3. Grounding, policy and execution
+
+System 2 proposes an action; it does not directly control the pointer. A
+semantic GUI target must be resolved with current evidence and the configured
+local AVCS grounding capability. An explicit pixel point instead needs
+current-frame provenance and strict screen-bounds validation; a model-proposed
+coordinate by itself is not grounding evidence. Either path must pass
+freshness, frame-identity and action-policy checks before provider dispatch.
+An ambiguous target or a missing/unready grounding capability blocks the
+dependent action.
+
+Semantic pointer grounding and focus verification are separate capabilities.
+The goal-conditioned grounder requires recorded demonstration provenance,
+held-out evaluation and calibrated per-query confidence evidence. Text entry
+also requires evaluated local focus verification. The existence of model
+code, a configured path or a checkpoint file alone does not establish
+readiness. No live acceptance result in this repository documentation proves
+reliable grounding or typing.
+
+The provider performs the action and returns a receipt. Dispatch success is
+not task success. The worker must observe the resulting state; Boss reviews
+the worker evidence and an independent Judge result before reporting a GUI
+task complete.
+
+### 4. Judge and completion
+
+The GUI Judge requires fresh desktop evidence and processes pixels locally
+through AVCS. It does not send screenshot pixels to a model. In the current
+AVCS-only GUI path, the Judge records the fresh reflex state but returns
+`INCONCLUSIVE`: there is no validated local task-verification head to establish
+the semantic postcondition. AVCS reflex signals, motion, a changed scene, a
+successful input dispatch, or the worker's `GOAL_COMPLETE` proposal alone do
+not establish completion. Report the GUI outcome as unconfirmed unless a
+separate, task-relevant verification path provides admissible evidence.
+
+## Capability boundaries
+
+- **Implemented:** local frame-stream integration, pixel-reflex state,
+  freshness/frame checks, bounded summary for GUI reasoning, one stream
+  restart-and-retry, action receipts and fail-closed handling for unsupported
+  GUI actions.
+- **Optional and gated:** semantic target grounding and focus verification.
+  These are usable only when the corresponding local model has valid
+  evaluation/provenance evidence and is ready.
+- **Not established:** human-like full-screen understanding, reliable
+  recognition of arbitrary app names or screen text, universal GUI grounding,
+  sustained target-FPS performance, arbitrary multi-step task success, or
+  superiority to human users or other computer-use systems.
+- **Different execution plane:** a headless task does not need desktop AVCS
+  frames. The selected plane must match the assigned task; headless execution
+  must not masquerade as visible GUI work.
+- **Explicit snapshot boundary:** an authorized dashboard snapshot endpoint
+  may encode a frame for display. That API-boundary behavior is distinct from
+  sending workstation pixels to reasoning or Judge models.
+
+## Source and related documentation
+
+- [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — SONIC components and runtime
+  boundaries.
+- [`docs/SONIC_COMPUTER_USER_GOAL.md`](SONIC_COMPUTER_USER_GOAL.md) — product
+  goal and GUI acceptance criteria.
+- [`packages/avcs/README.md`](../packages/avcs/README.md) — AVCS package status,
+  current capability evidence and experimental features.
+- [`packages/avcs/docs/AVCS_ARCHITECTURE.md`](../packages/avcs/docs/AVCS_ARCHITECTURE.md)
+  — experimental neural-cortex design, not the active SONIC reflex path.
+- [`packages/avcs/docs/AVCS_LLM_INTEGRATION_ROADMAP.md`](../packages/avcs/docs/AVCS_LLM_INTEGRATION_ROADMAP.md)
+  — historical integration proposal, not a current delivery/status report.
+
+Primary implementation entry points:
+`services/core/sonic/computer/docker_computer.py`,
+`services/core/sonic/computer_use/avcs_perception.py`,
+`services/core/sonic/computer_use/agent.py`,
+`services/core/sonic/computer_use/boss.py`, and
+`services/core/sonic/agents/judge.py`.

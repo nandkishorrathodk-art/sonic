@@ -11,6 +11,11 @@ This is the product direction, not a claim that every task is already
 implemented or reliable. Capability claims require evidence from real
 workstation tasks.
 
+For the current AVCS/System 1, System 2, action-provider and Judge flow, see
+[SONIC_AVCS_SYSTEM_FLOW.md](SONIC_AVCS_SYSTEM_FLOW.md). That document describes
+the implemented path and its evidence limits; it does not expand the acceptance
+claims below.
+
 ## Expected behavior
 
 ### Understand outcomes

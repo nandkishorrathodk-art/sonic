@@ -20,6 +20,7 @@ by itself prove that a real desktop task succeeded.
 | Native kernel | [`packages/kernel/`](packages/kernel/) | Rust runtime, safety and IPC |
 | Desktop/container setup | [`docker/`](docker/) and [`docker-compose.yml`](docker-compose.yml) | Local graphical workstation and supporting services |
 | Product acceptance contract | [`docs/SONIC_COMPUTER_USER_GOAL.md`](docs/SONIC_COMPUTER_USER_GOAL.md) | Authoritative computer-use goal and evidence requirements |
+| SONIC + AVCS flow | [`docs/SONIC_AVCS_SYSTEM_FLOW.md`](docs/SONIC_AVCS_SYSTEM_FLOW.md) | Current perception, reasoning, action and verification path |
 | Architecture and engineering docs | [`docs/`](docs/) | Setup, architecture, deployment and contributor guidance |
 
 ```text
