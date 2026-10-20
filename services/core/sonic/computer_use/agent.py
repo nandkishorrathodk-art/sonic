@@ -5045,6 +5045,27 @@ class ComputerUseAgent:
             self._last_screenshot_b64 = ""
         return result
 
+    def _avcs_focus_head_ready(self) -> bool:
+        """True only when a configured, evaluated local focus head can be loaded.
+
+        This is a pure capability probe: it never dispatches an action and never
+        treats a configured checkpoint path as readiness. A missing or failing
+        checkpoint returns False so text entry stays blocked.
+        """
+        try:
+            perception = getattr(self, "_avcs_perception", None)
+            if perception is None:
+                from sonic.computer_use.avcs_perception import AVCSPerception
+
+                perception = AVCSPerception()
+                self._avcs_perception = perception
+            ensure = getattr(perception, "ensure_focus_verifier_ready", None)
+            if not callable(ensure):
+                return False
+            return bool(ensure())
+        except Exception:
+            return False
+
     async def _verify_gui_focus_with_avcs(
         self,
         screen: ScreenObservation,
@@ -5359,7 +5380,7 @@ class ComputerUseAgent:
         if action_type in (
             ComputerActionType.GUI_TYPE,
             ComputerActionType.BROWSER_NAVIGATE,
-        ):
+        ) and not self._avcs_focus_head_ready():
             actual_obs_str = (
                 f"{action_type.value} blocked: AVCS has no evaluated local "
                 "focus-verification head, so text will not be sent."

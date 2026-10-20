@@ -47,7 +47,12 @@ task/window groups to produce leakage-resistant train/validation/test splits.
 
 Keyboard input remains blocked until AVCS provides a dedicated local focus head
 whose current-frame result is backed by recorded focus-demonstration provenance
-and held-out precision of at least 0.80 on at least 30 samples. Host application
+and held-out precision of at least 0.80 on at least 30 samples. That head now
+exists: train it from recorded focus demonstrations and configure
+`SONIC_AVCS_FOCUS_CHECKPOINT` with the resulting checkpoint (see
+`packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md`). The loader refuses any
+checkpoint that lacks recorded-demonstration provenance or fails its held-out
+precision gate, so a configured path alone never unlocks typing. Host application
 launch/close and software installation remain blocked. AVCS reflex output is
 not semantic grounding or focus verification, and enabling this opt-in does not
 establish reliable autonomous GUI task completion. Use a single primary display

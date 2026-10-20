@@ -1169,3 +1169,66 @@ async def test_daytona_destroy_failure_keeps_workspace_tracked(tmp_path, monkeyp
     assert workspace.status == ComputerWorkspaceStatus.DEGRADED
     assert provider.workspaces[workspace.id] is workspace
     assert provider._sandboxes[workspace.id] is not None
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_daemon_probe_is_single_flight_under_concurrent_exec(monkeypatch):
+    """Concurrent execs must share one `docker info` probe, not fan out N probes."""
+    provider = DockerComputerProvider()
+    provider._daemon_checked = None
+    provider._daemon_checked_at = None
+
+    calls = {"info": 0}
+
+    def counting_run(args, *rest, **kwargs):
+        if isinstance(args, (list, tuple)) and len(args) > 1 and args[1] == "info":
+            calls["info"] += 1
+            time.sleep(0.05)
+        return SimpleNamespace(returncode=0, stdout=b"25.0.0", stderr=b"")
+
+    monkeypatch.setattr(docker_computer_module.subprocess, "run", counting_run)
+
+    async def fake_container_running():
+        return True
+
+    monkeypatch.setattr(provider, "_container_is_running", fake_container_running)
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*a, **k):
+        return _Proc()
+
+    monkeypatch.setattr(
+        docker_computer_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    await asyncio.gather(*(provider._docker_exec("true", timeout=1) for _ in range(4)))
+    assert calls["info"] == 1
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_container_probe_is_single_flight_under_concurrent_calls(monkeypatch):
+    """Concurrent container-state probes must share one `docker inspect`."""
+    provider = DockerComputerProvider()
+    provider._container_checked_at = None
+    provider._container_running_cache = False
+
+    calls = {"inspect": 0}
+
+    def counting_run(args, *rest, **kwargs):
+        if isinstance(args, (list, tuple)) and len(args) > 1 and args[1] == "inspect":
+            calls["inspect"] += 1
+            time.sleep(0.05)
+        return SimpleNamespace(returncode=0, stdout=b"true", stderr=b"")
+
+    monkeypatch.setattr(docker_computer_module.subprocess, "run", counting_run)
+
+    results = await asyncio.gather(*(provider._container_is_running() for _ in range(5)))
+    assert all(results)
+    assert calls["inspect"] == 1

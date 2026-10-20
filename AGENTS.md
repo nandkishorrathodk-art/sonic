@@ -2742,3 +2742,60 @@ Root cause found for "the mouse can't be used" and the perception loop:
 
 Test baseline after this pass: 935 passed, 25 skipped (broad computer/agent/gui
 regression); 660 passed on the parser/action-focused subset.
+
+## Focus-verification head + hot-path latency fix (2026-10-20)
+
+Two real gaps closed while assessing AVCS/CUA and a reported slowness regression.
+
+### 1. Local focus-verification head — previously entirely missing
+The agent demanded an "evaluated local focus-verification head" before typing,
+but **no focus-verifier module existed anywhere**; `GUI_TYPE`/`BROWSER_NAVIGATE`
+were blocked by an unconditional early `return` in `_execute_action_unlocked`
+(agent.py ~5380), which also made the real focus-verify path (~6759) dead code.
+Built the missing capability with the same honesty discipline as the grounder:
+
+- `packages/avcs/avcs/focus_verifier.py` — `FocusVerifier` (CorticalBackbone2M +
+  `ByteQueryEncoder` + MLP head) classifying whether a screen point is a focused
+  text-entry control; `load_focus_checkpoint()` refuses any checkpoint lacking
+  recorded-demonstration provenance or a passing held-out precision evaluation.
+  `focus_patch_bounds`/`focus_patch_rgb` crop a clamped square patch around the
+  point (no clamping of off-screen points into edge clicks).
+- `packages/avcs/avcs/training/focus_dataset.py` — session-disjoint discovery/
+  split (task+window groups never leak across train/val/held-out) and dataset.
+- `packages/avcs/avcs/training/train_focus_verifier.py` — trainer with held-out
+  precision gate; `runtime_ready` is derived, never decreed.
+- `services/core/sonic/computer_use/avcs_perception.py` — `verify_focus_rgb_bytes`,
+  `ensure_focus_verifier_ready()`, `focus_verifier_ready`; fails closed without a
+  configured, evaluated checkpoint or when pixels are not the latest frame.
+- `agent.py` — `_avcs_focus_head_ready()` capability probe; the early GUI_TYPE/
+  BROWSER_NAVIGATE block is now conditional on it. No checkpoint → still BLOCKED
+  (unchanged); a genuinely ready head → dispatch proceeds to real focus
+  verification. A configured-but-unloadable checkpoint is NOT readiness.
+
+**Bug found during verification:** threshold selection used raw scores as
+candidates, so the chosen threshold landed exactly on a true positive score and
+`score >= threshold` excluded it (field scored 0.897 with threshold 0.897 →
+`focused=False`). Fixed to use midpoint candidates between adjacent distinct
+scores (standard ROC practice).
+
+### 2. Slowness regression — duplicated Docker probes on the cold hot path
+`status()` fans out 4 concurrent `docker exec`s, but each independently ran the
+stale-cache `docker info` daemon probe (and `docker inspect` container probe).
+With a stale (>10 s) cache a cold `status()` cost ~446 ms with **4** duplicate
+`docker info` probes; warm it was ~92 ms. Added single-flight async locks
+(`_daemon_probe_lock`, `_container_probe_lock`) with double-checked re-reads.
+Cold stale-cache `status()` dropped to ~114 ms with 1 probe. Warm `observe()`
+remains ~260 ms (status ~150 ms + screenshot ~100 ms); `application_list` is
+cached so the earlier "fold into gather" fix is not defeated.
+
+### Tests
+- `packages/avcs/tests/test_focus_verifier.py` (14).
+- `services/core/tests/test_phase8_visual_computer_use.py` `TestFocusHeadCapabilityGate` (5).
+- `services/core/tests/test_docker_computer_provider.py` (2): single-flight probes.
+- Focused regression: 153 passed, 2 skipped across provider + GUI suites.
+
+**Honesty:** unit/contract validations only. No real arbitrary-GUI end-to-end
+task was demonstrated, and no live focus checkpoint exists in-repo; without one,
+text entry correctly stays blocked. Train a checkpoint from real recorded
+demonstrations (packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md) before
+claiming focus verification works on real controls.

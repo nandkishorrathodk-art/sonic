@@ -198,6 +198,8 @@ class DockerComputerProvider(ComputerProvider):
         self._last_exec: tuple[str, int, str, str] | None = None  # (cmd, exit, stdout, stderr)
         self._daemon_checked: bool | None = None
         self._daemon_checked_at: float | None = None
+        self._daemon_probe_lock = asyncio.Lock()
+        self._container_probe_lock = asyncio.Lock()
         self._container_running_cache: bool = False
         self._container_checked_at: float | None = None
         self._default_workspace_id = self.container_name
@@ -259,20 +261,30 @@ class DockerComputerProvider(ComputerProvider):
         now = asyncio.get_event_loop().time()
         if self._container_checked_at is not None and (now - self._container_checked_at) < 1.5:
             return self._container_running_cache
-        try:
-            probe = await asyncio.to_thread(
-                subprocess.run,
-                [docker, "inspect", "-f", "{{.State.Running}}", self.container_name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
-            running = probe.stdout.decode("utf-8", errors="ignore").strip() == "true"
-        except Exception:
-            running = False
-        self._container_running_cache = running
-        self._container_checked_at = now
-        return running
+        # Single-flight: the status() hot path fans out concurrent execs, each of
+        # which probes container state. Share one `docker inspect` round-trip so
+        # a cold observation pays one probe instead of four.
+        async with self._container_probe_lock:
+            now = asyncio.get_event_loop().time()
+            if (
+                self._container_checked_at is not None
+                and (now - self._container_checked_at) < 1.5
+            ):
+                return self._container_running_cache
+            try:
+                probe = await asyncio.to_thread(
+                    subprocess.run,
+                    [docker, "inspect", "-f", "{{.State.Running}}", self.container_name],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                running = probe.stdout.decode("utf-8", errors="ignore").strip() == "true"
+            except Exception:
+                running = False
+            self._container_running_cache = running
+            self._container_checked_at = now
+            return running
 
     async def _provision_workstation(self) -> bool:
         """Try to bring up the workstation container from repo compose files.
@@ -326,19 +338,33 @@ class DockerComputerProvider(ComputerProvider):
             or not self._daemon_checked
             or (self._daemon_checked_at is not None and (now - self._daemon_checked_at) > 10.0)
         ):
-            try:
-                probe = await asyncio.to_thread(
-                    subprocess.run,
-                    [docker, "info", "--format", "{{.ServerVersion}}"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=10,
-                )
-                self._daemon_checked = probe.returncode == 0
-                self._daemon_checked_at = now
-            except Exception:
-                self._daemon_checked = False
-                self._daemon_checked_at = now
+            # Single-flight: concurrent hot-path probes (status() fans out four
+            # execs) must share one `docker info` round-trip instead of each
+            # spawning its own. Re-check the cache after acquiring the lock so
+            # only the first waiter actually probes.
+            async with self._daemon_probe_lock:
+                now = asyncio.get_event_loop().time()
+                if (
+                    self._daemon_checked is None
+                    or not self._daemon_checked
+                    or (
+                        self._daemon_checked_at is not None
+                        and (now - self._daemon_checked_at) > 10.0
+                    )
+                ):
+                    try:
+                        probe = await asyncio.to_thread(
+                            subprocess.run,
+                            [docker, "info", "--format", "{{.ServerVersion}}"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=10,
+                        )
+                        self._daemon_checked = probe.returncode == 0
+                        self._daemon_checked_at = now
+                    except Exception:
+                        self._daemon_checked = False
+                        self._daemon_checked_at = now
         if not self._daemon_checked:
             return 126, "", "docker daemon is unreachable; command execution failed-closed"
         async with self._exec_semaphore:
