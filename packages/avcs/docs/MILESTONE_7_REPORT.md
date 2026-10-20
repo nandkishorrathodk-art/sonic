@@ -19,22 +19,23 @@
 > latency, and release-candidate decision are not valid evidence of GUI
 > capability and must not be used as certification claims.
 
-Milestone 7 delivers the **Cross-Application Generalization and Release Candidate Validation Suite** for AVCS. It expands beyond single-application workflows into a diverse 12-scenario matrix covering native Win32/UWP controls, display geometry scaling, canvas applications (no DOM), legacy forms, mixed accessibility, simulated remote desktop, and dynamic UI overlays.
+The sections below preserve the historical harness description and output for
+auditability only. Because the adapter used fixed actions and coordinates, the
+scenario matrix is not evidence of cross-application generalization, an AVCS
+release candidate, or autonomous GUI task completion.
 
-Crucial architectural contracts enforced:
-1. **Three Comparable Execution Modes**: Evaluated under identical scenario/repetition master seeds across:
-   - `visual_only`: Pure-pixel biological perception (`HumanEye`, magnocellular optical flow, foveal acuity).
-   - `uia_only`: Windows UI Automation tree inspection and accessibility semantics.
-   - `hybrid`: Multimodal fusion bridging visual affordances with accessibility semantics (`TargetProvenance.FUSED`).
-2. **Strict Zero-Oracle Boundary**: The execution adapter receives only an `AgentTask` prompt and mode string. Scenario IDs, target properties, oracle assertions, and setup notes remain strictly private to the evaluation process.
-3. **Independent Out-of-Process Oracle**: Application postconditions are evaluated by a dedicated oracle inspecting target application states independently of the agent's reported status.
-4. **Deterministic Release Decision**: Requiring $\ge 300$ trials, coverage across $\ge 8$ distinct scenarios, $\ge 95\%$ verified completion per scenario/mode, and exactly zero false confirmations.
+The original report described these as architectural contracts. The fixed
+action/coordinate adapter did not validate the claimed live application modes,
+task-driven action selection, or GUI postconditions; therefore the assertions
+and release gates below are historical harness output, not verified contracts
+of AVCS or SONIC.
 
 ---
 
-## 2. 360-Trial Cross-Application Validation Results
+## 2. Retracted 360-Trial Harness Output (Not GUI Verification)
 
-The 360-trial cross-application validation benchmark completed with **100% verified task completion** and **zero false confirmations**:
+The retracted synthetic harness reported the following output. It must not be
+interpreted as verified task completion, release acceptance, or GUI capability:
 
 ### 2.1 Acceptance Gate Scorecard
 

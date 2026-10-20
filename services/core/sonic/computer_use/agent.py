@@ -2391,11 +2391,14 @@ class ComputerUseAgent:
             raw_facts.append(f"Git: {git_branch_str} (clean={observation.git_clean})")
         if terminal_text != "UNKNOWN":
             raw_facts.append(f"Last terminal output: {terminal_text[:500]}")
-        avcs_state = getattr(observation.screen, "avcs_state", {})
-        if avcs_state:
+        avcs_summary = self._fresh_avcs_reflex_summary(
+            getattr(observation, "screen", None)
+        )
+        if avcs_summary != "unavailable":
             raw_facts.append(
-                "AVCS local pixel reflex (not semantic UI labels or task proof): "
-                + self._format_avcs_reflex_summary(avcs_state)
+                "AVCS local pixel reflex (coarse visual change only; not semantic "
+                "UI labels or task proof): "
+                + avcs_summary
             )
         facts_str = "\n  ".join(raw_facts) if raw_facts else "(no observations yet)"
 
@@ -2647,16 +2650,17 @@ class ComputerUseAgent:
             obs_summary += f"\nYour Immediate Prior Thought was:\n\"{prior_thought[:400]}\"\n"
 
         if self._gui_action_contract_active():
-            avcs_state = getattr(observation.screen, "avcs_state", {})
-            avcs_state_text = json.dumps(
-                avcs_state, ensure_ascii=False, separators=(",", ":")
-            ) if avcs_state else "unavailable"
+            avcs_summary = self._fresh_avcs_reflex_summary(
+                getattr(observation, "screen", None)
+            )
             obs_summary = (
                 "ASSIGNED PLANE: visible desktop GUI only.\n"
                 f"OBJECTIVE: {goal}\n"
                 f"CURRENT SCREEN DIMENSIONS: {screen_w}x{screen_h} pixels.\n"
-                "CURRENT AVCS PIXEL STATE (computed locally; no screenshot is sent "
-                f"to the reasoning model): {avcs_state_text}\n"
+                "CURRENT AVCS PIXEL STATE SUMMARY "
+                "(fresh local frame; coarse scene/change/motion signals only; "
+                "not semantic certainty or task proof; no screenshot is sent; "
+                f"no pixels are sent): {avcs_summary}\n"
                 "GROUNDING RULE: AVCS reflex state describes pixel changes and scene "
                 "motion; it does not provide OCR or semantic controls. Semantic targets "
                 "must be resolved locally by the configured, evaluated AVCS grounder. "
@@ -2847,33 +2851,160 @@ class ComputerUseAgent:
                 return "unknown"
             return f"{float(value):.3f}"
 
-        system3 = state.get("system3")
-        if (
-            not isinstance(system3, dict)
-            or system3.get("engine") != "system3_temporal_prediction"
-        ):
-            temporal = "temporal=unavailable"
-        else:
-            temporal_state = str(system3.get("stability_state", "unknown"))[:24]
-            temporal = (
-                f"temporal={temporal_state} "
-                f"surprise={format_number(system3.get('surprise_score'))} (advisory)"
-            )
-
         scene_hash = str(state.get("scene_hash", "")).strip()
-        frame_id = state.get("source_frame_id", state.get("frame_index", "unknown"))
+        frame_id = state.get("source_frame_id")
+        if (
+            isinstance(frame_id, bool)
+            or not isinstance(frame_id, int)
+            or frame_id <= 0
+        ):
+            frame_id = state.get("frame_index", "unknown")
         changed = state.get("scene_changed")
         overlay = state.get("overlay_suspected")
         regions = state.get("regions")
         region_count = len(regions) if isinstance(regions, list) else 0
+        region_kinds = []
+        if isinstance(regions, list):
+            for region in regions:
+                if not isinstance(region, dict):
+                    continue
+                kind = region.get("kind")
+                if kind in {"band", "panel", "patch"} and kind not in region_kinds:
+                    region_kinds.append(kind)
+                if len(region_kinds) == 3:
+                    break
+        temporal_state = "unavailable"
+        system3 = state.get("system3")
+        if (
+            isinstance(system3, dict)
+            and system3.get("engine") == "system3_temporal_prediction"
+        ):
+            temporal_state = (
+                f"{str(system3.get('stability_state', 'unknown'))[:24]} "
+                f"(advisory surprise={format_number(system3.get('surprise_score'))})"
+            )
+        event_labels = {
+            "scene_change": "whole-screen transition",
+            "overlay": "possible compact overlay change",
+            "move": "localized motion",
+            "appear": "new visually busy area",
+        }
+        events = state.get("events")
+        visual_events = []
+        if isinstance(events, list):
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                label = event_labels.get(event.get("kind"))
+                if label and label not in visual_events:
+                    visual_events.append(label)
+                if len(visual_events) == 3:
+                    break
+        dimensions = (
+            f"{state['width']}x{state['height']}"
+            if isinstance(state.get("width"), int)
+            and not isinstance(state.get("width"), bool)
+            and state["width"] > 0
+            and isinstance(state.get("height"), int)
+            and not isinstance(state.get("height"), bool)
+            and state["height"] > 0
+            else "unknown"
+        )
         return (
-            f"frame={frame_id}, scene={scene_hash[:12] or 'unknown'}, "
+            "pixel-only; "
+            f"frame={frame_id}, screen={dimensions}, "
+            f"scene={scene_hash[:12] or 'unknown'}, "
             f"changed={changed if isinstance(changed, bool) else 'unknown'}, "
             f"change={format_number(state.get('change_fraction'))}, "
             f"motion={format_number(state.get('global_motion'))}, "
-            f"overlay={overlay if isinstance(overlay, bool) else 'unknown'}, "
-            f"regions={region_count}, {temporal}"
+            f"peak_motion={format_number(state.get('peak_motion'))}, "
+            f"overlay_suspected={overlay if isinstance(overlay, bool) else 'unknown'}, "
+            f"coarse_regions={region_count} ({','.join(region_kinds) or 'unknown'}), "
+            f"events={', '.join(visual_events) or 'none'}, temporal={temporal_state}"
         )
+
+    @classmethod
+    def _fresh_avcs_reflex_summary(
+        cls, screen: ScreenObservation | None, *, max_age_ms: float = 2_000
+    ) -> str:
+        """Summarize only AVCS state matched to the screen's current fresh frame."""
+        if screen is None or getattr(screen, "desktop_state", None) != "INTERACTIVE":
+            return "unavailable"
+        raw_rgb = getattr(screen, "raw_rgb", b"")
+        screenshot = getattr(screen, "screenshot_base64", "")
+        width, height = getattr(screen, "width", 0), getattr(screen, "height", 0)
+        if not screenshot and not raw_rgb:
+            return "unavailable"
+        if (
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or width <= 0
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or height <= 0
+            or (
+                raw_rgb
+                and (
+                    not isinstance(raw_rgb, bytes)
+                    or len(raw_rgb) != width * height * 3
+                )
+            )
+        ):
+            return "unavailable"
+
+        age_ms = getattr(screen, "capture_age_ms", None)
+        if (
+            isinstance(age_ms, bool)
+            or not isinstance(age_ms, (int, float))
+            or not math.isfinite(float(age_ms))
+            or age_ms < 0
+        ):
+            age_ms = None
+        capture_timestamp_ns = getattr(screen, "capture_timestamp_ns", None)
+        if isinstance(capture_timestamp_ns, int) and not isinstance(
+            capture_timestamp_ns, bool
+        ):
+            timestamp_age_ms = (time.time_ns() - capture_timestamp_ns) / 1_000_000
+            if not math.isfinite(timestamp_age_ms) or timestamp_age_ms < 0:
+                return "unavailable"
+            age_ms = max(float(age_ms or 0), timestamp_age_ms)
+        if age_ms is None or age_ms > max_age_ms:
+            return "unavailable"
+
+        state = getattr(screen, "avcs_state", None)
+        frame_index = state.get("frame_index") if isinstance(state, dict) else None
+        screen_frame_id = getattr(screen, "frame_id", None)
+        if (
+            not isinstance(state, dict)
+            or state.get("engine") != "avcs_reflex"
+            or isinstance(frame_index, bool)
+            or not isinstance(frame_index, int)
+            or frame_index <= 0
+            or getattr(screen, "perception_version", None) != frame_index
+            or state.get("width") != width
+            or state.get("height") != height
+            or not isinstance(state.get("scene_hash"), str)
+            or not state["scene_hash"].strip()
+            or (
+                screen_frame_id is not None
+                and state.get("source_frame_id") != screen_frame_id
+            )
+            or (
+                screen_frame_id is None
+                and state.get("source_frame_id") is not None
+            )
+            or (
+                raw_rgb
+                and (
+                    isinstance(screen_frame_id, bool)
+                    or not isinstance(screen_frame_id, int)
+                    or screen_frame_id <= 0
+                    or state.get("source_frame_id") != screen_frame_id
+                )
+            )
+        ):
+            return "unavailable"
+        return cls._format_avcs_reflex_summary(state)
 
     _MAX_HISTORY_STEPS: int = 25
     _MAX_RESULT_LENGTH: int = 500
@@ -2949,9 +3080,6 @@ class ComputerUseAgent:
                 self._agentic_lessons = self.lessons_ledger.relevant(goal)
                 self._agentic_lessons_goal = goal
 
-        system_prompt, obs_summary = self._build_reasoning_context(
-            goal, observation, step_index, primary_file, test_file
-        )
         plane = str(getattr(self, "execution_plane", "dual") or "dual").lower().strip()
         gui_reasoning = (
             plane in ("gui", "dual")
@@ -3035,13 +3163,20 @@ class ComputerUseAgent:
                     height=getattr(visual_observation, "height", 0),
                     capture_age_ms=visual_age,
                 )
+        avcs_summary = self._fresh_avcs_reflex_summary(
+            getattr(observation, "screen", None)
+        )
         if gui_reasoning and (
-            not self._last_screen_has_pixels
-            or not getattr(observation.screen, "avcs_state", None)
+            not self._last_screen_has_pixels or avcs_summary == "unavailable"
         ):
             return self._reasoning_unavailable_action(
-                "AVCS requires a fresh pixel frame and local AVCS state; no GUI reasoning request was sent."
+                "AVCS requires fresh, frame-matched pixel state; no GUI reasoning request was sent."
             )
+        # Build the prompt only after any fresh-frame recovery so the next
+        # System2 turn reasons from the same pixels as the AVCS state.
+        system_prompt, obs_summary = self._build_reasoning_context(
+            goal, observation, step_index, primary_file, test_file
+        )
         user_text = obs_summary
         image_attached = False
         escalation_reason = (
@@ -3071,7 +3206,7 @@ class ComputerUseAgent:
             "visual_escalation_reason": escalation_reason,
             "image_escalation_count": counters["visual_escalations"],
         }
-        if self._gui_action_contract_active() and not observation.screen.avcs_state:
+        if self._gui_action_contract_active() and avcs_summary == "unavailable":
             return (
                 ActionExecutionStatus.BLOCKED,
                 "gui-perception-unavailable",
@@ -9493,6 +9628,24 @@ class ComputerUseAgent:
                     action=action_type_val,
                     target=target,
                     reason=trace_observation[:200],
+                )
+                break
+
+            if (
+                trace.status == ActionExecutionStatus.BLOCKED
+                and "[ACTION LOOP DETECTED]" in trace_observation
+            ):
+                self.history.append({
+                    "action": f"{action_type_val} {target} (ACTION_LOOP_BLOCKED)",
+                    "result": (
+                        "Stopped after the action-loop breaker blocked a repeated "
+                        "action. Replan from the latest desktop observation."
+                    ),
+                })
+                logger.warning(
+                    "mission_stopped_after_action_loop_block",
+                    action=action_type_val,
+                    target=target,
                 )
                 break
 

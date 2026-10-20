@@ -124,6 +124,53 @@ def test_local_restore_does_not_reassign_persisted_shared_container(
         workstation._tenant_workstations.pop(tenant_id, None)
 
 
+@pytest.mark.parametrize("mission_status", ["QUEUED", "RUNNING"])
+def test_workstation_state_restore_marks_active_mission_failed(
+    tmp_path, monkeypatch, mission_status
+):
+    tenant_id = "restore-running-mission-tenant"
+    state_path = tmp_path / "workstations.json"
+    state_path.write_text(
+        json.dumps({
+            tenant_id: {
+                "default": {
+                    "status": mission_status,
+                    "current_action": "Starting mission target-sandbox preflight...",
+                    "desktop": {},
+                    "mission": {
+                        "mission_id": "mission-orphaned",
+                        "status": mission_status,
+                        "completed_at": "",
+                        "events": [],
+                    },
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SONIC_USE_DAYTONA_CLOUD", "0")
+    monkeypatch.setattr(
+        workstation, "_get_workstation_state_file", lambda: state_path
+    )
+    workstation._tenant_workstations.pop(tenant_id, None)
+
+    try:
+        workstation._load_workstation_state()
+        restored = workstation._tenant_workstations[tenant_id]["default"]
+
+        assert restored["status"] == "IDLE"
+        assert restored["mission"]["status"] == "FAILED"
+        assert restored["mission"]["completed_at"]
+        assert restored["current_action"] == (
+            "Mission interrupted by service restart."
+        )
+        assert restored["mission"]["events"][0]["title"] == (
+            "Mission interrupted by service restart"
+        )
+    finally:
+        workstation._tenant_workstations.pop(tenant_id, None)
+
+
 def test_workstation_command_without_owned_workspace_fails_closed(
     client, auth_headers, monkeypatch
 ):

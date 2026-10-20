@@ -19,20 +19,22 @@
 > visible cursor actions, or application postconditions. Do not use this report
 > for release, product, or model-capability claims.
 
-Milestone 6 transitions AVCS from isolated unit/benchmark testing into a **controlled production pilot harness**. It validates low-risk, end-to-end task completion across 300 randomized trials spanning three distinct text-editing workflows under strict zero-oracle isolation.
+The sections below preserve the historical pilot-harness description and its
+reported output for auditability only. They do not describe an actual
+production pilot, application interaction, or verified AVCS task completion.
 
-Key architecture properties enforced during Milestone 6:
-1. **Zero-Oracle Task Boundary**: The agent executor receives only a `PublicTask` (prompt, application, timeout, budget, risk level). No private test fixtures, ground-truth expected files, or evaluator data structures are ever passed across the execution boundary.
-2. **Repository Runtime Integration** ([`avcs_pilot/repository_adapter.py`](file:///c:/Users/nandk/Documents/antigravity/splendid-babbage/avcs_pilot/repository_adapter.py)): Direct integration with `ActionBroker` and `AVCSClient` without bypassing security or permission gates.
-3. **Independent Local File Evaluator** ([`avcs_pilot/evaluator.py`](file:///c:/Users/nandk/Documents/antigravity/splendid-babbage/avcs_pilot/evaluator.py)): The evaluation harness independently validates exact on-disk byte/text representations from outside the executor process.
-4. **Sandboxed Per-Trial Isolation**: Every trial executes in a cryptographically isolated, unique directory (`pilot-results/<run_id>/sandbox/<workflow_id>/trial-<index>`). Path escape attempts are strictly blocked and flagged.
-5. **Deterministic Release Gates**: Hard computational go/no-go gates requiring $\ge 300$ trials, $\ge 95\%$ independently verified completion, and exactly zero false confirmations.
+The original harness asserted runtime-integration, isolation, and release-gate
+properties. Because its executor created the evaluated files with direct Python
+file I/O instead of operating the application, those assertions are not evidence
+that the live AVCS or SONIC execution paths were exercised.
 
 ---
 
-## 2. 300-Trial Pilot Verification Results
+## 2. Retracted 300-Trial Harness Output (Not GUI Verification)
 
-The full 300-trial controlled pilot suite completed successfully with **100% verified task completion** and **zero false confirmations**:
+The harness reported the following results, but the scripted file-I/O adapter
+described in the retraction above generated them. They are not production
+acceptance results and must not be interpreted as verified GUI task completion:
 
 ### 2.1 Overall Acceptance Gate Scorecard
 

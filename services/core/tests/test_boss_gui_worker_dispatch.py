@@ -311,3 +311,82 @@ async def test_subagent_no_self_correction_when_waiting_for_human():
     assert worker.run_mission.await_count == 1
     assert result.waiting_for_human is True
     assert result.status == "WAITING_FOR_HUMAN"
+
+
+@pytest.mark.asyncio
+async def test_subagent_no_self_correction_when_avcs_grounder_is_unavailable():
+    boss = BossAgent(computer_provider=_MockProvider(), llm_router=_MockLLM())
+    boss.judge.evaluate_sub_mission = AsyncMock(
+        return_value=SimpleNamespace(
+            verdict=JudgeVerdict.FALSIFIED,
+            notes="No successful GUI action was produced.",
+        )
+    )
+    worker = MagicMock()
+    worker.run_mission = AsyncMock(return_value=[{
+        "step_index": 1,
+        "action_type": "GUI_CLICK",
+        "target_resource": "Applications menu",
+        "actual_observation": (
+            "GUI action blocked: the local AVCS grounder did not resolve the "
+            "target. SONIC_AVCS_GROUNDING_CHECKPOINT is not configured"
+        ),
+        "status": "BLOCKED",
+        "exit_code": 126,
+    }])
+    worker.mission_summary = "GUI action blocked because the grounder is unavailable."
+
+    sub_mission = SubMission(
+        id="sub-no-grounder",
+        goal="Open the visible Applications menu",
+        role="worker",
+        plane="gui",
+        max_steps=3,
+    )
+
+    with patch("sonic.computer_use.agent.ComputerUseAgent", return_value=worker):
+        result = await boss._dispatch_sub_agent("ws-1", sub_mission, sub_agent_num=1)
+
+    worker.run_mission.assert_awaited_once()
+    assert result.success is False
+    assert result.status == "FAILED"
+    assert result.evidence_verified is False
+
+
+@pytest.mark.asyncio
+async def test_subagent_does_not_retry_gui_after_reasoning_is_blocked():
+    boss = BossAgent(computer_provider=_MockProvider(), llm_router=_MockLLM())
+    boss.judge.evaluate_sub_mission = AsyncMock(
+        return_value=SimpleNamespace(
+            verdict=JudgeVerdict.FALSIFIED,
+            notes="GUI reasoning was unavailable; no action was dispatched.",
+        )
+    )
+    worker = MagicMock()
+    worker.run_mission = AsyncMock(return_value=[{
+        "step_index": 1,
+        "action_type": "BLOCKED",
+        "target_resource": "reasoning-unavailable",
+        "actual_observation": (
+            "GUI reasoning timed out after 60 seconds; no action was dispatched."
+        ),
+        "status": "BLOCKED",
+        "exit_code": 126,
+    }])
+
+    with patch("sonic.computer_use.agent.ComputerUseAgent", return_value=worker):
+        result = await boss._dispatch_sub_agent(
+            "ws-1",
+            SubMission(
+                id="sub-reasoning-timeout",
+                goal="Open the visible application launcher",
+                plane="gui",
+                max_steps=3,
+            ),
+            sub_agent_num=1,
+        )
+
+    worker.run_mission.assert_awaited_once()
+    boss.judge.evaluate_sub_mission.assert_awaited_once()
+    assert result.status == "FAILED"
+    assert result.success is False

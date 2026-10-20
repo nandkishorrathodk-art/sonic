@@ -630,6 +630,15 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
     ) -> ScreenObservation:
         atype = action.action
         action_name = atype.value if hasattr(atype, "value") else str(atype)
+        if not self.enable_virtual_desktop and atype != GUIActionType.WAIT:
+            logger.warning(
+                "headless_gui_action_blocked",
+                workspace_id=workspace_id,
+                action=action_name,
+            )
+            raise RuntimeError(
+                f"GUI action {action_name} requires a real graphical desktop backend"
+            )
         if atype == GUIActionType.WAIT:
             await asyncio.sleep(max(0.1, (action.delay_ms or 500) / 1000.0))
         elif atype in (GUIActionType.OPEN_APP, GUIActionType.LAUNCH_APP) and action.app_name:
@@ -648,12 +657,6 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
                 await self.close_application(workspace_id, target, actor=actor)
         elif atype == GUIActionType.INSTALL_APP and (action.app_name or action.text):
             await self.install_application(workspace_id, action.app_name or action.text or "", actor=actor)
-        elif atype == GUIActionType.TYPE and action.text:
-            active_win = self._active_window.get(workspace_id, "Desktop")
-            wmap = self._window_content.setdefault(workspace_id, {})
-            wmap[active_win] = (wmap.get(active_win, "") + " " + action.text).strip()
-        elif atype in (GUIActionType.KEYPRESS, GUIActionType.HOTKEY):
-            pass
         logger.info(
             "headless_gui_action_intercepted",
             workspace_id=workspace_id,

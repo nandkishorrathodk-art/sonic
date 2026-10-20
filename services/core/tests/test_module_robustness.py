@@ -701,6 +701,50 @@ class TestVerifyAndReplan:
         assert len(agent.traces) == 2
         assert agent.history[-1]["action"].startswith("GUI_CLICK 100,100 (BLOCKED)")
 
+        agent.traces = []
+        agent.history = []
+        proposal_count = 0
+        agent._consecutive_stale_gui_blocks = 0
+        agent._consecutive_gui_postcondition_violations = 0
+        agent._watchdog_aborted = False
+        agent.execution_plane = "headless"
+        agent.gui_only = False
+
+        async def _choose_terminal(goal, obs, step):
+            nonlocal proposal_count
+            proposal_count += 1
+            return (
+                ComputerActionType.TERMINAL_EXEC,
+                "true",
+                {"command": "true"},
+                "Run a harmless command",
+            )
+
+        async def _loop_block(ws, action_type, target, payload, expected):
+            agent.action_counter += 1
+            trace = ComputerDecisionTrace(
+                step_index=agent.action_counter,
+                action_type=action_type,
+                target_resource=target,
+                payload=str(payload),
+                predicted_outcome=expected,
+                actual_observation="[ACTION LOOP DETECTED]: repeated action blocked",
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+            )
+            agent.traces.append(trace)
+            return trace
+
+        agent.execute_action = _loop_block
+        agent.choose_action = _choose_terminal
+        await agent.run_mission("ws", "run a harmless command", steps=8)
+
+        assert proposal_count == 1
+        assert len(agent.traces) == 1
+        assert agent.history[-1]["action"].endswith("(ACTION_LOOP_BLOCKED)")
+
 
 # =====================================================================
 # Self-improvement: cross-mission lessons ledger (learn → apply loop)

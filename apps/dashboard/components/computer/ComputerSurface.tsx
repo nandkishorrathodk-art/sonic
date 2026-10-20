@@ -64,6 +64,9 @@ export function ComputerSurface({
   const [cmdRunning, setCmdRunning] = useState(false);
   const [takeoverPending, setTakeoverPending] = useState(false);
   const [useStream, setUseStream] = useState(true);
+  const [streamViewerState, setStreamViewerState] = useState<
+    "loading" | "loaded" | "failed"
+  >("loading");
   const [resumeNote, setResumeNote] = useState("");
   const [resuming, setResuming] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -296,6 +299,10 @@ export function ComputerSurface({
     if (isHostAVCSDesktop) setUseStream(false);
   }, [isHostAVCSDesktop]);
 
+  useEffect(() => {
+    setStreamViewerState("loading");
+  }, [sessionId, streamUrl]);
+
   return (
     <div
       className={`flex-1 panel flex flex-col overflow-hidden shadow-2xl ${
@@ -316,7 +323,15 @@ export function ComputerSurface({
               <span>
                 {isInteractive
                   ? "HUMAN CONTROL ACTIVE"
-                  : isStreamAvailable ? "STREAM AVAILABLE" : "AVCS SNAPSHOT"}
+                  : isStreamAvailable
+                    ? useStream
+                      ? streamViewerState === "loaded"
+                        ? "VNC VIEWER LOADED · STREAM UNVERIFIED"
+                        : streamViewerState === "failed"
+                          ? "VNC VIEWER FAILED"
+                          : "VNC VIEWER LOADING"
+                      : "VNC ENDPOINT CONFIGURED"
+                    : "AVCS SNAPSHOT"}
               </span>
             </span>
           ) : (
@@ -444,7 +459,16 @@ export function ComputerSurface({
                 className="w-full h-full border-0"
                 style={{ pointerEvents: isInteractive ? "auto" : "none" }}
                 allow="clipboard-read; clipboard-write; fullscreen"
+                onLoad={() => setStreamViewerState("loaded")}
+                onError={() => setStreamViewerState("failed")}
               />
+              <div className="absolute bottom-2 right-2 z-20 rounded bg-black/80 px-2 py-1 text-[10px] font-mono text-amber-200 pointer-events-none">
+                {streamViewerState === "loaded"
+                  ? "Viewer page loaded; VNC desktop connection is unverified."
+                  : streamViewerState === "failed"
+                    ? "The VNC viewer page failed to load."
+                    : "Loading VNC viewer page; desktop connection is unverified."}
+              </div>
               <div className="absolute top-2.5 left-2.5 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-black/80 border border-success/40 text-[11px] font-mono text-success shadow-lg backdrop-blur-sm pointer-events-none">
                 <Bot className="w-3.5 h-3.5 text-success" />
                 <span>SONIC Autonomous Desktop</span>

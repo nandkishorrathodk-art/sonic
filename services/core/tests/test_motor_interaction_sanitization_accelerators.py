@@ -184,6 +184,19 @@ def test_terminal_exec_sanitization_strips_trailing_thoughts_and_commentary():
     assert "Thought" not in payload.get("command", "")
 
 
+def test_terminal_exec_sanitization_strips_explanatory_parenthetical():
+    text = (
+        "ACTION: TERMINAL_EXEC\n"
+        "TARGET: terminal\n"
+        'PAYLOAD: {"command": "whoami (or we can put the command in the payload)"}\n'
+        "EXPECTED: Current user\n"
+    )
+    act_type, _, payload, _ = ComputerUseAgent._parse_llm_action(text, "README.md")
+
+    assert act_type == ComputerActionType.TERMINAL_EXEC
+    assert payload["command"] == "whoami"
+
+
 def test_gui_type_sanitization_strips_beingcraft_note_and_reasoning():
     """BeingCraft notes and trailing thoughts must not be typed into GUI fields."""
     text = (

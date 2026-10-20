@@ -449,6 +449,71 @@ async def test_docker_screenshot_rejects_frame_that_ages_during_avcs(monkeypatch
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
+async def test_docker_screenshot_restarts_stalled_avcs_stream_once():
+    provider = DockerComputerProvider(container_name="stalled-avcs-test-workstation")
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        "___ACTIVE_WINDOW___\nDesktop\n___OPEN_WINDOWS___\n",
+        "",
+    ))
+    provider._start_raw_frame_stream = AsyncMock()
+    provider.close = AsyncMock()
+
+    async def wait_for_frame():
+        if provider._wait_for_new_processed_frame.await_count == 1:
+            raise TimeoutError("Timed out waiting for a new processed AVCS frame")
+        provider._latest_processed_frame = SimpleNamespace(
+            frame_id=1,
+            capture_timestamp_ns=time.time_ns(),
+            width=80,
+            height=60,
+            raw_rgb=bytes((40, 80, 120)) * (80 * 60),
+            avcs_state={
+                "engine": "avcs_reflex",
+                "frame_index": 1,
+                "source_frame_id": 1,
+                "scene_hash": "recovered-avcs-scene",
+                "width": 80,
+                "height": 60,
+            },
+        )
+
+    provider._wait_for_new_processed_frame = AsyncMock(side_effect=wait_for_frame)
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.desktop_state == "INTERACTIVE"
+    assert observation.frame_id == 1
+    provider.close.assert_awaited_once()
+    assert provider._start_raw_frame_stream.await_count == 2
+    assert provider._wait_for_new_processed_frame.await_count == 2
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_screenshot_stays_unavailable_after_one_stream_restart():
+    provider = DockerComputerProvider(container_name="repeatedly-stalled-avcs-workstation")
+    provider._docker_exec = AsyncMock(return_value=(
+        0,
+        "___ACTIVE_WINDOW___\nDesktop\n___OPEN_WINDOWS___\n",
+        "",
+    ))
+    provider._start_raw_frame_stream = AsyncMock()
+    provider.close = AsyncMock()
+    provider._wait_for_new_processed_frame = AsyncMock(
+        side_effect=TimeoutError("Timed out waiting for a new processed AVCS frame")
+    )
+
+    observation = await provider.screenshot("ws-1")
+
+    assert observation.desktop_state == "NO_DISPLAY"
+    assert "Timed out waiting" in observation.visible_text
+    assert provider._start_raw_frame_stream.await_count == 2
+    assert provider._wait_for_new_processed_frame.await_count == 2
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
 async def test_docker_frame_processor_initializes_avcs_for_raw_stream(monkeypatch):
     provider = DockerComputerProvider(container_name="avcs-lazy-init-workstation")
     raw_rgb = bytes((10, 20, 30)) * (80 * 60)

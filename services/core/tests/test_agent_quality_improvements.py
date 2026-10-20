@@ -312,6 +312,39 @@ def test_exact_repeat_action_blocked():
     assert "BLOCKED: exact repeat" in rejection
 
 
+def test_repeated_gui_key_is_blocked_after_unchanged_screen_across_action_types():
+    agent = ComputerUseAgent(computer_provider=DummyComputerProvider(), gui_only=True)
+    agent._consecutive_unchanged_screens = 1
+    agent._recent_action_signatures = [
+        ("GUI_KEYPRESS", "keyboard", "{'key': 'Win'}")
+    ]
+
+    rejection = agent._is_trivial_or_repeated_action(
+        ComputerActionType.GUI_HOTKEY,
+        "keyboard",
+        {"keys": "Win"},
+    )
+
+    assert rejection is not None
+    assert "already produced no visible screen change" in rejection
+
+
+def test_different_gui_key_remains_available_after_unchanged_screen():
+    agent = ComputerUseAgent(computer_provider=DummyComputerProvider(), gui_only=True)
+    agent._consecutive_unchanged_screens = 1
+    agent._recent_action_signatures = [
+        ("GUI_KEYPRESS", "keyboard", "{'key': 'Win'}")
+    ]
+
+    rejection = agent._is_trivial_or_repeated_action(
+        ComputerActionType.GUI_HOTKEY,
+        "keyboard",
+        {"keys": "Escape"},
+    )
+
+    assert rejection is None
+
+
 # ---------------------------------------------------------------------------
 # 5. Bounded History Window Tests
 # ---------------------------------------------------------------------------
@@ -386,6 +419,8 @@ def test_avcs_context_is_compact_temporal_pixel_state_without_ocr():
             "frame_index": 12,
             "source_frame_id": 48,
             "scene_hash": "abcdef0123456789",
+            "width": 1920,
+            "height": 1080,
             "scene_changed": True,
             "change_fraction": 0.125,
             "global_motion": 0.0412,
@@ -398,16 +433,23 @@ def test_avcs_context_is_compact_temporal_pixel_state_without_ocr():
                 "trained": False,
                 "action_authorization": False,
             },
-            "events": [{"kind": "change", "text": "pixel change"}],
+            "events": [
+                {
+                    "kind": "scene_change",
+                    "text": "untrusted event text is never forwarded",
+                }
+            ],
         }
     )
 
     assert summary == (
-        "frame=48, scene=abcdef012345, changed=True, change=0.125, "
-        "motion=0.041, overlay=False, regions=2, "
-        "temporal=transitioning surprise=0.093 (advisory)"
+        "pixel-only; frame=48, screen=1920x1080, scene=abcdef012345, "
+        "changed=True, change=0.125, motion=0.041, peak_motion=unknown, "
+        "overlay_suspected=False, coarse_regions=2 (patch,band), "
+        "events=whole-screen transition, "
+        "temporal=transitioning (advisory surprise=0.093)"
     )
-    assert "events" not in summary
+    assert "untrusted event text" not in summary
     assert "OCR" not in summary
     assert "semantic" not in summary
 
@@ -701,6 +743,21 @@ def test_parse_llm_action_robust_json_with_trailing_commentary():
     act_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "README.md")
     assert act_type == ComputerActionType.TERMINAL_EXEC
     assert payload.get("command") == "hostname"
+
+
+def test_parse_llm_action_does_not_append_commentary_after_empty_payload():
+    text = (
+        "ACTION: TERMINAL_EXEC\n"
+        "TARGET: pwd\n"
+        "PAYLOAD: {}\n\n"
+        "But the system might not have stored it. Instead, run another command.\n"
+        "EXPECTED: Working directory\n"
+    )
+    act_type, target, payload, _ = ComputerUseAgent._parse_llm_action(text, "README.md")
+
+    assert act_type == ComputerActionType.TERMINAL_EXEC
+    assert target == "pwd"
+    assert payload.get("command") == "pwd"
 
 
 @pytest.mark.asyncio
