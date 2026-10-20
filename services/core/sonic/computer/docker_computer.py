@@ -581,16 +581,18 @@ class DockerComputerProvider(ComputerProvider):
         active_window = "Desktop"
         open_windows: list[str] = ["Desktop"]
 
-        # These three probes are independent `docker exec` round-trips (~70 ms
-        # each). Run them concurrently so status() costs one round-trip instead
-        # of three on the observation hot path.
+        # These probes are independent `docker exec` round-trips (~70 ms each,
+        # and the cold application scan is the most expensive). Run them
+        # concurrently so status() costs one round-trip instead of four on the
+        # observation hot path.
         windows_coro = self._docker_exec(f"DISPLAY={disp} wmctrl -l 2>/dev/null", timeout=5)
         active_coro = self._docker_exec(
             f"DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null", timeout=5
         )
         procs_coro = self.process_list(workspace_id)
-        (code, out, _), (acode, aout, _), procs = await asyncio.gather(
-            windows_coro, active_coro, procs_coro
+        apps_coro = self.application_list(workspace_id)
+        (code, out, _), (acode, aout, _), procs, installed = await asyncio.gather(
+            windows_coro, active_coro, procs_coro, apps_coro
         )
 
         # Check real open windows via wmctrl
@@ -613,7 +615,6 @@ class DockerComputerProvider(ComputerProvider):
             active_window = open_windows[-1] if len(open_windows) > 1 else "Desktop"
 
         proc_names = [p.name for p in procs]
-        installed = await self.application_list(workspace_id)
 
         return ComputerState(
             workspace_id=workspace_id or self.container_name,
