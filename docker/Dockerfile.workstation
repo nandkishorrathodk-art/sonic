@@ -59,6 +59,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     firefox-esr \
     && rm -rf /var/lib/apt/lists/*
 
+# Touch controls are optional in noVNC. Guard their setup so a cached or
+# customized page missing the mobile keyboard cannot abort desktop startup.
+RUN sed -i \
+    's/^[[:space:]]*UI\.addTouchSpecificHandlers();[[:space:]]*$/        if (document.getElementById("noVNC_keyboard_button")) { UI.addTouchSpecificHandlers(); }/' \
+    /usr/share/novnc/app/ui.js \
+    && grep -F 'if (document.getElementById("noVNC_keyboard_button"))' /usr/share/novnc/app/ui.js
+
 # Bundle only AVCS's pixel-reflex runtime used by SONIC. Keeping these modules
 # as a namespace package avoids importing unrelated training/model components.
 COPY packages/avcs/forge/vision/reflex.py /opt/sonic/packages/avcs/forge/vision/reflex.py

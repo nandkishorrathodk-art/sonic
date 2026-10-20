@@ -153,6 +153,112 @@ class TestGUIActionDispatch:
         provider.get_active_window_class.assert_awaited_once_with("ws-1")
 
     @pytest.mark.asyncio
+    async def test_app_launch_accepts_valid_raw_rgb_frame_without_base64(self):
+        provider = _mock_provider()
+        provider.status.return_value = MagicMock(
+            active_application="sample-app",
+            active_window="sample-app",
+            open_applications=["Desktop", "sample-app"],
+            installed_applications=["sample-app"],
+            running_processes=["sample-app"],
+        )
+        provider.screenshot.return_value = ScreenObservation(
+            width=2,
+            height=2,
+            raw_rgb=b"\x00" * 12,
+            frame_id=1,
+            capture_age_ms=0,
+            active_window="sample-app",
+            desktop_state="INTERACTIVE",
+        )
+        provider.launch_application.return_value = True
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.APP_LAUNCH,
+            "sample-app",
+            {"app_name": "sample-app"},
+            "Launch the observed application",
+        )
+
+        assert trace.status == ActionExecutionStatus.COMPLETED
+        assert "Launched and focused sample-app" in trace.actual_observation
+
+    @pytest.mark.asyncio
+    async def test_app_close_is_verified_against_fresh_window_state(self):
+        provider = _mock_provider()
+        before = MagicMock(
+            active_application="sample-app",
+            active_window="sample-app",
+            open_applications=["Desktop", "sample-app"],
+        )
+        after = MagicMock(
+            active_application="Desktop",
+            active_window="Desktop",
+            open_applications=["Desktop"],
+        )
+        provider.close_application = AsyncMock(return_value=True)
+        provider.status = AsyncMock(
+            side_effect=lambda *_: (
+                after if provider.close_application.await_count else before
+            )
+        )
+        provider.screenshot.return_value = ScreenObservation(
+            width=2,
+            height=2,
+            raw_rgb=b"\x00" * 12,
+            frame_id=1,
+            capture_age_ms=0,
+            active_window="Desktop",
+            desktop_state="INTERACTIVE",
+        )
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.APP_CLOSE,
+            "sample-app",
+            {"app_name": "sample-app"},
+            "Close the application",
+        )
+
+        assert trace.status == ActionExecutionStatus.VERIFIED
+        assert "no matching application window remains" in trace.actual_observation
+
+    @pytest.mark.asyncio
+    async def test_app_close_does_not_claim_success_when_window_remains_open(self):
+        provider = _mock_provider()
+        open_state = MagicMock(
+            active_application="sample-app",
+            active_window="sample-app",
+            open_applications=["Desktop", "sample-app"],
+        )
+        provider.close_application = AsyncMock(return_value=True)
+        provider.status = AsyncMock(return_value=open_state)
+        provider.screenshot.return_value = ScreenObservation(
+            width=2,
+            height=2,
+            raw_rgb=b"\x00" * 12,
+            frame_id=1,
+            capture_age_ms=0,
+            active_window="sample-app",
+            desktop_state="INTERACTIVE",
+        )
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.APP_CLOSE,
+            "sample-app",
+            {"app_name": "sample-app"},
+            "Close the application",
+        )
+
+        assert trace.status == ActionExecutionStatus.FAILED
+        assert "remains visible" in trace.actual_observation
+
+    @pytest.mark.asyncio
     async def test_gui_click_dispatches_to_provider(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider)

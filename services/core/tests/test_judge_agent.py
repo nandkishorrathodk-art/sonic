@@ -123,6 +123,72 @@ async def test_judge_confirms_valid_execution():
     )
 
     assert evaluation.verdict == JudgeVerdict.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_judge_uses_relevant_success_after_failed_terminal_attempt():
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Run whoami and return the current user")
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[
+            {
+                "action_type": "TERMINAL_EXEC",
+                "target_resource": "whoami (or we can put the command in the payload)",
+                "status": "FAILED",
+                "exit_code": 2,
+                "actual_observation": "bash syntax error near unexpected token",
+            },
+            {
+                "action_type": "TERMINAL_EXEC",
+                "target_resource": "whoami",
+                "status": "COMPLETED",
+                "exit_code": 0,
+                "actual_observation": "root",
+            },
+        ],
+        success=True,
+        findings_summary="Command completed after retry; root",
+    )
+
+    evaluation = await judge.evaluate_sub_mission("test-ws", sub_m, result)
+
+    assert evaluation.verdict == JudgeVerdict.CONFIRMED
+    assert "failed attempts remain in the trace" in evaluation.notes
+
+
+@pytest.mark.asyncio
+async def test_judge_does_not_use_failed_trace_for_goal_relevance():
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Run whoami and return the current user")
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=[
+            {
+                "action_type": "TERMINAL_EXEC",
+                "target_resource": "whoami",
+                "status": "FAILED",
+                "exit_code": 1,
+                "actual_observation": "Command failed",
+            },
+            {
+                "action_type": "TERMINAL_EXEC",
+                "target_resource": "echo unrelated",
+                "status": "COMPLETED",
+                "exit_code": 0,
+                "actual_observation": "ready",
+            },
+        ],
+        success=True,
+        findings_summary="Command completed",
+    )
+
+    evaluation = await judge.evaluate_sub_mission("test-ws", sub_m, result)
+
+    assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
+    assert "not relevant" in evaluation.notes
     assert evaluation.confidence >= 0.8
 
 

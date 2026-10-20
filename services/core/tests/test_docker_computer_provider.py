@@ -103,6 +103,28 @@ def _workstation_container_up(container_name: str = "sonic-desktop-workstation")
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
+async def test_close_app_uses_window_manager_not_broad_process_kill():
+    provider = DockerComputerProvider(container_name="close-test-workstation")
+    provider._docker_exec = AsyncMock(return_value=(0, "", ""))
+    provider.screenshot = AsyncMock(return_value=ScreenObservation(
+        width=1,
+        height=1,
+        capture_age_ms=0,
+        desktop_state="INTERACTIVE",
+    ))
+
+    await provider.gui_action(
+        "ws-close",
+        GUIAction(action=GUIActionType.CLOSE_APP, app_name="sample application"),
+    )
+
+    command = provider._docker_exec.await_args.args[0]
+    assert "wmctrl -c 'sample application'" in command
+    assert "pkill" not in command
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
 async def test_docker_exec_cancellation_kills_and_reaps_docker_client(monkeypatch):
     provider = DockerComputerProvider(container_name="cancel-test-workstation")
     monkeypatch.setattr(docker_computer_module.shutil, "which", lambda _: "docker")
@@ -707,6 +729,39 @@ async def test_gui_pointer_coordinates_require_fresh_screen_and_in_bounds():
         "ws-1", GUIAction(action=GUIActionType.CLICK, x=79, y=59)
     )
     assert "sonic_cursor.py move 79 59" in provider._docker_exec.await_args.args[0]
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_agent_typing_requires_verified_focus_coordinates():
+    provider = DockerComputerProvider()
+    provider._docker_exec = AsyncMock(return_value=(0, "", ""))
+    screen = ScreenObservation(
+        screenshot_base64=_png_base64(80, 60),
+        width=80,
+        height=60,
+        capture_age_ms=0,
+        desktop_state="INTERACTIVE",
+    )
+    provider.screenshot = AsyncMock(return_value=screen)
+
+    with pytest.raises(ValueError, match="focus coordinates verified"):
+        await provider.gui_action(
+            "ws-1",
+            GUIAction(action=GUIActionType.TYPE, text="hello"),
+            actor="sonic-agent",
+        )
+    provider._docker_exec.assert_not_awaited()
+
+    await provider.gui_action(
+        "ws-1",
+        GUIAction(action=GUIActionType.TYPE, x=20, y=30, text="hello"),
+        actor="sonic-agent",
+    )
+
+    command = provider._docker_exec.await_args.args[0]
+    assert "xdotool type" in command
+    assert "sonic_cursor.py click" not in command
 
 
 @pytest.mark.no_live_infra
