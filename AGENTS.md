@@ -2701,3 +2701,44 @@ AVCS perception + the CUA agent.
 - `services/core/tests` + `packages/avcs/tests` (minus tkinter module):
   **2628 passed, 53 skipped, 1 pre-existing load-flake** (soak).
 
+
+## Consumption-loop + mouse fix pass (2026-10-20)
+
+Root cause found for "the mouse can't be used" and the perception loop:
+
+- **Parser bug (real, fixed).** `ComputerUseAgent._parse_llm_action` split the
+  LLM's ACTION/TARGET/PAYLOAD block with a `\s*` separator after each field
+  colon. For the natural coordinate-motor shape — an *empty* `TARGET:` line
+  followed by `PAYLOAD: {"x":..,"y":..}` — the newline was consumed, TARGET
+  captured the literal `PAYLOAD: {...}` text, and the coordinate payload was
+  dropped. The GUI action then degraded into an unresolvable **semantic** target
+  and was `BLOCKED` fail-closed ("local AVCS grounder did not resolve the
+  target 'PAYLOAD: {…}'"). So `GUI_MOVE`/`GUI_CLICK` with payload-only
+  coordinates could never run through the mission loop. Fix: separator is now
+  `[ \t]*`, so an empty field cannot absorb the next field. 3 regression tests
+  in `test_phase8_visual_computer_use.py`.
+- **Mouse verified live.** Against the real `sonic-desktop-workstation`
+  (DISPLAY :99) via the real `ComputerUseAgent.run_mission` loop with a scripted
+  router: APP_LAUNCH -> COMPLETED (1 real window), GUI_MOVE -> COMPLETED (cursor
+  glided 25,18 -> 500,300), GUI_CLICK -> VERIFIED (AVCS pixel scene changed at
+  140,260). Direct dispatch of every motor action also lands the cursor exactly
+  (MOVE/CLICK/DOUBLE_CLICK/RIGHT_CLICK/DRAG); SCROLL dispatches and honestly
+  reports UNVERIFIED when nothing changed. Scripts: `scripts/live_gui_mouse_mission.py`,
+  `scripts/live_gui_mouse_task.py`.
+- **The four-layer flow is wired.** AVCS (System 1) produces the bounded
+  scene/change/motion reflex summary; it reaches System 2 as a *text* summary in
+  the reasoning prompt (`CURRENT AVCS PIXEL STATE SUMMARY ... scene=.. changed=..
+  change=.. motion=..`) with no pixels sent; the provider executes the action;
+  the post-action AVCS frame is the verification receipt (VERIFIED only on a real
+  scene change). Semantic targeting and focus-verification remain fail-closed
+  when the evaluated AVCS heads are not configured (GUI_TYPE blocked).
+- **Slowness diagnosis.** `observe()` ~= 260-290 ms = `screenshot()` 97 ms +
+  agent-side AVCS recompute 24 ms + `status()` 145 ms. `status()` ran the cold
+  `application_list()` scan (~280 ms) sequentially; it is now folded into the
+  existing `asyncio.gather` (window/active-window/process/application probes run
+  concurrently). Further gains require reusing the provider's already-computed
+  `avcs_state` (rejected: the agent's AVCS instance must re-derive from the exact
+  frame it will ground against) or a persistent in-container telemetry daemon.
+
+Test baseline after this pass: 935 passed, 25 skipped (broad computer/agent/gui
+regression); 660 passed on the parser/action-focused subset.
