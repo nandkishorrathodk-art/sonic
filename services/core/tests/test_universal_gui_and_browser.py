@@ -78,16 +78,29 @@ async def test_verify_goal_file_creation_probe():
 
 @pytest.mark.asyncio
 async def test_docker_computer_injects_root_sandbox_flags():
-    """Ensure launch_application preserves the discovered app and target arguments."""
+    """Ensure launch_application preserves the discovered app and target arguments,
+    and reports success only after a new window maps."""
     provider = DockerComputerProvider(container_name="test-container")
-    provider._docker_exec = AsyncMock(return_value=(0, "", ""))
     # Binary discovery is mocked to a real resolved path; a generic (0, "", "")
     # exec cannot resolve a binary because `which` returns empty output.
     provider._resolve_app_binary = AsyncMock(return_value="/usr/bin/google-chrome")
 
+    state = {"launched": False}
+
+    async def fake_exec(cmd):
+        if "wmctrl -l" in cmd:
+            return (0, "" if not state["launched"] else "0x0022 0 host chrome\n", "")
+        if "nohup /usr/bin/google-chrome" in cmd:
+            state["launched"] = True
+            return (0, "4242", "")
+        return (0, "", "")
+
+    provider._docker_exec = AsyncMock(side_effect=fake_exec)
+
     success = await provider.launch_application("ws-1", "google-chrome https://198.51.100.10")
     assert success is True
-    called_spawn = provider._docker_exec.call_args_list[-1][0][0]
+    spawns = [c[0][0] for c in provider._docker_exec.call_args_list if "nohup" in c[0][0]]
+    called_spawn = spawns[-1]
     assert "google-chrome" in called_spawn
     assert "https://198.51.100.10" in called_spawn
     # Mock returns exit 0 for --no-sandbox probe so flags are injected

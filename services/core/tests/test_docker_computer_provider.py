@@ -974,13 +974,28 @@ def test_docker_computer_display_resolution(monkeypatch):
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
 async def test_docker_computer_launch_application_quoting(monkeypatch):
-    """Proves launch_application uses shlex.split and quotes each part individually."""
+    """Proves launch_application uses shlex.split and quotes each part individually,
+    and only reports success once a genuinely NEW window has mapped."""
     monkeypatch.delenv("DISPLAY", raising=False)
     provider = DockerComputerProvider()
-    provider._docker_exec = AsyncMock(return_value=(0, "", ""))
     provider._resolve_app_binary = AsyncMock(
         side_effect=lambda query: f"/usr/bin/{query.replace(' ', '-')}"
     )
+
+    # Simulate a real desktop: the pre-launch window snapshot is empty, and a
+    # window id appears only after the spawn command runs.
+    state = {"launched": False}
+
+    async def fake_exec(cmd):
+        if "wmctrl -l" in cmd:
+            return (0, "0x0011 0 host existing\n" if not state["launched"] else
+                    "0x0011 0 host existing\n0x0022 0 host NewWindow\n", "")
+        if "nohup /usr/bin/" in cmd:
+            state["launched"] = True
+            return (0, "4242", "")
+        return (0, "", "")
+
+    provider._docker_exec = AsyncMock(side_effect=fake_exec)
 
     success = await provider.launch_application("ws-1", "chromium https://target.local")
     assert success is True
@@ -988,12 +1003,14 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
     # Mock returns exit 0 for the --no-sandbox probe, so flags are injected
     spawn = next(cmd for cmd in called_cmds if "nohup /usr/bin/chromium" in cmd)
     assert "DISPLAY=:99 nohup /usr/bin/chromium --no-sandbox --disable-dev-shm-usage https://target.local" in spawn
-    assert "kill -0" in spawn
     assert "grep -q -- '--no-sandbox'" in spawn
     assert "retry_args=(" not in spawn
+    # Honesty: success is gated on observing a NEW window, never a bare process guess
+    assert any("wmctrl -l" in cmd for cmd in called_cmds)
 
     # Also test an argument with spaces / special characters that requires escaping
     provider._docker_exec.reset_mock()
+    state["launched"] = False
     success2 = await provider.launch_application("ws-1", "chromium 'https://target.local/path with spaces'")
     assert success2 is True
     called_cmds2 = [call.args[0] for call in provider._docker_exec.call_args_list]
@@ -1005,6 +1022,7 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
 
     # Also test multi-word application query (e.g. 'google chrome')
     provider._docker_exec.reset_mock()
+    state["launched"] = False
     success3 = await provider.launch_application("ws-1", "google chrome https://target.local")
     assert success3 is True
     called_cmds3 = [call.args[0] for call in provider._docker_exec.call_args_list]
@@ -1014,6 +1032,33 @@ async def test_docker_computer_launch_application_quoting(monkeypatch):
     assert "https://target.local" in spawn3
     # Mock returns exit 0 for probe so flags are injected
     assert "--no-sandbox" in spawn3
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_computer_launch_reports_false_when_no_window_appears(monkeypatch):
+    """A spawn that exits 0 but never maps a window must NOT be reported as success.
+
+    Regression for the self-matching `pgrep -f <bin>` false positive: the old
+    command matched its own supervising shell and returned True even when the
+    application never opened.
+    """
+    monkeypatch.delenv("DISPLAY", raising=False)
+    provider = DockerComputerProvider()
+    provider._resolve_app_binary = AsyncMock(side_effect=lambda q: f"/usr/bin/{q}")
+
+    async def fake_exec(cmd):
+        # wmctrl always shows only the same pre-existing window; spawn exits 0.
+        if "wmctrl -l" in cmd:
+            return (0, "0x0011 0 host existing\n", "")
+        if "nohup /usr/bin/" in cmd:
+            return (0, "4242", "")
+        return (0, "", "")
+
+    provider._docker_exec = AsyncMock(side_effect=fake_exec)
+
+    success = await provider.launch_application("ws-1", "ghostapp")
+    assert success is False
 
 
 @pytest.mark.no_live_infra

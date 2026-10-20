@@ -581,8 +581,19 @@ class DockerComputerProvider(ComputerProvider):
         active_window = "Desktop"
         open_windows: list[str] = ["Desktop"]
 
+        # These three probes are independent `docker exec` round-trips (~70 ms
+        # each). Run them concurrently so status() costs one round-trip instead
+        # of three on the observation hot path.
+        windows_coro = self._docker_exec(f"DISPLAY={disp} wmctrl -l 2>/dev/null", timeout=5)
+        active_coro = self._docker_exec(
+            f"DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null", timeout=5
+        )
+        procs_coro = self.process_list(workspace_id)
+        (code, out, _), (acode, aout, _), procs = await asyncio.gather(
+            windows_coro, active_coro, procs_coro
+        )
+
         # Check real open windows via wmctrl
-        code, out, _ = await self._docker_exec(f"DISPLAY={disp} wmctrl -l 2>/dev/null", timeout=5)
         if code == 0 and out.strip():
             for line in out.splitlines():
                 parts = line.split(maxsplit=3)
@@ -596,14 +607,11 @@ class DockerComputerProvider(ComputerProvider):
             open_windows.insert(0, "Desktop")
 
         # Check active window via xdotool
-        code, out, _ = await self._docker_exec(f"DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null", timeout=5)
-        if code == 0 and out.strip():
-            active_window = out.strip()
+        if acode == 0 and aout.strip():
+            active_window = aout.strip()
         else:
             active_window = open_windows[-1] if len(open_windows) > 1 else "Desktop"
 
-        # Check running processes
-        procs = await self.process_list(workspace_id)
         proc_names = [p.name for p in procs]
         installed = await self.application_list(workspace_id)
 
@@ -1923,21 +1931,48 @@ class DockerComputerProvider(ComputerProvider):
             f"{' '.join(shlex.quote(arg) for arg in retry_args)} "
             ">/tmp/sonic_app_launch.log 2>&1 & "
         )
+        # Snapshot existing top-level windows (exclude sticky panels/desktop,
+        # which wmctrl reports with desktop id -1) so success can be verified
+        # against a genuinely NEW window rather than a process guess.
+        list_windows_cmd = f"DISPLAY={disp} wmctrl -l 2>/dev/null | awk '$2 != -1 {{print $1}}'"
+        _, pre_out, _ = await self._docker_exec(list_windows_cmd)
+        pre_windows = set(pre_out.split())
+
         spawn = (
             f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 & "
             f"app_pid=$!; sleep 0.4; "
             f"if ! kill -0 \"$app_pid\" 2>/dev/null && grep -q -- '--no-sandbox' /tmp/sonic_app_launch.log 2>/dev/null; then "
             f"  {retry_spawn}"
-            f"  app_pid=$!; sleep 0.4; "
+            f"  app_pid=$!; "
             f"fi; "
-            f"kill -0 \"$app_pid\" 2>/dev/null || pgrep -f -- {bin_base} >/dev/null 2>&1"
+            f"echo \"$app_pid\""
         )
-        code, _, _ = await self._docker_exec(spawn)
-        if code == 0:
-            self._active_windows[workspace_id] = os.path.basename(resolved_bin)
-            self._last_screenshot = None
-            self._last_screenshot_time = 0.0
-            return True
+        code, pid_out, _ = await self._docker_exec(spawn)
+        if code != 0:
+            return False
+
+        # Verify a real window appeared. A self-matching `pgrep -f <bin>` in the
+        # supervising shell always matches its own command line, so it cannot
+        # prove the application launched. Poll for a new top-level window instead
+        # and report an honest failure if none materializes.
+        app_pid = (pid_out.strip().splitlines() or [""])[-1].strip()
+        for _ in range(12):  # bounded ~3.6s wait for the window to map
+            await asyncio.sleep(0.3)
+            _, now_out, _ = await self._docker_exec(list_windows_cmd)
+            if set(now_out.split()) - pre_windows:
+                self._active_windows[workspace_id] = os.path.basename(resolved_bin)
+                self._last_screenshot = None
+                self._last_screenshot_time = 0.0
+                return True
+            if app_pid:
+                alive_code, _, _ = await self._docker_exec(f"kill -0 {shlex.quote(app_pid)} 2>/dev/null")
+                if alive_code != 0:
+                    break
+        logger.info(
+            "application_launch_no_window",
+            app_query=app_query,
+            resolved_bin=resolved_bin,
+        )
         return False
 
     async def cleanup_desktop_windows(self, workspace_id: str) -> None:
