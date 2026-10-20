@@ -511,6 +511,7 @@ class ComputerUseAgent:
         self._last_screen_has_pixels: bool = False
         self._last_screen_frame_id: int | None = None
         self._last_screen_observation_received_at: float = 0.0
+        self._last_observed_screen_from_reasoning: bool = False
         self._last_gui_action_observation_valid: bool = False
         self._last_active_window_geometry: tuple[int, int, int, int] | None = None
         self._consecutive_unchanged_screens: int = 0
@@ -1263,6 +1264,7 @@ class ComputerUseAgent:
         screen_received_at_ns = time.perf_counter_ns()
         self._last_screen_observation_received_at = asyncio.get_event_loop().time()
         self._last_observed_screen = screen_obs
+        self._last_observed_screen_from_reasoning = True
         self._last_gui_dispatch_evidence = (
             screen_obs,
             asyncio.get_event_loop().time(),
@@ -3141,6 +3143,7 @@ class ComputerUseAgent:
                 self._screen_height = visual_observation.height
                 observation.screen = visual_observation
                 self._last_observed_screen = visual_observation
+                self._last_observed_screen_from_reasoning = True
                 refreshed = self.perception_bus.publish(
                     screenshot_base64=visual_observation.screenshot_base64,
                     width=visual_observation.width,
@@ -4766,6 +4769,7 @@ class ComputerUseAgent:
             asyncio.get_running_loop().time()
         )
         self._last_observed_screen = fresh_screen
+        self._last_observed_screen_from_reasoning = False
         self._last_screen_has_pixels = self._screen_has_pixel_data(fresh_screen)
         self._last_screen_frame_id = (
             getattr(fresh_screen, "frame_id", None)
@@ -4866,6 +4870,7 @@ class ComputerUseAgent:
         self._last_world_observation = fresh_observation
         self._last_screen_observation_received_at = asyncio.get_running_loop().time()
         self._last_observed_screen = screen
+        self._last_observed_screen_from_reasoning = False
         self._last_screen_has_pixels = self._screen_has_pixel_data(screen)
         self._last_screen_frame_id = (
             getattr(screen, "frame_id", None)
@@ -4998,6 +5003,7 @@ class ComputerUseAgent:
         ):
             result = self._ensure_avcs_state(result)
             self._last_observed_screen = result
+            self._last_observed_screen_from_reasoning = False
             self._last_gui_state_observation = None
             capture_age_ms = getattr(result, "capture_age_ms", None)
             self._last_gui_action_observation_valid = bool(
@@ -5030,6 +5036,7 @@ class ComputerUseAgent:
         else:
             self._last_gui_action_observation_valid = False
             self._last_observed_screen = result
+            self._last_observed_screen_from_reasoning = False
             self._last_gui_state_observation = None
             self._last_screenshot_b64 = ""
         return result
@@ -5441,9 +5448,17 @@ class ComputerUseAgent:
             and observed_avcs.get("engine") == "avcs_reflex"
             else None
         )
+        # Only a frame the agent actually reasoned on can raise "the desktop
+        # changed unexpectedly". The post-action frame captured by the agent's
+        # own GUI dispatch is its expected effect; treating it as surprise would
+        # block the very next legitimate action.
+        from_reasoning = bool(
+            getattr(self, "_last_observed_screen_from_reasoning", False)
+        )
         surprise_score = (
             system3.get("surprise_score")
-            if isinstance(system3, dict)
+            if from_reasoning
+            and isinstance(system3, dict)
             and system3.get("engine") == "system3_temporal_prediction"
             and system3.get("prediction_available") is True
             and system3.get("stability_state") == "surprise_event"
@@ -6109,33 +6124,36 @@ class ComputerUseAgent:
             self._recent_action_signatures = []
         self._recent_action_signatures.append(action_sig)
 
-        if action_type not in {
-            ComputerActionType.GUI_WAIT,
-            ComputerActionType.BROWSER_WAIT,
-            # Headless execution retries are governed by FailureBudgetTracker;
-            # blocking the third identical attempt would prevent that tracker
-            # from reaching its configured exhaustion threshold.
-            ComputerActionType.TERMINAL_EXEC,
-            ComputerActionType.SECURITY_TOOL,
-        } and len(self._recent_action_signatures) >= 3 and all(
-            s == action_sig for s in self._recent_action_signatures[-3:]
+        # A GUI click/double-click whose previous attempts already produced no
+        # visible change is owned by the visual-stall watchdog, not this breaker.
+        # Blocking the repeat here would stop the mission on a generic "loop"
+        # message one stall short of the watchdog's documented abort threshold
+        # and would hide the real cause (unchanged pixels).
+        stalled_gui_repeat = (
+            action_type
+            in (ComputerActionType.GUI_CLICK, ComputerActionType.GUI_DOUBLE_CLICK)
+            and self._consecutive_unchanged_screens > 0
+        )
+        if (
+            not stalled_gui_repeat
+            and action_type
+            not in {
+                ComputerActionType.GUI_WAIT,
+                ComputerActionType.BROWSER_WAIT,
+                # Headless execution retries are governed by FailureBudgetTracker;
+                # blocking the third identical attempt would prevent that tracker
+                # from reaching its configured exhaustion threshold.
+                ComputerActionType.TERMINAL_EXEC,
+                ComputerActionType.SECURITY_TOOL,
+            }
+            and len(self._recent_action_signatures) >= 3
+            and all(s == action_sig for s in self._recent_action_signatures[-3:])
         ):
             actual_obs_str = (
                 f"[ACTION LOOP DETECTED]: You have repeated '{action_type.value}' on '{target_resource}' "
                 "3 times consecutively without state progression. "
                 "This action is BLOCKED. Advance to a different action (e.g. alternative command, script authoring, GUI interaction, or conclude)."
             )
-            if (
-                action_type in (
-                    ComputerActionType.GUI_CLICK,
-                    ComputerActionType.GUI_DOUBLE_CLICK,
-                )
-                and self._consecutive_unchanged_screens
-            ):
-                self._consecutive_unchanged_screens += 1
-                actual_obs_str, self._watchdog_aborted = await self._handle_visual_stall_watchdog(
-                    workspace_id, action_type, actual_obs_str
-                )
             status = ActionExecutionStatus.BLOCKED
             logger.warning(
                 "action_loop_breaker_triggered",

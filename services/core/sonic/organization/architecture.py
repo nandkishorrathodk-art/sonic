@@ -142,6 +142,7 @@ SUBSYSTEM_OWNERSHIP: tuple[SubsystemOwnership, ...] = (
     SubsystemOwnership("repository_security_policy", Department.SECURITY_SAFETY, Team.TRUST_SAFETY, ("SECURITY.md",), "Repository security reporting and disclosure policy."),
     SubsystemOwnership("repository_runtime_config", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, (".env.example", "pyproject.toml", "uv.lock", ".gitignore", ".gitattributes"), "Root workspace metadata and environment/configuration conventions."),
     SubsystemOwnership("repository_governance", Department.PLATFORM_SYSTEMS, Team.API_SERVICES, ("AGENTS.md", "CODEOWNERS", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "README.md", "TEST_INFRA.md", "TEST_READY.md", "run_backend.ps1"), "Repository governance, contributor entry points and local developer startup."),
+    SubsystemOwnership("computer_interaction_contract", Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, ("nochiting.md",), "Honest computer-interaction contract for the assistant and operator."),
 )
 
 
