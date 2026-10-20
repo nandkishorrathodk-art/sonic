@@ -43,10 +43,11 @@ class WindowsHostAVCSComputerProvider(DockerComputerProvider):
         cursor: Any | None = None,
     ) -> None:
         super().__init__()
-        if sys.platform != "win32" and (
-            capture_factory is None or perception is None or cursor is None
-        ):
-            raise RuntimeError("The Windows host desktop provider requires Windows.")
+        # Construction is lazy: selecting the Windows host provider is opt-in,
+        # but the platform/adapters are only required when the desktop is
+        # actually provisioned or used. This keeps provider selection from
+        # crashing process startup on a non-Windows host; create()/screenshot()
+        # fail closed instead.
         self._capture_factory = capture_factory
         self._perception = perception
         self._cursor = cursor

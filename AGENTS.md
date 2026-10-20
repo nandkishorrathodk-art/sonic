@@ -2639,3 +2639,65 @@ Fourth-pass audit and remediation across Department `platform_systems` (`service
    - Standardized default `app_port` to 12000 in `AppSettings` and `Settings`.
    - Removed redundant duplicate route mount of `organization.router` in `main.py`.
    - Purged dead 0-byte orphan file `api/routes/hikko.py` and obsolete `__pycache__` artifacts.
+
+## Perception/import latency regression + AVCS/CUA audit (2026-10-20)
+
+Investigated the reported "SONIC got slow, CUA not working" regression and audited
+AVCS perception + the CUA agent.
+
+### Root cause of the cold-start slowness (fixed)
+- `packages/avcs/forge/vision/__init__.py` eagerly imported **every** submodule,
+  including `forge.vision.encoder`, which imports `torch` (~1.1 s). Because
+  Python runs a package `__init__` before any submodule, the workstation
+  perception hot path (`sonic/computer_use/avcs_perception.py` →
+  `from forge.vision.reflex import ReflexPerception`) paid the full torch import
+  cost on every fresh process, even though the reflex path never uses torch.
+- Measured: `import forge.vision.reflex` = **1522 ms** before → **162 ms** after.
+- Fix: converted the package `__init__` to PEP 562 lazy attribute resolution
+  (`__getattr__`/`__dir__` + an explicit name→submodule map). The public API is
+  unchanged; `from forge.vision import SceneUnderstandingModel` still works and
+  only then imports torch. No consumer imports package-level `forge.vision`, so
+  nothing regressed.
+- Regression guard: `packages/avcs/tests/test_lazy_package_import.py` (4 tests,
+  fresh subprocesses) asserts `forge.vision.reflex` does not load torch, the
+  public API is intact, encoder symbols resolve lazily, and unknown names raise
+  `AttributeError`.
+
+### Per-action perception cost (measured, not a bug)
+- Each GUI reasoning step still takes **2 provider screenshots** (one
+  `observe()`, plus a pre-dispatch fresh-frame revalidation in
+  `_create_gui_action_intent`/`_dispatch_gui_action`). That is intentional
+  fail-closed freshness enforcement, not redundant perception. With a Docker
+  provider whose `screenshot()` bundles window metadata, this is the dominant
+  per-step latency; AVCS perception itself is only ~18 ms warm.
+
+### AVCS perception audit (correct)
+- `perceive_rgb`: 9.65 ms/frame (sha256 fingerprint 1.93 ms, reflex 7.4 ms,
+  system3 0.02 ms) → ~100 fps, fine for a 30 fps frame stream.
+- Fingerprint / frame-ID / scene-hash revalidation in `ground_goal` is correct
+  (guards against a frame changing mid-inference; raises off-screen points).
+- `perceive_png` passes `source_frame_id=None` (correct: monotonic-ID
+  enforcement applies to the raw-RGB provider stream, not PNG re-decodes).
+
+### CUA blocker (environmental, honest fail-closed)
+- `services/core/sonic/health.py::check_llm` reports
+  "No configured vision provider credentials are available for GUI reasoning"
+  because no SONIC LLM/vision provider keys are present in the environment. This
+  is correct fail-closed behavior, not a code bug: the `vision`/`computer_use`
+  routing rules point at `openrouter/openai/gpt-4o` with a
+  `nvidia/meta/llama-3.2-11b-vision-instruct` fallback, and the router fails all
+  providers fast when keys are absent. Provide credentials before expecting
+  live GUI reasoning; do not claim GUI capability from unit tests.
+
+### Pre-existing test flake (NOT caused by this work)
+- `packages/avcs/tests/test_soak_runner.py::test_soak_runner_short_run` fails
+  only under suite load (its handle-stability gate is resource-sensitive); it
+  passes in isolation (1.37 s) and fails identically on the unmodified HEAD
+  `__init__.py`. Treat as environmental/load-induced.
+- `packages/avcs/tests/test_desktop_gui.py` fails to collect without system
+  `libtk8.6.so` (tkinter) — environmental.
+
+### Suite status after this pass
+- `services/core/tests` + `packages/avcs/tests` (minus tkinter module):
+  **2628 passed, 53 skipped, 1 pre-existing load-flake** (soak).
+
