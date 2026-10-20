@@ -208,10 +208,17 @@ async def test_workstation_routes_actionable_prompt_to_boss_agent(monkeypatch):
         mock_boss.run = AsyncMock(side_effect=fake_run)
         mock_boss_cls.return_value = mock_boss
 
-        await _run_prompt_reasoning(tenant_id, session_id, "find SQL injection in target.com")
+        await _run_prompt_reasoning(
+            tenant_id,
+            session_id,
+            "find SQL injection in target.com",
+            requested_plane="headless",
+        )
 
         assert mock_boss_cls.called
         assert mock_boss.run.called
+        assert mock_boss.run.await_args.kwargs["requested_plane"] == "headless"
+        mock_computer.screenshot.assert_not_awaited()
         assert state["status"] == "IDLE"
         assert state["thought_summary"] == "Recon completed: Apache 2.4 + PHP 7.4 found."
         command_entries = [item for item in state["worklog"] if item.get("type") == "command"]
@@ -335,6 +342,169 @@ async def test_autonomous_prompt_uses_verified_target_sandbox_without_desktop(mo
         session_id,
         state["mission"]["mission_id"],
     )
+
+
+@pytest.mark.asyncio
+async def test_preflight_block_reconciles_session_status_and_completion(monkeypatch):
+    import sonic.api.routes.workstation as workstation
+
+    tenant_id = "test-preflight-terminal-state"
+    session_id = "blocked-preflight"
+    mission_id = "mission-blocked"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["status"] = "RUNNING"
+    state["current_action"] = "Starting mission target-sandbox preflight..."
+    state["mission"].update({
+        "mission_id": mission_id,
+        "status": "RUNNING",
+        "completed_at": "",
+    })
+    monkeypatch.setattr(workstation, "_persist_workstation_state", lambda: None)
+
+    async def block_preflight(_tenant_id, _session_id, _mission_id):
+        state["mission"]["status"] = "BLOCKED"
+
+    monkeypatch.setattr(workstation, "_run_mission_preflight_body", block_preflight)
+
+    await workstation._run_mission_preflight(tenant_id, session_id, mission_id)
+
+    assert state["mission"]["status"] == "BLOCKED"
+    assert state["mission"]["completed_at"]
+    assert state["status"] == "BLOCKED"
+    assert "blocked" in state["current_action"].lower()
+
+
+@pytest.mark.asyncio
+async def test_preflight_unhandled_failure_is_terminal_and_reported(monkeypatch):
+    import sonic.api.routes.workstation as workstation
+
+    tenant_id = "test-preflight-unhandled"
+    session_id = "failed-preflight"
+    mission_id = "mission-failed"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["status"] = "RUNNING"
+    state["mission"].update({
+        "mission_id": mission_id,
+        "status": "RUNNING",
+        "completed_at": "",
+    })
+    monkeypatch.setattr(workstation, "_persist_workstation_state", lambda: None)
+
+    async def fail_preflight(*_args):
+        raise RuntimeError("preflight subsystem failed")
+
+    monkeypatch.setattr(workstation, "_run_mission_preflight_body", fail_preflight)
+
+    await workstation._run_mission_preflight(tenant_id, session_id, mission_id)
+
+    assert state["mission"]["status"] == "FAILED"
+    assert state["mission"]["completed_at"]
+    assert state["status"] == "ERROR"
+    assert any(event["title"] == "Mission preflight failed" for event in state["mission"]["events"])
+
+
+@pytest.mark.asyncio
+async def test_paused_mission_event_stream_terminates(monkeypatch):
+    import sonic.api.routes.workstation as workstation
+    from types import SimpleNamespace
+
+    tenant_id = "test-paused-event-stream"
+    session_id = "paused-mission"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["mission"]["status"] = "PAUSED"
+    state["mission"]["events"] = []
+    monkeypatch.setattr(workstation, "_resolve_tenant_id", lambda _user: tenant_id)
+
+    response = await workstation.get_workstation_mission_events(
+        session_id=session_id,
+        after=0,
+        user=SimpleNamespace(),
+    )
+    stream = response.body_iterator
+
+    with pytest.raises(StopAsyncIteration):
+        await stream.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_workstation_prompt_forwards_explicit_execution_plane(monkeypatch):
+    import sonic.api.routes.workstation as workstation
+    from types import SimpleNamespace
+
+    tenant_id = "test-tenant-explicit-plane"
+    session_id = "explicit-plane-session"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["desktop"] = {}
+    monkeypatch.setattr(workstation, "_resolve_tenant_id", lambda _user: tenant_id)
+    monkeypatch.setattr(workstation, "_persist_workstation_state", lambda: None)
+    reasoning = AsyncMock()
+    monkeypatch.setattr(workstation, "_run_prompt_reasoning_with_timeout", reasoning)
+    tasks = []
+    monkeypatch.setattr(
+        workstation,
+        "_track_background_task",
+        lambda _tenant, _session, task: tasks.append(task),
+    )
+
+    response = await send_workstation_prompt(
+        WorkstationPromptRequest(
+            prompt="Run a read-only terminal check",
+            session_id=session_id,
+            requested_plane="headless",
+        ),
+        user=SimpleNamespace(),
+    )
+    await asyncio.gather(*tasks)
+
+    assert response["status"] == "accepted"
+    reasoning.assert_awaited_once_with(
+        tenant_id,
+        session_id,
+        "Run a read-only terminal check",
+        requested_plane="headless",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_plane", ["gui", "headless"])
+async def test_human_resume_preserves_the_paused_execution_plane(
+    monkeypatch, requested_plane
+):
+    import sonic.api.routes.workstation as workstation
+    from types import SimpleNamespace
+
+    tenant_id = "test-tenant-resume-plane"
+    session_id = f"resume-{requested_plane}-plane-session"
+    state = _get_or_create_session(tenant_id, session_id)
+    state.update({
+        "paused_objective": "Open the visible desktop application",
+        "paused_requested_plane": requested_plane,
+        "waiting_for_human": True,
+        "status": "WAITING_FOR_HUMAN",
+    })
+    monkeypatch.setattr(workstation, "_resolve_tenant_id", lambda _user: tenant_id)
+    monkeypatch.setattr(workstation, "_persist_workstation_state", lambda: None)
+    reasoning = AsyncMock()
+    monkeypatch.setattr(workstation, "_run_prompt_reasoning_with_timeout", reasoning)
+    tasks = []
+    monkeypatch.setattr(
+        workstation,
+        "_track_background_task",
+        lambda _tenant, _session, task: tasks.append(task),
+    )
+
+    response = await workstation.resume_workstation_after_human(
+        session_id=session_id,
+        note="Verification completed",
+        user=SimpleNamespace(),
+    )
+    await asyncio.gather(*tasks)
+
+    assert response["resumed_objective"].startswith(
+        "Open the visible desktop application"
+    )
+    reasoning.assert_awaited_once()
+    assert reasoning.await_args.kwargs["requested_plane"] == requested_plane
 
 
 @pytest.mark.asyncio

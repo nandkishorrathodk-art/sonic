@@ -19,6 +19,7 @@ import asyncio
 import base64
 import io
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image
@@ -358,6 +359,7 @@ class _StubComputer(ComputerProvider):
         self.width = width
         self.height = height
         self.gui_calls: list[tuple[str, int, int]] = []
+        self.terminal_calls: list[str] = []
 
     async def create(self, *a, **k): return type("W", (), {"id": self.workspace_id})()
     async def destroy(self, *a, **k): return True
@@ -390,6 +392,7 @@ class _StubComputer(ComputerProvider):
             desktop_state="INTERACTIVE",
         )
     async def terminal(self, workspace_id, command, timeout=60, actor="operator"):
+        self.terminal_calls.append(command)
         return ExecResult(command=command, exit_code=0, stdout="", stderr="")
     async def read_file(self, *a, **k): return ""
     async def write_file(self, *a, **k): return True
@@ -802,3 +805,35 @@ def test_clean_terminal_command_preserves_shell_arguments_and_trailing_operators
         json.dumps({"command": command})
     ) == command
     assert ComputerUseAgent._clean_terminal_command(None) == ""
+
+
+def test_clean_terminal_command_removes_explanatory_parenthetical_and_following_error():
+    from sonic.computer_use.agent import ComputerUseAgent
+
+    command = (
+        "whoami (or we can put the command in the payload): "
+        "bash: -c: line 1: syntax error"
+    )
+    assert ComputerUseAgent._clean_terminal_command(command) == "whoami"
+    quoted = "printf '%s\\n' 'two words (or more)'"
+    assert ComputerUseAgent._clean_terminal_command(quoted) == quoted
+
+
+@pytest.mark.asyncio
+async def test_gui_reasoning_unavailable_stops_mission_without_dispatch(monkeypatch):
+    comp = _StubComputer()
+    agent = ComputerUseAgent(computer_provider=comp, execution_plane="gui")
+    choose_action = AsyncMock(return_value=(
+        ActionExecutionStatus.BLOCKED,
+        "reasoning-unavailable",
+        {},
+        "GUI reasoning timed out; no action was dispatched.",
+    ))
+    monkeypatch.setattr(agent, "choose_action", choose_action)
+
+    traces = await agent.run_mission(comp.workspace_id, "Open a visible application", steps=3)
+
+    choose_action.assert_awaited_once()
+    assert len(traces) == 1
+    assert comp.gui_calls == []
+    assert comp.terminal_calls == []

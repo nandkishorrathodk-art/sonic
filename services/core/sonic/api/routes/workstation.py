@@ -24,7 +24,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -111,6 +111,7 @@ class WorkstationPromptRequest(BaseModel):
     target_repo: str | None = "nandkishorrathodk-art/sonic"
     mode: str | None = "autonomous_engineer"
     session_id: str | None = "default"
+    requested_plane: Literal["gui", "headless"] | None = None
 
 
 class ExecuteCommandRequest(BaseModel):
@@ -254,6 +255,7 @@ async def _run_prompt_reasoning_with_timeout(
     tenant_id: str,
     session_id: str,
     prompt: str,
+    requested_plane: str | None = None,
 ) -> None:
     """Bound one-shot reasoning so a provider outage cannot strand a session."""
     state = _get_or_create_session(tenant_id, session_id)
@@ -269,7 +271,12 @@ async def _run_prompt_reasoning_with_timeout(
         )
         await asyncio.wait_for(
             _run_foreground_operator_task(
-                _run_prompt_reasoning(tenant_id, session_id, prompt)
+                _run_prompt_reasoning(
+                    tenant_id,
+                    session_id,
+                    prompt,
+                    requested_plane=requested_plane,
+                )
             ),
             timeout=timeout_sec,
         )
@@ -335,8 +342,7 @@ def _load_workstation_state() -> None:
                                 raw[canonical_tenant][sid] = sdata
                         migrated_any = True
                 _tenant_workstations.update(raw)
-                if migrated_any:
-                    _persist_workstation_state()
+                recovered_any = False
                 # Preview URLs contain short-lived private Daytona tokens. Do
                 # not reuse a token persisted by an earlier process; the next
                 # authenticated state read will mint a fresh link.
@@ -372,10 +378,32 @@ def _load_workstation_state() -> None:
                                 desktop["vnc_url"] = ""
                                 desktop["novnc_url"] = ""
                                 desktop["os_name"] = "Linux Cyber Workstation (Docker XFCE4)"
-                        # Reset lingering RUNNING status on restart since no background task survived
-                        if session.get("status") == "RUNNING":
+                        # No queued/running task survives a control-plane restart.
+                        if session.get("status") in {"QUEUED", "RUNNING"}:
                             session["status"] = "IDLE"
                             session["current_action"] = "Ready when you are."
+                            recovered_any = True
+                        mission = session.get("mission")
+                        if isinstance(mission, dict) and mission.get("status") in {
+                            "QUEUED",
+                            "RUNNING",
+                        }:
+                            mission["status"] = "FAILED"
+                            mission["completed_at"] = datetime.now(UTC).isoformat()
+                            mission.setdefault("events", []).append({
+                                "type": "error",
+                                "title": "Mission interrupted by service restart",
+                                "content": "The background mission task did not survive the workstation service restart.",
+                                "timestamp": mission["completed_at"],
+                                "mission_id": mission.get("mission_id", ""),
+                            })
+                            session["status"] = "IDLE"
+                            session["current_action"] = (
+                                "Mission interrupted by service restart."
+                            )
+                            recovered_any = True
+                if migrated_any or recovered_any:
+                    _persist_workstation_state()
     except Exception as exc:
         logger.warning("workstation_state_restore_failed", error=str(exc))
 
@@ -890,7 +918,9 @@ def _record_unverified_observation(
     return record
 
 
-async def _run_mission_preflight(tenant_id: str, session_id: str, mission_id: str) -> None:
+async def _run_mission_preflight_body(
+    tenant_id: str, session_id: str, mission_id: str
+) -> None:
     """Run only read-only discovery in the authorized target sandbox.
 
     Exploit/probe actions remain behind the explicit target-command approval
@@ -1047,6 +1077,84 @@ async def _run_mission_preflight(tenant_id: str, session_id: str, mission_id: st
         mission["status"] = "COMPLETED"
         state["current_action"] = "Read-only discovery loop completed with evidence."
         _mission_event(state, "completed", "Discovery mission completed", "All planned read-only discovery actions completed and evidence was captured.")
+
+
+async def _run_mission_preflight(
+    tenant_id: str, session_id: str, mission_id: str
+) -> None:
+    """Run preflight and reconcile persisted session/mission state on every exit."""
+    state = _get_or_create_session(tenant_id, session_id)
+    mission = state.get("mission", {})
+    try:
+        await _run_mission_preflight_body(tenant_id, session_id, mission_id)
+    except asyncio.CancelledError:
+        if mission.get("mission_id") == mission_id:
+            mission["status"] = "CANCELLED"
+            mission["completed_at"] = _timestamp()
+            state["current_action"] = "Mission cancelled before preflight completed."
+            _mission_event(
+                state,
+                "error",
+                "Mission cancelled",
+                "The mission task was cancelled before preflight completed.",
+            )
+        raise
+    except Exception as exc:
+        logger.exception(
+            "workstation_mission_preflight_unhandled_error",
+            mission_id=mission_id,
+            error=str(exc),
+        )
+        if mission.get("mission_id") == mission_id:
+            mission["status"] = "FAILED"
+            mission["completed_at"] = _timestamp()
+            state["current_action"] = "Mission failed during target sandbox preflight."
+            _mission_event(state, "error", "Mission preflight failed", str(exc))
+    finally:
+        if mission.get("mission_id") == mission_id:
+            if mission.get("status") in {"QUEUED", "RUNNING"}:
+                mission["status"] = "FAILED"
+                mission["completed_at"] = _timestamp()
+                _mission_event(
+                    state,
+                    "error",
+                    "Mission stopped unexpectedly",
+                    "Preflight exited without a terminal mission status.",
+                )
+            mission_status = mission.get("status")
+            if mission_status in {
+                "AWAITING_APPROVAL",
+                "BLOCKED",
+                "CANCELLED",
+                "COMPLETED",
+                "FAILED",
+                "PAUSED",
+            }:
+                state["status"] = {
+                    "AWAITING_APPROVAL": "WAITING_FOR_HUMAN",
+                    "BLOCKED": "BLOCKED",
+                    "CANCELLED": "IDLE",
+                    "COMPLETED": "COMPLETED",
+                    "FAILED": "ERROR",
+                    "PAUSED": "PAUSED",
+                }[mission_status]
+                if mission_status == "BLOCKED":
+                    state["current_action"] = "Mission blocked during target sandbox preflight."
+                elif mission_status == "FAILED":
+                    state["current_action"] = "Mission failed during target sandbox preflight."
+                elif mission_status == "CANCELLED":
+                    state["current_action"] = "Mission cancelled before preflight completed."
+                elif mission_status == "PAUSED":
+                    state["current_action"] = "Mission paused during target sandbox preflight."
+                elif mission_status == "COMPLETED":
+                    state["current_action"] = "Read-only discovery loop completed with evidence."
+                elif mission_status == "AWAITING_APPROVAL" and not state.get("current_action"):
+                    state["current_action"] = (
+                        "Read-only discovery complete; operator approval required."
+                    )
+                if mission_status != "PAUSED" and not mission.get("completed_at"):
+                    mission["completed_at"] = _timestamp()
+            _persist_workstation_state()
 
 
 # -------------------------------------------------------------
@@ -1586,6 +1694,7 @@ async def interrupt_workstation_session(
     state["status"] = "PAUSED"
     if not state.get("paused_objective"):
         state["paused_objective"] = state.get("last_objective") or state.get("mission_name") or ""
+        state["paused_requested_plane"] = state.get("last_requested_plane")
     task = _background_tasks.get((tenant_id, session_id))
     if task and not task.done() and task is not asyncio.current_task():
         task.cancel()
@@ -2267,7 +2376,15 @@ async def get_workstation_mission_events(
                 idle_count = 0
 
             status = state.get("mission", {}).get("status")
-            if status in {"AWAITING_APPROVAL", "BLOCKED", "FAILED", "COMPLETED"}:
+            if status in {
+                "AWAITING_APPROVAL",
+                "BLOCKED",
+                "CANCELLED",
+                "COMPLETED",
+                "DISMISSED",
+                "FAILED",
+                "PAUSED",
+            }:
                 if cursor >= len(events):
                     break
 
@@ -3201,7 +3318,12 @@ def _claims_missing_desktop_observation(text: str) -> bool:
     )
 
 
-async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) -> None:
+async def _run_prompt_reasoning(
+    tenant_id: str,
+    session_id: str,
+    prompt: str,
+    requested_plane: str | None = None,
+) -> None:
     """Resolve an objective asynchronously so a slow provider cannot block the UI request."""
     state = _get_or_create_session(tenant_id, session_id)
     action_blocked = False
@@ -3210,7 +3332,13 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
     action_prompt = _is_action_prompt(prompt)
     observation_only = _is_observation_only_prompt(prompt)
     execution_prompt = action_prompt and not observation_only
-    desktop_prompt = _requires_desktop_observation(prompt)
+    desktop_prompt = requested_plane != "headless" and (
+        requested_plane == "gui" or _requires_desktop_observation(prompt)
+    )
+    state["last_objective"] = prompt
+    state["last_requested_plane"] = requested_plane or (
+        "gui" if desktop_prompt else None
+    )
     pipeline_failed = False
     program_profile = _infer_program_profile(prompt, state)
     state["program_profile"] = program_profile
@@ -3820,7 +3948,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 objective=effective_goal,
                                 phase_callback=_on_boss_event,
                                 interrupt_check=lambda: bool(state.get("interrupted")),
-                                requested_plane="gui" if desktop_prompt else None,
+                                requested_plane=requested_plane or (
+                                    "gui" if desktop_prompt else None
+                                ),
                             )
                             report = boss_report
                             summary_msg = report.findings_summary
@@ -3876,6 +4006,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 state["waiting_for_human"] = True
                                 state["waiting_for_human_reason"] = reason_str
                                 state["paused_objective"] = clean_prompt
+                                state["paused_requested_plane"] = state.get(
+                                    "last_requested_plane"
+                                )
                                 state["current_action"] = f"Paused for human assistance: {reason_str}"
                             elif state.get("interrupted"):
                                 state["status"] = "PAUSED"
@@ -4023,6 +4156,9 @@ async def _run_prompt_reasoning(tenant_id: str, session_id: str, prompt: str) ->
                                 state["waiting_for_human"] = True
                                 state["waiting_for_human_reason"] = reason_str
                                 state["paused_objective"] = clean_prompt
+                                state["paused_requested_plane"] = state.get(
+                                    "last_requested_plane"
+                                )
                                 state["current_action"] = f"Waiting for human assistance: {reason_str}"
                                 summary_msg = f"Paused for human assistance: {reason_str}. Complete the step on the live desktop or provide input, then click Resume."
                             elif state.get("interrupted"):
@@ -4458,7 +4594,14 @@ async def send_workstation_prompt(
     _track_background_task(
         tenant_id,
         session_id,
-        asyncio.create_task(_run_prompt_reasoning_with_timeout(tenant_id, session_id, prompt_text)),
+        asyncio.create_task(
+            _run_prompt_reasoning_with_timeout(
+                tenant_id,
+                session_id,
+                prompt_text,
+                requested_plane=req.requested_plane,
+            )
+        ),
     )
     return {
         "status": "accepted",
@@ -4659,9 +4802,11 @@ async def resume_workstation_after_human(
     tenant_id = _resolve_tenant_id(user)
     state = _get_or_create_session(tenant_id, session_id)
     paused_objective = (state.get("paused_objective") or "").strip()
+    requested_plane = state.get("paused_requested_plane")
     state["waiting_for_human"] = False
     state["waiting_for_human_reason"] = ""
     state["paused_objective"] = ""
+    state["paused_requested_plane"] = None
     state["interrupted"] = False
     msg = f"Human assistance completed.{f' Note/Code: {note}' if note else ''}"
     _append_worklog(state, "action", "Human Takeover Completed", msg)
@@ -4677,7 +4822,12 @@ async def resume_workstation_after_human(
             tenant_id,
             session_id,
             asyncio.create_task(
-                _run_prompt_reasoning_with_timeout(tenant_id, session_id, resume_prompt)
+                _run_prompt_reasoning_with_timeout(
+                    tenant_id,
+                    session_id,
+                    resume_prompt,
+                    requested_plane=requested_plane,
+                )
             ),
         )
     else:

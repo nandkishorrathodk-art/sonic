@@ -281,6 +281,28 @@ def sanitize_command_payload(cmd: str) -> str:
         c,
         flags=re.IGNORECASE | re.DOTALL,
     ).strip()
+    quote = ""
+    escaped = False
+    for index, char in enumerate(c):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in ("'", '"'):
+            quote = char
+            continue
+        if char == "(" and re.match(
+            r"\(\s*(?:or|because|which|that|so|we|i|you|for example|e\.g\.)\b",
+            c[index:],
+            flags=re.IGNORECASE,
+        ):
+            return c[:index].rstrip()
     return c
 
 
@@ -3114,6 +3136,8 @@ class ComputerUseAgent:
             action_instructions = (
                 "TARGET: <resource path, application/window name, destination, UI query, coordinates, or command>\n"
                 "PAYLOAD: {\"command\": \"...\"} or another payload JSON object\n"
+                "For TERMINAL_EXEC, the command value must contain shell syntax only; "
+                "never append explanations, parenthetical suggestions, or prose.\n"
                 f"{efficiency_directive}"
                 "3. EARLY COMPLETION: If command output or screen observations already satisfy "
                 "the objective, declare GOAL_COMPLETE immediately."
@@ -3887,8 +3911,12 @@ class ComputerUseAgent:
         elif action_type in (ComputerActionType.GUI_TYPE, ComputerActionType.BROWSER_TYPE):
             payload = {"text": payload_str.strip('"\' ')} if payload_str.strip() not in ("{}", "") else {}
         elif action_type == ComputerActionType.TERMINAL_EXEC:
-            cleaned_cmd = ComputerUseAgent._clean_terminal_command(payload_str)
-            payload = {"command": cleaned_cmd} if cleaned_cmd not in ("{}", "") else {}
+            raw_payload = payload_str.strip()
+            if raw_payload.startswith("{"):
+                payload = {}
+            else:
+                cleaned_cmd = ComputerUseAgent._clean_terminal_command(raw_payload)
+                payload = {"command": cleaned_cmd} if cleaned_cmd else {}
         elif action_type == ComputerActionType.FILE_WRITE:
             payload = {}
             raw_c = fields.get("CONTENT") or fields.get("CODE") or fields.get("SOURCE") or (payload_str if payload_str.strip() not in ("{}", "", "none") else "")
@@ -4299,7 +4327,7 @@ class ComputerUseAgent:
             count=1,
             flags=re.IGNORECASE,
         )
-        return command.strip()
+        return sanitize_command_payload(command.strip())
 
     def _extract_tool_name(
         self,
@@ -4603,6 +4631,12 @@ class ComputerUseAgent:
             asyncio.get_running_loop().time()
         )
         self._last_observed_screen = fresh_screen
+        self._last_screen_has_pixels = self._screen_has_pixel_data(fresh_screen)
+        self._last_screen_frame_id = (
+            getattr(fresh_screen, "frame_id", None)
+            if self._last_screen_has_pixels
+            else None
+        )
         self._last_gui_dispatch_evidence = (
             fresh_screen,
             self._last_screen_observation_received_at,
@@ -4697,6 +4731,12 @@ class ComputerUseAgent:
         self._last_world_observation = fresh_observation
         self._last_screen_observation_received_at = asyncio.get_running_loop().time()
         self._last_observed_screen = screen
+        self._last_screen_has_pixels = self._screen_has_pixel_data(screen)
+        self._last_screen_frame_id = (
+            getattr(screen, "frame_id", None)
+            if self._last_screen_has_pixels
+            else None
+        )
         self._last_gui_state_observation = None
         self._last_screenshot_b64 = screen.screenshot_base64
         self._screen_width = screen.width
@@ -4707,6 +4747,8 @@ class ComputerUseAgent:
         self,
         workspace_id: str,
         action: GUIAction,
+        *,
+        actor: str | None = None,
     ) -> ScreenObservation:
         """Revalidate the pixel frame before GUI dispatch and capture its result."""
         pending_intent = getattr(self, "_pending_gui_action_intent", None)
@@ -4785,10 +4827,15 @@ class ComputerUseAgent:
         if before_screen is None:
             before_screen = getattr(self, "_last_observed_screen", None)
         state_action = getattr(type(self.computer), "gui_action_state", None)
-        dispatch = (
-            self.computer.gui_action_state(workspace_id, action)
+        dispatch_method = (
+            self.computer.gui_action_state
             if callable(state_action)
-            else self.computer.gui_action(workspace_id, action)
+            else self.computer.gui_action
+        )
+        dispatch = (
+            dispatch_method(workspace_id, action, actor=actor)
+            if actor is not None
+            else dispatch_method(workspace_id, action)
         )
         dispatch_task = asyncio.create_task(dispatch)
         try:
@@ -6626,10 +6673,11 @@ class ComputerUseAgent:
                             GUIAction(
                                 action=GUIActionType.TYPE,
                                 text=text,
-                                x=None,
-                                y=None,
+                                x=int(focus_x) if focus_x is not None else None,
+                                y=int(focus_y) if focus_y is not None else None,
                                 delay_ms=payload.get("delay_ms", 25),
                             ),
+                            actor="sonic-agent",
                         )
                     else:
                         await self.motor.human_type(workspace_id, text, delay_ms=payload.get("delay_ms", 25))
@@ -6639,9 +6687,10 @@ class ComputerUseAgent:
                         GUIAction(
                             action=GUIActionType.TYPE,
                             text=text,
-                            x=None,
-                            y=None,
+                            x=int(focus_x) if focus_x is not None else None,
+                            y=int(focus_y) if focus_y is not None else None,
                         ),
+                        actor="sonic-agent",
                     )
                 if status != ActionExecutionStatus.BLOCKED and hasattr(self.computer, "screenshot") and not obs_after:
                     try:
@@ -6843,7 +6892,17 @@ class ComputerUseAgent:
                     import asyncio as _asyncio
                     await _asyncio.sleep(1.0)
                     screen = await self.computer.screenshot(workspace_id)
-                    self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
+                    screenshot_b64 = str(
+                        getattr(screen, "screenshot_base64", "") or ""
+                    )
+                    raw_rgb = bytes(getattr(screen, "raw_rgb", b"") or b"")
+                    frame_has_pixels = bool(screenshot_b64) or (
+                        screen.width > 0
+                        and screen.height > 0
+                        and len(raw_rgb) == screen.width * screen.height * 3
+                    )
+                    self._last_screenshot_b64 = screenshot_b64
+                    self._last_screen_has_pixels = frame_has_pixels
                     self._update_screen_dims(screen)
                     screen_state = str(getattr(screen, "desktop_state", "") or "").upper()
                     active_w = str(getattr(screen, "active_window", "") or "").strip()
@@ -6867,7 +6926,7 @@ class ComputerUseAgent:
                     }
                     if (
                         screen_state == "NO_DISPLAY"
-                        or not self._last_screenshot_b64
+                        or not frame_has_pixels
                         or active_w.lower() in {"", "desktop"}
                         or not (
                             self._window_matches_application(app_name, active_w)
@@ -6894,16 +6953,81 @@ class ComputerUseAgent:
                 else:
                     if "\n" in app_name:
                         app_name = app_name.split("\n")[0].strip(" *_\n\r\t`\"'")
+                    before_status = await self.computer.status(workspace_id)
+                    before_windows = [
+                        str(window)
+                        for window in (
+                            list(getattr(before_status, "open_applications", []) or [])
+                            + [
+                                str(getattr(before_status, "active_application", "") or ""),
+                                str(getattr(before_status, "active_window", "") or ""),
+                            ]
+                        )
+                        if str(window).strip()
+                    ]
+                    was_open = any(
+                        self._window_matches_application(app_name, window)
+                        for window in before_windows
+                    )
                     if hasattr(self.computer, "close_application"):
-                        closed = await self.computer.close_application(workspace_id, app_name)
-                        if closed is False:
-                            raise RuntimeError(f"application close failed for '{app_name}'")
+                        await self.computer.close_application(workspace_id, app_name)
                     else:
                         await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(action=GUIActionType.CLOSE_APP, app_name=app_name),
                         )
-                    actual_obs_str = f"Closed {app_name}"
+                    await asyncio.sleep(0.15)
+                    after_status = await self.computer.status(workspace_id)
+                    after_windows = [
+                        str(window)
+                        for window in (
+                            list(getattr(after_status, "open_applications", []) or [])
+                            + [
+                                str(getattr(after_status, "active_application", "") or ""),
+                                str(getattr(after_status, "active_window", "") or ""),
+                            ]
+                        )
+                        if str(window).strip()
+                    ]
+                    still_open = any(
+                        self._window_matches_application(app_name, window)
+                        for window in after_windows
+                    )
+                    screen = await self.computer.screenshot(workspace_id)
+                    raw_rgb = bytes(getattr(screen, "raw_rgb", b"") or b"")
+                    frame_has_pixels = bool(
+                        getattr(screen, "screenshot_base64", "")
+                    ) or (
+                        screen.width > 0
+                        and screen.height > 0
+                        and len(raw_rgb) == screen.width * screen.height * 3
+                    )
+                    capture_age_ms = getattr(screen, "capture_age_ms", None)
+                    frame_is_fresh = (
+                        isinstance(capture_age_ms, (int, float))
+                        and not isinstance(capture_age_ms, bool)
+                        and math.isfinite(capture_age_ms)
+                        and 0 <= capture_age_ms <= 2_000
+                    )
+                    if still_open:
+                        status = ActionExecutionStatus.FAILED
+                        actual_obs_str = (
+                            f"APP_CLOSE was dispatched, but '{app_name}' remains "
+                            "visible in the fresh window state."
+                        )
+                    elif not frame_has_pixels or not frame_is_fresh:
+                        status = ActionExecutionStatus.UNVERIFIED
+                        actual_obs_str = (
+                            f"Window state no longer lists '{app_name}', but the "
+                            "post-close desktop frame is missing or stale."
+                        )
+                    else:
+                        status = ActionExecutionStatus.VERIFIED
+                        qualifier = "Closed" if was_open else "Already closed"
+                        actual_obs_str = (
+                            f"{qualifier} {app_name}; fresh desktop state confirms "
+                            "no matching application window remains."
+                        )
 
             elif action_type == ComputerActionType.APP_FOCUS:
                 raw_app = payload.get("app_name") or target_resource
@@ -8522,6 +8646,49 @@ class ComputerUseAgent:
                         f"action instead (e.g. author a tool/script, run curl, execute python/bash, inspect target, file edit, or app interaction)."
                     )
 
+        gui_key_actions = {
+            ComputerActionType.GUI_KEYPRESS.value,
+            ComputerActionType.GUI_HOTKEY.value,
+        }
+        if (
+            action_type.value in gui_key_actions
+            and self._consecutive_unchanged_screens > 0
+            and isinstance(payload, dict)
+        ):
+            key_value = (
+                payload.get("key")
+                or payload.get("keys")
+                or payload.get("hotkey")
+                or payload.get("key_combination")
+            )
+            if key_value:
+                current_key = re.sub(r"\s+", "", str(key_value)).casefold()
+                for signature in reversed(self._recent_action_signatures[-4:]):
+                    if signature[0] not in gui_key_actions:
+                        continue
+                    try:
+                        previous_payload = ast.literal_eval(signature[2])
+                    except (SyntaxError, ValueError):
+                        continue
+                    if not isinstance(previous_payload, dict):
+                        continue
+                    previous_key = (
+                        previous_payload.get("key")
+                        or previous_payload.get("keys")
+                        or previous_payload.get("hotkey")
+                        or previous_payload.get("key_combination")
+                    )
+                    if (
+                        previous_key
+                        and re.sub(r"\s+", "", str(previous_key)).casefold()
+                        == current_key
+                    ):
+                        return (
+                            "BLOCKED: this GUI key input already produced no visible "
+                            "screen change. Do not dispatch it again; choose a different "
+                            "grounded interaction or report that the target is unavailable."
+                        )
+
         # Block repeat of recent actions (within the last 4 actions)
         if self._recent_action_signatures:
             cmd_val = (
@@ -9057,6 +9224,15 @@ class ComputerUseAgent:
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= self._STUCK_THRESHOLD:
                     self._inject_replan(goal)
+                if rejection.startswith(
+                    "BLOCKED: this GUI key input already produced no visible screen change."
+                ):
+                    self._watchdog_aborted = True
+                    self.history.append({
+                        "action": "WATCHDOG_ABORT",
+                        "result": rejection,
+                    })
+                    break
                 continue
 
             # 3. ACT & VERIFY
@@ -9217,6 +9393,32 @@ class ComputerUseAgent:
                 getattr(getattr(trace, "status", ""), "value", getattr(trace, "status", ""))
             ).upper()
             normalized_trace_observation = trace_observation.strip().casefold()
+            unavailable_gui_capability = (
+                trace_status == ActionExecutionStatus.BLOCKED.value
+                and trace_action_type.startswith(("GUI_", "APP_", "BROWSER_"))
+                and any(
+                    marker in normalized_trace_observation
+                    for marker in (
+                        "sonic_avcs_grounding_checkpoint is not configured",
+                        "local avcs pixel processor is unavailable",
+                        "avcs has no evaluated local focus-verification head",
+                    )
+                )
+            )
+            if unavailable_gui_capability:
+                self.history.append({
+                    "action": "GUI_CAPABILITY_UNAVAILABLE",
+                    "result": (
+                        "Stopped after the required local AVCS capability was "
+                        "unavailable. No GUI action was dispatched."
+                    ),
+                })
+                logger.warning(
+                    "gui_mission_stopped_for_unavailable_avcs_capability",
+                    action=trace_action_type,
+                    reason=trace_observation[:300],
+                )
+                break
             stale_gui_block = (
                 trace_status == ActionExecutionStatus.BLOCKED.value
                 and trace_action_type.startswith(("GUI_", "APP_", "BROWSER_"))

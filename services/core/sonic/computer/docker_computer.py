@@ -1230,6 +1230,10 @@ class DockerComputerProvider(ComputerProvider):
                 if action.x is None or action.y is None:
                     raise ValueError("Typing focus coordinates require both x and y")
                 await _validate_pointer_coords((action.x, action.y))
+            elif atype == GUIActionType.TYPE and actor == "sonic-agent":
+                raise ValueError(
+                    "Agent typing requires focus coordinates verified from the current desktop frame"
+                )
 
             if atype in (GUIActionType.CLICK, GUIActionType.DOUBLE_CLICK):
                 if action.button is not None and action.button not in (1, 2, 3):
@@ -1276,7 +1280,11 @@ class DockerComputerProvider(ComputerProvider):
                 delay = max(0, int(action.delay_ms)) if action.delay_ms is not None else 25
                 safe_text = shlex.quote(action.text)
                 focus_prefix = ""
-                if action.x is not None and action.y is not None:
+                if (
+                    actor != "sonic-agent"
+                    and action.x is not None
+                    and action.y is not None
+                ):
                     focus_prefix = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py click {action.x} {action.y} && sleep 0.05 && "
                 await exec_gui(f"export DISPLAY={disp}; {focus_prefix}xdotool type --clearmodifiers --delay {delay} -- {safe_text}")
 
@@ -1304,14 +1312,16 @@ class DockerComputerProvider(ComputerProvider):
                         f"export DISPLAY={disp}; "
                         f"wmctrl -c {safe_target} 2>/dev/null || "
                         f"wmctrl -ic {safe_target} 2>/dev/null || "
-                        f"xdotool search --onlyvisible --name {safe_target} windowclose 2>/dev/null || "
-                        f"pkill -f -- {safe_target}"
+                        f"xdotool search --onlyvisible --name {safe_target} windowclose 2>/dev/null"
                     )
                 else:
                     await exec_gui(f"DISPLAY={disp} xdotool getactivewindow windowclose")
 
             elif atype == GUIActionType.CLOSE_APP and action.app_name:
-                await exec_gui(f"pkill -f -- {shlex.quote(action.app_name)}")
+                await exec_gui(
+                    f"export DISPLAY={disp}; "
+                    f"wmctrl -c {shlex.quote(action.app_name)}"
+                )
 
             elif atype == GUIActionType.INSTALL_APP and (action.app_name or action.text):
                 pkg = action.app_name or action.text or ""

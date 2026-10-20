@@ -367,6 +367,14 @@ class JudgeAgent:
         written_files: list[str] = []
         failed_traces: list[str] = []
         syntax_errors: list[str] = []
+        stop_words = {
+            "a", "an", "and", "by", "for", "from", "in", "into", "of",
+            "on", "or", "the", "to", "using", "with", "run", "check",
+        }
+        goal_terms = {
+            token for token in re.findall(r"[a-z0-9]+", sub_mission.goal.lower())
+            if len(token) > 2 and token not in stop_words
+        }
 
         # Check for unsaved editor buffers or window titles with unsaved asterisks (*untitled)
         unsaved_match = None
@@ -470,19 +478,57 @@ class JudgeAgent:
                     if action in ("FILE_WRITE", "FILE_EDIT", "FILE_CREATE") and target:
                         written_files.append(target)
             else:
-                if exit_c == 0 and verif_ev.strip() and obs.strip():
+                if (
+                    exit_c == 0
+                    and obs.strip()
+                    and (
+                        verif_ev.strip()
+                        or (
+                            action == "TERMINAL_EXEC"
+                            and any(
+                                term in f"{target} {obs} {verif_ev}".lower()
+                                for term in goal_terms
+                            )
+                        )
+                    )
+                ):
                     has_concrete_proof = True
                     if target:
                         evidence_items.append(f"{action}:{target[:120]}")
                     if action in ("FILE_WRITE", "FILE_EDIT", "FILE_CREATE") and target:
                         written_files.append(target)
 
-        # Check 2.1: Terminal syntax errors must invalidate confirmation
+        successful_receipt_text = " ".join(
+            f"{_t_val(trace, 'target_resource', '')} "
+            f"{_t_val(trace, 'target', '')} "
+            f"{_t_val(trace, 'actual_observation', '')} "
+            f"{_t_val(trace, 'verification_evidence', '')}"
+            for trace in traces
+            if (
+                str(_t_val(trace, "status", "")).upper()
+                not in ("FAILED", "BLOCKED")
+                and (
+                    _t_val(trace, "exit_code", None) is None
+                    or _t_val(trace, "exit_code", None) == 0
+                )
+            )
+        ).lower()
+        successful_receipt_terms = set(re.findall(r"[a-z0-9]+", successful_receipt_text))
+        has_relevant_successful_receipt = (
+            bool(goal_terms.intersection(successful_receipt_terms))
+            or any(term in successful_receipt_text for term in goal_terms)
+        )
+
+        # A later successful, relevant command can recover from an earlier failed attempt.
         res_text = f"{result.findings_summary} {' '.join(result.key_discoveries)}".lower()
         if any(se in res_text for se in ("syntax error", "syntaxerror", "indentationerror", "taberror", "invalid syntax")):
             syntax_errors.append(f"Result summary reported syntax error: {result.findings_summary[:120]}")
 
-        if syntax_errors:
+        if syntax_errors and not (
+            not is_gui_mission
+            and has_concrete_proof
+            and has_relevant_successful_receipt
+        ):
             err_details = "; ".join(syntax_errors[:3])
             return JudgeEvaluation(
                 verdict=JudgeVerdict.FALSIFIED,
@@ -586,6 +632,25 @@ class JudgeAgent:
                 )
                 for trace in traces
             )
+            has_successful_execution = any(
+                str(_t_val(trace, "status", "")).upper()
+                not in ("FAILED", "BLOCKED")
+                and (
+                    _t_val(trace, "exit_code", None) is None
+                    or _t_val(trace, "exit_code", None) == 0
+                )
+                for trace in traces
+            )
+            if has_failed_execution and has_successful_execution:
+                return JudgeEvaluation(
+                    verdict=JudgeVerdict.INCONCLUSIVE,
+                    confidence=0.85,
+                    notes=(
+                        "Execution succeeded, but the successful receipt is not relevant "
+                        "to the objective; failed attempts cannot establish relevance."
+                    ),
+                    self_attestation_rejected=True,
+                )
             logger.warning(
                 "judge_self_attestation_rejected",
                 worker=worker_agent_id,
@@ -626,37 +691,30 @@ class JudgeAgent:
         # A successful process is not evidence that it advanced the mission.
         # Require a meaningful objective token in the concrete receipt before
         # accepting a generic successful command as confirmation.
-        stop_words = {
-            "a", "an", "and", "by", "for", "from", "in", "into", "of",
-            "on", "or", "the", "to", "using", "with", "run", "check",
-        }
-        goal_terms = {
-            token for token in re.findall(r"[a-z0-9]+", sub_mission.goal.lower())
-            if len(token) > 2 and token not in stop_words
-        }
-        receipt_text = " ".join(
-            f"{_t_val(trace, 'actual_observation', '')} "
-            f"{_t_val(trace, 'verification_evidence', '')}"
-            for trace in traces
-        ).lower()
-        receipt_terms = set(re.findall(r"[a-z0-9]+", receipt_text))
-        has_overlap = bool(goal_terms.intersection(receipt_terms)) or any(
-            gt in receipt_text for gt in goal_terms
-        )
+        has_overlap = has_relevant_successful_receipt
         if gui_evaluation is None and has_concrete_proof and goal_terms and not has_overlap:
             return JudgeEvaluation(
                 verdict=JudgeVerdict.INCONCLUSIVE,
-                confidence=0.4,
+                confidence=0.85,
                 notes="Execution succeeded but the receipt is not relevant to the sub-mission objective.",
                 evidence_items=evidence_items,
             )
 
         # 5. Confirmed Grounded Verdict
         if has_concrete_proof and result.success:
+            failure_note = (
+                f" Earlier failed attempts remain in the trace ({len(failed_traces)}); "
+                "the final relevant successful receipt was evaluated separately."
+                if failed_traces
+                else ""
+            )
             return JudgeEvaluation(
                 verdict=JudgeVerdict.CONFIRMED,
                 confidence=0.9,
-                notes="Independent verification confirmed concrete execution receipts with exit code 0.",
+                notes=(
+                    "Independent verification confirmed concrete execution receipts "
+                    f"with exit code 0.{failure_note}"
+                ),
                 evidence_items=evidence_items,
             )
 
