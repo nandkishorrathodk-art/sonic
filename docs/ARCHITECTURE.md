@@ -12,6 +12,8 @@ The authoritative acceptance contract is
 [SONIC_COMPUTER_USER_GOAL.md](SONIC_COMPUTER_USER_GOAL.md). Ownership of
 repository subsystems is defined in
 [`architecture.py`](../services/core/sonic/organization/architecture.py).
+For the step-by-step current AVCS-to-System-2 and GUI action path, see
+[SONIC_AVCS_SYSTEM_FLOW.md](SONIC_AVCS_SYSTEM_FLOW.md).
 
 ## Runtime at a glance
 

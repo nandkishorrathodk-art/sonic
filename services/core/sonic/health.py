@@ -229,10 +229,11 @@ class HealthChecker:
             )
         return ComponentHealth(
             name="llm_router",
-            status=HealthStatus.HEALTHY,
+            status=HealthStatus.DEGRADED,
             message=(
-                "Configured vision providers: "
-                f"{', '.join(ready_vision)}; remote reachability is not probed."
+                "Vision provider credentials are configured: "
+                f"{', '.join(ready_vision)}; remote reachability and image "
+                "comprehension are not verified."
             ),
             is_critical=True,
         )

@@ -1003,25 +1003,16 @@ class DockerComputerProvider(ComputerProvider):
 
         try:
             await self._start_raw_frame_stream(workspace_id)
-            deadline = asyncio.get_running_loop().time() + 5
-            while True:
-                current = self._latest_processed_frame
-                if (
-                    current is not None
-                    and current.frame_id > self._last_returned_frame_id
-                ):
-                    break
-                self._frame_ready.clear()
-                current = self._latest_processed_frame
-                if (
-                    current is not None
-                    and current.frame_id > self._last_returned_frame_id
-                ):
-                    break
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError("Timed out waiting for a new processed AVCS frame")
-                await asyncio.wait_for(self._frame_ready.wait(), timeout=remaining)
+            try:
+                await self._wait_for_new_processed_frame()
+            except TimeoutError:
+                logger.warning(
+                    "avcs_raw_frame_stream_stalled_restarting",
+                    workspace_id=workspace_id,
+                )
+                await self.close()
+                await self._start_raw_frame_stream(workspace_id)
+                await self._wait_for_new_processed_frame()
         except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
             self._frame_stream_error = str(exc)
             self._latest_processed_frame = None
@@ -1097,6 +1088,27 @@ class DockerComputerProvider(ComputerProvider):
         self._last_screenshot_time = asyncio.get_running_loop().time()
         self._last_returned_frame_id = frame.frame_id
         return observation
+
+    async def _wait_for_new_processed_frame(self) -> None:
+        deadline = asyncio.get_running_loop().time() + 5
+        while True:
+            current = self._latest_processed_frame
+            if (
+                current is not None
+                and current.frame_id > self._last_returned_frame_id
+            ):
+                return
+            self._frame_ready.clear()
+            current = self._latest_processed_frame
+            if (
+                current is not None
+                and current.frame_id > self._last_returned_frame_id
+            ):
+                return
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError("Timed out waiting for a new processed AVCS frame")
+            await asyncio.wait_for(self._frame_ready.wait(), timeout=remaining)
 
     # Graphical Actions (Human Takeover & Agent GUI Actions)
     # -------------------------------------------------------------

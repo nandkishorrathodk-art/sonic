@@ -10,6 +10,8 @@ import mss
 
 _HEADER = struct.Struct("!4sQQII")
 _MAGIC = b"AVCS"
+_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
+_MAX_FRAME_PIXELS = _MAX_RAW_FRAME_BYTES // 3
 
 
 def main() -> int:
@@ -26,7 +28,11 @@ def main() -> int:
         monitor = capture.monitors[0]
         width = int(monitor["width"])
         height = int(monitor["height"])
-        if width <= 0 or height <= 0 or width * height > 64_000_000:
+        if (
+            width <= 0
+            or height <= 0
+            or width * height > _MAX_FRAME_PIXELS
+        ):
             raise RuntimeError("X11 display dimensions are invalid or exceed the frame limit")
 
         while True:

@@ -9,6 +9,8 @@ universal or live desktop-task capability.
 
 - [Product goal and GUI acceptance contract](SONIC_COMPUTER_USER_GOAL.md) —
   authoritative outcome, perception, grounding and verification requirements.
+- [SONIC + AVCS system flow](SONIC_AVCS_SYSTEM_FLOW.md) — current path from
+  workstation pixels through AVCS, reasoning, guarded actions and Judge review.
 - [Getting started](GETTING_STARTED.md) — local development setup.
 - [Architecture](ARCHITECTURE.md) — current components and their boundaries.
 - [Deployment](DEPLOYMENT.md) — local and production configuration cautions.

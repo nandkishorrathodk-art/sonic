@@ -5,6 +5,7 @@ import base64
 import time
 from io import BytesIO
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image, ImageDraw
@@ -22,6 +23,7 @@ from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import (
     ActionExecutionStatus,
     ComputerActionType,
+    ComputerDecisionTrace,
     ComputerWorldObservation,
 )
 from sonic.safety.action_policy import ActionPolicy
@@ -907,6 +909,184 @@ def test_slow_gui_reasoning_fails_closed_when_screenshot_changed():
     assert computer.gui_calls == 0
 
 
+@pytest.mark.asyncio
+async def test_refreshed_gui_intent_keeps_grounding_frame_identity_in_sync():
+    rgb = bytes((30, 40, 50)) * (8 * 6)
+    state = {
+        "engine": "avcs_reflex",
+        "frame_index": 1,
+        "source_frame_id": 1,
+        "scene_hash": "stable-scene",
+        "width": 8,
+        "height": 6,
+    }
+    source_screen = ScreenObservation(
+        raw_rgb=rgb,
+        frame_id=1,
+        avcs_state=state,
+        perception_version=1,
+        width=8,
+        height=6,
+        active_window="Desktop",
+        capture_age_ms=3_000,
+        desktop_state="INTERACTIVE",
+    )
+    refreshed_screen = ScreenObservation(
+        raw_rgb=rgb,
+        frame_id=2,
+        avcs_state={**state, "frame_index": 2, "source_frame_id": 2},
+        perception_version=2,
+        width=8,
+        height=6,
+        active_window="Desktop",
+        capture_age_ms=0,
+        desktop_state="INTERACTIVE",
+    )
+    computer = _ReceiptComputer()
+    computer.screenshot = AsyncMock(return_value=refreshed_screen)
+    agent = ComputerUseAgent(computer_provider=computer, execution_plane="gui")
+    agent._ensure_avcs_state = lambda screen: screen
+    observation = ComputerWorldObservation(
+        screen=source_screen,
+        active_application="Desktop",
+        perception_version=1,
+        observation_age_ms=3_000,
+        observation_received_monotonic_ns=time.perf_counter_ns(),
+    )
+
+    await agent._create_gui_action_intent(
+        "workspace",
+        action_type=ComputerActionType.GUI_CLICK,
+        target="Applications menu",
+        payload={"x": 1, "y": 1},
+        expected_outcome="Menu opens",
+        observation=observation,
+        ttl_ms=2_000,
+    )
+
+    assert agent._last_observed_screen is refreshed_screen
+    assert agent._last_screen_has_pixels is True
+    assert agent._last_screen_frame_id == 2
+
+    class _Grounder:
+        def ground_target_rgb_bytes(
+            self, frame, query, width, height, geometry, source_frame_id
+        ):
+            assert source_frame_id == 2
+            return None
+
+    agent._avcs_perception = _Grounder()
+    assert await agent._ground_target_with_avcs("Applications menu") is None
+
+
+@pytest.mark.asyncio
+async def test_run_mission_stops_after_missing_avcs_grounder_blocks_gui_action():
+    agent = ComputerUseAgent(computer_provider=_ReceiptComputer(), execution_plane="gui")
+    observation = ComputerWorldObservation(
+        screen=_avcs_screen(),
+        active_application="Desktop",
+        perception_version=1,
+        observation_age_ms=0,
+        observation_received_monotonic_ns=time.perf_counter_ns(),
+    )
+    agent.observe = AsyncMock(return_value=observation)
+    agent.choose_action = AsyncMock(return_value=(
+        ComputerActionType.GUI_CLICK,
+        "Applications menu button",
+        {"postcondition": {"scene_changed": True}},
+        "The Applications menu is open",
+    ))
+    agent._single_gui_postcondition_error = lambda *_args: None
+    agent._create_gui_action_intent = AsyncMock(return_value=object())
+    blocked_trace = ComputerDecisionTrace(
+        step_index=1,
+        action_type=ComputerActionType.GUI_CLICK,
+        target_resource="Applications menu button",
+        payload="{}",
+        predicted_outcome="",
+        actual_observation=(
+            "GUI action blocked: the local AVCS grounder did not resolve the "
+            "target 'Applications menu button'. "
+            "SONIC_AVCS_GROUNDING_CHECKPOINT is not configured"
+        ),
+        expected_observation="",
+        info_gain=0.0,
+        recovery_attempted=False,
+        status=ActionExecutionStatus.BLOCKED,
+        exit_code=126,
+    )
+
+    async def execute_blocked(*_args, **_kwargs):
+        agent.traces.append(blocked_trace)
+        return blocked_trace
+
+    agent.execute_action = AsyncMock(side_effect=execute_blocked)
+
+    await agent.run_mission("workspace", "Open the Applications menu", steps=5)
+
+    assert agent.observe.await_count == 1
+    assert agent.choose_action.await_count == 1
+    assert agent.execute_action.await_count == 1
+    assert any(item["action"] == "GUI_CAPABILITY_UNAVAILABLE" for item in agent.history)
+
+
+@pytest.mark.asyncio
+async def test_run_mission_stops_before_repeating_unverified_gui_key():
+    agent = ComputerUseAgent(computer_provider=_ReceiptComputer(), execution_plane="gui")
+    observation = ComputerWorldObservation(
+        screen=_avcs_screen(),
+        active_application="Desktop",
+        perception_version=1,
+        observation_age_ms=0,
+        observation_received_monotonic_ns=time.perf_counter_ns(),
+    )
+    agent.observe = AsyncMock(return_value=observation)
+    agent.choose_action = AsyncMock(side_effect=[
+        (
+            ComputerActionType.GUI_KEYPRESS,
+            "keyboard",
+            {"key": "Win"},
+            "The menu opens",
+        ),
+        (
+            ComputerActionType.GUI_HOTKEY,
+            "keyboard",
+            {"keys": "Win"},
+            "The menu opens",
+        ),
+    ])
+    agent._single_gui_postcondition_error = lambda *_args: None
+    agent._create_gui_action_intent = AsyncMock(return_value=object())
+
+    async def execute_unverified_key(_workspace_id, action_type, target, payload, *_args):
+        agent._recent_action_signatures.append(
+            (action_type.value, target.lower(), str(payload))
+        )
+        agent._consecutive_unchanged_screens = 1
+        trace = ComputerDecisionTrace(
+            step_index=len(agent.traces) + 1,
+            action_type=action_type,
+            target_resource=target,
+            payload=str(payload),
+            predicted_outcome="",
+            actual_observation="AVCS saw no pixel-scene change.",
+            expected_observation="",
+            info_gain=0.0,
+            recovery_attempted=False,
+            status=ActionExecutionStatus.UNVERIFIED,
+        )
+        agent.traces.append(trace)
+        return trace
+
+    agent.execute_action = AsyncMock(side_effect=execute_unverified_key)
+
+    await agent.run_mission("workspace", "Open the Applications menu", steps=5)
+
+    assert agent.choose_action.await_count == 2
+    assert agent.execute_action.await_count == 1
+    assert any(item["action"] == "WATCHDOG_ABORT" for item in agent.history)
+
+
 def test_recent_gui_observation_fails_closed_when_screenshot_changed():
     class ChangedScreenComputer(_ReceiptComputer):
         async def screenshot(self, workspace_id):
@@ -1032,6 +1212,7 @@ async def test_reasoning_fallback_stores_refreshed_frame_for_target_grounding():
             "height": 6,
         },
         capture_age_ms=0,
+        perception_version=2,
         width=8,
         height=6,
         desktop_state="INTERACTIVE",

@@ -127,7 +127,15 @@ class VNCClickDemoRecorder:
                 raise ValueError("Target labels must contain 1 to 160 characters.")
             self._labels.put(normalized_label)
         self._snapshot_lock = threading.Lock()
-        self._latest_snapshot: tuple[np.ndarray, tuple[int, int, int, int], float] | None = None
+        self._latest_snapshot: (
+            tuple[
+                np.ndarray,
+                tuple[int, int, int, int],
+                tuple[int, int, int, int],
+                float,
+            ]
+            | None
+        ) = None
         self._record_lock = threading.Lock()
         self._samples_file: Any = None
         self._sample_count = 0
@@ -187,12 +195,13 @@ class VNCClickDemoRecorder:
                         frame = np.frombuffer(
                             shot.rgb, dtype=np.uint8
                         ).reshape(shot.height, shot.width, 3).copy()
-                        rect = window["rect"]
-                        crop, crop_rect = crop_window_frame(frame, rect)
+                        window_rect = window["rect"]
+                        crop, crop_rect = crop_window_frame(frame, window_rect)
                         with self._snapshot_lock:
                             self._latest_snapshot = (
                                 crop,
                                 crop_rect,
+                                window_rect,
                                 time.monotonic(),
                             )
                     else:
@@ -246,11 +255,11 @@ class VNCClickDemoRecorder:
         if snapshot is None:
             print("Ignored VNC click: the selected window is not foreground.", file=sys.stderr)
             return
-        crop, crop_rect, captured_at = snapshot
+        crop, crop_rect, window_rect, captured_at = snapshot
         if time.monotonic() - captured_at > _MAX_FRAME_AGE_SECONDS:
             print("Ignored VNC click: the captured window frame is stale.", file=sys.stderr)
             return
-        if not self._target_window_matches_snapshot(crop_rect):
+        if not self._target_window_matches_snapshot(window_rect):
             print(
                 "Ignored VNC click: the captured target window moved or closed.",
                 file=sys.stderr,

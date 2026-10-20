@@ -171,6 +171,7 @@ def test_rejected_click_does_not_consume_prearmed_label(monkeypatch, tmp_path):
     recorder._latest_snapshot = (
         np.full((20, 30, 3), (255, 0, 0), dtype=np.uint8),
         (10, 20, 40, 40),
+        (10, 20, 40, 40),
         time.monotonic(),
     )
     monkeypatch.setattr(
@@ -211,6 +212,7 @@ def test_click_is_recorded_if_target_loses_focus_after_click(monkeypatch, tmp_pa
     recorder._latest_snapshot = (
         np.full((20, 30, 3), (255, 0, 0), dtype=np.uint8),
         (10, 20, 40, 40),
+        (10, 20, 40, 40),
         time.monotonic(),
     )
     monkeypatch.setattr(recorder, "_active_window", lambda: None)
@@ -247,6 +249,7 @@ def test_recorder_writes_dataset_compatible_rgb_sample(monkeypatch, tmp_path):
     recorder._latest_snapshot = (
         np.full((20, 30, 3), (255, 0, 0), dtype=np.uint8),
         (10, 20, 40, 40),
+        (10, 20, 40, 40),
         time.monotonic(),
     )
     monkeypatch.setattr(
@@ -272,3 +275,44 @@ def test_recorder_writes_dataset_compatible_rgb_sample(monkeypatch, tmp_path):
     assert tuple(frame[0, 0]) == (255, 0, 0)
     manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["sample_count"] == 1
+
+
+def test_clipped_capture_validates_full_window_bounds_and_normalizes_to_crop(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("avcs.training.vnc_demo_recorder.sys.platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":99")
+    session_dir = tmp_path / "session"
+    (session_dir / "frames").mkdir(parents=True)
+    recorder = VNCClickDemoRecorder(
+        window_title="Test",
+        task="Click a visible control",
+        output_dir=session_dir,
+        confirm_isolated_window=True,
+        target_labels=["Visible control"],
+        capture_factory=object(),
+    )
+    recorder._samples_file = (session_dir / "samples.jsonl").open(
+        "x", encoding="utf-8"
+    )
+    crop_rect = (10, 20, 40, 40)
+    window_rect = (10, 20, 50, 50)
+    recorder._latest_snapshot = (
+        np.full((20, 30, 3), (255, 0, 0), dtype=np.uint8),
+        crop_rect,
+        window_rect,
+        time.monotonic(),
+    )
+    validated_rects = []
+    monkeypatch.setattr(
+        recorder,
+        "_target_window_matches_snapshot",
+        lambda rect: validated_rects.append(rect) or rect == window_rect,
+    )
+
+    recorder._record_click((25, 30))
+    recorder._samples_file.close()
+
+    assert validated_rects == [window_rect]
+    record = json.loads((session_dir / "samples.jsonl").read_text(encoding="utf-8"))
+    assert record["action"]["point_norm"] == [0.5, 0.5]

@@ -511,7 +511,8 @@ async def test_llm_health_reports_ready_vision_route(monkeypatch):
 
     health = await HealthChecker.check_llm()
 
-    assert health.status == HealthStatus.HEALTHY
+    assert health.status == HealthStatus.DEGRADED
     assert health.message == (
-        "Configured vision providers: groq, nvidia; remote reachability is not probed."
+        "Vision provider credentials are configured: groq, nvidia; remote "
+        "reachability and image comprehension are not verified."
     )

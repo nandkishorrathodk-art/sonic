@@ -1,5 +1,13 @@
 # AVCS + LLM Integration: Master Architectural Blueprint & Strategic Delivery Roadmap
 
+> **Historical proposal — not current status.** This dated roadmap contains
+> proposed designs, old audit findings, and milestone claims from its original
+> planning context. Do not use it as evidence that those capabilities are
+> currently deployed, trained, measured, or wired into SONIC. The current
+> implemented SONIC/AVCS flow and its limits are documented in
+> [SONIC_AVCS_SYSTEM_FLOW.md](../../../docs/SONIC_AVCS_SYSTEM_FLOW.md) and the
+> [AVCS package README](../README.md).
+
 **Project:** AVCS (Artificial Visual Cortex for Screens)  
 **Authors:** 7 Specialized Neural Architecture & LLM Integration Subagents  
 **Date:** October 9, 2026  
@@ -136,5 +144,4 @@ Proceed to **Milestone 7 (Sprint 2)**:
 1. Implement SONIC ReAct cognitive execution loop (`avcs/agent/`).
 2. Integrate visual post-condition assertion verification and multi-turn memory reduction.
 3. Wire the Safety Kernel (`VisualGuard` & trust ladder) to prevent rogue physical actions.
-
 

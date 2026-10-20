@@ -90,7 +90,7 @@ async def test_headless_filesystem_operations_and_safety(tmp_path):
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
-async def test_headless_gui_unsupported_graceful():
+async def test_headless_gui_actions_fail_closed_without_a_real_display():
     provider = HeadlessComputeProvider()
     ws_id = "ws-gui-test"
 
@@ -101,18 +101,39 @@ async def test_headless_gui_unsupported_graceful():
     assert obs.height == 0
     assert "NO GRAPHICAL DISPLAY" in obs.visible_text
 
-    # GUI Action returns graceful synthetic observation
-    action = GUIAction(action=GUIActionType.CLICK, x=100, y=100)
-    obs_action = await provider.gui_action(ws_id, action)
-    assert obs_action.desktop_state == "HEADLESS"
-    assert "unsupported in headless" in obs_action.visible_text
-
-    # Convenience methods
-    obs_click = await provider.click(ws_id, 200, 300)
-    assert obs_click.desktop_state == "HEADLESS"
-
-    obs_type = await provider.type(ws_id, "test text")
-    assert obs_type.desktop_state == "HEADLESS"
+    for action_type in (
+        GUIActionType.CLICK,
+        GUIActionType.DOUBLE_CLICK,
+        GUIActionType.RIGHT_CLICK,
+        GUIActionType.TYPE,
+        GUIActionType.KEYPRESS,
+        GUIActionType.HOTKEY,
+        GUIActionType.SCROLL,
+        GUIActionType.MOVE,
+        GUIActionType.DRAG,
+        GUIActionType.SELECT_WINDOW,
+        GUIActionType.APP_MAXIMIZE,
+        GUIActionType.WINDOW_MAXIMIZE,
+        GUIActionType.WINDOW_TILE,
+        GUIActionType.OPEN_APP,
+        GUIActionType.LAUNCH_APP,
+        GUIActionType.CLOSE_APP,
+        GUIActionType.CLOSE_WINDOW,
+        GUIActionType.INSTALL_APP,
+    ):
+        with pytest.raises(RuntimeError, match="requires a real graphical desktop backend"):
+            await provider.gui_action(
+                ws_id,
+                GUIAction(
+                    action=action_type,
+                    x=100,
+                    y=100,
+                    text="test text",
+                    app_name="application",
+                    window_id="window",
+                    scroll_delta=1,
+                ),
+            )
 
 
 @pytest.mark.no_live_infra

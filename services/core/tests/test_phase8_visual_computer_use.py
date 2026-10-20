@@ -1321,6 +1321,42 @@ class TestReasoningPrompt:
         assert "actual screen pixels" in user_prompt
         assert "Semantic GUI targets are resolved locally by AVCS" in user_prompt
 
+    def test_gui_context_sends_fresh_coarse_avcs_summary_to_system2(self):
+        agent = ComputerUseAgent(
+            computer_provider=_mock_provider(), execution_plane="gui"
+        )
+        observation = _seed_fresh_gui_observation(agent)
+        observation.screen.avcs_state.update(
+            {
+                "width": 1280,
+                "height": 800,
+                "scene_changed": True,
+                "change_fraction": 0.4,
+                "global_motion": 0.2,
+                "peak_motion": 0.8,
+                "overlay_suspected": True,
+                "regions": [{"kind": "band"}],
+                "events": [
+                    {
+                        "kind": "overlay",
+                        "text": "event text must not enter the reasoning prompt",
+                    }
+                ],
+            }
+        )
+
+        _, user_prompt = agent._build_reasoning_context(
+            "Inspect the current desktop", observation, 1, "", ""
+        )
+
+        assert "CURRENT AVCS PIXEL STATE SUMMARY" in user_prompt
+        assert "pixel-only;" in user_prompt
+        assert "coarse_regions=1 (band)" in user_prompt
+        assert "events=possible compact overlay change" in user_prompt
+        assert "semantic certainty" in user_prompt
+        assert "event text must not enter" not in user_prompt
+        assert "luma_grid" not in user_prompt
+
     @pytest.mark.asyncio
     async def test_gui_action_selection_distinguishes_apps_from_controls(self):
         provider = _mock_provider()
@@ -1702,6 +1738,88 @@ class TestReasoningPrompt:
         assert not getattr(request.messages[1], "images", [])
         assert "CURRENT AVCS PIXEL STATE" in request.messages[1].content
         assert request.task_type == "reasoning"
+
+
+@pytest.mark.asyncio
+async def test_next_gui_reasoning_context_uses_refreshed_bounded_avcs_summary():
+    provider = _mock_provider()
+    fresh_screen = ScreenObservation(
+        screenshot_base64=_AFTER_FRAME,
+        width=1280,
+        height=800,
+        capture_age_ms=0,
+        active_window="Desktop",
+    )
+    provider.screenshot.return_value = fresh_screen
+    agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+    agent._active_workspace_id = "ws-1"
+    agent.llm_router = MagicMock()
+    agent.llm_router.complete = AsyncMock(return_value=MagicMock(
+        content=(
+            "ACTION: GUI_SCREENSHOT\nTARGET: visible desktop\n"
+            "PAYLOAD: {}\nEXPECTED: Inspect the desktop"
+        ),
+        reasoning_content="",
+    ))
+    stale_observation = ComputerWorldObservation(
+        screen=ScreenObservation(
+            screenshot_base64="stale-frame-marker",
+            capture_age_ms=3_000,
+            active_window="Desktop",
+        ),
+        active_application="Desktop",
+    )
+
+    await agent._llm_choose_action(
+        "Inspect the desktop", stale_observation, 1, "", ""
+    )
+
+    request = agent.llm_router.complete.await_args.args[0]
+    user_prompt = request.messages[1].content
+    assert "CURRENT AVCS PIXEL STATE SUMMARY" in user_prompt
+    assert "frame=1" in user_prompt
+    assert "scene=" in user_prompt
+    assert "changed=" in user_prompt
+    assert "change=" in user_prompt
+    assert "motion=" in user_prompt
+    assert "stale-frame-marker" not in user_prompt
+    assert "events=none" in user_prompt
+    assert not request.messages[1].images
+
+
+@pytest.mark.asyncio
+async def test_gui_reasoning_blocks_mismatched_avcs_frame_state():
+    provider = _mock_provider()
+    agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+    agent.llm_router = MagicMock()
+    agent.llm_router.complete = AsyncMock()
+    screen = ScreenObservation(
+        screenshot_base64=_FRESH_FRAME,
+        frame_id=12,
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": 1,
+            "source_frame_id": 11,
+            "width": 1280,
+            "height": 800,
+            "scene_hash": "wrong-frame",
+        },
+        capture_age_ms=0,
+        perception_version=1,
+        width=1280,
+        height=800,
+    )
+
+    result = await agent._llm_choose_action(
+        "Inspect the desktop",
+        ComputerWorldObservation(screen=screen),
+        1,
+        "",
+        "",
+    )
+
+    assert result[0] == ActionExecutionStatus.BLOCKED
+    agent.llm_router.complete.assert_not_awaited()
 
 
 class TestSafetyPolicy:

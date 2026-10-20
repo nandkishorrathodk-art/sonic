@@ -1452,11 +1452,62 @@ Rules:
                         is_interrupted = self._interrupted or (
                             callable(interrupt_check) and bool(interrupt_check())
                         )
+                        unavailable_gui_capability = any(
+                            str(
+                                getattr(
+                                    _trace_value(trace, "action_type", ""),
+                                    "value",
+                                    _trace_value(trace, "action_type", ""),
+                                )
+                            ).upper().startswith(("GUI_", "APP_", "BROWSER_"))
+                            and any(
+                                marker in str(
+                                    _trace_value(trace, "actual_observation", "")
+                                ).casefold()
+                                for marker in (
+                                    "sonic_avcs_grounding_checkpoint is not configured",
+                                    "local avcs pixel processor is unavailable",
+                                    "avcs has no evaluated local focus-verification head",
+                                )
+                            )
+                            for trace in traces
+                        )
+                        is_visible_gui_mission = str(
+                            getattr(sub_mission, "plane", "") or ""
+                        ).lower() in ("gui", "desktop", "browser")
+                        blocked_gui_action = any(
+                            str(
+                                getattr(
+                                    _trace_value(trace, "status", ""),
+                                    "value",
+                                    _trace_value(trace, "status", ""),
+                                )
+                            ).upper()
+                            == "BLOCKED"
+                            and (
+                                is_visible_gui_mission
+                                or str(
+                                    getattr(
+                                        _trace_value(trace, "action_type", ""),
+                                        "value",
+                                        _trace_value(trace, "action_type", ""),
+                                    )
+                                ).upper().startswith(("GUI_", "APP_", "BROWSER_"))
+                            )
+                            for trace in traces
+                        )
                         can_self_correct = (
                             bool(traces)
                             and not sub_result.waiting_for_human
                             and not is_interrupted
+                            and not unavailable_gui_capability
+                            and not blocked_gui_action
                         )
+                        if unavailable_gui_capability or blocked_gui_action:
+                            logger.warning(
+                                "boss_self_correction_skipped_blocked_gui_action",
+                                sub_id=sub_mission.id,
+                            )
                         if can_self_correct:
                             try:
                                 feedback_notes = judge_eval.notes or "Verification rejected by Judge."
