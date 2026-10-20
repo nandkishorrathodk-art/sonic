@@ -67,3 +67,25 @@ hit rate or end-to-end task completion. Without an evaluated checkpoint, SONIC
 must continue to abstain from ungrounded semantic clicks. Text entry also
 remains blocked until a separately evaluated local focus-verification head is
 available.
+
+## Focus-verification head
+
+Text entry needs a separate local focus head that answers "is this point a
+focused text-entry control?" from the current frame alone. It is trained the same
+way as the grounder, from recorded demonstrations:
+
+- Record focus demonstrations: each session directory holds a `manifest.json`
+  (`status: "complete"`, `task`, `target_window_title`) and a `records.jsonl`
+  whose entries carry `schema_version: 1`, `target_label`, `frame`, a
+  `point_px` pixel coordinate, and a boolean `focused` label. Group each
+  app/task into its own session so training and held-out evaluation stay
+  leakage-resistant.
+- Train: `python -m avcs.training.train_focus_verifier --data-dir <root>
+  --output-dir runs/focus_verifier`. The trainer writes
+  `focus_verifier_best.pt` and a `training_report.json`.
+- Readiness: the report is `runtime_ready: true` only when held-out precision is
+  at least 0.80 over at least 30 accepted samples. Otherwise the checkpoint is
+  still written but the loader refuses it.
+- Configure: set `SONIC_AVCS_FOCUS_CHECKPOINT` to the checkpoint path. A
+  configured path that is missing, untrained, or below the gate keeps text entry
+  blocked; readiness is proven from checkpoint metadata, never from the path.

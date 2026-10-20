@@ -55,10 +55,166 @@ class AVCSPerception:
         self._grounding_lock = threading.Lock()
         self._grounder = None
         self._grounding_checkpoint = os.environ.get("SONIC_AVCS_GROUNDING_CHECKPOINT", "").strip()
+        self._focus_verifier = None
+        self._focus_checkpoint = os.environ.get("SONIC_AVCS_FOCUS_CHECKPOINT", "").strip()
 
     @property
     def goal_grounder_configured(self) -> bool:
         return bool(self._grounding_checkpoint)
+
+    @property
+    def focus_verifier_configured(self) -> bool:
+        return bool(self._focus_checkpoint)
+
+    @property
+    def focus_verifier_ready(self) -> bool:
+        """True only after a focus checkpoint with valid held-out evidence loads."""
+        if self._focus_verifier is None:
+            return False
+        metadata = getattr(self._focus_verifier, "checkpoint_metadata", None)
+        if not isinstance(metadata, Mapping):
+            return False
+        evaluation = metadata.get("evaluation")
+        if not isinstance(evaluation, Mapping):
+            return False
+        return bool(evaluation.get("passed")) and evaluation.get("metric") == "focus_verification_precision"
+
+    def _load_focus_verifier(self) -> Any:
+        from avcs.focus_verifier import load_focus_checkpoint
+
+        checkpoint = Path(self._focus_checkpoint).expanduser()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"AVCS focus checkpoint does not exist: {checkpoint}")
+        verifier = load_focus_checkpoint(checkpoint)
+        self._validated_focus_metadata(verifier)
+        return verifier
+
+    def ensure_focus_verifier_ready(self) -> bool:
+        """Load the focus head once and report whether it is genuinely usable.
+
+        Fail-closed: returns False when unconfigured or when the checkpoint fails
+        its provenance/precision gates, so callers never treat a configured path
+        as readiness.
+        """
+        if not self.focus_verifier_configured:
+            return False
+        if self._focus_verifier is None:
+            try:
+                with self._grounding_lock:
+                    if self._focus_verifier is None:
+                        self._focus_verifier = self._load_focus_verifier()
+            except Exception:
+                return False
+        return self.focus_verifier_ready
+
+    @staticmethod
+    def _validated_focus_metadata(verifier: Any) -> dict[str, Any]:
+        from avcs.focus_verifier import (
+            FOCUS_ACCEPTANCE_METRIC,
+            FOCUS_ACCEPTANCE_THRESHOLD,
+            FOCUS_DATASET_PROVENANCE,
+            FOCUS_MIN_EVALUATION_SAMPLES,
+        )
+
+        if getattr(verifier, "is_trained", None) is not True:
+            raise ValueError("AVCS focus checkpoint is not demonstration-trained")
+        metadata = getattr(verifier, "checkpoint_metadata", None)
+        if not isinstance(metadata, Mapping):
+            raise ValueError("AVCS focus checkpoint metadata is unavailable")
+        if metadata.get("dataset_provenance") != FOCUS_DATASET_PROVENANCE:
+            raise ValueError("AVCS focus checkpoint lacks focus demonstration provenance")
+        evaluation = metadata.get("evaluation")
+        if not isinstance(evaluation, Mapping):
+            raise ValueError("AVCS focus checkpoint held-out evaluation is unavailable")
+        precision = evaluation.get("precision")
+        samples = evaluation.get("samples")
+        if (
+            evaluation.get("metric") != FOCUS_ACCEPTANCE_METRIC
+            or evaluation.get("passed") is not True
+            or isinstance(samples, bool)
+            or not isinstance(samples, int)
+            or samples < FOCUS_MIN_EVALUATION_SAMPLES
+            or isinstance(precision, bool)
+            or not isinstance(precision, (int, float))
+            or not math.isfinite(float(precision))
+            or float(precision) < FOCUS_ACCEPTANCE_THRESHOLD
+        ):
+            raise ValueError("AVCS focus checkpoint fails the held-out precision gates")
+        return dict(metadata)
+
+    def verify_focus_rgb_bytes(
+        self,
+        frame_bytes: bytes,
+        width: int,
+        height: int,
+        x: int,
+        y: int,
+        target: str,
+        source_frame_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Verify, from the latest local frame, whether a point is focused text entry.
+
+        Fails closed: without a configured, evaluated focus checkpoint, or when
+        the supplied pixels are not the latest perceived frame, this raises.
+        """
+        if not self.focus_verifier_configured:
+            raise RuntimeError("SONIC_AVCS_FOCUS_CHECKPOINT is not configured")
+        if (
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or width <= 0
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or height <= 0
+            or width * height > 64_000_000
+        ):
+            raise ValueError("AVCS focus verification requires valid bounded frame dimensions")
+        if not isinstance(frame_bytes, bytes) or len(frame_bytes) != width * height * 3:
+            raise ValueError("AVCS focus verification frame length does not match its dimensions")
+        if not isinstance(target, str) or not target.strip():
+            raise ValueError("AVCS focus verification requires a non-empty target query")
+        if source_frame_id is not None and (
+            isinstance(source_frame_id, bool)
+            or not isinstance(source_frame_id, int)
+            or source_frame_id <= 0
+        ):
+            raise ValueError("AVCS source frame ID must be a positive integer")
+        frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(height, width, 3)
+        frame = self._validated_rgb_frame(frame)
+        fingerprint = hashlib.sha256(frame.tobytes()).hexdigest()
+        with self._lock:
+            if fingerprint != self._last_frame_fingerprint:
+                raise RuntimeError(
+                    "AVCS focus verification pixels do not match the latest perceived frame"
+                )
+            if source_frame_id is not None and source_frame_id != self._last_source_frame_id:
+                raise RuntimeError(
+                    "AVCS focus verification frame ID does not match the latest perceived frame"
+                )
+            frame_id = self._last_source_frame_id
+            scene_hash = self._last_scene_hash
+
+        with self._grounding_lock:
+            if self._focus_verifier is None:
+                self._focus_verifier = self._load_focus_verifier()
+            verifier = self._focus_verifier
+            self._validated_focus_metadata(verifier)
+            prediction = verifier.predict(frame, x, y, target)
+
+        return {
+            "engine": "avcs_focus_verifier",
+            "focused": bool(prediction.focused),
+            "decision_score": float(prediction.score),
+            "decision_threshold": float(prediction.threshold),
+            "frame_id": frame_id,
+            "scene_hash": scene_hash,
+            "patch_bounds": list(prediction.patch_bounds),
+            "checkpoint_metadata": dict(verifier.checkpoint_metadata),
+            "evidence": (
+                f"local focus head score {prediction.score:.3f} "
+                f"(threshold {prediction.threshold:.3f}) at ({x},{y}) for {target!r}"
+            ),
+        }
 
     @property
     def goal_grounder_ready(self) -> bool:

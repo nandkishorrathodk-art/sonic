@@ -2701,3 +2701,101 @@ AVCS perception + the CUA agent.
 - `services/core/tests` + `packages/avcs/tests` (minus tkinter module):
   **2628 passed, 53 skipped, 1 pre-existing load-flake** (soak).
 
+
+## Consumption-loop + mouse fix pass (2026-10-20)
+
+Root cause found for "the mouse can't be used" and the perception loop:
+
+- **Parser bug (real, fixed).** `ComputerUseAgent._parse_llm_action` split the
+  LLM's ACTION/TARGET/PAYLOAD block with a `\s*` separator after each field
+  colon. For the natural coordinate-motor shape — an *empty* `TARGET:` line
+  followed by `PAYLOAD: {"x":..,"y":..}` — the newline was consumed, TARGET
+  captured the literal `PAYLOAD: {...}` text, and the coordinate payload was
+  dropped. The GUI action then degraded into an unresolvable **semantic** target
+  and was `BLOCKED` fail-closed ("local AVCS grounder did not resolve the
+  target 'PAYLOAD: {…}'"). So `GUI_MOVE`/`GUI_CLICK` with payload-only
+  coordinates could never run through the mission loop. Fix: separator is now
+  `[ \t]*`, so an empty field cannot absorb the next field. 3 regression tests
+  in `test_phase8_visual_computer_use.py`.
+- **Mouse verified live.** Against the real `sonic-desktop-workstation`
+  (DISPLAY :99) via the real `ComputerUseAgent.run_mission` loop with a scripted
+  router: APP_LAUNCH -> COMPLETED (1 real window), GUI_MOVE -> COMPLETED (cursor
+  glided 25,18 -> 500,300), GUI_CLICK -> VERIFIED (AVCS pixel scene changed at
+  140,260). Direct dispatch of every motor action also lands the cursor exactly
+  (MOVE/CLICK/DOUBLE_CLICK/RIGHT_CLICK/DRAG); SCROLL dispatches and honestly
+  reports UNVERIFIED when nothing changed. Scripts: `scripts/live_gui_mouse_mission.py`,
+  `scripts/live_gui_mouse_task.py`.
+- **The four-layer flow is wired.** AVCS (System 1) produces the bounded
+  scene/change/motion reflex summary; it reaches System 2 as a *text* summary in
+  the reasoning prompt (`CURRENT AVCS PIXEL STATE SUMMARY ... scene=.. changed=..
+  change=.. motion=..`) with no pixels sent; the provider executes the action;
+  the post-action AVCS frame is the verification receipt (VERIFIED only on a real
+  scene change). Semantic targeting and focus-verification remain fail-closed
+  when the evaluated AVCS heads are not configured (GUI_TYPE blocked).
+- **Slowness diagnosis.** `observe()` ~= 260-290 ms = `screenshot()` 97 ms +
+  agent-side AVCS recompute 24 ms + `status()` 145 ms. `status()` ran the cold
+  `application_list()` scan (~280 ms) sequentially; it is now folded into the
+  existing `asyncio.gather` (window/active-window/process/application probes run
+  concurrently). Further gains require reusing the provider's already-computed
+  `avcs_state` (rejected: the agent's AVCS instance must re-derive from the exact
+  frame it will ground against) or a persistent in-container telemetry daemon.
+
+Test baseline after this pass: 935 passed, 25 skipped (broad computer/agent/gui
+regression); 660 passed on the parser/action-focused subset.
+
+## Focus-verification head + hot-path latency fix (2026-10-20)
+
+Two real gaps closed while assessing AVCS/CUA and a reported slowness regression.
+
+### 1. Local focus-verification head — previously entirely missing
+The agent demanded an "evaluated local focus-verification head" before typing,
+but **no focus-verifier module existed anywhere**; `GUI_TYPE`/`BROWSER_NAVIGATE`
+were blocked by an unconditional early `return` in `_execute_action_unlocked`
+(agent.py ~5380), which also made the real focus-verify path (~6759) dead code.
+Built the missing capability with the same honesty discipline as the grounder:
+
+- `packages/avcs/avcs/focus_verifier.py` — `FocusVerifier` (CorticalBackbone2M +
+  `ByteQueryEncoder` + MLP head) classifying whether a screen point is a focused
+  text-entry control; `load_focus_checkpoint()` refuses any checkpoint lacking
+  recorded-demonstration provenance or a passing held-out precision evaluation.
+  `focus_patch_bounds`/`focus_patch_rgb` crop a clamped square patch around the
+  point (no clamping of off-screen points into edge clicks).
+- `packages/avcs/avcs/training/focus_dataset.py` — session-disjoint discovery/
+  split (task+window groups never leak across train/val/held-out) and dataset.
+- `packages/avcs/avcs/training/train_focus_verifier.py` — trainer with held-out
+  precision gate; `runtime_ready` is derived, never decreed.
+- `services/core/sonic/computer_use/avcs_perception.py` — `verify_focus_rgb_bytes`,
+  `ensure_focus_verifier_ready()`, `focus_verifier_ready`; fails closed without a
+  configured, evaluated checkpoint or when pixels are not the latest frame.
+- `agent.py` — `_avcs_focus_head_ready()` capability probe; the early GUI_TYPE/
+  BROWSER_NAVIGATE block is now conditional on it. No checkpoint → still BLOCKED
+  (unchanged); a genuinely ready head → dispatch proceeds to real focus
+  verification. A configured-but-unloadable checkpoint is NOT readiness.
+
+**Bug found during verification:** threshold selection used raw scores as
+candidates, so the chosen threshold landed exactly on a true positive score and
+`score >= threshold` excluded it (field scored 0.897 with threshold 0.897 →
+`focused=False`). Fixed to use midpoint candidates between adjacent distinct
+scores (standard ROC practice).
+
+### 2. Slowness regression — duplicated Docker probes on the cold hot path
+`status()` fans out 4 concurrent `docker exec`s, but each independently ran the
+stale-cache `docker info` daemon probe (and `docker inspect` container probe).
+With a stale (>10 s) cache a cold `status()` cost ~446 ms with **4** duplicate
+`docker info` probes; warm it was ~92 ms. Added single-flight async locks
+(`_daemon_probe_lock`, `_container_probe_lock`) with double-checked re-reads.
+Cold stale-cache `status()` dropped to ~114 ms with 1 probe. Warm `observe()`
+remains ~260 ms (status ~150 ms + screenshot ~100 ms); `application_list` is
+cached so the earlier "fold into gather" fix is not defeated.
+
+### Tests
+- `packages/avcs/tests/test_focus_verifier.py` (14).
+- `services/core/tests/test_phase8_visual_computer_use.py` `TestFocusHeadCapabilityGate` (5).
+- `services/core/tests/test_docker_computer_provider.py` (2): single-flight probes.
+- Focused regression: 153 passed, 2 skipped across provider + GUI suites.
+
+**Honesty:** unit/contract validations only. No real arbitrary-GUI end-to-end
+task was demonstrated, and no live focus checkpoint exists in-repo; without one,
+text entry correctly stays blocked. Train a checkpoint from real recorded
+demonstrations (packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md) before
+claiming focus verification works on real controls.

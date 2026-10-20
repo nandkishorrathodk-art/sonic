@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Iterator
+from typing import Iterator, Optional, Tuple
 
 import numpy as np
 

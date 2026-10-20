@@ -198,6 +198,8 @@ class DockerComputerProvider(ComputerProvider):
         self._last_exec: tuple[str, int, str, str] | None = None  # (cmd, exit, stdout, stderr)
         self._daemon_checked: bool | None = None
         self._daemon_checked_at: float | None = None
+        self._daemon_probe_lock = asyncio.Lock()
+        self._container_probe_lock = asyncio.Lock()
         self._container_running_cache: bool = False
         self._container_checked_at: float | None = None
         self._default_workspace_id = self.container_name
@@ -259,20 +261,30 @@ class DockerComputerProvider(ComputerProvider):
         now = asyncio.get_event_loop().time()
         if self._container_checked_at is not None and (now - self._container_checked_at) < 1.5:
             return self._container_running_cache
-        try:
-            probe = await asyncio.to_thread(
-                subprocess.run,
-                [docker, "inspect", "-f", "{{.State.Running}}", self.container_name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
-            running = probe.stdout.decode("utf-8", errors="ignore").strip() == "true"
-        except Exception:
-            running = False
-        self._container_running_cache = running
-        self._container_checked_at = now
-        return running
+        # Single-flight: the status() hot path fans out concurrent execs, each of
+        # which probes container state. Share one `docker inspect` round-trip so
+        # a cold observation pays one probe instead of four.
+        async with self._container_probe_lock:
+            now = asyncio.get_event_loop().time()
+            if (
+                self._container_checked_at is not None
+                and (now - self._container_checked_at) < 1.5
+            ):
+                return self._container_running_cache
+            try:
+                probe = await asyncio.to_thread(
+                    subprocess.run,
+                    [docker, "inspect", "-f", "{{.State.Running}}", self.container_name],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                running = probe.stdout.decode("utf-8", errors="ignore").strip() == "true"
+            except Exception:
+                running = False
+            self._container_running_cache = running
+            self._container_checked_at = now
+            return running
 
     async def _provision_workstation(self) -> bool:
         """Try to bring up the workstation container from repo compose files.
@@ -326,19 +338,33 @@ class DockerComputerProvider(ComputerProvider):
             or not self._daemon_checked
             or (self._daemon_checked_at is not None and (now - self._daemon_checked_at) > 10.0)
         ):
-            try:
-                probe = await asyncio.to_thread(
-                    subprocess.run,
-                    [docker, "info", "--format", "{{.ServerVersion}}"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=10,
-                )
-                self._daemon_checked = probe.returncode == 0
-                self._daemon_checked_at = now
-            except Exception:
-                self._daemon_checked = False
-                self._daemon_checked_at = now
+            # Single-flight: concurrent hot-path probes (status() fans out four
+            # execs) must share one `docker info` round-trip instead of each
+            # spawning its own. Re-check the cache after acquiring the lock so
+            # only the first waiter actually probes.
+            async with self._daemon_probe_lock:
+                now = asyncio.get_event_loop().time()
+                if (
+                    self._daemon_checked is None
+                    or not self._daemon_checked
+                    or (
+                        self._daemon_checked_at is not None
+                        and (now - self._daemon_checked_at) > 10.0
+                    )
+                ):
+                    try:
+                        probe = await asyncio.to_thread(
+                            subprocess.run,
+                            [docker, "info", "--format", "{{.ServerVersion}}"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=10,
+                        )
+                        self._daemon_checked = probe.returncode == 0
+                        self._daemon_checked_at = now
+                    except Exception:
+                        self._daemon_checked = False
+                        self._daemon_checked_at = now
         if not self._daemon_checked:
             return 126, "", "docker daemon is unreachable; command execution failed-closed"
         async with self._exec_semaphore:
@@ -581,8 +607,21 @@ class DockerComputerProvider(ComputerProvider):
         active_window = "Desktop"
         open_windows: list[str] = ["Desktop"]
 
+        # These probes are independent `docker exec` round-trips (~70 ms each,
+        # and the cold application scan is the most expensive). Run them
+        # concurrently so status() costs one round-trip instead of four on the
+        # observation hot path.
+        windows_coro = self._docker_exec(f"DISPLAY={disp} wmctrl -l 2>/dev/null", timeout=5)
+        active_coro = self._docker_exec(
+            f"DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null", timeout=5
+        )
+        procs_coro = self.process_list(workspace_id)
+        apps_coro = self.application_list(workspace_id)
+        (code, out, _), (acode, aout, _), procs, installed = await asyncio.gather(
+            windows_coro, active_coro, procs_coro, apps_coro
+        )
+
         # Check real open windows via wmctrl
-        code, out, _ = await self._docker_exec(f"DISPLAY={disp} wmctrl -l 2>/dev/null", timeout=5)
         if code == 0 and out.strip():
             for line in out.splitlines():
                 parts = line.split(maxsplit=3)
@@ -596,16 +635,12 @@ class DockerComputerProvider(ComputerProvider):
             open_windows.insert(0, "Desktop")
 
         # Check active window via xdotool
-        code, out, _ = await self._docker_exec(f"DISPLAY={disp} xdotool getactivewindow getwindowname 2>/dev/null", timeout=5)
-        if code == 0 and out.strip():
-            active_window = out.strip()
+        if acode == 0 and aout.strip():
+            active_window = aout.strip()
         else:
             active_window = open_windows[-1] if len(open_windows) > 1 else "Desktop"
 
-        # Check running processes
-        procs = await self.process_list(workspace_id)
         proc_names = [p.name for p in procs]
-        installed = await self.application_list(workspace_id)
 
         return ComputerState(
             workspace_id=workspace_id or self.container_name,
@@ -1923,21 +1958,48 @@ class DockerComputerProvider(ComputerProvider):
             f"{' '.join(shlex.quote(arg) for arg in retry_args)} "
             ">/tmp/sonic_app_launch.log 2>&1 & "
         )
+        # Snapshot existing top-level windows (exclude sticky panels/desktop,
+        # which wmctrl reports with desktop id -1) so success can be verified
+        # against a genuinely NEW window rather than a process guess.
+        list_windows_cmd = f"DISPLAY={disp} wmctrl -l 2>/dev/null | awk '$2 != -1 {{print $1}}'"
+        _, pre_out, _ = await self._docker_exec(list_windows_cmd)
+        pre_windows = set(pre_out.split())
+
         spawn = (
             f"DISPLAY={disp} nohup {' '.join(shlex.quote(p) for p in parts)} >/tmp/sonic_app_launch.log 2>&1 & "
             f"app_pid=$!; sleep 0.4; "
             f"if ! kill -0 \"$app_pid\" 2>/dev/null && grep -q -- '--no-sandbox' /tmp/sonic_app_launch.log 2>/dev/null; then "
             f"  {retry_spawn}"
-            f"  app_pid=$!; sleep 0.4; "
+            f"  app_pid=$!; "
             f"fi; "
-            f"kill -0 \"$app_pid\" 2>/dev/null || pgrep -f -- {bin_base} >/dev/null 2>&1"
+            f"echo \"$app_pid\""
         )
-        code, _, _ = await self._docker_exec(spawn)
-        if code == 0:
-            self._active_windows[workspace_id] = os.path.basename(resolved_bin)
-            self._last_screenshot = None
-            self._last_screenshot_time = 0.0
-            return True
+        code, pid_out, _ = await self._docker_exec(spawn)
+        if code != 0:
+            return False
+
+        # Verify a real window appeared. A self-matching `pgrep -f <bin>` in the
+        # supervising shell always matches its own command line, so it cannot
+        # prove the application launched. Poll for a new top-level window instead
+        # and report an honest failure if none materializes.
+        app_pid = (pid_out.strip().splitlines() or [""])[-1].strip()
+        for _ in range(12):  # bounded ~3.6s wait for the window to map
+            await asyncio.sleep(0.3)
+            _, now_out, _ = await self._docker_exec(list_windows_cmd)
+            if set(now_out.split()) - pre_windows:
+                self._active_windows[workspace_id] = os.path.basename(resolved_bin)
+                self._last_screenshot = None
+                self._last_screenshot_time = 0.0
+                return True
+            if app_pid:
+                alive_code, _, _ = await self._docker_exec(f"kill -0 {shlex.quote(app_pid)} 2>/dev/null")
+                if alive_code != 0:
+                    break
+        logger.info(
+            "application_launch_no_window",
+            app_query=app_query,
+            resolved_bin=resolved_bin,
+        )
         return False
 
     async def cleanup_desktop_windows(self, workspace_id: str) -> None:

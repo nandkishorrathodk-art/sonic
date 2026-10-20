@@ -1092,6 +1092,33 @@ class TestActionParsing:
         assert payload.get("x") == 640
         assert payload.get("y") == 400
 
+    def test_parse_empty_target_does_not_swallow_payload(self):
+        """An empty `TARGET:` line must not absorb the following PAYLOAD text.
+
+        Regression: with a `\\s*` separator after the field colon the newline was
+        consumed, so TARGET captured "PAYLOAD: {...}" and the coordinate payload
+        was lost, turning a motor MOVE/CLICK into an unresolvable semantic target.
+        """
+        text = 'ACTION: GUI_MOVE\nTARGET:\nPAYLOAD: {"x": 500, "y": 300}\nEXPECTED: move cursor'
+        action_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "test.py")
+        assert action_type == ComputerActionType.GUI_MOVE
+        assert target == ""
+        assert payload.get("x") == 500
+        assert payload.get("y") == 300
+
+    def test_parse_empty_target_with_trailing_space_keeps_payload(self):
+        text = 'ACTION: GUI_CLICK\nTARGET: \nPAYLOAD: {"x": 140, "y": 260}\nEXPECTED: click'
+        action_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "test.py")
+        assert action_type == ComputerActionType.GUI_CLICK
+        assert target == ""
+        assert payload.get("x") == 140 and payload.get("y") == 260
+
+    def test_parse_terminal_exec_empty_target_keeps_command(self):
+        text = 'ACTION: TERMINAL_EXEC\nTARGET:\nPAYLOAD: {"command": "hostname"}\nEXPECTED: print'
+        action_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "test.py")
+        assert action_type == ComputerActionType.TERMINAL_EXEC
+        assert payload.get("command") == "hostname"
+
     def test_parse_gui_type(self):
         text = 'ACTION: GUI_TYPE\nTARGET: keyboard\nPAYLOAD: {"text": "hello"}\nEXPECTED: Type text'
         action_type, target, payload, expected = ComputerUseAgent._parse_llm_action(text, "test.py")
@@ -1868,3 +1895,82 @@ class TestSafetyPolicy:
         )
         assert trace.status == "BLOCKED"
         provider.gui_action.assert_not_called()
+
+
+class TestFocusHeadCapabilityGate:
+    """The GUI_TYPE gate must follow real focus-head readiness, not a hardcoded block."""
+
+    @pytest.mark.asyncio
+    async def test_gui_type_blocked_when_no_focus_head_configured(self, monkeypatch):
+        monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_TYPE,
+            "search field",
+            {"x": 320, "y": 240, "text": "query"},
+            "Type into the field",
+        )
+        assert trace.status == ActionExecutionStatus.BLOCKED
+        assert "focus-verification head" in trace.actual_observation
+        provider.gui_action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_focus_head_ready_probe_is_false_without_checkpoint(self, monkeypatch):
+        monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+        assert agent._avcs_focus_head_ready() is False
+
+    @pytest.mark.asyncio
+    async def test_focus_head_ready_probe_is_false_when_checkpoint_missing(self, monkeypatch):
+        monkeypatch.setenv("SONIC_AVCS_FOCUS_CHECKPOINT", "/nonexistent/focus.pt")
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+        # A configured-but-unloadable checkpoint is NOT readiness.
+        assert agent._avcs_focus_head_ready() is False
+
+    @pytest.mark.asyncio
+    async def test_focus_head_ready_probe_uses_perception_contract(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+
+        class _ReadyPerception:
+            def ensure_focus_verifier_ready(self) -> bool:
+                return True
+
+        agent._avcs_perception = _ReadyPerception()
+        assert agent._avcs_focus_head_ready() is True
+
+    @pytest.mark.asyncio
+    async def test_gui_type_proceeds_past_early_gate_when_focus_head_ready(self):
+        """With a ready head, the early block must not fire (dispatch continues)."""
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
+
+        class _ReadyPerception:
+            """Real perception with a forced-ready focus head."""
+
+            def __init__(self):
+                from sonic.computer_use.avcs_perception import AVCSPerception
+
+                self._inner = AVCSPerception()
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def ensure_focus_verifier_ready(self) -> bool:
+                return True
+
+        agent._avcs_perception = _ReadyPerception()
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_TYPE,
+            "search field",
+            {"x": 320, "y": 240, "text": "query"},
+            "Type into the field",
+        )
+        # The generic "no focus-verification head" block must not be the reason.
+        assert "no evaluated local focus-verification head" not in trace.actual_observation.lower()
+

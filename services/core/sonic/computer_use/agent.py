@@ -3781,7 +3781,11 @@ class ComputerUseAgent:
             except Exception:
                 pass
 
-        pattern = r'(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:\s*(.*?)(?=(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:|$)'
+        # NOTE: the separator after the field name is `[ \t]*` (not `\s*`) so an
+        # empty field like "TARGET:\nPAYLOAD: {...}" does not swallow the next
+        # field's text into this one. With `\s*` the newline is consumed and
+        # TARGET captures "PAYLOAD: {...}", dropping the payload entirely.
+        pattern = r'(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:[ \t]*(.*?)(?=(?:^|\n|\s)(?:\#+\s*)?(?:\d+[\.\)]\s*)?(?:[\*\-_]\s*)?(?:\*{1,2}|_)?\b(?:ACTION|ANSWER|TARGET|PAYLOAD|CONTENT|CODE|SOURCE|EXPECTED|EXPECTED[\s_]+OUTCOME|REASONING|THOUGHT|EXPLANATION|COORDINATES|COMMAND)\b(?:\*{1,2}|_)?\s*:|$)'
         matches = re.findall(pattern, parse_target_text, re.DOTALL | re.IGNORECASE)
         # Use setdefault to preserve the FIRST action in case of multiple blocks
         raw_fields: dict[str, str] = {}
@@ -5041,6 +5045,27 @@ class ComputerUseAgent:
             self._last_screenshot_b64 = ""
         return result
 
+    def _avcs_focus_head_ready(self) -> bool:
+        """True only when a configured, evaluated local focus head can be loaded.
+
+        This is a pure capability probe: it never dispatches an action and never
+        treats a configured checkpoint path as readiness. A missing or failing
+        checkpoint returns False so text entry stays blocked.
+        """
+        try:
+            perception = getattr(self, "_avcs_perception", None)
+            if perception is None:
+                from sonic.computer_use.avcs_perception import AVCSPerception
+
+                perception = AVCSPerception()
+                self._avcs_perception = perception
+            ensure = getattr(perception, "ensure_focus_verifier_ready", None)
+            if not callable(ensure):
+                return False
+            return bool(ensure())
+        except Exception:
+            return False
+
     async def _verify_gui_focus_with_avcs(
         self,
         screen: ScreenObservation,
@@ -5355,7 +5380,7 @@ class ComputerUseAgent:
         if action_type in (
             ComputerActionType.GUI_TYPE,
             ComputerActionType.BROWSER_NAVIGATE,
-        ):
+        ) and not self._avcs_focus_head_ready():
             actual_obs_str = (
                 f"{action_type.value} blocked: AVCS has no evaluated local "
                 "focus-verification head, so text will not be sent."

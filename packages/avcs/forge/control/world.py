@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
+from typing import Optional
 
 IGNORED_DIRS = {
     ".git", "__pycache__", "node_modules", ".pytest_cache", ".mypy_cache",

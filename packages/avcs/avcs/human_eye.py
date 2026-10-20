@@ -436,11 +436,6 @@ class HumanEye(nn.Module):
             return fn
         return decorator
 
-    def close(self) -> None:
-        """Closes visual stream source."""
-        if hasattr(self.source, "close") and callable(self.source.close):
-            self.source.close()
-
     def look_at(
         self,
         query: str,
