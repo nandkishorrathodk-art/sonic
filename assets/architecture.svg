@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="820" viewBox="0 0 1200 820" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="950" viewBox="0 0 1200 950" role="img" aria-labelledby="title desc">
   <title id="title">SONIC general-purpose computer-use architecture</title>
-  <desc id="desc">Operator outcome flows through Boss orchestration, a general computer-use worker, grounded GUI or appropriate execution capabilities, fresh observations, and independent Judge review. Safety and evidence controls span the flow.</desc>
+  <desc id="desc">Operator outcome flows through Boss orchestration, local AVCS System 1 pixel perception, SONIC System 2 reasoning, grounded GUI or other appropriate capabilities, and independent Judge review. Safety and evidence controls span the flow.</desc>
   <defs>
     <style>
       text { font-family: Inter, Segoe UI, Arial, sans-serif; fill: #e8eef8; }
@@ -21,45 +21,52 @@
       <path d="M0,0 L10,5 L0,10 z" fill="#70839d"/>
     </marker>
   </defs>
-  <rect width="1200" height="820" fill="#0b111b"/>
+  <rect width="1200" height="950" fill="#0b111b"/>
   <text x="54" y="58" class="title">SONIC | General-purpose AI computer user</text>
   <text x="55" y="87" class="subtitle">Architecture overview · components and intended flow, not a universal capability claim</text>
 
-  <rect x="70" y="126" width="1060" height="82" class="card blue"/>
+  <rect x="70" y="126" width="1060" height="76" class="card blue"/>
   <text x="96" y="158" class="heading">Operator outcome</text>
   <text x="96" y="184" class="body">Desired result · constraints · observable completion evidence</text>
-  <path d="M600 209 V239" class="line"/>
+  <path d="M600 203 V220" class="line"/>
 
-  <rect x="70" y="244" width="1060" height="92" class="card violet"/>
-  <text x="96" y="277" class="heading">Boss orchestration</text>
-  <text x="96" y="304" class="body">Analyze · plan · delegate bounded work · review evidence · replan</text>
-  <text x="826" y="304" class="small">No dedicated browser-specialist worker</text>
-  <path d="M600 337 V367" class="line"/>
+  <rect x="70" y="226" width="1060" height="82" class="card violet"/>
+  <text x="96" y="259" class="heading">Boss orchestration</text>
+  <text x="96" y="286" class="body">Analyze · plan · delegate bounded work · review evidence · replan</text>
+  <text x="826" y="286" class="small">No dedicated browser-specialist worker</text>
+  <path d="M600 309 V326" class="line"/>
 
-  <rect x="70" y="372" width="1060" height="112" class="card blue"/>
-  <text x="96" y="406" class="heading">Ordinary ComputerUseAgent worker</text>
-  <text x="96" y="433" class="body">Fresh state → reason about assigned objective → ground action → dispatch → observe</text>
-  <text x="96" y="461" class="small">Ambiguous, stale, or off-screen targets are blocked rather than guessed</text>
-  <path d="M600 485 V516" class="line"/>
+  <rect x="70" y="332" width="1060" height="104" class="card green"/>
+  <text x="96" y="366" class="heading">AVCS | System 1 · local visual perception</text>
+  <text x="96" y="393" class="body">Fresh workstation pixels → frame-bound scene and change signals</text>
+  <text x="96" y="419" class="small">Pixels stay local; reflex signals do not identify intent, click, or prove success</text>
+  <path d="M600 437 V454" class="line"/>
 
-  <rect x="70" y="522" width="510" height="132" class="card green"/>
-  <text x="94" y="557" class="heading">Visible workstation GUI</text>
-  <text x="94" y="585" class="body">Discover and use installed desktop applications</text>
-  <text x="94" y="610" class="body">NSI state + accessibility + screenshot when needed</text>
-  <text x="94" y="635" class="small">Current visible evidence grounds each GUI action</text>
+  <rect x="70" y="460" width="1060" height="104" class="card blue"/>
+  <text x="96" y="494" class="heading">SONIC | System 2 · ComputerUseAgent reasoning</text>
+  <text x="96" y="521" class="body">Goal + bounded AVCS summary + task history → next action proposal</text>
+  <text x="96" y="547" class="small">System 2 plans; fresh evidence and action policy gate dispatch</text>
+  <path d="M600 565 V582" class="line"/>
 
-  <rect x="620" y="522" width="510" height="132" class="card blue"/>
-  <text x="644" y="557" class="heading">Other appropriate capabilities</text>
-  <text x="644" y="585" class="body">Files · terminal · Git · APIs, when suited to the task</text>
-  <text x="644" y="610" class="body">Must not replace an explicitly requested GUI workflow</text>
-  <text x="644" y="635" class="small">Provider and policy wiring are environment-specific</text>
+  <rect x="70" y="588" width="510" height="140" class="card green"/>
+  <text x="94" y="623" class="heading">Visible workstation GUI</text>
+  <text x="94" y="651" class="body">Discover and use installed desktop applications</text>
+  <text x="94" y="676" class="body">Fresh frame → AVCS → reason → grounded action</text>
+  <text x="94" y="706" class="small">Ambiguous or stale targets are blocked, never guessed</text>
 
-  <path d="M324 655 V683 H490" class="line"/>
-  <path d="M875 655 V683 H710" class="line"/>
-  <rect x="300" y="686" width="600" height="74" class="card amber"/>
-  <text x="328" y="718" class="heading">Fresh evidence → independent Judge review</text>
-  <text x="328" y="744" class="body">Confirm, report partial progress, or mark blocked / unverified</text>
+  <rect x="620" y="588" width="510" height="140" class="card blue"/>
+  <text x="644" y="623" class="heading">Other appropriate capabilities</text>
+  <text x="644" y="651" class="body">Files · terminal · Git · APIs, when suited to the task</text>
+  <text x="644" y="676" class="body">Must not replace an explicitly requested GUI workflow</text>
+  <text x="644" y="706" class="small">Headless tasks do not require workstation AVCS frames</text>
 
-  <rect x="70" y="778" width="1060" height="1" fill="#34455d"/>
-  <text x="70" y="802" class="small">Policy and receipts cover supported paths; verify deployment wiring. Tests do not prove real multi-app task completion.</text>
+  <path d="M324 729 V760 H490" class="line"/>
+  <path d="M875 729 V760 H710" class="line"/>
+  <rect x="300" y="764" width="600" height="88" class="card amber"/>
+  <text x="328" y="799" class="heading">Fresh evidence → independent Judge review</text>
+  <text x="328" y="827" class="body">Confirm, report partial progress, or mark blocked / unverified</text>
+
+  <rect x="70" y="882" width="1060" height="1" fill="#34455d"/>
+  <text x="70" y="906" class="small">AVCS reflex signals are not semantic grounding or task proof. Tests do not prove real multi-app task completion.</text>
+  <text x="70" y="929" class="small">AVCS SDKs, MCP, adapters and experimental models are separate package interfaces; they are not wired into this SONIC runtime path.</text>
 </svg>

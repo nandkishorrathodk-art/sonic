@@ -17,6 +17,8 @@ For the step-by-step current AVCS-to-System-2 and GUI action path, see
 
 ## Runtime at a glance
 
+![SONIC runtime flow, including AVCS System 1 and System 2 reasoning](assets/architecture.svg)
+
 ```text
 Operator outcome
   -> API/workstation session
@@ -59,6 +61,68 @@ workers.
 Exact wiring varies by route and provider. A component's presence in this table
 does not prove every route uses it; verify the relevant production call path
 before making behavior claims.
+
+## Repository structure
+
+This is a map of the existing repository boundaries, not a proposed file move.
+The complete subsystem-to-department registry is maintained in
+[`architecture.py`](../services/core/sonic/organization/architecture.py).
+
+```text
+sonic/
+├── apps/
+│   ├── dashboard/                 Next.js operator interface
+│   └── cli/                       Standalone local developer CLI
+├── services/core/sonic/           Python API and runtime
+│   ├── api/routes/                HTTP routes and application entry points
+│   ├── computer_use/              Boss, ComputerUseAgent, GUI contracts, AVCS bridge
+│   ├── computer/                  Workstation providers, including Docker
+│   ├── agents/                    Judge and other agent implementations
+│   ├── safety/                    Action policy, scope and sealed controls
+│   ├── llm/                       Provider routing and model contracts
+│   ├── memory/                    Persistent graph and vector memory
+│   ├── brain/ research/ world/    Reasoning, evidence models and environment state
+│   └── being/ evolution/           Identity, learning and controlled evolution
+├── packages/
+│   ├── avcs/
+│   │   ├── avcs_sdk/              Async client/backend contract + repository adapter
+│   │   ├── avcs/                  HumanEye SDK, drivers, MCP, training and tooling
+│   │   ├── forge/vision/           ScreenEye/cortex model and capture pipeline
+│   │   ├── adapters/               Framework adapters and examples
+│   │   └── tests/                 Package-level SDK and perception tests
+│   └── kernel/                    Native Rust kernel and IPC
+├── docs/                          Architecture, product contracts and guides
+├── configs/                       Runtime configuration
+├── docker/                        Workstation and service container assets
+└── infra/                         Deployment and infrastructure definitions
+```
+
+For the live interaction sequence, follow
+[AVCS/System 1 → System 2 → grounded action → Judge](SONIC_AVCS_SYSTEM_FLOW.md).
+For subsystem ownership, use the registry rather than inferring owners from
+these folder names.
+
+### AVCS SDK and adjacent components
+
+The AVCS package contains developer-facing APIs and experiments in addition
+to SONIC's pixel-reflex component:
+
+| Package component | Intended job | SONIC workstation status |
+|---|---|---|
+| `avcs_sdk.AVCSClient` + `RepositoryAVCSBackend` | Async observe/target/action contract, freshness checks, action IDs and broker-backed execution | Not imported or wired by `services/core`; package examples/tests use this separate backend |
+| `avcs.sdk.HumanEyeClient` | Higher-level perception, events, scene/memory helpers, motor methods, optional metering/auth | Standalone SDK; not SONIC's workstation agent/provider path |
+| `forge.vision.cortex.ScreenEye` | Cortex inference/capture API for package consumers | Experimental package API; not the active SONIC AVCS reflex processor |
+| `avcs.mcp`, `adapters/`, `drivers/` | MCP interface and integrations for external agent frameworks/providers | Package integrations; no evidence they are called by SONIC workstation flow |
+| `avcs/training/`, benchmarks and demos | Record/train/evaluate experimental perception and target-grounding models | Separate tooling; only a valid evaluated checkpoint can enable SONIC's optional goal-grounding path |
+
+In SONIC's current workstation path, `DockerComputerProvider` captures and
+locally processes frames through `ComputerUseAgent`'s `AVCSPerception`
+integration; System 2 consumes its bounded reflex summary. It does not invoke
+the AVCS SDK's client loop, MCP server, adapter layer or SDK motor methods.
+The `RepositoryAVCSBackend` also defaults to an interactive synthetic capture
+adapter and a virtual cursor, so its demos/tests are not proof of real VNC
+control or live SONIC integration. Do not treat SDK method names, package
+examples or synthetic test results as capability evidence.
 
 ## Dependency boundaries
 

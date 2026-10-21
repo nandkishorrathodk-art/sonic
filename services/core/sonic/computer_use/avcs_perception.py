@@ -210,6 +210,7 @@ class AVCSPerception:
         width: int,
         height: int,
         window_geometry: tuple[int, int, int, int] | None = None,
+        source_frame_id: int | None = None,
     ) -> dict[str, Any] | None:
         """Compatibility adapter for callers that still provide PNG frames."""
         if not png_bytes:
@@ -217,7 +218,12 @@ class AVCSPerception:
         with Image.open(BytesIO(png_bytes)) as image:
             frame = np.array(image.convert("RGB"))
         return self.ground_target_rgb(
-            frame, query, width, height, window_geometry=window_geometry
+            frame,
+            query,
+            width,
+            height,
+            window_geometry=window_geometry,
+            source_frame_id=source_frame_id,
         )
 
     def ground_target_rgb_bytes(
@@ -378,12 +384,14 @@ class AVCSPerception:
             "latency_ms": round(latency_ms, 3),
         }
 
-    def perceive_png(self, png_bytes: bytes) -> dict[str, Any]:
+    def perceive_png(
+        self, png_bytes: bytes, source_frame_id: int | None = None
+    ) -> dict[str, Any]:
         if not png_bytes:
             raise ValueError("AVCS requires non-empty screenshot pixels")
         with Image.open(BytesIO(png_bytes)) as image:
             frame = np.array(image.convert("RGB"))
-        return self.perceive_rgb(frame)
+        return self.perceive_rgb(frame, source_frame_id=source_frame_id)
 
     def perceive_rgb(
         self,

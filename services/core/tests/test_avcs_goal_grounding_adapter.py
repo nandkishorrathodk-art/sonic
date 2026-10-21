@@ -131,6 +131,33 @@ def test_avcs_processes_raw_rgb_frame_without_png_round_trip():
     assert state["scene_hash"]
 
 
+def test_avcs_png_perception_preserves_source_frame_identity():
+    perception = AVCSPerception()
+
+    state = perception.perceive_png(_png_bytes(), source_frame_id=42)
+
+    assert state["source_frame_id"] == 42
+
+
+def test_goal_grounder_png_result_preserves_source_frame_identity(
+    monkeypatch, tmp_path
+):
+    perception, _ = _configured_perception(monkeypatch, tmp_path)
+    png_bytes = _png_bytes()
+    state = perception.perceive_png(png_bytes, source_frame_id=42)
+
+    result = perception.ground_target_png(
+        png_bytes,
+        "Save the document",
+        width=200,
+        height=100,
+        source_frame_id=42,
+    )
+
+    assert result["source_frame_id"] == 42
+    assert result["frame_index"] == state["frame_index"]
+
+
 @pytest.mark.parametrize(
     ("frame", "message"),
     [

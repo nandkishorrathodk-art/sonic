@@ -31,8 +31,10 @@ universal or live desktop-task capability.
 
 ## Visual assets
 
-- [`assets/architecture.svg`](../assets/architecture.svg) — component overview;
-  an architecture summary, not an end-to-end acceptance result.
+- [`assets/architecture.svg`](../assets/architecture.svg) — runtime flow showing
+  AVCS System 1, SONIC System 2, action paths and Judge review. The separate
+  SDK/MCP/adapters are explicitly marked as not wired into this runtime path;
+  the diagram is not an end-to-end acceptance result.
 - [`assets/sonic_cyber_workstation.png`](../assets/sonic_cyber_workstation.png) —
   historical interface snapshot with legacy cyber branding; not proof of task completion.
 - [`assets/sonic_cognitive_memory_graph.png`](../assets/sonic_cognitive_memory_graph.png) —

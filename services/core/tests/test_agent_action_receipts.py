@@ -508,6 +508,20 @@ def test_configured_avcs_grounder_binds_semantic_target_to_current_frame(monkeyp
     )
 
 
+def test_agent_png_perception_binds_avcs_state_to_provider_frame_id():
+    agent = ComputerUseAgent(
+        computer_provider=_ReceiptComputer(),
+        execution_plane="gui",
+    )
+    screen = _avcs_screen()
+    screen.frame_id = 42
+
+    processed = agent._ensure_avcs_state(screen)
+
+    assert processed.avcs_state["source_frame_id"] == 42
+    assert ComputerUseAgent._fresh_avcs_reflex_summary(processed) != "unavailable"
+
+
 def test_agent_processes_raw_rgb_observation_locally_and_keeps_frame_private():
     agent = ComputerUseAgent(computer_provider=_ReceiptComputer())
     raw_rgb = bytes((24, 48, 72)) * (64 * 48)

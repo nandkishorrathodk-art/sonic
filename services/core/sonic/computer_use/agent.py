@@ -1018,7 +1018,12 @@ class ComputerUseAgent:
                 png_bytes = base64.b64decode(
                     screen.screenshot_base64, validate=True
                 )
-                state = perception.perceive_png(png_bytes)
+                if screen.frame_id is None:
+                    state = perception.perceive_png(png_bytes)
+                else:
+                    state = perception.perceive_png(
+                        png_bytes, source_frame_id=screen.frame_id
+                    )
             if (
                 state.get("engine") != "avcs_reflex"
                 or state.get("width") != screen.width
@@ -1112,14 +1117,26 @@ class ComputerUseAgent:
             )
         else:
             png_bytes = base64.b64decode(frame_b64, validate=True)
-            result = await asyncio.to_thread(
-                perception.ground_target_png,
-                png_bytes,
-                query.strip(),
-                width,
-                height,
-                getattr(source_screen, "active_window_geometry", None),
-            )
+            ground_png = perception.ground_target_png
+            if source_frame_id is None:
+                result = await asyncio.to_thread(
+                    ground_png,
+                    png_bytes,
+                    query.strip(),
+                    width,
+                    height,
+                    getattr(source_screen, "active_window_geometry", None),
+                )
+            else:
+                result = await asyncio.to_thread(
+                    ground_png,
+                    png_bytes,
+                    query.strip(),
+                    width,
+                    height,
+                    getattr(source_screen, "active_window_geometry", None),
+                    source_frame_id=source_frame_id,
+                )
         if result is not None:
             x, y = result.get("x"), result.get("y")
             query_score = result.get("query_score")
@@ -1146,10 +1163,7 @@ class ComputerUseAgent:
                 result.get("engine") != "avcs_goal_grounder"
                 or result.get("scene_hash") != state.get("scene_hash")
                 or result.get("frame_index") != state.get("frame_index")
-                or (
-                    raw_rgb
-                    and result.get("source_frame_id") != source_frame_id
-                )
+                or result.get("source_frame_id") != source_frame_id
                 or isinstance(query_score, bool)
                 or not isinstance(query_score, (int, float))
                 or not math.isfinite(float(query_score))

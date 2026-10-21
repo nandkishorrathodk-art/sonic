@@ -161,6 +161,7 @@ def fresh_avcs_pixel_evidence(
             and screenshot.strip()
             or raw_pixels_valid
         )
+        or (raw_rgb and not raw_pixels_valid)
         or getattr(screen, "desktop_state", None) != "INTERACTIVE"
     ):
         return None
@@ -196,9 +197,21 @@ def fresh_avcs_pixel_evidence(
         return None
 
     avcs_state = getattr(screen, "avcs_state", None)
-    if raw_pixels_valid and (
-        not isinstance(avcs_state, dict)
-        or avcs_state.get("source_frame_id") != raw_frame_id
+    source_frame_id = (
+        avcs_state.get("source_frame_id")
+        if isinstance(avcs_state, dict)
+        else None
+    )
+    if raw_frame_id is None:
+        if source_frame_id is not None:
+            return None
+    elif (
+        isinstance(raw_frame_id, bool)
+        or not isinstance(raw_frame_id, int)
+        or raw_frame_id <= 0
+        or isinstance(source_frame_id, bool)
+        or not isinstance(source_frame_id, int)
+        or source_frame_id != raw_frame_id
     ):
         return None
     summary = avcs_pixel_state_summary(avcs_state)

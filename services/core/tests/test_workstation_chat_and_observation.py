@@ -320,3 +320,21 @@ def test_fresh_avcs_evidence_summary_drops_semantic_and_unbounded_fields():
     assert evidence["frame_index"] == 9
     assert "events" not in evidence["summary"]
     assert evidence["summary"]["regions"] == [{"row": 1, "col": 2, "salience": 0.5}]
+
+
+def test_fresh_avcs_evidence_rejects_screenshot_with_mismatched_frame_id():
+    screen = _fresh_screen()
+    screen.frame_id = 10
+    screen.avcs_state["source_frame_id"] = 9
+
+    assert _fresh_avcs_pixel_evidence(screen) is None
+
+
+def test_fresh_avcs_evidence_accepts_screenshot_with_matching_frame_id():
+    screen = _fresh_screen()
+    screen.frame_id = 10
+    screen.avcs_state["source_frame_id"] = 10
+
+    evidence = _fresh_avcs_pixel_evidence(screen)
+
+    assert evidence is not None
