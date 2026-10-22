@@ -44,12 +44,29 @@ from sonic.logger import get_logger
 logger = get_logger(__name__)
 
 _active_life_loop: BeingLifeLoop | None = None
+_process_bus: EventBus | None = None
 
 
 def register_life_loop(loop: BeingLifeLoop) -> None:
     """Expose the process-local idle actor to the foreground control plane."""
     global _active_life_loop
     _active_life_loop = loop
+
+
+def get_life_bus() -> EventBus:
+    """Return the process-wide cognition event bus.
+
+    One bus per process so a producer (e.g. continuous visual awareness) and a
+    consumer (cognition, dashboard bridge) share the same topic stream. The
+    active life loop's bus is preferred when a loop exists; otherwise a
+    standalone bus is created and reused.
+    """
+    global _process_bus
+    if _active_life_loop is not None:
+        return _active_life_loop.bus
+    if _process_bus is None:
+        _process_bus = EventBus()
+    return _process_bus
 
 
 def pause_for_operator() -> None:
@@ -218,6 +235,18 @@ class BeingLifeLoop:
             raise ValueError("self_coder_every must be an integer from 1 to 10000")
         self.self_coder_every = self_coder_every
         self.self_coder_reports: list = []
+        # Continuous visual awareness: subscribe to AVCS perception events so a
+        # real screen change becomes a cognition signal instead of dead
+        # telemetry. The most recent noteworthy change is exposed to the next
+        # idle tick (and any UI bridge) without forcing a fixed-tick screenshot.
+        self.recent_perception_changes: list[dict[str, Any]] = []
+        try:
+            from sonic.computer_use.awareness import TOPIC_CHANGE, TOPIC_FRAME
+
+            self.bus.subscribe(TOPIC_CHANGE, self._on_perception_change)
+            self.bus.subscribe(TOPIC_FRAME, self._on_perception_frame)
+        except Exception as exc:  # pragma: no cover - awareness is optional
+            logger.warning("being_perception_subscribe_failed", error=str(exc))
         if self.self_coder is None:
             logger.info(
                 "being_self_coder_disabled",
@@ -234,6 +263,28 @@ class BeingLifeLoop:
     def pause_for_operator(self) -> None:
         self._operator_active.set()
         logger.info("being_life_loop_paused_for_operator", being_id=self.being.being_id)
+
+    def _on_perception_frame(self, event: Any) -> None:
+        """Record the latest observed frame (awareness telemetry)."""
+        self._latest_frame = getattr(event, "payload", {}) or {}
+
+    def _on_perception_change(self, event: Any) -> None:
+        """Record a real screen change so the next tick can reason about it."""
+        payload = getattr(event, "payload", {}) or {}
+        self.recent_perception_changes.append(payload)
+        # Bound the buffer: only the recent window is useful to cognition.
+        if len(self.recent_perception_changes) > 20:
+            del self.recent_perception_changes[:-20]
+
+    def perception_context(self) -> dict[str, Any]:
+        """Summarize what the eyes have seen since the last tick."""
+        changes = list(self.recent_perception_changes)
+        self.recent_perception_changes.clear()
+        return {
+            "changes": changes,
+            "change_count": len(changes),
+            "latest_frame": getattr(self, "_latest_frame", {}),
+        }
 
     def resume_after_operator(self) -> None:
         self._operator_active.clear()
@@ -281,6 +332,16 @@ class BeingLifeLoop:
                 "info_gain": info_gain,
                 "learned_fact": str(learned),
             })
+            # Feed what the eyes saw since the last tick back onto the bus so a
+            # screen change the being noticed can drive its next decision.
+            perception = self.perception_context()
+            if perception["change_count"]:
+                self.bus.publish("being.perception_awareness", {
+                    "being_id": self.being.being_id,
+                    "cycle": self.cycles_completed,
+                    "change_count": perception["change_count"],
+                    "changes": perception["changes"][-5:],
+                })
             await self._maybe_self_improve()
             return res
         except Exception as e:

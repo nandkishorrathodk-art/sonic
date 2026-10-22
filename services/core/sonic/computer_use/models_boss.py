@@ -133,5 +133,6 @@ class BossReport(BaseModel):
     duration_seconds: float = 0.0
     replay_metrics: dict[str, Any] = Field(default_factory=dict)
     replay_quality_gate_passed: bool = False
+    dispatch_decision: dict[str, Any] = Field(default_factory=dict)
     waiting_for_human: bool = False
     waiting_for_human_reason: str = ""

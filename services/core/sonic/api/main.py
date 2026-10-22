@@ -10,6 +10,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -280,10 +281,55 @@ async def _maybe_start_self_coder_background_loop():
         return None
 
 
+async def _maybe_start_visual_awareness(settings) -> str | None:
+    """Start continuous AVCS awareness for the being's home desktop.
+
+    This is the EYES -> BRAIN link: without it the workstation perception path
+    only runs when an operator sends a prompt. It is env-gated (default OFF) so
+    a normal boot does not pay continuous capture cost, and it is a no-op when
+    no computer provider / home workspace exists (test and headless boots).
+
+    Returns the workspace id when a monitor is running, else None.
+    """
+    if os.environ.get("SONIC_ENABLE_VISUAL_AWARENESS") != "1":
+        logger.info("visual_awareness_disabled", reason="SONIC_ENABLE_VISUAL_AWARENESS!=1")
+        return None
+    try:
+        from sonic.api.routes.workstation import get_computer
+        from sonic.being.life_loop import get_life_bus
+        from sonic.computer_use.awareness import get_awareness_monitor
+
+        provider = get_computer()
+        if provider is None:
+            logger.warning("visual_awareness_no_computer_provider")
+            return None
+
+        tenant_id = os.environ.get(
+            "SONIC_BEING_TENANT", os.environ.get("SONIC_AWARENESS_TENANT", "default")
+        )
+        home = await provider.get_or_create_home(tenant_id)
+        workspace_id = getattr(home, "id", None) or getattr(home, "workspace_id", None)
+        if not workspace_id:
+            logger.warning("visual_awareness_no_home", tenant=tenant_id)
+            return None
+
+        fps = float(os.environ.get("SONIC_AWARENESS_FPS", "2") or 2)
+        monitor = get_awareness_monitor(provider, workspace_id, bus=get_life_bus(), fps=fps)
+        monitor.start()
+        logger.info(
+            "visual_awareness_running",
+            workspace_id=workspace_id,
+            fps=monitor.stats()["target_fps"],
+        )
+        return workspace_id
+    except Exception as exc:
+        logger.warning("visual_awareness_init_failed", error=str(exc))
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    settings = get_settings()
 
     logger.info(
         "sonic_starting",
@@ -341,10 +387,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("being_life_loop_not_started", reason=str(e))
     self_coder_loop = await _maybe_start_self_coder_background_loop()
+    awareness_task = await _maybe_start_visual_awareness(settings)
 
     yield
 
     # Shutdown
+    if awareness_task is not None:
+        try:
+            from sonic.computer_use.awareness import stop_awareness_monitor
+
+            await stop_awareness_monitor(awareness_task)
+        except Exception as e:
+            logger.warning("awareness_monitor_stop_failed", error=str(e))
     if self_coder_loop is not None:
         try:
             await self_coder_loop.stop()

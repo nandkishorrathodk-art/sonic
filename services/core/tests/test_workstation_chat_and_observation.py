@@ -320,3 +320,49 @@ def test_fresh_avcs_evidence_summary_drops_semantic_and_unbounded_fields():
     assert evidence["frame_index"] == 9
     assert "events" not in evidence["summary"]
     assert evidence["summary"]["regions"] == [{"row": 1, "col": 2, "salience": 0.5}]
+
+
+def test_avcs_capability_state_fails_closed_without_evaluated_heads(monkeypatch):
+    """A LIVE desktop is not a working desktop: without evaluated AVCS heads the
+    capability surface must report semantic GUI targeting and text entry as
+    unavailable so the operator is not misled by a green 'LIVE' status."""
+    from sonic.api.routes.workstation_perception import avcs_capability_state
+
+    monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
+    monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
+
+    capability = avcs_capability_state()
+
+    assert capability["reflex_perception"] is True
+    assert capability["semantic_grounding"] is False
+    assert capability["focus_verification"] is False
+    assert capability["gui_actions_ready"] is False
+    assert "grounding checkpoint" in capability["reason"].lower()
+
+
+def test_desktop_status_surfaces_avcs_capability():
+    """The desktop status endpoint must expose the AVCS capability gate."""
+    from fastapi.testclient import TestClient
+
+    from sonic.api.main import app
+    from sonic.auth.google_auth import create_jwt_token
+    from sonic.auth.models import User, UserRole
+
+    client = TestClient(app)
+    user = User(
+        email="engineer@company.com",
+        name="Lead Engineer",
+        role=UserRole.OPERATOR,
+        tenant_id="tenant-alpha",
+    )
+    token = create_jwt_token(user)
+    response = client.get(
+        "/workstation/desktop/status",
+        headers={"Authorization": f"Bearer {token.access_token}"},
+    )
+    assert response.status_code == 200
+    capability = response.json().get("avcs_capability")
+    assert isinstance(capability, dict)
+    assert capability["reflex_perception"] is True
+    assert capability["gui_actions_ready"] is False
+

@@ -692,6 +692,47 @@ async def test_vnc_url_uses_selected_container_published_host_port():
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
+async def test_vnc_url_honors_operator_configured_public_host(monkeypatch):
+    """A remote dashboard cannot reach a 127.0.0.1 stream URL; the operator
+    must be able to point the browser at the workstation host's real address."""
+    monkeypatch.setenv("SONIC_NOVNC_PUBLIC_HOST", "workstation.example.test")
+    provider = DockerComputerProvider(container_name="isolated-workstation")
+    provider._container_is_running = AsyncMock(return_value=True)
+    provider._resolve_novnc_url = AsyncMock(
+        return_value="http://127.0.0.1:6081/vnc.html"
+    )
+    provider._docker_exec = AsyncMock(return_value=(0, "0", ""))
+
+    url = await provider.get_vnc_url("isolated-workstation")
+
+    assert url == (
+        "http://workstation.example.test:6081/vnc.html"
+        "?autoconnect=true&resize=scale&show_dot=true&cursor=true"
+    )
+
+
+@pytest.mark.no_live_infra
+def test_novnc_public_host_precedence_and_default(monkeypatch):
+    from sonic.computer.docker_computer import _novnc_public_host
+
+    for key in (
+        "SONIC_NOVNC_PUBLIC_HOST",
+        "SONIC_WORKSTATION_PUBLIC_HOST",
+        "SONIC_PUBLIC_HOST",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    assert _novnc_public_host() == "localhost"
+    monkeypatch.setenv("SONIC_PUBLIC_HOST", "a.example.test")
+    assert _novnc_public_host() == "a.example.test"
+    monkeypatch.setenv("SONIC_WORKSTATION_PUBLIC_HOST", "b.example.test")
+    assert _novnc_public_host() == "b.example.test"
+    monkeypatch.setenv("SONIC_NOVNC_PUBLIC_HOST", "c.example.test")
+    assert _novnc_public_host() == "c.example.test"
+
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
 async def test_vnc_url_fails_closed_without_selected_container_port_binding():
     provider = DockerComputerProvider(container_name="unpublished-workstation")
     provider._container_is_running = AsyncMock(return_value=True)
@@ -1232,3 +1273,76 @@ async def test_container_probe_is_single_flight_under_concurrent_calls(monkeypat
     results = await asyncio.gather(*(provider._container_is_running() for _ in range(5)))
     assert all(results)
     assert calls["inspect"] == 1
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_idle_stream_watchdog_closes_stream_when_no_consumer(monkeypatch):
+    """A continuous AVCS frame stream must stop once nothing observes.
+
+    Regression for the "SONIC became slow" report: the stream started on the
+    first screenshot and was never released, so a single dashboard visit left
+    the backend running a 1920x1080 capture + AVCS loop (~60% of a core,
+    ~187 MB/s) until process restart.
+    """
+    monkeypatch.setenv("SONIC_AVCS_STREAM_IDLE_SECONDS", "0.2")
+    provider = DockerComputerProvider(container_name="idle-watchdog-workstation")
+    provider._last_stream_use = asyncio.get_running_loop().time()
+
+    closed = asyncio.Event()
+
+    async def fake_close():
+        closed.set()
+
+    provider.close = AsyncMock(side_effect=fake_close)
+    provider._frame_stream_process = SimpleNamespace(returncode=None)
+
+    provider._ensure_idle_watchdog()
+
+    await asyncio.wait_for(closed.wait(), timeout=2)
+    provider.close.assert_awaited_once()
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_idle_stream_watchdog_keeps_stream_while_consumed(monkeypatch):
+    """A stream with ongoing observations must NOT be released."""
+    monkeypatch.setenv("SONIC_AVCS_STREAM_IDLE_SECONDS", "0.5")
+    provider = DockerComputerProvider(container_name="busy-watchdog-workstation")
+    provider._frame_stream_process = SimpleNamespace(returncode=None)
+    provider.close = AsyncMock()
+
+    provider._ensure_idle_watchdog()
+    for _ in range(4):
+        provider._last_stream_use = asyncio.get_running_loop().time()
+        await asyncio.sleep(0.15)
+
+    provider.close.assert_not_awaited()
+    assert provider._frame_stream_idle_task is not None
+    provider._frame_stream_idle_task.cancel()
+    await asyncio.gather(provider._frame_stream_idle_task, return_exceptions=True)
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_close_cancels_idle_watchdog_without_deadlock():
+    """close() must cancel the watchdog and not cancel itself when it is the watchdog."""
+    provider = DockerComputerProvider(container_name="close-watchdog-workstation")
+    provider._ensure_idle_watchdog()
+    watchdog = provider._frame_stream_idle_task
+    assert watchdog is not None
+
+    await provider.close()
+
+    assert provider._frame_stream_idle_task is None
+    assert watchdog.done()
+
+
+@pytest.mark.no_live_infra
+def test_default_capture_fps_is_conservative(monkeypatch):
+    """The continuous-capture default must not be the old 30 FPS CPU burner."""
+    monkeypatch.delenv("SONIC_AVCS_CAPTURE_FPS", raising=False)
+    import sonic.computer.docker_computer as module
+
+    assert module._DEFAULT_AVCS_CAPTURE_FPS <= 15
+    assert module._DEFAULT_AVCS_STREAM_IDLE_SECONDS > 0

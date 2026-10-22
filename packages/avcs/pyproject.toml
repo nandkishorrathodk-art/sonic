@@ -48,6 +48,10 @@ dependencies = [
 desktop = [
     "mss>=9.0.0",
 ]
+# Video apprenticeship: decode screen recordings into AVCS training frames.
+video = [
+    "imageio-ffmpeg>=0.4.9",
+]
 dev = [
     "pytest>=7.0.0",
     "psutil>=5.9.0",
@@ -69,6 +73,7 @@ avcs-m7-validate = "avcs_m7_validation.runner:main"
 avcs-audit-evidence = "avcs_m7_validation.evidence_auditor:main"
 avcs-record-demo = "avcs.training.demo_recorder:main"
 avcs-train-grounder = "avcs.training.train_grounder:main"
+avcs-ingest-video = "avcs.training.video_apprenticeship:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

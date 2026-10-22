@@ -19,6 +19,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
+
 from sonic.computer.models import (
     GUIAction,
     GUIActionType,
@@ -846,6 +848,27 @@ class ComputerUseAgent:
             and not action.name.startswith("BROWSER_")
         )
         grounding_source = "the current AVCS pixel-state summary"
+        # Semantic clicks need an evaluated local AVCS grounder. When none is
+        # configured the action fails closed, so tell the model up front and
+        # point it at routes that do not require semantic grounding (launching
+        # an observed installed application, keyboard navigation). This avoids
+        # burning the whole step budget on a target that cannot be resolved.
+        if self._avcs_grounder_ready():
+            grounding_clause = (
+                "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and "
+                "GUI_SCROLL, provide an observed semantic target in TARGET; a configured "
+                "AVCS grounding checkpoint resolves it to pixels before dispatch. "
+                "Never guess coordinates. "
+            )
+        else:
+            grounding_clause = (
+                "No AVCS grounding checkpoint is configured, so semantic GUI_CLICK "
+                "targets cannot be resolved and will fail closed. Do not propose "
+                "GUI_CLICK/GUI_DOUBLE_CLICK/GUI_RIGHT_CLICK/GUI_MOVE/GUI_SCROLL on a "
+                "described control. Instead open an observed installed application with "
+                "APP_LAUNCH (its name only, never a path or destination), then use "
+                "keyboard actions such as GUI_HOTKEY and GUI_KEYPRESS. "
+            )
         return (
             "You are SONIC, a general-purpose AI-human colleague operating a live "
             "desktop. This worker's assigned plane is the visible GUI only.\n"
@@ -862,14 +885,17 @@ class ComputerUseAgent:
             f"Choose one immediate action from {grounding_source}. AVCS provides "
             "local pixel reflex state, not OCR text or semantic controls. Do not infer "
             "a control from the objective or earlier history.\n"
-            "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and "
-            "GUI_SCROLL, provide an observed semantic target in TARGET; a configured "
-            "AVCS grounding checkpoint must resolve it to pixels before dispatch. "
-            "Never guess coordinates. Do not depend on OCR, extracted control lists, "
+            f"{grounding_clause}"
+            "Do not depend on OCR, extracted control lists, "
             "or accessibility metadata. Never describe a desktop shortcut as an already-open window "
             "or add inferred words such as 'window' or 'active'.\n"
             "APP_LAUNCH may name only an observed installed application, never a "
-            "directory or destination path. Text entry is unavailable until AVCS "
+            "directory or destination path. Only launch an application that appears "
+            "in the 'Available Installed Desktop Applications' list above; if the "
+            "objective names an application that is NOT in that list, it is not "
+            "installed — do not invent a binary name (for example do not guess a "
+            "different terminal emulator), and instead report the objective as blocked. "
+            "Text entry is unavailable until AVCS "
             "has an evaluated local focus-verification head. If a visual target cannot be grounded, do "
             "not repeat it or guess coordinates: use another observed route, including "
             "keyboard navigation when appropriate. If no route is grounded, choose "
@@ -1044,6 +1070,19 @@ class ComputerUseAgent:
             raise RuntimeError("AVCS could not process the current workstation frame") from exc
 
         screen.avcs_state = state
+        # Learned semantics ride along when a trained cortex checkpoint is
+        # configured; an empty mapping means "unavailable", not "nothing there".
+        if screen.raw_rgb:
+            try:
+                frame = np.frombuffer(screen.raw_rgb, dtype=np.uint8).reshape(
+                    screen.height, screen.width, 3
+                )
+                semantics = perception.perceive_semantics_rgb(frame)
+            except Exception as exc:
+                logger.warning("avcs_cortex_perception_failed", error=str(exc))
+                semantics = {}
+            if semantics:
+                state["semantics"] = semantics
         screen.visible_text = ""
         screen.detected_controls = []
         screen.controls_age_ms = None
@@ -1504,7 +1543,9 @@ class ComputerUseAgent:
             capture_age_ms=screen_obs.capture_age_ms,
             controls_age_ms=None,
             accessible_scene_fresh=False,
-            screenshot_pixels_available=bool(screen_obs.screenshot_base64),
+            # AVCS delivers pixels as raw RGB, not base64; checking only the
+            # base64 field reported "no pixels" while the frame was present.
+            screenshot_pixels_available=self._screen_has_pixel_data(screen_obs),
             action_to_state_ms=(
                 round(action_to_state_ms, 2)
                 if action_to_state_ms is not None
@@ -2659,6 +2700,7 @@ class ComputerUseAgent:
                 "ASSIGNED PLANE: visible desktop GUI only.\n"
                 f"OBJECTIVE: {goal}\n"
                 f"CURRENT SCREEN DIMENSIONS: {screen_w}x{screen_h} pixels.\n"
+                f"Available Installed Desktop Applications: {installed_str}\n"
                 "CURRENT AVCS PIXEL STATE SUMMARY "
                 "(fresh local frame; coarse scene/change/motion signals only; "
                 "not semantic certainty or task proof; no screenshot is sent; "
@@ -2912,10 +2954,22 @@ class ComputerUseAgent:
             and state["height"] > 0
             else "unknown"
         )
+        semantics = state.get("semantics")
+        semantics_summary = "unavailable"
+        if isinstance(semantics, dict) and semantics:
+            hotspots = semantics.get("action_hotspots")
+            hotspot_count = len(hotspots) if isinstance(hotspots, list) else 0
+            semantics_summary = (
+                f"{str(semantics.get('primary_category', 'unknown'))[:32]} "
+                f"(confidence={format_number(semantics.get('category_confidence'))}, "
+                f"stability={str(semantics.get('stability_state', 'unknown'))[:20]}, "
+                f"interactive_targets={hotspot_count})"
+            )
         return (
             "pixel-only; "
             f"frame={frame_id}, screen={dimensions}, "
             f"scene={scene_hash[:12] or 'unknown'}, "
+            f"learned_semantics={semantics_summary}, "
             f"changed={changed if isinstance(changed, bool) else 'unknown'}, "
             f"change={format_number(state.get('change_fraction'))}, "
             f"motion={format_number(state.get('global_motion'))}, "
@@ -5063,6 +5117,33 @@ class ComputerUseAgent:
             if not callable(ensure):
                 return False
             return bool(ensure())
+        except Exception:
+            return False
+
+    def _avcs_grounder_ready(self) -> bool:
+        """True only when a configured, evaluated local grounding checkpoint loads.
+
+        Pure capability probe: it never dispatches an action and never treats a
+        configured path as readiness. When False, semantic GUI targets (clicks on
+        described controls) cannot be grounded and will fail closed, so the
+        reasoning prompt must steer the model toward non-semantic routes.
+        """
+        try:
+            perception = getattr(self, "_avcs_perception", None)
+            if perception is None:
+                from sonic.computer_use.avcs_perception import AVCSPerception
+
+                perception = AVCSPerception()
+                self._avcs_perception = perception
+            if not bool(getattr(perception, "goal_grounder_configured", False)):
+                return False
+            ready = getattr(perception, "goal_grounder_ready", None)
+            if callable(ready):
+                try:
+                    return bool(ready())
+                except Exception:
+                    return False
+            return False
         except Exception:
             return False
 

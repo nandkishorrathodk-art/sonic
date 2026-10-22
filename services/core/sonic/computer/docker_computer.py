@@ -54,9 +54,34 @@ from sonic.sandbox.provider import ExecResult
 logger = get_logger(__name__)
 
 _SCREEN_CAPTURE_FRESHNESS_BUDGET_MS = 2_000
+# The persistent AVCS frame stream exists so an observation does not pay a
+# fresh `docker exec` + screen-grab round-trip. It is a *continuous* capture
+# loop, so at 1920x1080 it costs real CPU for as long as it runs (~20 ms of
+# AVCS processing per frame). It must therefore stop when nothing is looking,
+# or a single dashboard visit leaves the backend burning a core until restart.
+_DEFAULT_AVCS_CAPTURE_FPS = 10.0
+_DEFAULT_AVCS_STREAM_IDLE_SECONDS = 30.0
 _RAW_FRAME_HEADER = struct.Struct("!4sQQII")
 _RAW_FRAME_MAGIC = b"AVCS"
 _RAW_FRAME_MAX_BYTES = 64 * 1024 * 1024
+
+# Tokens that make an application query a generic ROLE rather than a product
+# name. Only a query built entirely from these ("terminal", "web browser") may
+# be satisfied by a POSIX alternative; a specific name such as "gnome-terminal"
+# must not be silently substituted with a different program.
+_GENERIC_ROLE_TOKENS = frozenset(
+    {
+        "a", "an", "the", "app", "application", "program", "software",
+        "browser", "web", "internet",
+        "terminal", "console", "shell", "command", "prompt",
+        "editor", "text", "notepad", "writer",
+        "file", "manager", "explorer", "folder",
+        "image", "viewer", "photo", "picture",
+        "media", "video", "player", "music", "audio",
+        "pdf", "reader", "document", "spreadsheet", "calc", "presentation",
+        "mail", "email", "calculator", "settings", "preferences", "archive",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +98,28 @@ class _RawDesktopFrame:
 def _get_display(workspace_id: str | None = None) -> str:
     """Check if environment has DISPLAY, default to :99 if running docker Xvfb."""
     return os.environ.get("DISPLAY") or ":99"
+
+
+def _novnc_public_host() -> str:
+    """Host the browser should use to reach the published noVNC port.
+
+    The Docker workstation publishes noVNC on the *host* loopback
+    (``127.0.0.1:6080`` in docker-compose.yml). A browser running on that same
+    host can use ``127.0.0.1`` directly, but a browser on any other machine
+    (the common case for a remote operator dashboard) must be given the host's
+    reachable address. That address cannot be inferred from inside the API
+    container, so it is operator-configured. Falls back to ``localhost`` for
+    the documented single-host dev topology.
+    """
+    for key in (
+        "SONIC_NOVNC_PUBLIC_HOST",
+        "SONIC_WORKSTATION_PUBLIC_HOST",
+        "SONIC_PUBLIC_HOST",
+    ):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return "localhost"
 
 
 def _docker_binary() -> str | None:
@@ -233,6 +280,12 @@ class DockerComputerProvider(ComputerProvider):
         self._capture_times_ns: deque[int] = deque(maxlen=30)
         self._processing_times: deque[float] = deque(maxlen=30)
         self._frame_stream_lock = asyncio.Lock()
+        # Monotonic time of the last observation request. The continuous stream
+        # is stopped once this goes stale so an idle workstation does not burn
+        # CPU forever (see _DEFAULT_AVCS_STREAM_IDLE_SECONDS).
+        self._last_stream_use: float = 0.0
+        self._frame_stream_idle_task: asyncio.Task[None] | None = None
+        self._captures_in_flight: int = 0
 
     def _ensure_default_workspace(self, tenant_id: str = "default", engagement_id: str = "default") -> ComputerWorkspace:
         if self._default_workspace_id not in self.workspaces:
@@ -550,6 +603,14 @@ class DockerComputerProvider(ComputerProvider):
         self._latest_processed_frame = None
         self._last_returned_frame_id = 0
         self._frame_ready.clear()
+        # Stop the idle watchdog too, unless this close() *is* the watchdog
+        # (cancelling the current task would abort close() mid-flight).
+        idle_task = self._frame_stream_idle_task
+        self._frame_stream_idle_task = None
+        if idle_task is not None and idle_task is not asyncio.current_task():
+            if not idle_task.done():
+                idle_task.cancel()
+            await asyncio.gather(idle_task, return_exceptions=True)
 
     async def get_vnc_url(self, workspace_id: str) -> str | None:
         # Fail-closed: a stream URL is only real when the container actually
@@ -567,8 +628,9 @@ class DockerComputerProvider(ComputerProvider):
             timeout=8,
         )
         if code == 0 and out.strip() == "0":
+            host = _novnc_public_host()
             return (
-                f"http://localhost:{published_port}/vnc.html"
+                f"http://{host}:{published_port}/vnc.html"
                 "?autoconnect=true&resize=scale&show_dot=true&cursor=true"
             )
         return None
@@ -781,7 +843,11 @@ class DockerComputerProvider(ComputerProvider):
                 raise RuntimeError("Workstation container is unavailable for AVCS frame streaming")
 
             try:
-                fps = float(os.environ.get("SONIC_AVCS_CAPTURE_FPS", "30"))
+                fps = float(
+                    os.environ.get(
+                        "SONIC_AVCS_CAPTURE_FPS", str(_DEFAULT_AVCS_CAPTURE_FPS)
+                    )
+                )
             except ValueError as exc:
                 raise ValueError("SONIC_AVCS_CAPTURE_FPS must be between 1 and 60") from exc
             if not math.isfinite(fps) or not 1 <= fps <= 60:
@@ -826,6 +892,70 @@ class DockerComputerProvider(ComputerProvider):
             )
             self._frame_stream_processor_task = asyncio.create_task(
                 self._process_raw_frame_stream()
+            )
+            self._last_stream_use = asyncio.get_running_loop().time()
+            self._ensure_idle_watchdog()
+
+    def _ensure_idle_watchdog(self) -> None:
+        """Start (once) the task that stops the stream when nothing is looking."""
+        task = self._frame_stream_idle_task
+        if task is not None and not task.done():
+            return
+        self._frame_stream_idle_task = asyncio.create_task(self._stop_idle_stream())
+
+    async def _stop_idle_stream(self) -> None:
+        """Close the continuous frame stream after an idle period.
+
+        The stream is a *continuous* capture loop; leaving it running with no
+        consumer is pure CPU burn (and a `docker exec` piping ~6 MB/frame).
+        Releasing it after ``SONIC_AVCS_STREAM_IDLE_SECONDS`` keeps the
+        fast-path (a burst of observations reuses one stream) without leaving
+        the workstation capturing forever. The next observation transparently
+        restarts it.
+        """
+        try:
+            idle_seconds = float(
+                os.environ.get(
+                    "SONIC_AVCS_STREAM_IDLE_SECONDS",
+                    str(_DEFAULT_AVCS_STREAM_IDLE_SECONDS),
+                )
+            )
+        except ValueError:
+            idle_seconds = _DEFAULT_AVCS_STREAM_IDLE_SECONDS
+        if not math.isfinite(idle_seconds) or idle_seconds <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                last_use = self._last_stream_use
+                if last_use <= 0:
+                    return
+                remaining = idle_seconds - (loop.time() - last_use)
+                if remaining <= 0:
+                    # An observation in flight owns the stream: wait for it to
+                    # finish (it refreshes _last_stream_use) instead of pulling
+                    # frames out from under it.
+                    if self._captures_in_flight > 0:
+                        await asyncio.sleep(0.1)
+                        continue
+                    break
+                await asyncio.sleep(min(remaining, idle_seconds))
+            process = self._frame_stream_process
+            if process is None or process.returncode is not None:
+                return
+            logger.info(
+                "avcs_frame_stream_idle_stopped",
+                container=self.container_name,
+                idle_seconds=idle_seconds,
+            )
+            await self.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "avcs_frame_stream_idle_stop_failed",
+                container=self.container_name,
+                error=str(exc),
             )
 
     async def _read_raw_frame_stream(
@@ -1038,6 +1168,10 @@ class DockerComputerProvider(ComputerProvider):
 
         try:
             await self._start_raw_frame_stream(workspace_id)
+            # Mark the stream as actively consumed for the whole observation so
+            # the idle watchdog cannot release it mid-capture.
+            self._last_stream_use = asyncio.get_running_loop().time()
+            self._captures_in_flight += 1
             try:
                 await self._wait_for_new_processed_frame()
             except TimeoutError:
@@ -1048,6 +1182,8 @@ class DockerComputerProvider(ComputerProvider):
                 await self.close()
                 await self._start_raw_frame_stream(workspace_id)
                 await self._wait_for_new_processed_frame()
+            finally:
+                self._captures_in_flight -= 1
         except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
             self._frame_stream_error = str(exc)
             self._latest_processed_frame = None
@@ -1122,6 +1258,9 @@ class DockerComputerProvider(ComputerProvider):
         self._last_screenshot = observation
         self._last_screenshot_time = asyncio.get_running_loop().time()
         self._last_returned_frame_id = frame.frame_id
+        # Record consumer activity so the idle watchdog keeps the stream alive
+        # while observations are flowing and releases it once they stop.
+        self._last_stream_use = self._last_screenshot_time
         return observation
 
     async def _wait_for_new_processed_frame(self) -> None:
@@ -1874,19 +2013,30 @@ class DockerComputerProvider(ComputerProvider):
         if code == 0 and out.strip():
             return out.strip().splitlines()[0]
 
-        # 4. Fallback to POSIX standard alternatives if querying a generic role (browser, editor, terminal)
+        # 4. Fallback to POSIX standard alternatives, but ONLY for a generic role
+        # query such as "terminal" or "web browser". A specific product name that
+        # merely contains a role word (e.g. "gnome-terminal", "konsole") must NOT
+        # be silently substituted with a different application: that hides the fact
+        # that the requested program is not installed and lets the agent believe it
+        # launched what it asked for. Return "" so the launch fails honestly.
         role_lower = app_clean.lower()
-        if any(role in role_lower for role in ("browser", "web")):
+        role_tokens = set(re.findall(r"[a-z0-9]+", role_lower))
+        role_is_generic = bool(role_tokens) and role_tokens <= _GENERIC_ROLE_TOKENS
+        if role_is_generic and any(role in role_lower for role in ("browser", "web")):
             for alt in ("x-www-browser", "sensible-browser", "xdg-open"):
                 code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
                 if code == 0 and out.strip():
                     return out.strip().splitlines()[0]
-        elif any(role in role_lower for role in ("terminal", "console", "shell")):
+        elif role_is_generic and any(
+            role in role_lower for role in ("terminal", "console", "shell")
+        ):
             for alt in ("x-terminal-emulator", "sensible-terminal"):
                 code, out, _ = await self._docker_exec(f"which {alt} 2>/dev/null")
                 if code == 0 and out.strip():
                     return out.strip().splitlines()[0]
-        elif any(role in role_lower for role in ("editor", "text", "notepad")):
+        elif role_is_generic and any(
+            role in role_lower for role in ("editor", "text", "notepad")
+        ):
             code, out, _ = await self._docker_exec(
                 "for d in /usr/share/applications/*.desktop; do "
                 "  [ -f \"$d\" ] || continue; "
@@ -1899,6 +2049,12 @@ class DockerComputerProvider(ComputerProvider):
             )
             if code == 0 and out.strip():
                 return out.strip().splitlines()[0]
+        elif role_tokens and not role_is_generic:
+            logger.info(
+                "application_launch_not_installed",
+                app_query=app_clean,
+                reason="specific application name not found on PATH or in .desktop entries",
+            )
 
         return ""
 

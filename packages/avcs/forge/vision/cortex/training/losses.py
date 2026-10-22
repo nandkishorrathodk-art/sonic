@@ -19,6 +19,9 @@ class AVCSMultiTaskLoss(nn.Module):
         self.cfg = cfg or TrainingConfig()
 
         self.ce_loss = nn.CrossEntropyLoss()
+        # Separate loss for the category head so unlabeled samples (index -1)
+        # are ignored instead of trained as a fabricated class.
+        self.category_loss = nn.CrossEntropyLoss(ignore_index=-1)
         self.coord_loss = nn.SmoothL1Loss()
 
     def forward(
@@ -52,8 +55,17 @@ class AVCSMultiTaskLoss(nn.Module):
         loss_affordance = self.ce_loss(affordance_logits, affordance_targets)
 
         # 3. Ventral UI Category Loss
+        # ``ignore_index=-1`` lets unlabeled data (e.g. watched-video frames,
+        # which carry no UI category) contribute nothing to this term instead of
+        # training on a fabricated class. Existing labeled data never uses -1,
+        # so this is a no-op for them. When a batch is *entirely* unlabeled,
+        # CrossEntropyLoss returns nan; substitute a real zero so the category
+        # term is honestly absent rather than poisoning the total loss.
         cat_logits = model_outputs_t["category_logits"]
-        loss_category = self.ce_loss(cat_logits, category_targets)
+        if bool((category_targets != -1).any()):
+            loss_category = self.category_loss(cat_logits, category_targets)
+        else:
+            loss_category = torch.zeros((), device=cat_logits.device, dtype=cat_logits.dtype)
 
         # 4. Language Grounding Coordinate Regression Loss
         query_coords = model_outputs_t["query_coords"]

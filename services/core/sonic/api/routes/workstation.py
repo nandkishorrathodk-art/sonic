@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -34,7 +35,10 @@ from pydantic import BaseModel, Field
 from sonic.auth.middleware import require_auth, require_operator
 from sonic.auth.models import User
 from sonic.computer.daytona_computer import DaytonaComputerProvider
-from sonic.computer.docker_computer import DockerComputerProvider
+from sonic.computer.docker_computer import (
+    DockerComputerProvider,
+    _novnc_public_host,
+)
 from sonic.computer.models import (
     ComputerProfile,
     ComputerWorkspaceStatus,
@@ -44,6 +48,7 @@ from sonic.computer.models import (
 )
 from sonic.computer_use.human_workflow import HumanFirstWorkflow
 from sonic.api.routes.workstation_perception import (
+    avcs_capability_state as _avcs_capability_state,
     dashboard_screen_payload as _dashboard_screen_payload,
     fresh_avcs_pixel_evidence as _fresh_avcs_pixel_evidence,
     require_fresh_avcs_evidence as _require_fresh_avcs_evidence,
@@ -366,7 +371,7 @@ def _load_workstation_state() -> None:
                             if not desktop.get("display"):
                                 desktop["display"] = ":99"
                             if not desktop.get("resolution"):
-                                desktop["resolution"] = {"width": 1280, "height": 800}
+                                desktop["resolution"] = {"width": 1920, "height": 1080}
                             # A local Docker desktop is a single shared resource and
                             # its in-memory owner cannot be proven after restart.
                             # Require explicit reprovisioning instead of restoring
@@ -482,10 +487,11 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
                 "display": ":99",
                 "vnc_port": 5900,
                 "novnc_port": 6080,
-                "novnc_url": "" if not active_ws else "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale&show_dot=true&cursor=true",
+                "novnc_url": "" if not active_ws else f"http://{_novnc_public_host()}:6080/vnc.html?autoconnect=true&resize=scale&show_dot=true&cursor=true",
                 "status": "LIVE" if active_ws else "NO_ACTIVE_WORKSPACE",
                 "active_window": "Desktop",
-                "resolution": {"width": 1280, "height": 800},
+                "resolution": {"width": 1920, "height": 1080},
+                "avcs_capability": _avcs_capability_state(),
                 "running_apps": [],
                 "active_services": [],
             },
@@ -1175,9 +1181,20 @@ async def get_workstation_state(
     workspace_id = _session_workspace_id(user, session_id)
 
     # Cache expensive sandbox telemetry briefly, but refresh it during long missions too.
+    # The dashboard polls this endpoint every 5s; the TTL must sit *above* that
+    # interval or the cache expires exactly when the next poll arrives and every
+    # request pays the full status()+VNC+screenshot cost (the old 5.0/5.0
+    # collision meant an effectively 0% hit rate and a sluggish UI).
     cache_key = f"{tenant_id}:{session_id}"
     now = time.time()
-    telemetry_cache_ttl = 5.0
+    try:
+        telemetry_cache_ttl = float(
+            os.environ.get("SONIC_WORKSTATION_TELEMETRY_CACHE_SECONDS", "8.0")
+        )
+    except ValueError:
+        telemetry_cache_ttl = 8.0
+    if not math.isfinite(telemetry_cache_ttl) or telemetry_cache_ttl <= 0:
+        telemetry_cache_ttl = 8.0
     cached = _workstation_state_cache.get(cache_key)
 
     if cached and (now - cached[0] < telemetry_cache_ttl):
@@ -1367,7 +1384,7 @@ async def delete_workstation_session(
                     "novnc_url": "",
                     "status": "NO_ACTIVE_WORKSPACE",
                     "active_window": "",
-                    "resolution": {"width": 1280, "height": 800},
+                    "resolution": {"width": 1920, "height": 1080},
                     "running_apps": [],
                     "active_services": [],
                 },
@@ -1447,7 +1464,7 @@ async def provision_desktop(
         "resolution": (
             None
             if workspace.provider_type == "WindowsHostAVCSComputerProvider"
-            else {"width": 1280, "height": 800}
+            else {"width": 1920, "height": 1080}
         ),
         "display": "Windows host desktop" if workspace.provider_type == "WindowsHostAVCSComputerProvider" else ":99",
         "novnc_port": None if workspace.provider_type == "WindowsHostAVCSComputerProvider" else 6080,
@@ -1737,6 +1754,10 @@ async def get_desktop_status(
     desktop["capture_age_ms"] = None
     desktop["capture_timestamp_ns"] = None
     desktop["perception_version"] = None
+    # Honest capability surface: a LIVE desktop is not the same as a desktop
+    # SONIC can act on. Semantic GUI targeting and text entry fail closed
+    # without evaluated local AVCS heads, so report that readiness explicitly.
+    desktop["avcs_capability"] = _avcs_capability_state()
 
     if target_id:
         try:

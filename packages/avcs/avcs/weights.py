@@ -6,16 +6,18 @@ Artificial Visual Cortex neural network checkpoints.
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Optional
 import urllib.request
+from pathlib import Path
 
 import torch
 
-# Standard release checkpoint URL on Praxis-Neural repository
-DEFAULT_WEIGHTS_URL = (
-    "https://github.com/Praxis-Neural/packages/avcs/releases/download/v0.2.0/avcs_cortex_weights.pt"
-)
+# There is NO public release of pre-trained AVCS cortex weights. The previous
+# value here pointed at a repository URL that returns HTTP 404, so
+# `download_weights()` could only ever fail (and, with a permissive caller,
+# silently leave the cortex at random initialisation while appearing
+# "configured"). Leave this unset unless a real, reachable release exists, and
+# always train or supply a checkpoint explicitly.
+DEFAULT_WEIGHTS_URL: str | None = None
 
 # Standard filename
 WEIGHTS_FILENAME = "avcs_cortex_weights.pt"
@@ -32,7 +34,7 @@ def get_default_cache_dir() -> Path:
     return cache_dir
 
 
-def get_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
+def get_weights_path(custom_path: str | None = None) -> str | None:
     """Finds the path to pre-trained AVCS weights.
 
     Search priority:
@@ -73,11 +75,20 @@ def get_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
 
 
 def download_weights(
-    dest_path: Optional[str] = None,
-    url: str = DEFAULT_WEIGHTS_URL,
+    dest_path: str | None = None,
+    url: str | None = DEFAULT_WEIGHTS_URL,
     verbose: bool = True,
 ) -> str:
-    """Downloads pre-trained AVCS weights from the official release repository."""
+    """Download pre-trained AVCS weights from a release URL.
+
+    There is currently no published release, so the default URL is unset and
+    this raises rather than pretending to fetch weights that do not exist.
+    """
+    if not url:
+        raise RuntimeError(
+            "No AVCS weights release URL is configured; train a checkpoint "
+            "(forge.vision.cortex.training.trainer) or pass an explicit url."
+        )
     target = Path(dest_path) if dest_path else get_default_cache_dir() / WEIGHTS_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -94,7 +105,7 @@ def download_weights(
 
 def load_avcs_weights(
     cortex: torch.nn.Module,
-    path: Optional[str] = None,
+    path: str | None = None,
     device: str = "cpu",
     strict: bool = False,
     auto_download: bool = False,

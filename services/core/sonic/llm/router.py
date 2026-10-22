@@ -253,13 +253,30 @@ class ModelRouter:
             # Remaining models serve as model-level fallback (EOL/not-found recovery)
             fallback_model_ids = [m["id"] for m in models[1:]]
             speed_map = {"fast": SpeedTier.FAST, "medium": SpeedTier.MEDIUM, "slow": SpeedTier.SLOW}
+            provider_model_ids = {str(m["id"]) for m in models}
 
-            # Check if default model for this provider is overridden in env or config
+            # Check if default model for this provider is overridden in env or config.
+            # A global default model only applies when this provider actually
+            # declares that model id. Applying a model id from a different
+            # provider (e.g. the Groq `qwen/qwen3.8-27b` name on NVIDIA) sends
+            # every request to a non-existent endpoint, which then 404s before
+            # the model-level fallback chain recovers. Prefer the provider's own
+            # declared default in that case.
             env_override_model = (
                 env.get(f"{provider_name.upper()}_MODEL")
                 or (env.get("DEFAULT_MODEL") or env.get("LLM_MODEL") if router.default_provider == provider_name else None)
             )
+            if env_override_model and str(env_override_model) not in provider_model_ids:
+                logger.warning(
+                    "provider_model_override_not_declared",
+                    provider=provider_name,
+                    requested_model=str(env_override_model),
+                    using_model=first_model["id"],
+                )
+                env_override_model = None
             config_default_for_provider = router.default_model if router.default_provider == provider_name and router.default_model else None
+            if config_default_for_provider and str(config_default_for_provider) not in provider_model_ids:
+                config_default_for_provider = None
             model_id = env_override_model or config_default_for_provider or first_model["id"]
 
             kwargs = {}

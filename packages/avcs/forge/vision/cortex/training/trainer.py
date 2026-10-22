@@ -4,14 +4,13 @@ from __future__ import annotations
 import argparse
 import os
 import time
-from typing import Optional
 
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from forge.vision.cortex.config import CortexConfig, TrainingConfig
-from forge.vision.cortex.data.dataset import ScreenDataset, create_dataloader
+from forge.vision.cortex.config import CortexConfig
+from forge.vision.cortex.data.dataset import create_dataloader
 from forge.vision.cortex.model import ArtificialVisualCortex
 from forge.vision.cortex.training.losses import AVCSMultiTaskLoss
 
@@ -21,9 +20,9 @@ class AVCSCloudTrainer:
 
     def __init__(
         self,
-        model: Optional[ArtificialVisualCortex] = None,
-        config: Optional[CortexConfig] = None,
-        dataloader: Optional[DataLoader] = None,
+        model: ArtificialVisualCortex | None = None,
+        config: CortexConfig | None = None,
+        dataloader: DataLoader | None = None,
     ) -> None:
         self.config = config or CortexConfig()
         self.train_cfg = self.config.training
@@ -129,7 +128,7 @@ class AVCSCloudTrainer:
         }
         return metrics
 
-    def train(self, epochs: Optional[int] = None, save_path: str = "runs/cortex_model.pt") -> None:
+    def train(self, epochs: int | None = None, save_path: str = "runs/cortex_model.pt") -> None:
         num_epochs = epochs or self.train_cfg.epochs
         print(f"Starting AVCS Training on {self.device} for {num_epochs} epochs...")
 
@@ -156,13 +155,37 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--samples", type=int, default=40)
+    parser.add_argument(
+        "--video-manifest",
+        default="",
+        help=(
+            "Path to a video_ingest.json produced by video_apprenticeship. "
+            "When set, trains the self-supervised trunk on watched-video frames "
+            "instead of synthetic screens."
+        ),
+    )
+    parser.add_argument("--save-path", default="runs/cortex_model.pt")
     args = parser.parse_args()
 
     cfg = CortexConfig()
     cfg.training.batch_size = args.batch_size
     cfg.training.epochs = args.epochs
 
-    dl = create_dataloader(num_samples=args.samples, batch_size=args.batch_size)
+    if args.video_manifest:
+        from forge.vision.cortex.data.video_dataset import VideoFrameDataset
+
+        dataset = VideoFrameDataset(args.video_manifest)
+        print(
+            f"Watched-video pretraining: {len(dataset)} frame pairs, "
+            f"labeled_ratio={dataset.labeled_ratio:.2f} "
+            "(category/affordance labels are absent and ignored, not invented)."
+        )
+        dl = DataLoader(
+            dataset, batch_size=args.batch_size, shuffle=True, num_workers=0
+        )
+    else:
+        dl = create_dataloader(num_samples=args.samples, batch_size=args.batch_size)
+
     trainer = AVCSCloudTrainer(config=cfg, dataloader=dl)
-    trainer.train(epochs=args.epochs)
+    trainer.train(epochs=args.epochs, save_path=args.save_path)
 

@@ -57,6 +57,45 @@ class AVCSPerception:
         self._grounding_checkpoint = os.environ.get("SONIC_AVCS_GROUNDING_CHECKPOINT", "").strip()
         self._focus_verifier = None
         self._focus_checkpoint = os.environ.get("SONIC_AVCS_FOCUS_CHECKPOINT", "").strip()
+        # Semantic cortex head (trained UI-category + affordance model). Unlike
+        # the reflex path this is a learned network, so it is only used when a
+        # real trained checkpoint is configured and loads. Otherwise the agent
+        # keeps the numpy reflex semantics and does not pretend to have them.
+        self._cortex = None
+        self._cortex_failed = False
+        self._cortex_checkpoint = os.environ.get("SONIC_AVCS_CORTEX_CHECKPOINT", "").strip()
+        self._cortex_device = os.environ.get("SONIC_AVCS_CORTEX_DEVICE", "cpu").strip() or "cpu"
+
+    @property
+    def cortex_configured(self) -> bool:
+        return bool(self._cortex_checkpoint)
+
+    @property
+    def cortex_ready(self) -> bool:
+        """True only when a trained cortex checkpoint actually loaded."""
+        return self._cortex is not None
+
+    def ensure_cortex_ready(self) -> bool:
+        """Load the semantic cortex once, fail-closed on any error.
+
+        A configured path is NOT readiness: a missing file, a shape mismatch or
+        an unevaluated checkpoint leaves the cortex unloaded so callers cannot
+        report learned semantics they do not have.
+        """
+        if self._cortex is not None:
+            return True
+        if self._cortex_failed or not self.cortex_configured:
+            return False
+        try:
+            from forge.vision.cortex.training.evaluate import load_cortex_checkpoint
+
+            self._cortex = load_cortex_checkpoint(
+                self._cortex_checkpoint, device=self._cortex_device
+            )
+            return True
+        except Exception:
+            self._cortex_failed = True
+            return False
 
     @property
     def goal_grounder_configured(self) -> bool:
@@ -607,6 +646,34 @@ class AVCSPerception:
             ],
             "latency_ms": round(state.latency_ms, 3),
         }
+
+    def perceive_semantics_rgb(self, frame: np.ndarray) -> dict[str, Any]:
+        """Learned UI semantics for one frame, or an honest empty result.
+
+        Returns ``{}`` when no trained cortex checkpoint is loaded. The caller
+        must treat an empty mapping as "semantics unavailable", never as a
+        neutral/negative classification.
+        """
+        if not self.ensure_cortex_ready():
+            return {}
+        try:
+            assert self._cortex is not None
+            state = self._cortex.perceive(frame)
+            return {
+                "primary_category": state.primary_category,
+                "category_confidence": float(state.category_confidence),
+                "text_density": float(state.text_density),
+                "stability_state": state.stability_state,
+                "surprise_score": float(state.surprise_score),
+                "action_hotspots": [
+                    {"x": float(x), "y": float(y), "action": action, "confidence": float(conf)}
+                    for x, y, action, conf in (state.action_hotspots or [])
+                ],
+                "latent_dim": int(getattr(state.visual_latent, "shape", (0,))[0]),
+            }
+        except Exception:
+            self._cortex_failed = True
+            return {}
 
     def perceive_rgb_bytes(
         self,

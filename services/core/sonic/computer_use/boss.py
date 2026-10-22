@@ -40,6 +40,10 @@ from sonic.agents.task_graph import (
     TaskPriority,
     TaskStatus,
 )
+from sonic.computer_use.dispatch_policy import (
+    decide_dispatch,
+    workstreams_from_sub_missions,
+)
 from sonic.computer_use.models_boss import (
     BossReport,
     BossThinking,
@@ -187,6 +191,7 @@ class BossAgent:
         # Explicit concurrency budget: the Boss may never create more live
         # workers than this configured bound in a dependency wave.
         self.max_parallel_workers = max(1, int(max_parallel_workers))
+        self.last_dispatch_decision: Any = None
         # A single workstation is a shared mutable state machine. Parallel GUI
         # workers would race over focus, windows, screenshots, and typed input.
         self._shared_desktop = (
@@ -510,6 +515,33 @@ class BossAgent:
                 "content": current_phase.thinking,
             })
 
+            # Decide explicitly whether this phase should fan out or run as a
+            # single adaptive worker, and tell the operator why. This is the
+            # "kab sub-agents launch karna chahiye" decision made visible and
+            # structural instead of implicit.
+            dispatch = decide_dispatch(
+                workstreams_from_sub_missions(current_phase.sub_missions),
+                max_parallel=self.max_parallel_workers,
+                shared_desktop=bool(self._shared_desktop),
+            )
+            self.last_dispatch_decision = dispatch
+            logger.info(
+                "boss_dispatch_decision",
+                phase=current_phase.phase_number,
+                mode=dispatch.mode,
+                max_concurrent=dispatch.max_concurrent,
+                serialized=dispatch.serialized,
+                reason=dispatch.reason,
+            )
+            await self._emit(phase_callback, "dispatch_decision", {
+                "phase": current_phase.phase_number,
+                **dispatch.to_dict(),
+            })
+            # The decision bounds how many workers this phase may run at once.
+            # A single-worker verdict means one worker at a time; the work still
+            # runs (sequentially), it is never silently dropped.
+            phase_concurrency = max(1, dispatch.max_concurrent)
+
             # Dispatch only tasks the dependency graph currently marks READY.
             pending_subs = sorted(current_phase.sub_missions, key=lambda s: -s.priority)
 
@@ -555,7 +587,7 @@ class BossAgent:
                 locked_paths: set[str] = set()
                 gui_worker_count = 0
                 for cand in unblocked_ready:
-                    if len(wave_batch) >= self.max_parallel_workers:
+                    if len(wave_batch) >= phase_concurrency:
                         break
                     is_gui = str(cand.plane).lower() != "headless"
                     if self._shared_desktop and is_gui and gui_worker_count >= 1:
@@ -2252,6 +2284,11 @@ If the objective is complete or no more work is needed, return:
                 and replay_metrics.safety_blocks == 0
                 and replay_metrics.evidence_completeness >= 0.5
                 and replay_metrics.verification_rate > 0.0
+            ),
+            dispatch_decision=(
+                self.last_dispatch_decision.to_dict()
+                if self.last_dispatch_decision is not None
+                else {}
             ),
             waiting_for_human=any_waiting_for_human,
             waiting_for_human_reason=waiting_reason_str,

@@ -334,8 +334,8 @@ def test_workstation_desktop_api_endpoints(client, auth_headers):
     assert res_status.status_code == 200
     data = res_status.json()
     assert ":99" in data["display"]
-    assert data["resolution"]["width"] == 1280
-    assert data["resolution"]["height"] == 800
+    assert data["resolution"]["width"] == 1920
+    assert data["resolution"]["height"] == 1080
 
     # 2. Screenshot
     res_screen = client.get("/workstation/desktop/screenshot", headers=auth_headers)

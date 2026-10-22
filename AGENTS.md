@@ -2799,3 +2799,432 @@ task was demonstrated, and no live focus checkpoint exists in-repo; without one,
 text entry correctly stays blocked. Train a checkpoint from real recorded
 demonstrations (packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md) before
 claiming focus verification works on real controls.
+
+## Live-capability diagnostic pass: "AVCS/Boss not working" root cause (2026-10-21)
+
+Operator reported the being "cannot do any work on the computer": AVCS not
+functioning, Boss launching subagents that "can't do anything", VNC bugs. This
+pass separates what is genuinely broken from what is fail-closed-by-design, and
+fixes the real reporting bugs. No capability is claimed without evidence.
+
+### Ground truth (verified, not asserted)
+- AVCS reflex perception WORKS on real numpy frames: a large change sets
+  `scene_changed=True` (change_fraction ~0.40), a 1-pixel change does not.
+  The "eyes" algorithm is not the breakage.
+- Full suite: 2105 passed, 40 skipped, 0 failures. The problem is not failing
+  tests; tests validate mocked contracts while live capability is gated.
+- Boss architecture is intact: `_strategic_decomposition` → real subagent
+  `ComputerUseAgent`s → independent `JudgeAgent`. Dispatch kwargs match the
+  agent constructor. So "subagents can't work" is a capability GATE.
+
+### The real reason a GUI worker "cannot do anything" (fail-closed, correct)
+Semantic GUI targeting and text entry require evaluated LOCAL AVCS heads:
+- `SONIC_AVCS_GROUNDING_CHECKPOINT` (goal grounder) — **no checkpoint exists
+  anywhere in the repo**, so a semantic GUI target (click a *described* control)
+  is BLOCKED with "SONIC_AVCS_GROUNDING_CHECKPOINT is not configured".
+- `SONIC_AVCS_FOCUS_CHECKPOINT` (focus head) — required before GUI_TYPE.
+Verified end-to-end with a scripted router + stub provider: an explicit
+pixel-coordinate `GUI_CLICK` dispatches and reports `VERIFIED` via a real AVCS
+scene change; a semantic target is BLOCKED. The model is also never given
+screenshot pixels (`image_attached=False`), so it cannot invent coordinates.
+Net: the desktop is "eyes only" until the operator trains and configures
+evaluated AVCS heads (packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md).
+
+### Real bugs fixed this pass
+1. **VNC URL unreachable from a remote browser** — `get_vnc_url()` and the
+   default session `novnc_url` were hardcoded to `127.0.0.1`/`localhost`. A
+   dashboard on any other machine cannot reach that. Added
+   `_novnc_public_host()` (env `SONIC_NOVNC_PUBLIC_HOST` →
+   `SONIC_WORKSTATION_PUBLIC_HOST` → `SONIC_PUBLIC_HOST` → `localhost`) and
+   routed both call sites through it. Fail-closed reachability checks unchanged.
+2. **Misleading desktop resolution** — reported `1280x800` while the Xvfb
+   workstation runs `1920x1080`. Defaults corrected to `1920x1080`; the
+   `test_phase21` assertion updated to match. (Live `status()` still overrides
+   with the real frame dimensions.)
+3. **Misleading perception log** — `screenshot_pixels_available` checked only
+   `screenshot_base64`, ignoring the actual AVCS payload (`raw_rgb`), so it
+   logged `False` while pixels were present. Now uses `_screen_has_pixel_data`.
+4. **No capability surface** — added `avcs_capability_state()` and exposed it as
+   `desktop["avcs_capability"]` on `/workstation/desktop/status`, plus an
+   "EYES ONLY · ACTIONS BLOCKED" chip on the dashboard. A green "LIVE" desktop
+   no longer implies "ready to work".
+
+### Honesty
+- Tests: 2105 passed / 40 skipped / 0 failed; dashboard `next build` clean.
+- No live GUI task was run (no LLM/vision credentials, no Docker here). The
+  blocking gate is verified by code inspection + a stub-provider E2E harness;
+  no real arbitrary-GUI acceptance is claimed.
+- To make the being actually operate the GUI: supply model credentials AND
+  train+configure the AVCS grounding (and focus) heads. Until then, only
+  explicit-coordinate pointer actions can dispatch, and text entry stays blocked
+  by design.
+
+## Slowness regression: runaway AVCS frame stream + cache TTL collision (2026-10-21)
+
+Investigated the report "SONIC bahot slow ho gaya hai" and found two real,
+measurable causes (not perception quality, not the Boss architecture).
+
+### Root cause 1 — the continuous AVCS frame stream never stopped (dominant)
+`DockerComputerProvider.screenshot()` starts a persistent in-container raw-frame
+stream (`docker/avcs_frame_stream.py`, `mss` at 1920x1080) on first use and
+reuses it for later observations. Nothing ever stopped it: no idle timer, and
+no caller invokes `provider.close()` on a live server (the only `close()` calls
+are inside the provider itself, e.g. `destroy()` when the last workspace goes
+away). So a single dashboard visit left the backend running a 30 FPS capture
+loop *forever*.
+
+Measured at 1920x1080 (this environment):
+- AVCS `perceive_rgb_bytes`: ~20-30 ms per frame
+- 30 FPS => **~61% of one CPU core, continuously**
+- pipe volume: 1920*1080*3 = 6.2 MB/frame => **~187 MB/s** through the
+  `docker exec` pipe, plus per-frame `np.frombuffer`/reshape in the processor task
+
+The workstation container itself was also grabbing a full 1080p frame 30x/s,
+competing with the desktop/agent for CPU inside the same container.
+
+Fix (`services/core/sonic/computer/docker_computer.py`):
+- Idle watchdog `_stop_idle_stream()`: closes the stream once no observation has
+  been requested for `SONIC_AVCS_STREAM_IDLE_SECONDS` (default 30 s). The next
+  observation transparently restarts it, so the fast path (a burst of
+  observations reuses one stream) is preserved. `close()` cancels the watchdog
+  and is safe when called *from* the watchdog.
+- `_captures_in_flight` counter: the watchdog never releases the stream while an
+  observation is in flight, so frames cannot be pulled out from under a capture.
+- Default capture FPS lowered from 30 to 10 (`SONIC_AVCS_CAPTURE_FPS` still
+  overrides, 1-60). No consumer needs 30 FPS: the being life loop ticks at 60 s
+  and the agent observes once per reasoning step. 10 FPS cuts idle CPU burn by
+  ~3x and the pipe volume to ~62 MB/s while keeping observation latency low.
+- `_last_stream_use` is refreshed both when a capture starts and when a fresh
+  observation is returned.
+
+### Root cause 2 — telemetry cache TTL exactly equalled the poll interval
+`GET /workstation/state` caches sandbox telemetry for `telemetry_cache_ttl = 5.0`
+seconds, and the dashboard polls it every `5000` ms. The cache therefore expired
+at essentially the same moment the next poll arrived, giving a ~0% hit rate: every
+poll paid the full `status()` + `get_vnc_url()` + `screenshot()` cost. Fixed to a
+configurable 8 s (`SONIC_WORKSTATION_TELEMETRY_CACHE_SECONDS`), which sits above
+the 5 s poll so the second request is served from cache.
+
+### Also fixed while profiling
+- The capability probe added in the previous pass constructed a fresh
+  `AVCSPerception()` per call; once a focus checkpoint is configured that would
+  reload the checkpoint on every status poll. Now a process-wide shared probe
+  (`workstation_perception._shared_capability_probe`).
+- Stale `1280x800` default remained at one restore path in `workstation.py`; the
+  real Xvfb display is 1920x1080. Corrected for consistency with the other sites.
+
+### Evidence
+- Full `services/core/tests`: **2109 passed, 40 skipped, 0 failures**.
+- New regression tests (`test_docker_computer_provider.py`): idle watchdog closes
+  the stream when unconsumed; keeps it while consumed; `close()` cancels the
+  watchdog without deadlocking; conservative default FPS/idle constants.
+- Live check with a real subprocess: the stream is SIGTERM'd after the idle
+  period and `avcs_frame_stream_idle_stopped` is logged.
+- Ruff clean on all changed files.
+
+Honesty: these are measured latency/CPU fixes on the Docker provider hot path.
+No live end-to-end GUI task was run (no Docker daemon or model credentials in
+this environment); the idle-stop behaviour was verified with a real subprocess
+plus unit tests, not a full workstation session.
+
+## AVCS learned cortex + continuous awareness (2026-10-21)
+
+Closed the "AVCS kaam nahi karta" gap: AVCS reflex was pure numpy heuristics
+with NO learned weights, the neural cortex had ZERO trained checkpoints (random
+outputs), the advertised weights URL was fabricated (HTTP 404), and nothing
+consumed perception events — the EYES never reached the BRAIN.
+
+### 1. Real trained cortex (measured, not decreed)
+- `packages/avcs/forge/vision/cortex/training/evaluate.py` (NEW) — held-out
+  evaluator over seeds disjoint from training (`TRAIN_SEED_BASE` vs
+  `EVAL_SEED_BASE`). Writes an `.eval.json` sidecar that requires a
+  `dataset_provenance` string, so a metric cannot be recorded without naming
+  the data it was measured on.
+- Trained `ArtificialVisualCortex` (1.14M params, real PyTorch CNN) for 14
+  epochs on synthetic procedural screens: loss 3.28 -> 0.95.
+- **Held-out results** (`runs/cortex_model.pt`, 64 samples): category_accuracy
+  **0.7031** (8-way chance = 0.125), affordance_pixel_accuracy **0.9875**,
+  affordance_mIoU **0.7976**, CPU inference **18.62 ms/frame**.
+- HONESTY: this is synthetic procedural-screen accuracy. It is not real desktop
+  footage and does not by itself prove real-world scene understanding.
+- `packages/avcs/avcs/weights.py`: removed the fabricated download URL
+  (`DEFAULT_WEIGHTS_URL = None`); `download_weights()` now raises instead of
+  pretending to fetch pretrained weights that were never published.
+
+### 2. Cortex wired into the SONIC runtime
+- `sonic/computer_use/avcs_perception.py`: `perceive_semantics_rgb(frame)` plus a
+  cortex readiness gate (`cortex_configured` / `ensure_cortex_ready` /
+  `cortex_ready`). Honest empty result when no checkpoint is configured.
+- `sonic/computer_use/agent.py`: learned semantics ride into `avcs_state` and
+  the AVCS reflex summary line handed to the reasoning model.
+- Verified live: with `SONIC_AVCS_CORTEX_CHECKPOINT` set, the runtime loads the
+  trained checkpoint and emits real semantics (`primary_category`,
+  `category_confidence`, `action_hotspots`) — not random output.
+
+### 3. Continuous awareness — the EYES -> BRAIN link
+- `sonic/computer_use/awareness.py` (NEW): `AwarenessMonitor` samples the real
+  desktop continuously (no operator prompt), derives scene/change state through
+  AVCS, and publishes `perception.frame` / `perception.change` on the shared
+  cognition bus. It never dispatches a GUI action (observation only) and a
+  transient capture failure never kills the loop. FPS is capped to protect the
+  host; one monitor per workspace.
+- Wired into `api/main.py` lifespan behind `SONIC_ENABLE_VISUAL_AWARENESS=1`
+  (default off — a normal boot must not pay continuous capture cost); a no-op
+  without a provider/home.
+- `sonic/being/life_loop.py`: the being now SUBSCRIBES to `perception.change` /
+  `perception.frame`, buffers recent changes, and feeds them into its next idle
+  tick via `perception_context()` — publishing `being.perception_awareness`.
+  This is the actual consumer; before this the change events had no listener.
+- `get_life_bus()` gives producers and consumers one process-wide bus.
+
+### 4. Honest capability surface
+- `workstation_perception.avcs_capability_state()` now reports
+  `learned_cortex_configured`, `learned_cortex_ready`, `continuous_awareness`
+  and `awareness_stats` alongside the existing grounding/focus flags, so an
+  operator can see exactly which AVCS layer is actually ready.
+
+### Tests
+- `services/core/tests/test_continuous_avcs_awareness.py` (14): continuous
+  sampling without a prompt; real change -> change event; static screen -> no
+  false change; never dispatches GUI actions; transient error survived;
+  one monitor per workspace; FPS cap; invalid FPS rejected; cortex fails closed
+  without/missing checkpoint; a real checkpoint loads and emits semantics;
+  awareness stats; capability surface honesty; the life loop consumes
+  perception changes.
+- `packages/avcs/tests/test_cortex_training_and_evaluation.py` (10): real
+  network head shapes; train/held-out seed disjointness; deterministic real
+  metrics; training reduces loss + checkpoint round-trips; missing/shape-bad
+  checkpoint fails closed; sidecar records provenance; no fabricated weights
+  URL; weights path honest; `load_avcs_weights` returns False without a file.
+- Regression: 193 passed across the awareness/GUI/being/security suites; ruff
+  clean on all changed files.
+
+## Boss dispatch policy + AVCS video apprenticeship (2026-10-21)
+
+Two capabilities the product goal needs were made real and honest: the Boss now
+decides *whether* to fan out (instead of always delegating), and AVCS can learn
+from watched video (apprenticeship) instead of only synthetic frames.
+
+### 1. Boss dispatch policy — WHEN to launch sub-agents (`computer_use/dispatch_policy.py`)
+- Before this the Boss always split an objective into sub-missions and ran
+  dependency waves, but *whether* fan-out was appropriate was implicit. It could
+  launch a swarm for a one-worker task, and an operator could not see why.
+- New pure-function policy decides per phase: ``direct`` (no work), ``single``
+  (one adaptive worker), or ``parallel`` (N genuinely independent workstreams).
+  "Independent" is **structural**, never keyword-based: two workstreams may run
+  together only when (a) neither depends on the other, (b) their owned paths do
+  not overlap, and (c) they are not two GUI-capable workers racing one shared
+  physical desktop.
+- Wired into ``BossAgent.run()``: the decision is logged, streamed to the UI as a
+  ``dispatch_decision`` event, stored on ``BossAgent.last_dispatch_decision``,
+  and included in the final ``BossReport.dispatch_decision``. It bounds
+  ``phase_concurrency`` for the wave loop, so a "single" verdict serializes the
+  phase instead of racing — but the work is never silently dropped.
+- Honest constraint recorded, not hidden: one workstation parallelizes headless
+  work freely but MUST serialize GUI work (focus/windows/cursor are shared
+  mutable state). ``shared_desktop`` comes from the provider having
+  ``screenshot``/``gui_action``.
+- Tests: ``services/core/tests/test_boss_dispatch_policy.py`` (14) — policy unit
+  cases plus **real ``boss.run()`` integration**: headless fans out, two GUI
+  workers on a shared desktop serialize (still executed), one workstream stays
+  single, and the decision is durable on the report.
+
+### 2. AVCS video apprenticeship (`avcs/training/video_apprenticeship.py`)
+- Lets AVCS learn from a screen recording (a YouTube download, OBS capture, VNC
+  recording) with no hand-labelling. Uses ``imageio-ffmpeg`` (bundled ffmpeg) so
+  no system ffmpeg is required.
+- What is honestly derivable from raw video is extracted: **frames** (feed the
+  cortex's self-supervised temporal-predictive objective) and **cursor
+  trajectory** (a compact high-contrast blob; its pauses become *candidate*
+  click events). The cursor detector uses a local box-mean residual centroid —
+  an earlier window-max score was biased toward the window edge, offsetting the
+  point by ~half a window; a flat frame correctly returns ``None``.
+- What is NOT derivable is never invented: UI category, affordance masks, and
+  semantic click labels stay absent. The manifest is tagged
+  ``provenance: watched_video_unlabeled_pixels`` and click events carry
+  ``confirmed: False``.
+- ``forge/vision/cortex/data/video_dataset.py``: ``VideoFrameDataset`` feeds the
+  cortex trainer from a manifest. Category targets are ``-1`` (unlabeled) and
+  the loss ignores them; the category term is honestly 0 for unlabeled batches.
+- **Real bug found + fixed:** when a batch is entirely unlabeled,
+  ``CrossEntropyLoss(ignore_index=-1)`` returns ``nan``, which poisoned the
+  total loss and would have saved a ``nan`` checkpoint. The loss now substitutes
+  a real zero in that case. Verified: the trunk genuinely learns from watched
+  video (predictive loss 0.55 -> 0.18 over 4 epochs) with the category term
+  honestly 0.
+- CLI: ``avcs-ingest-video --video <path> --output-dir <dir> [--fps] [--max-frames]
+  [--scale] [--no-cursor]``; trainer mode
+  ``python -m forge.vision.cortex.training.trainer --video-manifest <manifest>``.
+- Tests: ``packages/avcs/tests/test_video_apprenticeship.py`` (12) — probe,
+  bounded frame extraction, real cursor + click-candidate detection, JSON-safe
+  manifest with no fabricated labels, flat-frame rejection, honest missing-ffmpeg
+  error. Existing cortex/grounder suites unchanged.
+
+### Verified state (honest)
+- New tests: 14 (dispatch) + 12 (video) all pass; combined focused run 82 passed.
+- Full ``packages/avcs/tests`` (minus the pre-existing tkinter + soak-load
+  environmental failures): **575 passed, 13 skipped**.
+- Focused ``services/core`` computer_use/safety subset: **364 passed, 8 skipped**.
+- Ruff clean on every new/changed file (one pre-existing ``N812`` in
+  ``cortex/training/losses.py`` is unchanged from HEAD).
+- **What is still NOT proven:** no real arbitrary-GUI task was run, because this
+  environment has **no LLM provider credentials** (``check_llm`` ->
+  "No configured vision provider credentials are available for GUI reasoning").
+  Workers fail closed without a router; that is the reason live sub-agents do no
+  work here, not a code defect. No real YouTube video was downloaded or trained
+  on (network fetch is the operator's call); the pipeline was validated on real
+  ffmpeg-encoded test videos. Do not claim GUI capability or trained-model
+  quality beyond these measurements.
+
+## Live arbitrary-GUI acceptance run + two real bug fixes (2026-10-22)
+
+A real end-to-end GUI task was finally run against the live Docker workstation
+with real LLM credentials, which surfaced two genuine defects that unit tests
+could not see.
+
+### Live environment used
+- `docker compose -f docker-compose.yml up -d workstation` started
+  `sonic-desktop-workstation` (Xvfb `:99`, **1920x1080x24**, x11vnc, noVNC on
+  `127.0.0.1:6080`).
+- NVIDIA key present; router loaded `[openrouter, deepseek, groq, nvidia,
+  claude, openai, grok, local]`. Vision route model
+  `meta/llama-3.2-11b-vision-instruct` is available on this account;
+  `nvidia/nemotron-3-ultra-550b-a55b` is the working text model
+  (`nemotron-3-super-120b-a12b` is catalogued but 404s for this account tier —
+  the model-level fallback chain recovers, which is correct behaviour).
+
+### REAL BUG 1 — AVCS learned-cortex perception failed on every frame (`np` NameError)
+- `sonic/computer_use/agent.py` used `np.frombuffer(...)` in the AVCS cortex
+  perception path but **never imported numpy**. The `NameError` was swallowed by
+  a broad `except`, so every frame logged
+  `avcs_cortex_perception_failed error="name 'np' is not defined"` and semantics
+  silently stayed empty. This is a real "AVCS kaam nahi karta" symptom.
+- Fix: added `import numpy as np`. Verified live: the error is gone and
+  `perceive_semantics_rgb` now runs (returns `{}` honestly — no trained cortex
+  checkpoint is configured, which is correct, not a failure).
+
+### REAL BUG 2 — global default model leaked to the wrong provider
+- `sonic/llm/router.py` applied the global `default_model` from
+  `configs/models.yaml` (`qwen/qwen3.8-27b`, a **Groq** model id) to whichever
+  provider was the global default provider. With `DEFAULT_LLM_PROVIDER=nvidia`
+  (from `configs.py` `default_llm_provider = "nvidia"`), NVIDIA was handed a
+  model id that does not exist on its endpoint: every reasoning request logged
+  `model_not_found_trying_fallbacks ... 404 ... original_model=qwen/qwen3.8-27b`
+  and paid a wasted round-trip before the model-level fallback recovered.
+- Fix: a global/env default model is now applied **only when that provider
+  actually declares the model id**; otherwise the provider's own first declared
+  model is used (with a `provider_model_override_not_declared` warning).
+  Verified live: `nvidia: default_model=nvidia/nemotron-3-super-120b-a12b`
+  (previously `qwen/qwen3.8-27b`), `groq: qwen/qwen3.8-27b` unchanged.
+
+### Live evidence that the three parts DO work
+- **Living eyes (AVCS)**: real frame stream against the container
+  (`avcs_raw_frame_processed`, `capture_fps≈10`, `latency_ms≈18`, 1920x1080,
+  scene hash + change/motion/regions), plus a real `INTERACTIVE` screenshot.
+- **Brain (Boss/agent reasoning)**: the real `ComputerUseAgent.run_mission()`
+  reasoned from the AVCS text summary and chose actions. With a GUI goal the LLM
+  proposed `GUI_CLICK` on a semantic target.
+- **Hands (mouse/keyboard)**: the LLM-driven mission actually **opened Thunar**
+  on the real desktop — verified out-of-band with `wmctrl -l` →
+  `workspace - Thunar` and `pgrep thunar` → PID. A second deterministic run
+  proved the agent dispatches an explicit **pixel-coordinate** `GUI_CLICK`
+  end-to-end (status `UNVERIFIED`, honest: clicking empty desktop changes
+  nothing).
+
+### The honest blocker for *semantic* GUI clicks (fail-closed, by design)
+- `avcs_capability_state()` reports
+  `semantic_grounding=false, focus_verification=false, gui_actions_ready=false,
+  grounding_checkpoint_configured=false`.
+- A GUI-plane worker's semantic click is therefore blocked:
+  `avcs_target_grounding_failed_closed error='SONIC_AVCS_GROUNDING_CHECKPOINT is
+  not configured'` → `gui_mission_stopped_for_unavailable_avcs_capability`. This
+  is the documented fail-closed contract, **not** a code bug: no evaluated local
+  AVCS grounding checkpoint exists in the repo. Semantic clicks and text entry
+  stay blocked until one is trained from real recorded demonstrations
+  (`packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md`).
+- **What is proven:** pixel-coordinate GUI actions and application launching
+  work end-to-end on the live desktop. **What is NOT proven:** semantic
+  ("click the Save button") grounding and text entry, because the grounding and
+  focus-verification checkpoints do not exist yet. Do not claim either.
+
+### Tests
+- `services/core/tests/test_live_gui_regression_fixes.py` (6): numpy import
+  present + `np.` usage covered; global default model not leaked to a provider
+  that does not declare it; provider-declared default respected; provider env
+  override honoured when declared; undeclared provider env override falls back
+  to the declared model.
+- Focused regression: **419 passed, 2 skipped, 0 failures**; Ruff clean on all
+  changed files.
+
+## Boss live run on the real desktop — three more real bugs fixed (2026-10-22)
+
+Ran the real `BossAgent.run()` against the live `sonic-desktop-workstation` with
+a genuine objective ("open the terminal and report the working directory"). The
+mission ended `INCOMPLETE`, and tracing why exposed three genuine defects.
+
+### BUG 3 — workstation image shipped NO terminal emulator
+`docker/Dockerfile.workstation` installed the `xfce4` meta-package but never a
+terminal emulator (`xfce4-terminal` was absent; `xterm` absent too). A GUI task
+that needs a terminal therefore had nothing to launch. Fixed by adding
+`xfce4-terminal` to the image and rebuilding
+(`docker compose -f docker-compose.yml build workstation`). Verified:
+`command -v xfce4-terminal` -> `/usr/bin/xfce4-terminal` after recreate.
+
+### BUG 4 — silent application substitution (a real honesty bug)
+`DockerComputerProvider._resolve_app_binary` applied its generic POSIX-role
+fallback to ANY query merely *containing* a role word. So `gnome-terminal` (not
+installed) matched the "terminal" role and resolved to `x-terminal-emulator` /
+`exo-open`, and `launch_application` returned **True** while opening a different
+program. The agent then believed it had launched the requested application and
+looped on a name that could never be honoured. This is exactly the "fake
+success" class the project forbids.
+- Fixed: the role fallback now applies only when the query is genuinely generic
+  (every token is in `_GENERIC_ROLE_TOKENS`, e.g. "terminal", "web browser").
+  A specific product name that is not installed resolves to `""` and logs
+  `application_launch_not_installed`; `launch_application` returns `False`.
+- Verified live: `resolve('gnome-terminal') -> ''`, `resolve('konsole') -> ''`,
+  `resolve('terminal') -> '/usr/bin/exo-open'`, `resolve('xfce4-terminal') ->
+  '/usr/bin/xfce4-terminal'`, `launch('gnome-terminal') -> False`.
+
+### BUG 5 — GUI-only workers never saw the installed-application list
+`_build_reasoning_context` replaced the whole observation block for the GUI-only
+plane, and that replacement omitted `Available Installed Desktop Applications`.
+The model therefore had no way to know which binaries exist and invented names
+(`gnome-terminal`, `xterm`) even though `xfce4-terminal` was present at index 0
+of the provider's list. Fixed by including the installed-application inventory
+in the GUI-only observation block. Verified live: after the fix the model chose
+the real `xfce4-terminal`, and a clean launch completed as `COMPLETED`
+("Launched and focused xfce4-terminal", real window + PID).
+
+### Capability-aware GUI prompt
+When no evaluated local AVCS grounder is configured, semantic `GUI_CLICK`
+targets fail closed. The GUI-only system prompt now detects this
+(`_avcs_grounder_ready()`) and instructs the model to avoid semantic clicks and
+use `APP_LAUNCH` (observed installed apps only) plus keyboard actions instead,
+so it does not burn the whole step budget on an unresolvable target.
+
+### Honest capability picture after this pass
+- **Works on the live desktop:** AVCS frame perception; LLM reasoning;
+  launching an installed GUI application; pixel-coordinate GUI actions.
+- **Fail-closed (blocked by design, capability genuinely absent):** semantic
+  GUI clicks ("click the Save button") — needs an evaluated AVCS grounding
+  checkpoint; text entry — needs an evaluated AVCS focus-verification head.
+  A Boss objective that requires clicking a described control or typing cannot
+  complete until those checkpoints are trained from real demonstrations.
+- Boss orchestration itself is wired and streams real events, but its
+  end-to-end success is bounded by those two missing AVCS heads.
+- One run also hit a transient 60 s LLM-request timeout (`computer_llm_action_failed`
+  with an empty error) on the large reasoning model — a latency issue, not an
+  action-logic defect.
+
+### Tests
+- `services/core/tests/test_app_launch_no_silent_substitution.py` (5): a specific
+  uninstalled app is not substituted; a generic role still resolves; an installed
+  specific app resolves directly; launching a missing app returns False; the
+  workstation image declares a terminal emulator.
+- `services/core/tests/test_gui_capability_aware_prompt.py` (6): prompt forbids
+  semantic clicks without a grounder, forbids inventing app names, allows
+  semantic targets when a grounder is ready, the real readiness probe fails
+  closed without a checkpoint, the GUI-only observation surfaces installed apps.
+- Focused regression: **237 passed, 2 skipped, 0 failures**; Ruff clean on every
+  changed file.

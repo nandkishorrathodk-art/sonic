@@ -27,6 +27,13 @@ interface ComputerSurfaceProps {
     resolution?: { width: number; height: number };
     active_services?: Array<{ name: string; status: string; port: number }>;
     vnc_url?: string;
+    avcs_capability?: {
+      reflex_perception?: boolean;
+      semantic_grounding?: boolean;
+      focus_verification?: boolean;
+      gui_actions_ready?: boolean;
+      reason?: string;
+    };
   };
   status?: string;
   waitingForHuman?: boolean;
@@ -272,6 +279,7 @@ export function ComputerSurface({
   const hasScreenshot = Boolean(screenshotBase64 && screenshotBase64.length > 100);
   const isDesktopOnline = ["LIVE", "RUNNING", "READY"].includes(desktopState?.status || "");
   const isStreamAvailable = Boolean(isDesktopOnline && streamUrl);
+  const avcsCapability = desktopState?.avcs_capability;
   const isHostAVCSDesktop = desktopState?.provider_type === "WindowsHostAVCSComputerProvider";
   const isSnapshotConnected = Boolean(isHostAVCSDesktop && isDesktopOnline);
   const isDesktopConnected = isStreamAvailable || isSnapshotConnected;
@@ -345,6 +353,14 @@ export function ComputerSurface({
               {perceptionFresh
                 ? `FRESH FRAME${frameAgeMs != null ? ` · ${Math.round(frameAgeMs)} ms` : ""}`
                 : "NO FRESH FRAME"}
+            </span>
+          )}
+          {isDesktopConnected && avcsCapability && !avcsCapability.gui_actions_ready && (
+            <span
+              className="chip border border-amber-500/40 bg-amber-500/10 text-amber-300"
+              title={avcsCapability.reason || "AVCS GUI capability is not ready"}
+            >
+              <span>EYES ONLY · ACTIONS BLOCKED</span>
             </span>
           )}
         </div>

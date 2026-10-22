@@ -10,6 +10,23 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+_capability_probe: Any = None
+
+
+def _shared_capability_probe() -> Any:
+    """One AVCSPerception for capability reporting.
+
+    Constructing a fresh instance per poll is wasteful once a focus checkpoint
+    is configured, because loading a checkpoint is expensive. The probe is
+    read-only capability reporting, so a process-wide instance is safe.
+    """
+    global _capability_probe
+    if _capability_probe is None:
+        from sonic.computer_use.avcs_perception import AVCSPerception
+
+        _capability_probe = AVCSPerception()
+    return _capability_probe
+
 
 def dashboard_screen_payload(screen: Any) -> dict[str, Any]:
     """Encode raw frames only for explicit dashboard snapshot responses."""
@@ -238,3 +255,78 @@ async def require_fresh_avcs_evidence(
             ),
         )
     return screen, evidence
+
+
+def _awareness_snapshot() -> dict[str, Any]:
+    """Report continuous-awareness state without starting or disturbing it."""
+    try:
+        from sonic.computer_use.awareness import awareness_stats
+
+        return awareness_stats()
+    except Exception:
+        return {"running": False}
+
+
+def avcs_capability_state() -> dict[str, Any]:
+    """Report the real AVCS capability readiness for GUI task execution.
+
+    This is an honesty surface, not a capability grant. Semantic GUI targeting
+    and text entry fail closed unless an evaluated local AVCS head is loaded.
+    Without a configured, evaluated grounding checkpoint the model cannot turn
+    a described control into screen pixels, and without an evaluated focus head
+    it cannot confirm text focus; both actions are blocked by design. Reporting
+    that state lets the operator see why a GUI worker cannot act instead of
+    reading a misleading "LIVE" desktop as "ready to work".
+    """
+    capability: dict[str, Any] = {
+        "reflex_perception": True,
+        "semantic_grounding": False,
+        "focus_verification": False,
+        "gui_actions_ready": False,
+        "grounding_checkpoint_configured": False,
+        "focus_checkpoint_configured": False,
+        "learned_cortex_configured": False,
+        "learned_cortex_ready": False,
+        "continuous_awareness": False,
+        "awareness_stats": {},
+        "reason": "",
+    }
+    try:
+        perception = _shared_capability_probe()
+        grounding_configured = bool(perception.goal_grounder_configured)
+        focus_configured = bool(perception.focus_verifier_configured)
+        capability["grounding_checkpoint_configured"] = grounding_configured
+        capability["focus_checkpoint_configured"] = focus_configured
+        capability["semantic_grounding"] = grounding_configured
+        capability["focus_verification"] = bool(perception.ensure_focus_verifier_ready())
+        capability["gui_actions_ready"] = bool(
+            capability["semantic_grounding"] and capability["focus_verification"]
+        )
+        capability["learned_cortex_configured"] = bool(
+            getattr(perception, "cortex_configured", False)
+        )
+        capability["learned_cortex_ready"] = bool(
+            getattr(perception, "ensure_cortex_ready", lambda: False)()
+        )
+        capability["continuous_awareness"] = bool(_awareness_snapshot().get("running"))
+        capability["awareness_stats"] = _awareness_snapshot()
+    except Exception as exc:  # pragma: no cover - defensive, stays fail-closed
+        capability["reason"] = f"AVCS capability probe failed: {exc}"
+        return capability
+
+    if not capability["grounding_checkpoint_configured"]:
+        capability["reason"] = (
+            "No evaluated AVCS grounding checkpoint is configured "
+            "(SONIC_AVCS_GROUNDING_CHECKPOINT). Semantic GUI targets "
+            "(clicks on described controls) are blocked; only explicit "
+            "pixel-coordinate actions can dispatch."
+        )
+    elif not capability["focus_verification"]:
+        capability["reason"] = (
+            "No evaluated AVCS focus-verification head is configured "
+            "(SONIC_AVCS_FOCUS_CHECKPOINT). Text entry is blocked."
+        )
+    else:
+        capability["reason"] = "AVCS semantic grounding and focus verification are ready."
+    return capability
+
