@@ -3518,3 +3518,88 @@ Verification: full `services/core/tests` **2214 passed, 40 skipped, 0 failures**
 Honest note on statuses: a worker's terminal status is passed through from the
 real `sub_report` (`SUCCESS`/`COMPLETED`/`FAILED`/...), not normalised to a
 single word — `SUCCESS` is a valid terminal status and is reported as-is.
+
+## Live narration + Boss worker-board seam verification (2026-10-23)
+
+Operator reports addressed: (a) Boss launches sub-agents but their id / live
+work is not visible when clicked, (b) "the eye does not speak to the brain",
+(c) overall completeness of the AGI / self-evolution / self-computer story.
+
+### 1. AVCS live narration — the eye now describes what it sees
+AVCS perceived pixels but emitted only numbers, so the reasoning model could
+not distinguish "a red dialog just popped up" from "nothing happened".
+
+- NEW `packages/avcs/forge/vision/narrator.py` — `LiveNarrator`,
+  `dominant_color_name()`, `rgb_tiles()`, `chromatic_change_mask()`. Speaks only
+  when something a human would notice changed; silence is the default.
+- NEW `services/core/sonic/computer_use/avcs_narrator.py` — `AVCSNarrator`,
+  SONIC's side: decodes the raw frame already on a `ScreenObservation` and
+  renders a bounded prompt block.
+- `avcs_perception.perceive_rgb()` now returns `rows`/`cols`/`changed_grid` so
+  the narrator can phrase *where* a change happened.
+- `agent.py`: `_narrate_screen()` injects narration into BOTH the GUI-only and
+  the general reasoning prompts (labelled advisory + text-blind);
+  `_narrate_action_result()` attaches the outcome to the action observation.
+  A new module constant `_GUI_ACTION_TYPES_FOR_NARRATION` scopes which actions
+  get an outcome line. Narration is optional: a missing package/frame yields `""`
+  and the agent keeps its previous behaviour.
+- `avcs_capability_state()` now reports `live_narration`.
+
+**Real gap closed:** the reflex diffs **luma**, so a saturated box whose
+luminance matches its background (a red `[200,40,40]` dialog on a grey desktop)
+was invisible. The narrator diffs RGB tiles too, so it is detected and named.
+
+Honest scope: no OCR, no semantic UI tree. Narration reports tone, structure,
+coarse position, colour and change — never what text says. Action feedback is
+fail-closed: VERIFIED → "the screen responded", UNVERIFIED → "no visible
+effect", anything else → "dispatched, effect not verified". An unverified action
+is never narrated as success.
+
+Tests: `services/core/tests/test_avcs_live_narration.py` (32).
+
+### 2. Boss -> worker-board seam — audited and locked
+The reported "sub-agents not visible" was **not** a code defect: audited the
+whole path and it is wired correctly.
+
+- `SubMission.id` is a real `sub-*` id; each worker also gets a run-unique
+  `agent_uid` (`worker-<n>-<hex>`) and a positional `agent_id` (`sub-agent-<n>`).
+- `boss._run_sub_worker` emits `sub_dispatch` / `sub_step` / `sub_report` with
+  both handles; the workstation route's event->worklog translation carries them
+  through; `collect_worker_activity()` keys per worker; `find_worker()` resolves
+  by uid; `WorklogFeed.tsx` renders one expandable card per worker showing goal,
+  latest thinking, recent steps, findings and the Judge verdict.
+- Verified with a **real** `BossAgent.run()` against a stub provider: 4 workers
+  (`worker-1-a07e9a` … `worker-4-28c82c`), each with its own goal, agent id, live
+  step, thought and findings, every one resolvable by uid.
+
+The gap was **test coverage of the seam**: `test_worker_activity_end_to_end.py`
+drives the route with a *faked* Boss event stream, so a producer/consumer field
+drift would pass there and still leave the board empty. NEW
+`services/core/tests/test_boss_worker_visibility.py` (6) runs the real
+`BossAgent.run()` loop (only model calls stubbed — offline, ~1 s) and asserts:
+unique non-colliding worker ids; one card per worker; click resolves the
+specific worker; the card shows real activity, not just a status; an unreported
+worker is `INTERRUPTED`, never a stale `RUNNING`.
+
+### 3. What is genuinely still missing (do not overclaim)
+- **Semantic GUI clicks and text entry remain blocked by design.** No evaluated
+  AVCS grounding checkpoint and no focus-verification checkpoint exist in the
+  repo, so `avcs_capability_state()` reports `semantic_grounding=false`,
+  `focus_verification=false`, `gui_actions_ready=false`. Only explicit
+  pixel-coordinate pointer actions can dispatch. Train the heads from real
+  recorded demonstrations (`packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md`)
+  before claiming "click the Save button" works.
+- **Learned cortex has no configured checkpoint** (`learned_cortex_ready=false`),
+  so learned semantics are honestly empty at runtime.
+- A live Boss run in this environment used a 550B model at ~20 s per call and
+  produced a **repeating clarification phase** (4 phases restating "obtain the
+  target from the user") instead of converging. That is a planning-quality /
+  objective-underspecification issue worth a separate look; it is not a
+  dispatch or visibility defect.
+- No live arbitrary-GUI end-to-end task was run this session (no Docker daemon
+  here). Do not claim GUI task capability from unit tests.
+
+### Test baseline after this pass
+- `services/core/tests`: **2253 passed, 40 skipped, 0 failures**.
+- Ruff clean on every changed/new file.
+- Pushed to `origin/main` (`edb5099`, `bc5e872`).
