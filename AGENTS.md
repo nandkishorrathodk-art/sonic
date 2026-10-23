@@ -3603,3 +3603,73 @@ worker is `INTERRUPTED`, never a stale `RUNNING`.
 - `services/core/tests`: **2253 passed, 40 skipped, 0 failures**.
 - Ruff clean on every changed/new file.
 - Pushed to `origin/main` (`edb5099`, `bc5e872`).
+
+## AVCS two-way loop: foveal focus + ambient commentary (2026-10-23)
+
+Turned AVCS from a sensor the agent *polls* into a colleague that *speaks*.
+Three additions, all verified against real frames (no mocks of narration logic).
+
+### 1. Foveal focus rectangle (`packages/avcs/forge/vision/narrator.py`)
+- `Narration.focus` now carries a real pixel rectangle `{"x","y","w","h"}` for
+  the region the line is about. `focus_rect_pixels()` converts the tile-space
+  block to pixels, grows it to `FOCUS_MIN_PIXELS` (48) so a one-tile change is
+  not a sliver, pads by `FOCUS_PAD_FRACTION` (0.30), and clamps into the frame
+  (an off-screen focus is a bug, never a guess). `crop_focus(frame, focus)`
+  returns the actual sub-frame.
+- This is the eye's **fovea**: a caller can hand a small crop to a vision model
+  instead of a whole screenshot. **No OCR** -- the pixel-only contract holds.
+- Focus is set for the chroma/overlay alert branches and for high motion
+  (centred on the motion centroid); a quiet "screen is still" line carries
+  `focus=None`.
+- Verified live: a 120x200 red dialog at y180-300,x220-420 produced
+  `focus={'x':150,'y':144,'w':339,'h':192}`; the crop contained the real red
+  pixels.
+
+### 2. Ambient commentary (`services/core/sonic/computer_use/awareness.py`)
+- `AwarenessMonitor` now narrates every sampled frame via a lazily-built
+  `AVCSNarrator`, stores the line on `AwarenessFrame.narration`, and publishes
+  a new `TOPIC_NARRATION` (`perception.narration`) **only when there is a
+  line** -- so a consumer can subscribe to commentary without every frame tick.
+- Still **observation-only**: it never dispatches an action. A missing narrator
+  or a decode failure degrades to no narration, never a broken loop.
+- `_decode_png_to_rgb()` handles the PNG branch (the raw-RGB branch already had
+  the numpy frame) so narration works on both capture paths.
+
+### 3. Ambient delivery channel (`avcs_narrator.py`, `agent.py`, `api/main.py`)
+- `record_ambient_narration()` / `drain_ambient_narration()` /
+  `peek_ambient_narration()`: a bounded (`_MAX_AMBIENT_LINES=8`), thread-safe,
+  **drain-once** channel for lines the eye spoke unprompted.
+- `ComputerUseAgent._ambient_narration_block()` drains it and injects an
+  "AVCS unsolicited observations since your last step" block into BOTH prompt
+  paths (the general reasoning context and the GUI-only context).
+- **Real bug found and fixed:** the awareness monitor keys on a workspace id
+  (`home-<tenant>` from `get_or_create_home`, or the container name from
+  `create`) while the agent keys on its own `_active_workspace_id`. The two
+  never matched, so the channel would have been **dead on arrival**. Both sides
+  now key on the **tenant id** -- a value each can derive -- via
+  `AwarenessMonitor(ambient_key=...)` set in `api/main.py`. Verified live: eye
+  writes under workspace `home-acme`, brain drains under tenant `acme`, and the
+  workspace-id key returns nothing.
+
+### Honesty
+- No OCR added; narration reports coarse structure, colour, motion, position and
+  never claims to read text (a test asserts no line contains "says"/"reads").
+- Narration is **advisory**, not proof of success, and is **advisory-inject**,
+  not a mission kill: it informs the next reasoning step rather than aborting
+  the worker.
+- `VisualRippleVerifier` (`packages/avcs/avcs/verifier.py`) still exists but is
+  NOT wired into SONIC; it is a heavy `HumanEye`+`OSCursorDriver` self-healing
+  executor and was deliberately left alone.
+- The user's earlier AVCS claims that remain false: `avcs/observation.py` does
+  not exist; there is no "131-word" vocabulary (VOCAB is 27 words); there is no
+  `ConvGRU` anywhere in the repo. Capture runs at 10 FPS, not 100.
+
+### Tests
+- `services/core/tests/test_avcs_foveal_and_ambient_loop.py` (19): focus rect
+  covers the described region, stays in-frame, is grown for tiny blocks; quiet
+  lines carry no focus; the eye narrates and publishes a narration topic; a
+  still screen does not repeat itself; the ambient channel is drain-once,
+  cross-identity, bounded, and never claims to read text; the monitor never
+  dispatches an action; the agent surfaces and drains the lines.
+- Full suite: **2272 passed, 40 skipped, 0 failures**. Ruff clean.
+- Pushed to `origin/main` (`9c512b9`).
