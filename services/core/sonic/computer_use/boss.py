@@ -607,13 +607,20 @@ class BossAgent:
                 for s in wave_batch:
                     pending_subs.remove(s)
 
-                # Atomically assign subagent numbers
+                # Atomically assign subagent numbers and a run-unique worker handle.
+                # The handle is minted here (not inside the worker) so the
+                # exception path below can still report the same identity.
                 batch_tasks = []
                 for s in wave_batch:
                     self._sub_agent_count += 1
-                    batch_tasks.append((s, self._sub_agent_count))
+                    agent_num = self._sub_agent_count
+                    batch_tasks.append((
+                        s,
+                        agent_num,
+                        f"worker-{agent_num}-{uuid.uuid4().hex[:6]}",
+                    ))
 
-                async def _run_sub_worker(sub_m: SubMission, agent_num: int):
+                async def _run_sub_worker(sub_m: SubMission, agent_num: int, agent_uid: str):
                     sub_m.status = "RUNNING"
                     tg_t = self.task_graph.get_task(sub_m.id)
                     if tg_t is None:
@@ -634,6 +641,7 @@ class BossAgent:
                     await self._emit(phase_callback, "sub_dispatch", {
                         "sub_mission_id": sub_m.id,
                         "agent_id": agent_id,
+                        "agent_uid": agent_uid,
                         "agent_name": _sub_mission_display_name(sub_m, agent_num),
                         "goal": sub_m.goal,
                         "role": sub_m.role,
@@ -650,6 +658,7 @@ class BossAgent:
                             phase_callback,
                             sub_agent_num=agent_num,
                             interrupt_check=worker_interrupt_check,
+                            agent_uid=agent_uid,
                         )
                     except Exception as e:
                         safe_err = str(e).encode("ascii", errors="replace").decode("ascii")
@@ -668,6 +677,7 @@ class BossAgent:
                         )
 
                     res.agent_id = agent_id
+                    res.agent_uid = agent_uid
                     res.agent_name = _sub_mission_display_name(sub_m, agent_num)
                     sub_m.status = "COMPLETED" if res.success else "FAILED"
                     try:
@@ -708,6 +718,7 @@ class BossAgent:
                     await self._emit(phase_callback, "sub_report", {
                         "sub_mission_id": sub_m.id,
                         "agent_id": res.agent_id,
+                        "agent_uid": res.agent_uid,
                         "agent_name": res.agent_name,
                         "sub_agent_number": agent_num,
                         "goal": sub_m.goal,
@@ -728,19 +739,19 @@ class BossAgent:
 
                 # Concurrently execute wave
                 if len(batch_tasks) == 1:
-                    sm, num = batch_tasks[0]
-                    res = await _run_sub_worker(sm, num)
+                    sm, num, uid = batch_tasks[0]
+                    res = await _run_sub_worker(sm, num, uid)
                     wave_results = [res]
                 else:
                     logger.info("boss_dispatching_concurrent_wave", wave_size=len(batch_tasks))
                     wave_results = await asyncio.gather(
-                        *(_run_sub_worker(sm, num) for sm, num in batch_tasks),
+                        *(_run_sub_worker(sm, num, uid) for sm, num, uid in batch_tasks),
                         return_exceptions=True,
                     )
 
                 for idx, res in enumerate(wave_results):
                     if isinstance(res, Exception):
-                        sm, num = batch_tasks[idx]
+                        sm, num, uid = batch_tasks[idx]
                         sm.status = "FAILED"
                         graph_task = self.task_graph.get_task(sm.id)
                         if graph_task and graph_task.status == TaskStatus.RUNNING:
@@ -767,7 +778,31 @@ class BossAgent:
                             actions_taken=0,
                             duration_seconds=0.0,
                             traces=[],
+                            agent_id=f"sub-agent-{num}",
+                            agent_uid=uid,
+                            agent_name=_sub_mission_display_name(sm, num),
                         )
+                        # Emit a terminal report for the crashed worker so the UI
+                        # never leaves it stuck on RUNNING.
+                        await self._emit(phase_callback, "sub_report", {
+                            "sub_mission_id": sm.id,
+                            "agent_id": res.agent_id,
+                            "agent_uid": res.agent_uid,
+                            "agent_name": res.agent_name,
+                            "sub_agent_number": num,
+                            "goal": sm.goal,
+                            "role": res.role,
+                            "plane": sm.plane,
+                            "success": False,
+                            "status": res.status,
+                            "findings_summary": res.findings_summary,
+                            "judge_verdict": res.judge_verdict,
+                            "judge_notes": res.judge_notes,
+                            "evidence_verified": res.evidence_verified,
+                            "key_discoveries": res.key_discoveries,
+                            "actions_taken": res.actions_taken,
+                            "duration_seconds": res.duration_seconds,
+                        })
                     current_phase.results.append(res)
                     self.all_traces.extend(res.traces)
 
@@ -1191,13 +1226,18 @@ Rules:
         phase_callback: Callable | None = None,
         sub_agent_num: int = 0,
         interrupt_check: Callable | None = None,
+        agent_uid: str = "",
     ) -> SubMissionResult:
         """Create a focused ComputerUseAgent and run it on a sub-mission.
 
         Each SubAgent is a FRESH agent with its own traces and history,
         executing on the shared workstation with the inherited safety policy.
+        ``agent_uid`` is a run-unique handle the operator UI uses to address
+        this specific worker; it is distinct from the positional ``agent_id``.
         """
         t_start = time.perf_counter()
+        if not agent_uid:
+            agent_uid = f"worker-{sub_agent_num}-{uuid.uuid4().hex[:6]}"
 
         try:
             from sonic.computer_use.agent import ComputerUseAgent
@@ -1272,6 +1312,7 @@ Rules:
                     await self._emit(phase_callback, "sub_step", {
                         "sub_mission_id": sub_mission.id,
                         "agent_id": f"sub-agent-{sub_agent_num}",
+                        "agent_uid": agent_uid,
                         "agent_name": _sub_mission_display_name(sub_mission, sub_agent_num),
                         "role": sub_mission.role,
                         "plane": sub_mission.plane,

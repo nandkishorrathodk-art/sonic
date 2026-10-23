@@ -70,6 +70,10 @@ class SubMissionResult(BaseModel):
 
     sub_mission_id: str
     agent_id: str = ""
+    # Stable, run-unique worker identity (e.g. "worker-1-a1b2c3"). The positional
+    # ``agent_id`` restarts per Boss run, so it cannot be used to address one
+    # specific worker across a persisted session; ``agent_uid`` can.
+    agent_uid: str = ""
     agent_name: str = ""
     goal: str
     role: str = "worker"

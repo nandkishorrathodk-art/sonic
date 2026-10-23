@@ -427,6 +427,8 @@ function SonicDevinWorkstation() {
                 onToggleRightPanel={() => setRightPanelOpen((open) => !open)}
                 sessionId={sessionId}
                 onRefreshState={() => fetchWorkstationData(sessionId)}
+                workers={workstationState?.workers}
+                missionTaskAlive={workstationState?.mission_task_alive}
               />
             </div>
 

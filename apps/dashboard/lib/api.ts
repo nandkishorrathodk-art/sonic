@@ -98,6 +98,15 @@ export const api = {
   getWorkstationState: (sessionId = "default") =>
     apiClient<any>(`/workstation/state?session_id=${encodeURIComponent(sessionId)}`, { timeout: 30000 }),
 
+  getWorkstationAgents: (sessionId = "default") =>
+    apiClient<any>(`/workstation/agents?session_id=${encodeURIComponent(sessionId)}`, { timeout: 30000 }),
+
+  getWorkstationAgent: (agentUid: string, sessionId = "default") =>
+    apiClient<any>(
+      `/workstation/agents/${encodeURIComponent(agentUid)}?session_id=${encodeURIComponent(sessionId)}`,
+      { timeout: 30000 },
+    ),
+
   listSessions: async (): Promise<SessionItem[]> => {
     const data = await apiClient<any>("/workstation/sessions");
     return normalizeSessionList(data);

@@ -591,8 +591,6 @@ class EngagementManager:
 
             # Dual-Plane Operational Model (Rule 5): both Graphical Desktop (GUI) and
             # Dedicated Headless Terminal/Tool plane remain concurrently active.
-            gui_only = False
-
             eng = self.active_engagements.get(engagement_id, {})
             tenant_id = eng.get("tenant_id", "default")
 

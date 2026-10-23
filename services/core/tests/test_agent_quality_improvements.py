@@ -444,14 +444,19 @@ def test_avcs_context_is_compact_temporal_pixel_state_without_ocr():
 
     assert summary == (
         "pixel-only; frame=48, screen=1920x1080, scene=abcdef012345, "
-        "changed=True, change=0.125, motion=0.041, peak_motion=unknown, "
+        "learned_semantics=unavailable, changed=True, change=0.125, motion=0.041, "
+        "peak_motion=unknown, "
         "overlay_suspected=False, coarse_regions=2 (patch,band), "
         "events=whole-screen transition, "
         "temporal=transitioning (advisory surprise=0.093)"
     )
     assert "untrusted event text" not in summary
     assert "OCR" not in summary
-    assert "semantic" not in summary
+    # The summary must not claim any semantic understanding. It may only report
+    # that learned semantics are unavailable (no cortex checkpoint configured).
+    assert "learned_semantics=unavailable" in summary
+    assert "primary_category" not in summary
+    assert "confidence=" not in summary
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,7 @@ from sonic.computer.models import (
     GUIAction,
     GUIActionType,
 )
+from sonic.computer_use.agent_activity import collect_worker_activity, find_worker
 from sonic.computer_use.human_workflow import HumanFirstWorkflow
 from sonic.api.routes.workstation_perception import (
     avcs_capability_state as _avcs_capability_state,
@@ -1170,6 +1171,37 @@ async def _run_mission_preflight(
 _workstation_state_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
+def _mission_task_alive(tenant_id: str, session_id: str) -> bool:
+    """True only while a background task is still driving this session.
+
+    The background-task map is the authoritative liveness signal: a finished,
+    crashed, or restarted mission leaves no live task, so workers must not be
+    reported as RUNNING from stale worklog events.
+    """
+    task = _background_tasks.get((tenant_id, session_id))
+    return task is not None and not task.done()
+
+
+def _attach_worker_activity(
+    state: dict[str, Any],
+    tenant_id: str,
+    session_id: str,
+) -> dict[str, Any]:
+    """Project the worklog into an honest per-worker view for the UI.
+
+    Returns a shallow copy so the derived worker projection is never written
+    back into the persisted session state.
+    """
+    task_alive = _mission_task_alive(tenant_id, session_id)
+    response = dict(state)
+    response["mission_task_alive"] = task_alive
+    response["workers"] = collect_worker_activity(
+        state.get("worklog"),
+        mission_task_alive=task_alive,
+    )
+    return response
+
+
 @router.get("/workstation/state")
 async def get_workstation_state(
     session_id: str = Query("default"),
@@ -1202,14 +1234,14 @@ async def get_workstation_state(
         cached_data = cached[1]
         state["git_branch"] = cached_data.get("git_branch", state.get("git_branch", ""))
         state["desktop"].update(cached_data.get("desktop", {}))
-        return state
+        return _attach_worker_activity(state, tenant_id, session_id)
 
     # Avoid blocking on slow container calls during active runs if cached telemetry exists
     if state.get("status") == "RUNNING" and cached and (now - cached[0] < telemetry_cache_ttl):
         cached_data = cached[1]
         state["git_branch"] = cached_data.get("git_branch", state.get("git_branch", ""))
         state["desktop"].update(cached_data.get("desktop", {}))
-        return state
+        return _attach_worker_activity(state, tenant_id, session_id)
 
     telemetry: dict[str, Any] = {"desktop": {}}
 
@@ -1294,7 +1326,63 @@ async def get_workstation_state(
         pass
 
     _workstation_state_cache[cache_key] = (now, telemetry)
-    return state
+    return _attach_worker_activity(state, tenant_id, session_id)
+
+
+@router.get("/workstation/agents")
+async def list_workstation_agents(
+    session_id: str = Query("default"),
+    user: User = Depends(require_auth),
+):
+    """List every worker the Boss launched for this session, with live status.
+
+    Returns the stable ``agent_uid`` the operator UI uses to drill into a
+    specific worker. ``mission_task_alive`` is included so the client can tell
+    a genuinely running worker from one left behind by a finished or
+    interrupted mission.
+    """
+    tenant_id = _resolve_tenant_id(user)
+    state = _get_or_create_session(tenant_id, session_id)
+    task_alive = _mission_task_alive(tenant_id, session_id)
+    workers = collect_worker_activity(
+        state.get("worklog"),
+        mission_task_alive=task_alive,
+    )
+    return {
+        "session_id": session_id,
+        "mission_status": state.get("status"),
+        "mission_task_alive": task_alive,
+        "count": len(workers),
+        "running_count": sum(1 for w in workers if w.get("is_running")),
+        "workers": workers,
+    }
+
+
+@router.get("/workstation/agents/{agent_uid}")
+async def get_workstation_agent(
+    agent_uid: str,
+    session_id: str = Query("default"),
+    user: User = Depends(require_auth),
+):
+    """Return one worker's full activity record (identity, status, steps)."""
+    tenant_id = _resolve_tenant_id(user)
+    state = _get_or_create_session(tenant_id, session_id)
+    task_alive = _mission_task_alive(tenant_id, session_id)
+    worker = find_worker(
+        state.get("worklog"),
+        agent_uid,
+        mission_task_alive=task_alive,
+    )
+    if worker is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No worker '{agent_uid}' in session '{session_id}'.",
+        )
+    return {
+        "session_id": session_id,
+        "mission_task_alive": task_alive,
+        "worker": worker,
+    }
 
 
 @router.get("/workstation/sessions")
@@ -3554,7 +3642,7 @@ async def _run_prompt_reasoning(
                         safety_policy = seal_default(
                             workspace_root=ws_root,
                             allow_security_tool_targets=scoped_targets if scoped_targets else None,
-                            allow_private_networks=True,
+                            allow_private_networks=is_private_net,
                             require_approval_for_intrusive=False,
                             scope_config=verified_scope_config,
                             scope_checker=get_scope_checker() if verified_scope_config else None,
@@ -3574,6 +3662,7 @@ async def _run_prompt_reasoning(
                                 payload = trace.get("payload", "")
                                 sub_agent_id = str(trace.get("sub_agent_id") or "")
                                 sub_agent_name = str(trace.get("sub_agent_name") or "")
+                                sub_agent_uid = str(trace.get("sub_agent_uid") or "")
                                 sub_mission_id = str(trace.get("sub_mission_id") or "")
                                 worker_role = str(trace.get("worker_role") or "")
                                 execution_plane = str(trace.get("execution_plane") or "")
@@ -3609,6 +3698,7 @@ async def _run_prompt_reasoning(
 
                                 sub_agent_id = ""
                                 sub_agent_name = ""
+                                sub_agent_uid = ""
                                 sub_mission_id = ""
                                 worker_role = ""
                                 execution_plane = ""
@@ -3616,11 +3706,12 @@ async def _run_prompt_reasoning(
                                 {
                                     "sub_agent_id": sub_agent_id,
                                     "sub_agent_name": sub_agent_name,
+                                    "sub_agent_uid": sub_agent_uid,
                                     "sub_mission_id": sub_mission_id,
                                     "worker_role": worker_role,
                                     "execution_plane": execution_plane,
                                 }
-                                if sub_agent_id or sub_agent_name
+                                if sub_agent_id or sub_agent_name or sub_agent_uid
                                 else {}
                             )
                             step_type = "action" if trace_status in ("COMPLETED", "SUCCESS", "RECOVERED", "VERIFIED") else "error"
@@ -3850,9 +3941,23 @@ async def _run_prompt_reasoning(
                                         thinking_type=data.get("thinking_type", "Planning"),
                                         phase=data.get("phase"),
                                     )
+                                elif event_type == "dispatch_decision":
+                                    mode = str(data.get("mode", "")).upper()
+                                    _mission_event(
+                                        state,
+                                        "info",
+                                        f"Boss Dispatch Decision — {mode}",
+                                        data.get("reason", ""),
+                                        orchestration_event="dispatch_decision",
+                                        dispatch_mode=data.get("mode"),
+                                        dispatch_reason=data.get("reason"),
+                                        max_concurrent=data.get("max_concurrent"),
+                                        serialized=data.get("serialized"),
+                                    )
                                 elif event_type == "sub_dispatch":
                                     sub_num = data.get("sub_agent_number")
                                     agent_id = str(data.get("agent_id") or "")
+                                    agent_uid = str(data.get("agent_uid") or "")
                                     agent_name = str(data.get("agent_name") or "")
                                     title = (
                                         f"Dispatching {agent_name} ({agent_id})"
@@ -3870,6 +3975,7 @@ async def _run_prompt_reasoning(
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
                                         agent_id=agent_id,
+                                        agent_uid=agent_uid,
                                         agent_name=agent_name,
                                         status=data.get("status", "RUNNING"),
                                         goal=data.get("goal"),
@@ -3880,6 +3986,7 @@ async def _run_prompt_reasoning(
                                 elif event_type == "sub_step":
                                     trace_data = data.get("trace", {})
                                     trace_data["sub_agent_id"] = data.get("agent_id", "")
+                                    trace_data["sub_agent_uid"] = data.get("agent_uid", "")
                                     trace_data["sub_agent_name"] = data.get("agent_name", "")
                                     trace_data["sub_mission_id"] = data.get("sub_mission_id", "")
                                     trace_data["worker_role"] = data.get("role", "")
@@ -3908,6 +4015,7 @@ async def _run_prompt_reasoning(
                                 elif event_type == "sub_report":
                                     sub_num = data.get("sub_agent_number")
                                     agent_id = str(data.get("agent_id") or "")
+                                    agent_uid = str(data.get("agent_uid") or "")
                                     agent_name = str(data.get("agent_name") or "")
                                     worker_status = str(data.get("status") or ("COMPLETED" if data.get("success") else "FAILED"))
                                     title = (
@@ -3926,6 +4034,7 @@ async def _run_prompt_reasoning(
                                         sub_agent_number=sub_num,
                                         sub_mission_id=data.get("sub_mission_id"),
                                         agent_id=agent_id,
+                                        agent_uid=agent_uid,
                                         agent_name=agent_name,
                                         status=worker_status,
                                         goal=data.get("goal"),
@@ -4185,7 +4294,7 @@ async def _run_prompt_reasoning(
                             elif state.get("interrupted"):
                                 state["status"] = "PAUSED"
                                 state["current_action"] = "Agent paused by user."
-                                summary_msg = f"Autonomous computer-use paused by user ({succeeded} actions completed, {len(traces)} total steps)."
+                                summary_msg = f"Autonomous computer-use paused by user ({succeeded} actions completed, {failed} failed, {blocked} blocked, {len(traces)} total steps)."
                             else:
                                 state["status"] = "IDLE"
                                 state["waiting_for_human"] = False
@@ -4419,7 +4528,6 @@ async def _run_prompt_reasoning(
             state["thought_summary"] = fallback_response
             _append_worklog(state, "info", "LLM Provider Unavailable", fallback_response)
         else:
-            system_prompt = WORKSTATION_CHAT_SYSTEM
             being_brief = _being_conversation_brief(tenant_id)
             conv_history = _extract_recent_conversation_messages(
                 state,

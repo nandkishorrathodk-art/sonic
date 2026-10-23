@@ -2362,6 +2362,22 @@ class ComputerUseAgent:
             )
             lessons_block = inject_into_context(lessons)
 
+        # Capability catalog (SKILLS.md). Advisory routing context so a worker
+        # knows which skills exist and which are fail-closed; it grants no
+        # permission and cannot widen the safety envelope.
+        skill_catalog_block = ""
+        if os.environ.get("SONIC_SKILL_CATALOG_IN_PROMPT", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        ):
+            try:
+                from sonic.computer_use.skill_catalog import render_skill_catalog
+
+                skill_catalog_block = render_skill_catalog()
+            except Exception as exc:
+                logger.warning("skill_catalog_render_failed", error=str(exc))
+
         # Living state (BeingMind mood) — a real affect signal the LLM can
         # act on (fixed the audit: mood floats were never read by any prompt).
         # High satiety => curious exploration is "fed", drop curiosity; high focus
@@ -2641,6 +2657,7 @@ class ComputerUseAgent:
             f"Git branch: {git_branch_str}, clean: {observation.git_clean}\n"
             f"Primary file: {primary_file_str}, Test file: {test_file_str}\n"
             f"{lessons_block}"
+            f"{skill_catalog_block}"
             f"{living_block}"
         )
 
@@ -6555,7 +6572,7 @@ class ComputerUseAgent:
                 "result": _safe_str(actual_obs_str),
             })
             if not burst_ok:
-                self._inject_replan(goal=str(actual_obs_str))
+                self._inject_replan(goal=self._current_goal_for_replan())
             return trace
 
         try:
@@ -9229,6 +9246,22 @@ class ComputerUseAgent:
         if score < 0.30:
             return False, f"{note}; evidence contradicts successful completion"
         return True, note
+
+    def _current_goal_for_replan(self) -> str:
+        """Return the active mission goal for replan messages.
+
+        Falls back to the last known mission goal, then the agent's goal
+        attribute. Never returns observation text, so the LLM always sees the
+        real objective when asked to pivot.
+        """
+        for candidate in (
+            getattr(self, "_last_mission_goal", None),
+            getattr(self, "goal", None),
+        ):
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return "(objective unavailable)"
 
     def _inject_replan(self, goal: str) -> None:
         """Signal the reasoning loop to abandon the current approach.

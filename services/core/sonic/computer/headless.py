@@ -777,7 +777,6 @@ class HeadlessComputeProvider(ComputerProvider, ComputeProvider):
         )
 
     async def git_action(self, workspace_id: str, action: str, **kwargs: Any) -> Any:
-        actor = kwargs.get("actor", "operator")
         ws_dir = self._get_workspace_dir(workspace_id)
         if action == "status":
             res = await self.execute(workspace_id, "git status --porcelain", cwd=str(ws_dir))

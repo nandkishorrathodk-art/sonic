@@ -170,7 +170,7 @@ class ScopeChecker:
     # Patterns that indicate destructive or high-risk operations
     _DESTRUCTIVE_PATTERNS = [
         re.compile(
-            r"\brm\s+(?:-[a-zA-Z]+\s+|--[a-zA-Z-]+\s+)*(?:/(?:\*|\s|$|etc\b|boot\b|usr\b|var\b|bin\b|sbin\b|lib\b|root\b|home\b|opt\b|srv\b|mnt\b|media\b|proc\b|sys\b|dev\b)|~(?:/|\s|$))",
+            r"\brm\s+(?:-[a-zA-Z]+\s+|--[a-zA-Z-]+\s+)*(?:/(?:\*|\s|$|etc\b|boot\b|usr\b|var\b|bin\b|sbin\b|lib\b|root\b|home\b|opt\b|srv\b|mnt\b|media\b|proc\b|sys\b|dev\b|run\b|snap\b|data\b|app\b|workspace\b|project\b|www\b)|~(?:/|\s|$))",
             re.IGNORECASE,
         ),
         re.compile(r"\b(mkfs(\.\w+)?|mke2fs|wipefs)\b", re.IGNORECASE),

@@ -25,10 +25,12 @@ export interface WorklogItem {
   sub_agent_number?: number;
   sub_agent_id?: string;
   sub_agent_name?: string;
+  sub_agent_uid?: string;
   sub_mission_id?: string;
   agent_id?: string;
+  agent_uid?: string;
   agent_name?: string;
-  orchestration_event?: "sub_dispatch" | "sub_report";
+  orchestration_event?: "sub_dispatch" | "sub_report" | "sub_heartbeat" | "dispatch_decision" | string;
   worker_role?: string;
   execution_plane?: "gui" | "headless" | string;
   action_type?: string;
@@ -44,6 +46,10 @@ export interface WorklogItem {
   judge_notes?: string | null;
   evidence_verified?: boolean;
   outcome_status?: string;
+  dispatch_mode?: string;
+  dispatch_reason?: string;
+  max_concurrent?: number;
+  serialized?: boolean;
 }
 
 export interface DesktopApp {
@@ -69,6 +75,45 @@ export interface DesktopState {
   running_processes?: string[];
 }
 
+export interface WorkstationWorkerStep {
+  step_index?: number | null;
+  action_type?: string;
+  status?: string;
+  target?: string;
+  thought?: string;
+  summary?: string;
+  timestamp?: string;
+}
+
+export interface WorkstationWorker {
+  key: string;
+  agent_uid?: string;
+  agent_id?: string;
+  agent_name?: string;
+  sub_mission_id?: string;
+  sub_agent_number?: number | null;
+  role?: string;
+  plane?: string;
+  goal?: string;
+  status: string;
+  is_running?: boolean;
+  success?: boolean | null;
+  findings_summary?: string;
+  key_discoveries?: string[];
+  judge_verdict?: string | null;
+  judge_notes?: string | null;
+  evidence_verified?: boolean | null;
+  actions_taken?: number | null;
+  duration_seconds?: number | null;
+  latest_action?: string;
+  latest_action_status?: string;
+  latest_thought?: string;
+  started_at?: string;
+  updated_at?: string;
+  step_count?: number;
+  steps?: WorkstationWorkerStep[];
+}
+
 export interface WorkstationState {
   session_id: string;
   session_name?: string;
@@ -88,6 +133,8 @@ export interface WorkstationState {
   worklog: WorklogItem[];
   desktop: DesktopState;
   mission?: MissionSummary;
+  workers?: WorkstationWorker[];
+  mission_task_alive?: boolean;
 }
 
 export interface MissionSummary {

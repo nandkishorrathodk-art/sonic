@@ -33,7 +33,7 @@ import {
   Users,
   Code2,
 } from "lucide-react";
-import { WorklogItem } from "../../types/workstation";
+import { WorklogItem, WorkstationWorker } from "../../types/workstation";
 import { api } from "../../lib/api";
 import { MarkdownText } from "./MarkdownText";
 import { CommandBlock } from "./CommandBlock";
@@ -42,26 +42,41 @@ import { FileActionBlock } from "./FileActionBlock";
 type Mode = "Normal" | "Autonomous" | "Pair-Program";
 const MODES: Mode[] = ["Normal", "Autonomous", "Pair-Program"];
 
+interface WorkerStep {
+  step_index?: number | null;
+  action_type?: string;
+  status?: string;
+  target?: string;
+  thought?: string;
+  summary?: string;
+  timestamp?: string;
+}
+
 interface WorkerActivity {
   key: string;
+  agentUid?: string;
   agentId?: string;
   subMissionId?: string;
-  number?: number;
+  number?: number | null;
   name: string;
   role?: string;
   plane?: string;
   goal: string;
   status: string;
-  success?: boolean;
+  isRunning?: boolean;
+  success?: boolean | null;
   latestAction?: string;
   latestActionStatus?: string;
+  latestThought?: string;
   findings?: string;
   keyDiscoveries?: string[];
-  actionsTaken?: number;
-  durationSeconds?: number;
+  actionsTaken?: number | null;
+  durationSeconds?: number | null;
   judgeVerdict?: string;
   judgeNotes?: string;
-  evidenceVerified?: boolean;
+  evidenceVerified?: boolean | null;
+  step_count?: number;
+  steps?: WorkerStep[];
 }
 
 function isWorkerDispatch(item: WorklogItem): boolean {
@@ -82,6 +97,9 @@ function isWorkerReport(item: WorklogItem): boolean {
 }
 
 function workerKey(item: WorklogItem): string | undefined {
+  if (item.agent_uid || item.sub_agent_uid) {
+    return `uid:${item.agent_uid || item.sub_agent_uid}`;
+  }
   if (item.agent_id || item.sub_agent_id) {
     return `agent:${item.agent_id || item.sub_agent_id}`;
   }
@@ -127,6 +145,7 @@ function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
       if (!key) continue;
       workers.set(key, {
         key,
+        agentUid: item.agent_uid || item.sub_agent_uid,
         agentId: item.agent_id || item.sub_agent_id,
         subMissionId: item.sub_mission_id,
         number: item.sub_agent_number,
@@ -165,9 +184,13 @@ function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
       continue;
     }
 
-    if (!item.sub_agent_id || item.type === "thought") continue;
-    const worker = workers.get(`agent:${item.sub_agent_id}`);
+    if (!(item.sub_agent_uid || item.sub_agent_id)) continue;
+    const worker = workers.get(workerKey(item) || "");
     if (!worker) continue;
+    if (item.type === "thought") {
+      worker.latestThought = item.content || worker.latestThought;
+      continue;
+    }
     worker.latestAction = summarizeWorkerAction(item);
     worker.latestActionStatus = item.action_status || (item.type === "error" ? "FAILED" : undefined);
   }
@@ -175,8 +198,49 @@ function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
   return Array.from(workers.values());
 }
 
+function workersFromServer(
+  serverWorkers: WorkstationWorker[] | undefined,
+  fallback: WorkerActivity[],
+): WorkerActivity[] {
+  if (!serverWorkers || serverWorkers.length === 0) return fallback;
+  return serverWorkers.map((worker) => ({
+    key: worker.agent_uid ? `uid:${worker.agent_uid}` : worker.key,
+    agentUid: worker.agent_uid,
+    agentId: worker.agent_id,
+    subMissionId: worker.sub_mission_id,
+    number: worker.sub_agent_number,
+    name:
+      worker.agent_name ||
+      (worker.sub_agent_number != null ? `Worker ${worker.sub_agent_number}` : "Worker"),
+    role: worker.role,
+    plane: worker.plane,
+    goal: worker.goal || "Task details unavailable",
+    status: worker.status || "RUNNING",
+    isRunning: worker.is_running,
+    success: worker.success,
+    latestAction: worker.latest_action,
+    latestActionStatus: worker.latest_action_status,
+    latestThought: worker.latest_thought,
+    findings: worker.findings_summary,
+    keyDiscoveries: worker.key_discoveries || [],
+    actionsTaken: worker.actions_taken,
+    durationSeconds: worker.duration_seconds,
+    judgeVerdict: worker.judge_verdict || undefined,
+    judgeNotes: worker.judge_notes || undefined,
+    evidenceVerified: worker.evidence_verified,
+    steps: worker.steps,
+  }));
+}
+
 function workerStatusLabel(worker: WorkerActivity, missionRunning: boolean): string {
   const status = worker.status.toUpperCase();
+  if (status === "INTERRUPTED") return "INTERRUPTED";
+  if (worker.isRunning === true) return "RUNNING";
+  // The server explicitly says this worker is not running; never re-derive a
+  // stale RUNNING from an old dispatch event.
+  if (worker.isRunning === false && (status === "RUNNING" || status === "PENDING")) {
+    return "UNCONFIRMED";
+  }
   if (missionRunning && ["RUNNING", "PENDING"].includes(status)) return "RUNNING";
   if (status === "WAITING_FOR_HUMAN") return "WAITING FOR HUMAN";
   if (["BLOCKED", "TIMED_OUT", "FAILED", "PAUSED", "PARTIAL", "INCOMPLETE"].includes(status)) {
@@ -208,6 +272,90 @@ function workerStatusClass(status: string): string {
   return "border-amber-500/25 bg-amber-500/10 text-amber-300";
 }
 
+function WorkerDetail({ worker }: { worker: WorkerActivity }) {
+  const steps = worker.steps || [];
+  return (
+    <div className="mt-2 space-y-2 border-t border-ink-750 pt-2">
+      <div>
+        <p className="text-[9px] uppercase tracking-wide text-muted-dim">Goal</p>
+        <p className="mt-0.5 text-[10.5px] leading-relaxed text-slate-200">{worker.goal}</p>
+      </div>
+      {worker.latestThought && (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">Latest thinking</p>
+          <p className="mt-0.5 line-clamp-4 whitespace-pre-wrap text-[10.5px] leading-relaxed text-slate-300">
+            {worker.latestThought}
+          </p>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9.5px] text-muted-dim">
+        {worker.agentUid && <span>uid: {worker.agentUid}</span>}
+        {worker.agentId && <span>agent: {worker.agentId}</span>}
+        {worker.subMissionId && <span>mission: {worker.subMissionId}</span>}
+        {worker.step_count !== undefined && <span>{worker.step_count} steps</span>}
+      </div>
+      {steps.length > 0 && (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">Recent activity</p>
+          <ol className="mt-1 space-y-1">
+            {steps.slice(-8).map((step, index) => (
+              <li
+                key={`${worker.key}-step-${index}`}
+                className="flex items-start gap-1.5 text-[10px] text-slate-300"
+              >
+                <span className="mt-0.5 shrink-0 rounded border border-ink-700 bg-ink-850 px-1 text-[8.5px] text-muted-dim">
+                  {step.step_index ?? index + 1}
+                </span>
+                <span className="min-w-0">
+                  <span className="font-medium text-slate-200">{step.summary || step.action_type}</span>
+                  {step.status && (
+                    <span className="ml-1 text-[9px] text-muted-dim">
+                      {String(step.status).toLowerCase()}
+                    </span>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {worker.judgeVerdict && (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">Independent Judge</p>
+          <p className="mt-0.5 text-[10.5px] text-amber-300">
+            {worker.judgeVerdict}
+            {worker.evidenceVerified === true
+              ? " · evidence confirmed"
+              : worker.judgeNotes
+                ? ` · ${worker.judgeNotes}`
+                : " · evidence not confirmed"}
+          </p>
+        </div>
+      )}
+      {worker.keyDiscoveries && worker.keyDiscoveries.length > 0 && (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">Discoveries</p>
+          <ul className="mt-1 space-y-0.5">
+            {worker.keyDiscoveries.map((discovery, index) => (
+              <li key={`${worker.key}-disc-${index}`} className="text-[10px] text-secondary-300">
+                {discovery}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {worker.findings && (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">Report</p>
+          <p className="mt-0.5 whitespace-pre-wrap text-[10.5px] leading-relaxed text-slate-300">
+            {worker.findings}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WorkerBoard({
   workers,
   missionRunning,
@@ -215,6 +363,7 @@ function WorkerBoard({
   workers: WorkerActivity[];
   missionRunning: boolean;
 }) {
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
   if (workers.length === 0) return null;
   const runningCount = workers.filter((worker) =>
     ["RUNNING", "PENDING"].includes(worker.status.toUpperCase()),
@@ -239,19 +388,32 @@ function WorkerBoard({
           const statusLabel = workerStatusLabel(worker, missionRunning);
           const statusClass = workerStatusClass(statusLabel);
           const PlaneIcon = worker.plane?.toLowerCase() === "headless" ? Code2 : Monitor;
+          const expanded = expandedKey === worker.key;
 
           return (
             <article
               key={worker.key}
-              className="min-w-0 rounded-lg border border-ink-750 bg-ink-900/80 p-2.5"
+              className={`min-w-0 rounded-lg border bg-ink-900/80 p-2.5 ${
+                expanded ? "border-secondary-500/40" : "border-ink-750"
+              }`}
             >
-              <div className="flex items-start gap-2">
+              <button
+                type="button"
+                onClick={() => setExpandedKey(expanded ? null : worker.key)}
+                aria-expanded={expanded}
+                className="flex w-full items-start gap-2 text-left"
+              >
                 <PlaneIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-bright" />
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="truncate text-[11.5px] font-semibold text-slate-100">
                       {worker.name}
                     </span>
+                    {worker.agentUid && (
+                      <span className="truncate rounded border border-ink-700 bg-ink-850 px-1.5 py-0.5 font-mono text-[9px] text-muted-dim">
+                        {worker.agentUid}
+                      </span>
+                    )}
                     {worker.role && worker.role.toLowerCase() !== "subagent" && (
                       <span className="rounded border border-ink-700 bg-ink-850 px-1.5 py-0.5 text-[9px] text-muted-bright">
                         {worker.role}
@@ -265,6 +427,11 @@ function WorkerBoard({
                     <span className={`ml-auto rounded border px-1.5 py-0.5 text-[9px] font-medium ${statusClass}`}>
                       {statusLabel}
                     </span>
+                    {expanded ? (
+                      <ChevronDown className="h-3 w-3 shrink-0 text-muted-dim" />
+                    ) : (
+                      <ChevronRight className="h-3 w-3 shrink-0 text-muted-dim" />
+                    )}
                   </div>
                   <p className="mt-1 line-clamp-2 text-[10.5px] leading-relaxed text-muted-bright">
                     {worker.goal}
@@ -276,12 +443,12 @@ function WorkerBoard({
                         ` · ${worker.latestActionStatus.toLowerCase()}`}
                     </p>
                   )}
-                  {worker.findings && (
+                  {!expanded && worker.findings && (
                     <p className="mt-1 line-clamp-2 text-[10px] text-slate-300">
                       {worker.findings}
                     </p>
                   )}
-                  {worker.judgeVerdict && (
+                  {!expanded && worker.judgeVerdict && (
                     <p className="mt-1 text-[10px] text-amber-300">
                       Judge: {worker.judgeVerdict}
                       {worker.evidenceVerified === true
@@ -291,7 +458,7 @@ function WorkerBoard({
                           : " · evidence not confirmed"}
                     </p>
                   )}
-                  {worker.keyDiscoveries && worker.keyDiscoveries.length > 0 && (
+                  {!expanded && worker.keyDiscoveries && worker.keyDiscoveries.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {worker.keyDiscoveries.slice(0, 3).map((discovery, index) => (
                         <span
@@ -303,18 +470,21 @@ function WorkerBoard({
                       ))}
                     </div>
                   )}
-                  {worker.actionsTaken !== undefined && (
+                  {worker.actionsTaken !== undefined && worker.actionsTaken !== null && (
                     <p className="mt-1 text-[9px] text-muted-dim">
                       {worker.actionsTaken} recorded {worker.actionsTaken === 1 ? "action" : "actions"}
                     </p>
                   )}
-                  {worker.durationSeconds !== undefined && worker.durationSeconds > 0 && (
-                    <p className="mt-1 text-[9px] text-muted-dim">
-                      Finished in {Math.max(1, Math.round(worker.durationSeconds))}s
-                    </p>
-                  )}
+                  {worker.durationSeconds !== undefined &&
+                    worker.durationSeconds !== null &&
+                    worker.durationSeconds > 0 && (
+                      <p className="mt-1 text-[9px] text-muted-dim">
+                        Finished in {Math.max(1, Math.round(worker.durationSeconds))}s
+                      </p>
+                    )}
                 </div>
-              </div>
+              </button>
+              {expanded && <WorkerDetail worker={worker} />}
             </article>
           );
         })}
@@ -339,6 +509,8 @@ interface WorklogFeedProps {
   onToggleRightPanel?: () => void;
   sessionId?: string;
   onRefreshState?: () => void;
+  workers?: WorkstationWorker[];
+  missionTaskAlive?: boolean;
 }
 
 function ProbeProposalCard({
@@ -614,6 +786,8 @@ export function WorklogFeed({
   onToggleRightPanel,
   sessionId = "default",
   onRefreshState,
+  workers,
+  missionTaskAlive,
 }: WorklogFeedProps) {
   const [promptText, setPromptText] = useState("");
   const [activeMode, setActiveMode] = useState<Mode>("Normal");
@@ -636,7 +810,10 @@ export function WorklogFeed({
   }
   const currentRunItems =
     latestObjectiveIndex >= 0 ? displayItems.slice(latestObjectiveIndex) : displayItems;
-  const workerActivities = buildWorkerActivities(currentRunItems);
+  const workerActivities = workersFromServer(
+    workers,
+    buildWorkerActivities(currentRunItems),
+  );
   const latestMissionOutcome = [...currentRunItems]
     .reverse()
     .find((item) => Boolean(item.outcome_status));
@@ -819,7 +996,10 @@ export function WorklogFeed({
           </div>
         ) : (
           <>
-            <WorkerBoard workers={workerActivities} missionRunning={!isFinished} />
+            <WorkerBoard
+              workers={workerActivities}
+              missionRunning={missionTaskAlive ?? !isFinished}
+            />
             {displayItems.map((item, idx) => {
             const itemId = item.id || `item-${idx}`;
 

@@ -3228,3 +3228,203 @@ so it does not burn the whole step budget on an unresolvable target.
   closed without a checkpoint, the GUI-only observation surfaces installed apps.
 - Focused regression: **237 passed, 2 skipped, 0 failures**; Ruff clean on every
   changed file.
+
+## Boss subagent identity, live worker visibility & agent drill-down (2026-10-23)
+
+Operator report: "Boss launches agents but they have no id, background running is
+not visible, and clicking an agent's id/name shows nothing about what it is
+doing." Investigation found the Boss emitted sub-agent events without a stable
+unique handle and the UI could not drill into a worker.
+
+### Real bugs fixed
+1. **No stable unique worker id.** The positional `agent_id`
+   (`sub-agent-N`) restarts every Boss run, so it cannot address one specific
+   worker in a persisted session, and two concurrent workers could be confused.
+   `SubMissionResult.agent_uid` added; the wave loop mints
+   `worker-<n>-<hex>` once per worker (at batch assignment) and threads it
+   through `_dispatch_sub_agent`, `sub_dispatch`, `sub_step` and `sub_report`.
+2. **Crashed workers were stuck on RUNNING.** An unhandled exception in
+   `_run_sub_worker` produced a `SubMissionResult` but never emitted a
+   `sub_report`, so the worker stayed "RUNNING" forever in the UI. The exception
+   path now emits a terminal `sub_report` (status FAILED) carrying the same uid.
+3. **Stale RUNNING after a finished/interrupted mission.** A worker with no
+   terminal report was displayed as RUNNING regardless of whether anything was
+   actually driving the session. Worker status is now gated on the real
+   background-task liveness (`_mission_task_alive`): no live task -> INTERRUPTED,
+   never a stale RUNNING.
+4. **`dispatch_decision` events were dropped by the route.** The Boss emits the
+   DIRECT/single/parallel decision; the workstation event handler had no branch
+   for it. Added a handler that records it as a mission event.
+5. **No way to see what a worker is doing.** Added `GET /workstation/agents`
+   (list) and `GET /workstation/agents/{agent_uid}` (detail), tenant-scoped and
+   authenticated; `GET /workstation/state` now includes `workers` and
+   `mission_task_alive`.
+
+### New module
+- `services/core/sonic/computer_use/agent_activity.py`: pure
+  `collect_worker_activity(worklog, *, mission_task_alive)` +
+  `find_worker(...)`. Projects the persisted worklog into per-worker records
+  (identity, status, steps, latest action/thought, Judge verdict). A worker is
+  RUNNING only while the owning task is alive; otherwise INTERRUPTED.
+
+### Dashboard
+- `types/workstation.ts`: `WorkstationWorker`, `WorkstationWorkerStep`, plus
+  `agent_uid`/`orchestration_event` widening on `WorklogItem`.
+- `lib/api.ts`: `getWorkstationAgents`, `getWorkstationAgent`.
+- `WorklogFeed.tsx`: the Parallel-work board now renders the server-provided
+  worker list (falling back to the worklog projection), shows each worker's
+  `agent_uid`, and each card is clickable to expand a drill-down (goal, latest
+  thinking, recent steps, Judge verdict, discoveries, report). Status honours
+  `is_running`/INTERRUPTED so a dead mission no longer shows a spinning worker.
+- `app/workstation/Workstation.tsx`: passes `workers` and `mission_task_alive`.
+
+### Tests
+- `services/core/tests/test_workstation_agent_activity.py` (15): RUNNING requires
+  a live task; terminal report wins; FAILED/SUCCESS status; independent workers;
+  step attach by uid; same `agent_id` across runs not merged; `find_worker`
+  resolution; Boss mints one uid reused on dispatch+report; distinct uids per
+  worker; crashed worker still emits a terminal report; `/workstation/agents`
+  auth + list + detail + 404 + tenant scoping; `/workstation/state` includes
+  workers + liveness.
+- `test_boss_concurrency_and_summaries.py`: test doubles updated to the real
+  `_dispatch_sub_agent` signature (accepts `agent_uid`).
+
+### Baseline
+- Full `services/core/tests`: **2168 passed, 40 skipped, 1 failed**. The single
+  failure (`test_agent_quality_improvements.py::test_avcs_context_is_compact_
+  temporal_pixel_state_without_ocr`) is pre-existing and unrelated: it asserts
+  the old AVCS summary string, but `agent.py` now also emits
+  `learned_semantics=...` (that file is not part of this change).
+- Dashboard `next build`: 23/23 routes compile. Ruff clean on all changed files.
+
+### Honesty
+- This closes the identity/visibility/drill-down gaps. It does not change the
+  documented capability gate: semantic GUI clicks still require an evaluated
+  local AVCS grounding checkpoint and text entry a focus-verification head, so
+  workers can still legitimately end BLOCKED/INTERRUPTED without an AVCS head.
+
+## Capability catalog (SKILLS.md) + MoE / Agentic-RAG reality check (2026-10-23)
+
+Operator asked (1) for a SKILLS.md catalog so SONIC's skills are available to it,
+and (2) whether SONIC follows an MoE architecture and Agentic RAG. Both answers
+are grounded below; the catalog was implemented so it is *loadable*, not decorative.
+
+### MoE vs Agentic RAG — verified, not assumed
+- **Agentic RAG: YES.** `sonic/memory/agentic.py::AgenticRetriever` does bounded
+  query planning over `VectorMemory` (max 2 rounds / 4 queries, reciprocal-rank
+  fusion, sufficiency stop, untrusted-evidence fencing). It is consumed by
+  `being/lessons.py::relevant_agentic`, which `ComputerUseAgent` calls
+  (`agent.py` ~3126) and injects into the reasoning prompt as REUSE/AVOID lessons.
+- **MoE: NO.** There is no expert-router / sparse-activation architecture in the
+  agent stack. The only MoE artifact is `packages/avcs/forge/model/moe.py`, a
+  trainable sparse MoE FFN used by the AVCS neural cortex (and exercised only by
+  AVCS tests) — it is not how SONIC routes work.
+- **What plays MoE's role instead** (honest framing: functional analogue, not MoE):
+  `sonic/llm/router.py` routes by `task_type` via `configs/models.yaml`
+  `routing_rules` (planning/reasoning/coding/verification/vision...), with
+  per-provider and model-level fallback chains. That is task-type routing, not
+  token-level sparse expert activation. `sonic/orchestration/dual_process.py`
+  (FAST/DEEP) and `LayaSystem1Engine` are fast/deep gating, also not MoE.
+
+### SKILLS.md — implemented as a real, loaded catalog
+A static skills markdown would have been dead documentation: **nothing in the
+repo read any `.md` skills file** before this. So the catalog is parsed at
+runtime and injected into every reasoning worker's prompt.
+- `SKILLS.md` (repo root): a fenced-JSON block between
+  `<!-- SKILL-CATALOG:START -->`/`END` listing 16 capabilities, each with
+  `name/category/status/summary/actions/evidence/requires`. `status` is one of
+  `available` / `conditional` / `not_wired`.
+- `sonic/computer_use/skill_catalog.py`: `load_skill_catalog()` (cached),
+  `render_skill_catalog()`, `reset_skill_catalog_cache()`. **Fail closed** —
+  missing/unreadable/malformed file, missing JSON block, non-object payload, or
+  an entry with an unknown status all yield an empty catalog; it never invents a
+  skill or defaults an invalid status to available.
+- `agent.py::_build_reasoning_context`: renders the catalog into the user prompt
+  (so GUI-only workers, which use a different *system* prompt, still receive it).
+  Env-gated by `SONIC_SKILL_CATALOG_IN_PROMPT` (default on). The block states it
+  is advisory routing context that **does not grant permissions**; `ActionPolicy`
+  /`SealedActionPolicy` still decide every action.
+
+### Honest catalog contents (why the statuses matter)
+- `available` (12): desktop app control, pixel pointer/keyboard, AVCS reflex
+  perception, headless exec, git ops, security tooling, tool authoring, method
+  invention, cross-mission lessons, delegation, verification/replan, dual-process.
+- `conditional` (3): semantic GUI grounding (`SONIC_AVCS_GROUNDING_CHECKPOINT`),
+  focus-verified text entry (`SONIC_AVCS_FOCUS_CHECKPOINT`), learned visual
+  cortex (`SONIC_AVCS_CORTEX_CHECKPOINT`). No evaluated checkpoints exist in-repo,
+  so these fail closed — the catalog tells the worker to pick another route
+  instead of burning its budget on an unresolvable target.
+- `not_wired` (1): `verified_computer_skills` — `ComputerSkillLedger`
+  (`skill_ledger.py`) is real and tested, but **no production caller constructs
+  it** (grep: constructed only in tests). It is marked `not_wired` rather than
+  `available` so the being never claims skill reuse it does not have.
+
+### Tests
+- `services/core/tests/test_skill_catalog.py` (21): repo catalog parses and is
+  non-empty; every status is a declared value; every `conditional` skill names
+  its `requires`; every skill cites evidence; missing file / malformed JSON /
+  missing block / non-object payload all fail closed; invalid status is rejected
+  (not defaulted); render lists status+actions+requires and truncates on a line
+  boundary; cache identity; the **real** `_build_reasoning_context` output
+  contains the catalog and omits it when disabled; the block states it is
+  advisory and does not grant permissions.
+- Also fixed a pre-existing stale assertion in
+  `test_agent_quality_improvements.py::test_avcs_context_is_compact_temporal_pixel_state_without_ocr`
+  (it predated the `learned_semantics=` field). The test's intent is preserved and
+  tightened: the summary may only report `learned_semantics=unavailable`, and must
+  not contain `primary_category`/`confidence=` (i.e. no semantic claim).
+
+### Baseline
+- Full `services/core/tests`: **2190 passed, 40 skipped, 0 failures** (was
+  2168/40/1 before this pass; the 1 failure was the stale AVCS assertion above).
+- Ruff clean on all changed files.
+
+## Logic-bug audit round 2 — four real defects fixed (2026-10-23)
+
+Manual inspection (not test-driven; the suite was green at 2190 passed) found
+four genuine defects. All are now fixed with regression coverage in
+`services/core/tests/test_logic_bug_fixes_round2.py` (21 tests).
+
+### BUG 1 — GUI-burst failure fed the observation into the replan "goal"
+`sonic/computer_use/agent.py` — the GUI-burst failure path called
+`self._inject_replan(goal=str(actual_obs_str))`, so the LLM was told
+*"Goal remains: <error text>"* and lost the real objective when asked to pivot.
+Every other replan call site passed the true `goal`. Fixed by adding
+`_current_goal_for_replan()` (reads `_last_mission_goal` → `goal` → honest
+placeholder) and routing the burst path through it.
+
+### BUG 2 — several top-level directories were deletable at L0_SAFE
+`sonic/safety/scope.py` — the `rm -rf` destructive pattern covered
+/etc /boot /usr /var /bin /sbin /lib /root /home /opt /srv /mnt /media /proc
+/sys /dev but NOT `/run`, `/snap`, `/data`, `/app`, `/workspace`, `/project`,
+`/www`. `rm -rf /workspace` (a mounted volume) classified as L0. Pattern
+extended; workspace-internal deletes (`rm -rf build/`, `./node_modules`,
+`/tmp/scratch`) still classify L0 so normal work is unaffected.
+
+### BUG 3 — `is_private_net` was computed then discarded (egress widening)
+`sonic/api/routes/workstation.py` — the mission route computed `is_private_net`
+from the engaged target but passed `allow_private_networks=True`
+unconditionally, so the egress envelope was widened for every mission. Now
+`allow_private_networks=is_private_net`: private ranges are permitted only when
+the verified engagement target is itself private. Metadata (`169.254.169.254`)
+and loopback stay blocked in both modes (`_MANDATORY_EGRESS_BLOCKED_NETWORKS`).
+
+### BUG 4 — experiment approve ignored the update result
+`sonic/api/routes/experiments.py` — `approve_experiment` assigned
+`ok = update_status(...)` but never checked it, returning `{"status":
+"approved"}` even for a non-existent experiment. The other three lifecycle
+routes (rollback/reject/promote) already checked. Now returns 404 on failure.
+Verified live: `POST /experiments/bogus-id/approve` → **404** (previously 200).
+
+### Also cleaned
+Dead variables removed: `gui_only` (engagement.py), `actor` (headless.py),
+`system_prompt` (workstation.py duplicate). `blocked` (workstation.py) was
+promoted into the paused-summary telemetry instead of deleted.
+
+### Baseline after this pass
+- Full `services/core/tests`: **2190 passed, 40 skipped, 0 failures**
+  (unchanged; +21 new tests, 21 previously-existing dead-code paths now covered).
+- Safety-critical subset (safety/plan6/phase24/dual-plane/boss/probes): 163 passed.
+- Backend + dashboard restarted and verified live; LLM path healthy.
+- Pre-existing ruff F841 warnings in `agent.py` (lines 1587/2294/5444/7330) are
+  outside the touched regions and were not introduced by this pass.

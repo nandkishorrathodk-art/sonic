@@ -115,6 +115,8 @@ async def approve_experiment(
         f"Human approval by {user.email}",
         tenant_id=None if user.role.value == "super_admin" else user.tenant_id,
     )
+    if not ok:
+        raise HTTPException(status_code=404, detail="Experiment not found")
     return {"status": "approved", "experiment_id": experiment_id, "new_state": "canary_testing"}
 
 

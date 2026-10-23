@@ -116,6 +116,7 @@ async def test_concurrent_dependency_waves():
         phase_callback=None,
         sub_agent_num=1,
         interrupt_check=None,
+        agent_uid="",
     ):
         execution_log.append({
             "sub_id": sub_m.id,
@@ -184,6 +185,7 @@ async def test_shared_desktop_dependency_wave_is_serialized():
         phase_callback=None,
         sub_agent_num=1,
         interrupt_check=None,
+        agent_uid="",
     ):
         execution_log.append(time.perf_counter())
         await asyncio.sleep(0.03)
