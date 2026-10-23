@@ -89,7 +89,7 @@ SUBSYSTEM_OWNERSHIP: tuple[SubsystemOwnership, ...] = (
     SubsystemOwnership("being", Department.COGNITIVE_SYSTEMS, Team.IDENTITY_EVOLUTION, ("services/core/sonic/being",), "Persistent Being identity, mind, craft and vault."),
     SubsystemOwnership("evolution", Department.COGNITIVE_SYSTEMS, Team.IDENTITY_EVOLUTION, ("services/core/sonic/evolution",), "Curiosity, adaptation and controlled evolution."),
     SubsystemOwnership("swarm", Department.COGNITIVE_SYSTEMS, Team.REASONING_ORCHESTRATION, ("services/core/sonic/swarm.py",), "Higher-order multi-agent coordination."),
-    SubsystemOwnership("computer_use", Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, ("services/core/sonic/computer_use",), "Computer-use agents and execution contracts."),
+    SubsystemOwnership("computer_use", Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, ("services/core/sonic/computer_use", "SKILLS.md"), "Computer-use agents, execution contracts and the runtime skill catalog parsed by computer_use.skill_catalog."),
     SubsystemOwnership("avcs", Department.COMPUTER_INTERACTION, Team.PERCEPTION_MOTOR, ("packages/avcs",), "AVCS visual perception, motor control, SDK and evaluation package."),
     SubsystemOwnership("computer", Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, ("services/core/sonic/computer",), "Workstation providers and desktop control."),
     SubsystemOwnership("browser", Department.COMPUTER_INTERACTION, Team.BROWSER_WEB, ("services/core/sonic/browser",), "Browser sessions and web interaction."),

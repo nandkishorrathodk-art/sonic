@@ -3483,3 +3483,38 @@ a worker never assumes a capability it does not have.
   remain blocked. No live arbitrary-GUI task was run.
 - Retrieval quality (Recall@3/MRR) is still unmeasured; only the mechanics are
   tested.
+
+### Worker-activity seam closed + SKILLS.md ownership (2026-10-23, commit `bb9a77d`)
+
+Two follow-ups after the observability pass, both found by running the real
+suite rather than trusting the earlier green run:
+
+1. **The Boss -> worklog -> projection seam was untested.** The pure projection
+   and the Boss dispatch path each had tests, but nothing drove real Boss events
+   through the route and then read the projection the dashboard uses. The
+   existing integration test emits `sub_dispatch` **without** `agent_uid`, so it
+   exercised positional `agent_id` keying, while production emits the run-unique
+   `agent_uid` (`worker-<n>-<hex>`) that is the only stable handle the operator
+   UI can address a worker by. A field-name mismatch there would have passed
+   every existing test while the dashboard showed nothing — precisely the
+   reported symptom. `test_worker_activity_end_to_end.py` (4 tests) now drives
+   the real `_run_prompt_reasoning` route with a fake Boss emitting the
+   production payload shape and asserts: two workers stay distinct by uid; a
+   reported worker is terminal while an unreported one is `INTERRUPTED` (never a
+   stale `RUNNING`); `find_worker` resolves the uid and surfaces its latest
+   action/step count, unknown uid -> `None`; the same worklog flips an
+   unreported worker to `RUNNING` only while `mission_task_alive` is true.
+
+2. **`SKILLS.md` had no declared owner.** `test_organization_architecture`
+   correctly failed (`unmapped == ['SKILLS.md']`) — the repository invariant is
+   that an unknown path must fail ownership resolution rather than get an
+   implicit owner. It is now owned by `computer_use`
+   (`COMPUTER_INTERACTION` / `DESKTOP_CONTROL`), since
+   `computer_use.skill_catalog` parses it at runtime.
+
+Verification: full `services/core/tests` **2214 passed, 40 skipped, 0 failures**
+(2254 collected); boss/activity regression 72 passed; ruff clean.
+
+Honest note on statuses: a worker's terminal status is passed through from the
+real `sub_report` (`SUCCESS`/`COMPLETED`/`FAILED`/...), not normalised to a
+single word — `SUCCESS` is a valid terminal status and is reported as-is.
