@@ -3428,3 +3428,58 @@ promoted into the paused-summary telemetry instead of deleted.
 - Backend + dashboard restarted and verified live; LLM path healthy.
 - Pre-existing ruff F841 warnings in `agent.py` (lines 1587/2294/5444/7330) are
   outside the touched regions and were not introduced by this pass.
+
+## Worker activity projection + skill catalog + logic-bug round 2 (2026-10-23)
+
+Committed as `b7d94b2` on `main` (21 files, +2097/-45). This pass closed the
+operator's Boss-observability request and shipped the pending SKILLS.md, on top
+of the four logic-bug fixes described in the previous section.
+
+### Boss worker observability (`sonic/computer_use/agent_activity.py`)
+Before this, the Boss streamed worker lifecycle events into the worklog but the
+dashboard had no per-worker view: you could not tell how many workers existed,
+which were actually running, or what each was doing. `collect_worker_activity`
+is a pure projection over the persisted worklog plus two route-owned facts
+(`mission_status`, `mission_task_alive`), so it never invents state:
+
+- Every worker gets a **stable id** (from the real `sub_dispatch`/`sub_step`
+  events), so the operator can click a worker and see its activity.
+- A worker is `RUNNING` **only while the owning background task is alive**.
+  Once the task exits (finished, crashed, or control plane restarted) a worker
+  that never produced a terminal report becomes `INTERRUPTED` — never a stale
+  `RUNNING`. This is the honesty rule the previous UI violated.
+- `latest_action` / `latest_thought` are copied from real step traces.
+
+Endpoints: `GET /workstation/agents` (list + `running_count`) and
+`GET /workstation/agents/{agent_uid}` (404 for an unknown id). `workers` is also
+attached to the session/state responses. Dashboard: `WorkstationWorker` types
+and the worklog feed render per-worker rows.
+
+### SKILLS.md + runtime catalog (`sonic/computer_use/skill_catalog.py`)
+`SKILLS.md` is a machine-readable capability catalog whose JSON block is parsed
+at runtime and injected into the `ComputerUseAgent` reasoning prompt, including
+every Boss worker. Each entry carries an honest `status`:
+`available` (reachable from the production loop), `conditional` (needs a
+configured dependency such as an evaluated AVCS head, provider key, or sandbox;
+fails closed otherwise), `not_wired` (code exists, no production caller — do not
+claim it works). A missing or malformed catalog renders empty (fail-closed), so
+a worker never assumes a capability it does not have.
+
+### Verification
+- Full `services/core/tests`: **2251 collected / 2211 passed / 40 skipped /
+  0 failures**.
+- New suites: `test_workstation_agent_activity.py` (15),
+  `test_skill_catalog.py` (21), `test_logic_bug_fixes_round2.py` (21).
+- Dashboard `next build` clean (workstation route 25.6 kB).
+- Live: `GET /workstation/agents` → 200 with honest `BLOCKED` mission status
+  (no Docker in this environment); unknown worker → 404; experiment approve on a
+  bogus id → 404.
+- No secrets in the diff.
+
+### Still open / not claimed
+- GUI work stays fail-closed: `SONIC_AVCS_GROUNDING_CHECKPOINT`,
+  `SONIC_AVCS_FOCUS_CHECKPOINT`, and `SONIC_AVCS_CORTEX_CHECKPOINT` are all
+  unset and no checkpoint exists in the repo, so semantic clicks and text entry
+  remain blocked. No live arbitrary-GUI task was run.
+- Retrieval quality (Recall@3/MRR) is still unmeasured; only the mechanics are
+  tested.
