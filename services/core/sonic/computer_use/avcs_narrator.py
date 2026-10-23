@@ -22,6 +22,7 @@ helper returns empty results and the agent keeps its existing behaviour.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Optional
 
 import numpy as np
@@ -30,6 +31,52 @@ logger = logging.getLogger(__name__)
 
 # Bounded so a long mission cannot grow this without limit.
 _MAX_RECENT_LINES = 12
+# Ambient channel: lines the eye spoke *unprompted* (from the continuous
+# awareness loop) that the brain has not read yet.  Bounded per workspace.
+_MAX_AMBIENT_LINES = 8
+
+_ambient_lock = threading.Lock()
+_ambient: dict[str, list[dict[str, Any]]] = {}
+
+
+def record_ambient_narration(key: str, payload: dict[str, Any]) -> None:
+    """Record a line the eye spoke on its own, for the brain to read later.
+
+    ``key`` is the shared identity both sides can compute -- the tenant id --
+    so the awareness monitor (which knows a workspace id) and the agent (which
+    knows the workspace it is driving) land in the same bucket even when their
+    workspace identifiers differ.
+
+    The continuous awareness loop calls this whenever it narrates.  Unlike the
+    per-observation lines, these are *unsolicited*: the eye noticed something
+    while the brain was busy, and the brain should hear about it on its next
+    turn.  Bounded, and never raises.
+    """
+    if not isinstance(payload, dict) or not payload.get("text"):
+        return
+    bucket_key = key or "default"
+    with _ambient_lock:
+        bucket = _ambient.setdefault(bucket_key, [])
+        bucket.append(payload)
+        del bucket[:-_MAX_AMBIENT_LINES]
+
+
+def drain_ambient_narration(key: str) -> list[dict[str, Any]]:
+    """Return and clear the eye's unread lines for a shared key.
+
+    Draining (rather than reading) means the brain hears each thing once, so a
+    long-running alert does not repeat in every subsequent prompt.
+    """
+    bucket_key = key or "default"
+    with _ambient_lock:
+        bucket = _ambient.pop(bucket_key, [])
+    return bucket
+
+
+def peek_ambient_narration(key: str) -> list[dict[str, Any]]:
+    """Read the eye's unread lines without clearing them."""
+    with _ambient_lock:
+        return list(_ambient.get(key or "default", []))
 
 
 class AVCSNarrator:
@@ -115,6 +162,28 @@ class AVCSNarrator:
             return None
         frame = self.frame_from_screen(screen)
         if frame is None:
+            return None
+        return self.observe_frame(
+            workspace_id, frame, state, events=events, active_window=active_window
+        )
+
+    def observe_frame(
+        self,
+        workspace_id: str,
+        frame: np.ndarray,
+        state: dict[str, Any],
+        events: Optional[list[Any]] = None,
+        active_window: str = "",
+    ) -> Optional[dict[str, Any]]:
+        """One narration line for an already-decoded frame plus its AVCS state.
+
+        This is the entry point for callers that own the frame themselves -- the
+        continuous awareness monitor, for instance -- so the narrator can be fed
+        without a ``ScreenObservation`` wrapper.  Returns ``None`` for silence.
+        """
+        if not self.available or not isinstance(state, dict):
+            return None
+        if state.get("engine") != "avcs_reflex":
             return None
         try:
             from forge.vision.scene import SceneState

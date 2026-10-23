@@ -1126,6 +1126,34 @@ class ComputerUseAgent:
             logger.warning("avcs_narrator_init_failed", error=str(exc))
             return None
 
+    def _ambient_narration_block(self) -> str:
+        """Drain the eye's unprompted lines into a prompt block ("" if none).
+
+        These are things AVCS noticed on its own while the agent was busy.  They
+        are drained, so each is surfaced once rather than repeated every turn.
+        """
+        narrator = self._get_avcs_narrator()
+        if narrator is None or not getattr(narrator, "available", False):
+            return ""
+        # Keyed on the tenant, not the workspace: the continuous awareness
+        # monitor and this agent may name the same desktop differently.
+        ambient_key = str(getattr(self, "tenant_id", "") or "") or self._narration_workspace_id()
+        try:
+            from sonic.computer_use.avcs_narrator import drain_ambient_narration
+
+            lines = drain_ambient_narration(ambient_key)
+        except Exception as exc:
+            logger.warning("avcs_ambient_drain_failed", error=str(exc))
+            return ""
+        if not lines:
+            return ""
+        rendered = []
+        for item in lines[-3:]:
+            urgency = str(item.get("urgency") or "info")
+            marker = {"alert": "!", "notice": "~"}.get(urgency, "-")
+            rendered.append(f"  {marker} {item.get('text', '')}")
+        return "\n".join(rendered)
+
     def _narrate_screen(
         self, screen: ScreenObservation | None, active_window: str = ""
     ) -> str:
@@ -2562,6 +2590,13 @@ class ComputerUseAgent:
                 "cannot read on-screen text and does not prove task success):\n  "
                 + narration_block
             )
+        ambient_block = self._ambient_narration_block()
+        if ambient_block:
+            raw_facts.append(
+                "AVCS unsolicited observations since your last step (the eye noticed "
+                "these on its own while you were working; they are not proof of "
+                "success):\n" + ambient_block
+            )
         facts_str = "\n  ".join(raw_facts) if raw_facts else "(no observations yet)"
 
         # Failure record (raw data, not conclusions about it)
@@ -2817,11 +2852,19 @@ class ComputerUseAgent:
                 getattr(observation, "screen", None)
             )
             narration_block = self._narrate_screen(getattr(observation, "screen", None))
+            ambient_block = self._ambient_narration_block()
             narration_line = (
                 f"AVCS LIVE NARRATION (local plain-language description of what the "
                 f"eye currently sees; it cannot read on-screen text and is not proof "
                 f"of success):\n{narration_block}\n"
                 if narration_block
+                else ""
+            )
+            ambient_line = (
+                f"AVCS UNSOLICITED OBSERVATIONS (the eye noticed these on its own "
+                f"while you were working; they are not proof of success):\n"
+                f"{ambient_block}\n"
+                if ambient_block
                 else ""
             )
             obs_summary = (
@@ -2834,6 +2877,7 @@ class ComputerUseAgent:
                 "not semantic certainty or task proof; no screenshot is sent; "
                 f"no pixels are sent): {avcs_summary}\n"
                 f"{narration_line}"
+                f"{ambient_line}"
                 "GROUNDING RULE: AVCS reflex state describes pixel changes and scene "
                 "motion; it does not provide OCR or semantic controls. Semantic targets "
                 "must be resolved locally by the configured, evaluated AVCS grounder. "

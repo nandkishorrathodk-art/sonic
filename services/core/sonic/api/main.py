@@ -314,7 +314,16 @@ async def _maybe_start_visual_awareness(settings) -> str | None:
             return None
 
         fps = float(os.environ.get("SONIC_AWARENESS_FPS", "2") or 2)
-        monitor = get_awareness_monitor(provider, workspace_id, bus=get_life_bus(), fps=fps)
+        monitor = get_awareness_monitor(
+            provider,
+            workspace_id,
+            bus=get_life_bus(),
+            fps=fps,
+            # The brain keys the same channel on the tenant id, so the eye's
+            # unsolicited lines reach the agent even though the two name the
+            # workspace differently.
+            ambient_key=tenant_id,
+        )
         monitor.start()
         logger.info(
             "visual_awareness_running",

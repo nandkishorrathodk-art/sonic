@@ -42,6 +42,10 @@ TOPIC_FRAME = "perception.frame"
 TOPIC_CHANGE = "perception.change"
 TOPIC_OVERLAY = "perception.overlay"
 TOPIC_STABLE = "perception.stable"
+# The eye speaking: a human-readable line about what the screen is doing.  This
+# is what a blind planner subscribes to.  Only published when the narrator has
+# something worth saying, so a quiet screen stays quiet.
+TOPIC_NARRATION = "perception.narration"
 
 # Per-frame event kinds the reflex layer can raise, mapped to bus topics. Only
 # the meaningful ones get their own topic; everything else is just a frame tick.
@@ -67,6 +71,10 @@ class AwarenessFrame:
     events: list[str] = field(default_factory=list)
     semantics: dict[str, Any] = field(default_factory=dict)
     capture_ms: float = 0.0
+    # The eye's spoken line for this frame, or empty when it had nothing worth
+    # saying.  A blind planner reads this instead of pixels.
+    narration: str = ""
+    narration_urgency: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +89,8 @@ class AwarenessFrame:
             "events": list(self.events),
             "semantics": dict(self.semantics),
             "capture_ms": self.capture_ms,
+            "narration": self.narration,
+            "narration_urgency": self.narration_urgency,
         }
 
 
@@ -106,12 +116,18 @@ class AwarenessMonitor:
         bus: Any | None = None,
         fps: float = 2.0,
         history: int = 32,
+        ambient_key: str = "",
     ) -> None:
         if fps <= 0:
             raise ValueError("Awareness fps must be positive")
         self._provider = provider
         self._workspace_id = workspace_id
         self._bus = bus
+        # Shared identity used to hand the eye's lines to the brain.  The
+        # workspace id alone is not enough: the awareness monitor and the agent
+        # may name the same desktop differently, so both sides key the ambient
+        # narration channel on a value they can each derive (the tenant id).
+        self._ambient_key = ambient_key or workspace_id
         self._fps = min(float(fps), self.MAX_FPS)
         self._interval = 1.0 / self._fps
         self._history: deque[AwarenessFrame] = deque(maxlen=max(1, history))
@@ -121,6 +137,11 @@ class AwarenessMonitor:
         self._capture_errors = 0
         self._last_publish_at = 0.0
         self._lock = threading.Lock()
+        # The eye's voice.  Built lazily so a monitor can be constructed in an
+        # environment without the AVCS narrator package; narration is then
+        # simply absent and the monitor keeps publishing raw state.
+        self._narrator: Any | None = None
+        self._narrator_ready = False
 
     # -- lifecycle ---------------------------------------------------------
     @property
@@ -186,6 +207,7 @@ class AwarenessMonitor:
         perception = _shared_perception()
         state: dict[str, Any] = {}
         semantics: dict[str, Any] = {}
+        rgb_frame: Any = None
         if getattr(screen, "raw_rgb", b""):
             state = perception.perceive_rgb_bytes(
                 screen.raw_rgb, screen.width, screen.height, screen.frame_id
@@ -193,23 +215,24 @@ class AwarenessMonitor:
             try:
                 import numpy as np
 
-                frame = np.frombuffer(screen.raw_rgb, dtype=np.uint8).reshape(
+                rgb_frame = np.frombuffer(screen.raw_rgb, dtype=np.uint8).reshape(
                     screen.height, screen.width, 3
                 )
-                semantics = perception.perceive_semantics_rgb(frame)
+                semantics = perception.perceive_semantics_rgb(rgb_frame)
             except Exception:
                 semantics = {}
         elif getattr(screen, "screenshot_base64", ""):
             import base64
 
-            state = perception.perceive_png(
-                base64.b64decode(screen.screenshot_base64, validate=True)
-            )
+            png_bytes = base64.b64decode(screen.screenshot_base64, validate=True)
+            state = perception.perceive_png(png_bytes)
+            rgb_frame = _decode_png_to_rgb(png_bytes)
 
         if state.get("engine") != "avcs_reflex":
             return None
 
         capture_ms = (time.perf_counter() - t0) * 1000.0
+        narration, narration_urgency = self._narrate(rgb_frame, state, screen)
         frame = AwarenessFrame(
             frame_index=int(state.get("frame_index", 0)),
             captured_at=time.time(),
@@ -222,6 +245,8 @@ class AwarenessMonitor:
             events=_event_kinds(state.get("events")),
             semantics=semantics,
             capture_ms=capture_ms,
+            narration=narration,
+            narration_urgency=narration_urgency,
         )
 
         with self._lock:
@@ -231,6 +256,49 @@ class AwarenessMonitor:
 
         self._publish(TOPIC_FRAME, frame, previous)
         return frame
+
+    def _narrate(
+        self, rgb_frame: Any, state: dict[str, Any], screen: Any
+    ) -> tuple[str, str]:
+        """Ask the eye to speak about this frame.
+
+        Returns ``("", "")`` when there is nothing worth saying or the narrator
+        is unavailable.  Never raises: narration is an enhancement and must not
+        be able to stop the awareness loop.
+        """
+        if rgb_frame is None or not isinstance(state, dict):
+            return "", ""
+        if not self._narrator_ready:
+            try:
+                from sonic.computer_use.avcs_narrator import AVCSNarrator
+
+                self._narrator = AVCSNarrator()
+            except Exception as exc:  # pragma: no cover - environment dependent
+                logger.warning("awareness_narrator_unavailable", error=str(exc))
+                self._narrator = None
+            self._narrator_ready = True
+        if self._narrator is None:
+            return "", ""
+        active_window = str(getattr(screen, "active_window", "") or "")
+        try:
+            line = self._narrator.observe_frame(
+                self._workspace_id, rgb_frame, state, active_window=active_window
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("awareness_narration_failed", error=str(exc))
+            return "", ""
+        if not isinstance(line, dict):
+            return "", ""
+        # The eye noticed something while the brain may have been busy.  Record
+        # it on the ambient channel so the next reasoning turn hears about it
+        # even though this observation was not requested by any agent.
+        try:
+            from sonic.computer_use.avcs_narrator import record_ambient_narration
+
+            record_ambient_narration(self._ambient_key, line)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("awareness_ambient_record_failed", error=str(exc))
+        return str(line.get("text") or ""), str(line.get("urgency") or "")
 
     def _publish(
         self, topic: str, frame: AwarenessFrame, previous: AwarenessFrame | None
@@ -258,6 +326,17 @@ class AwarenessMonitor:
                     logger.warning(
                         "awareness_publish_failed", topic=event_topic, error=str(exc)
                     )
+
+        # The eye speaking.  Published separately (and only when there is a
+        # line) so a consumer can subscribe to *commentary* without also
+        # receiving every raw frame tick.
+        if frame.narration:
+            try:
+                self._bus.publish(TOPIC_NARRATION, payload)
+            except Exception as exc:
+                logger.warning(
+                    "awareness_publish_failed", topic=TOPIC_NARRATION, error=str(exc)
+                )
 
     # -- read-back ---------------------------------------------------------
     def latest(self) -> AwarenessFrame | None:
@@ -292,6 +371,27 @@ def _event_kinds(events: Any) -> list[str]:
                 if isinstance(kind, str) and kind and kind not in kinds:
                     kinds.append(kind)
     return kinds
+
+
+def _decode_png_to_rgb(png_bytes: bytes) -> Any:
+    """Decode PNG bytes to an ``(H, W, 3)`` array for narration, or ``None``.
+
+    Best effort: the reflex state is already computed from the same bytes by
+    ``perceive_png``, so a decode failure here only costs the narration line,
+    not the perception.  No OCR and no resampling -- just pixels.
+    """
+    if not png_bytes:
+        return None
+    try:
+        from io import BytesIO
+
+        import numpy as np
+        from PIL import Image
+
+        with Image.open(BytesIO(png_bytes)) as img:
+            return np.asarray(img.convert("RGB"), dtype=np.uint8)
+    except Exception:  # pragma: no cover - environment dependent
+        return None
 
 
 _perception_singleton: Any | None = None

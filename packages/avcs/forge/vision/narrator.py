@@ -130,6 +130,12 @@ class Narration:
     where: str | None = None
     color: str | None = None
     salience: float = 0.0
+    # Pixel-space rectangle ``{"x", "y", "w", "h"}`` for the region this line is
+    # about, when there is one.  This is the eye's fovea: a caller may crop the
+    # frame to it and hand the small patch to a vision model, instead of
+    # shipping a whole screenshot.  ``None`` when the line is about the whole
+    # screen or nothing in particular.
+    focus: dict[str, int] | None = None
     data: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -144,6 +150,8 @@ class Narration:
             out["where"] = self.where
         if self.color:
             out["color"] = self.color
+        if self.focus:
+            out["focus"] = dict(self.focus)
         if self.data:
             out["data"] = self.data
         return out
@@ -258,6 +266,91 @@ def _block_color(
     if patch.size == 0:
         return "unknown"
     return dominant_color_name(patch)
+
+
+# Padding around a focus rectangle, as a fraction of the block's own size.  A
+# dialog is read with a little margin, the way a human's gaze lands on the box
+# and a bit around it rather than exactly on its border.
+FOCUS_PAD_FRACTION = 0.30
+# Never hand back a sliver: a focus region smaller than this is grown to it, so
+# a one-tile change does not produce a crop too small to carry any context.
+FOCUS_MIN_PIXELS = 48
+
+
+def focus_rect_pixels(
+    state: SceneState,
+    block: tuple[int, int, int, int] | None,
+    pad_fraction: float = FOCUS_PAD_FRACTION,
+    min_pixels: int = FOCUS_MIN_PIXELS,
+) -> tuple[int, int, int, int] | None:
+    """Convert a tile-space block into a padded pixel-space focus rectangle.
+
+    Returns ``(x0, y0, x1, y1)`` clamped to the frame, or ``None`` when there is
+    nothing to focus on.  This is the region a caller would crop and hand to a
+    vision model -- the eye's fovea -- so the numbers are pixels, not tiles.
+    """
+    if block is None or state.rows <= 0 or state.cols <= 0:
+        return None
+    if state.width <= 0 or state.height <= 0:
+        return None
+    r0, c0, r1, c1 = block
+    x0 = int(c0 / state.cols * state.width)
+    x1 = int((c1 + 1) / state.cols * state.width)
+    y0 = int(r0 / state.rows * state.height)
+    y1 = int((r1 + 1) / state.rows * state.height)
+
+    # Grow to the minimum, centred on the block, so the crop carries context.
+    if x1 - x0 < min_pixels:
+        mid = (x0 + x1) // 2
+        x0, x1 = mid - min_pixels // 2, mid + min_pixels // 2
+    if y1 - y0 < min_pixels:
+        mid = (y0 + y1) // 2
+        y0, y1 = mid - min_pixels // 2, mid + min_pixels // 2
+
+    # Then pad, so a popup is read with a margin.
+    pad_x = int((x1 - x0) * pad_fraction)
+    pad_y = int((y1 - y0) * pad_fraction)
+    x0, y0 = x0 - pad_x, y0 - pad_y
+    x1, y1 = x1 + pad_x, y1 + pad_y
+
+    # Clamp into the frame.  An off-screen focus is a bug, not a guess: the
+    # caller crops with these numbers, so they must be real pixels.
+    x0 = max(0, min(x0, state.width - 1))
+    y0 = max(0, min(y0, state.height - 1))
+    x1 = max(x0 + 1, min(x1, state.width))
+    y1 = max(y0 + 1, min(y1, state.height))
+    return x0, y0, x1, y1
+
+
+def crop_focus(
+    frame: np.ndarray | None, focus: dict[str, Any] | None
+) -> np.ndarray | None:
+    """Crop a frame to a focus rectangle produced by :func:`focus_rect_pixels`.
+
+    ``focus`` is the ``{"x", "y", "w", "h"}`` mapping carried on a
+    :class:`Narration`.  Returns ``None`` when the frame is unusable or the
+    rectangle does not land inside it, so a caller never sends a bogus crop.
+    """
+    if frame is None or not isinstance(frame, np.ndarray) or frame.ndim != 3:
+        return None
+    if not isinstance(focus, dict):
+        return None
+    try:
+        x = int(focus["x"])
+        y = int(focus["y"])
+        w = int(focus["w"])
+        h = int(focus["h"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    fh, fw = frame.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(fw, x + w), min(fh, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    patch = frame[y0:y1, x0:x1]
+    return patch if patch.size else None
 
 
 class LiveNarrator:
@@ -467,6 +560,9 @@ class LiveNarrator:
         kind = "screen"
         where: str | None = None
         color: str | None = None
+        # The tile block this line is *about*, if any.  Used to compute the
+        # pixel-space focus rectangle a caller can crop to.
+        focus_block: tuple[int, int, int, int] | None = None
 
         # 1. Where we are.  The window title is the only semantic hint the
         #    pixel path is given, and it comes from the caller, not from OCR.
@@ -495,6 +591,7 @@ class LiveNarrator:
                 ((chroma_block[0] + chroma_block[2]) / 2.0) / state.rows,
                 ((chroma_block[1] + chroma_block[3]) / 2.0) / state.cols,
             )
+            focus_block = chroma_block
             if named not in ("unknown", "grey", "black", "white"):
                 kind = "alert"
                 urgency = "alert"
@@ -516,6 +613,7 @@ class LiveNarrator:
             urgency = "alert"
             color = _block_color(frame, state, block) if block else "unknown"
             where = None
+            focus_block = block
             if block:
                 where = _where_word(
                     ((block[0] + block[2]) / 2.0) / state.rows,
@@ -530,6 +628,10 @@ class LiveNarrator:
             if state.motion_centroid is not None:
                 r, c = state.motion_centroid
                 where = _where_word(r / state.rows, c / state.cols)
+                # Focus on where the motion is, so a caller can look there.
+                rr = int(r)
+                cc = int(c)
+                focus_block = (max(0, rr - 1), max(0, cc - 1), rr + 1, cc + 1)
             parts.append(f"There is clear movement{' in the ' + where if where else ''}.")
         elif state.peak_motion > 0.03:
             kind = "change"
@@ -568,6 +670,11 @@ class LiveNarrator:
 
         if not parts:
             return None
+        focus: dict[str, int] | None = None
+        rect = focus_rect_pixels(state, focus_block)
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            focus = {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
         return Narration(
             kind=kind,
             text=" ".join(parts),
@@ -576,4 +683,5 @@ class LiveNarrator:
             where=where,
             color=color,
             salience=max(state.peak_motion, state.change_fraction),
+            focus=focus,
         )
