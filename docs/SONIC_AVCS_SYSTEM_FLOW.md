@@ -1,6 +1,6 @@
 # SONIC + AVCS: Current Desktop Perception and Action Flow
 
-**Status:** Current implementation description, checked 2026-10-20. This
+**Status:** Current implementation description, checked 2026-10-23. This
 document describes the normal SONIC workstation path; it does not claim that
 arbitrary desktop tasks are reliable or that every optional model is ready.
 The [computer-user goal](SONIC_COMPUTER_USER_GOAL.md) remains the acceptance
@@ -10,13 +10,55 @@ contract.
 
 | Role | Component | Responsibility | Does not prove |
 |---|---|---|---|
-| Eye / System 1 | AVCS pixel-reflex perception | Process a fresh desktop frame locally and derive bounded pixel/scene-change signals. | App identity, readable screen text, semantic control identity, or task success. |
+| Eye / System 1 | AVCS pixel-reflex perception **+ live narration** | Process a fresh desktop frame locally, derive bounded pixel/scene-change signals, and describe what it sees in plain language. | App identity, readable screen text, semantic control identity, or task success. |
 | Brain / System 2 | SONIC workstation reasoning | Interpret the operator's goal and available evidence, then propose the next action. | That the proposed action was dispatched or worked. |
 | Hands | Computer/action provider plus policy | Validate and dispatch an allowed GUI or other task-appropriate action; record the result. | That a dispatch changed the intended application state. |
 | Independent check | Boss/Judge and task-specific evidence | Review worker receipts and fresh evidence; the current AVCS-only GUI Judge returns inconclusive because it has no validated task-verification head. | Universal reliability or success from scene change alone. |
 
 “System 1” and “System 2” are architectural roles here, not a claim that the
 current reflex implementation has human-level perception or cognition.
+
+## Live narration — the eye speaks to the brain
+
+The reflex layer produces numbers; narration turns them into the sentence a
+sighted colleague would say out loud. This is the "talking eye" link: the
+reasoning model plans from words instead of from full frames.
+
+`forge/vision/narrator.py` (`LiveNarrator`) watches the same frame stream the
+reflex consumes and emits a `Narration` only when something a human would
+notice has changed. `sonic/computer_use/avcs_narrator.py` (`AVCSNarrator`) is
+SONIC's side of that contract: it decodes the raw frame already attached to a
+`ScreenObservation`, asks the narrator for a line, and renders a bounded prompt
+block.
+
+What it reports, and what it must never claim:
+
+| It reports | It never claims |
+|---|---|
+| Scene tone and structure ("a dark, flat screen") | What any text says — there is no OCR in this path |
+| Coarse position of a change ("top-centre") | A semantic control name or a widget type |
+| The colour of a newly appeared block ("a red box") | That a colour implies an error, warning, or meaning |
+| The visible outcome of a dispatched action | That an unverified action succeeded |
+
+Key properties, all covered by `services/core/tests/test_avcs_live_narration.py`:
+
+* **Colour is compared separately from luminance.** A saturated box whose
+  luminance matches its background — a red dialog on a grey desktop — is
+  invisible to the luma-only reflex, so the narrator diffs RGB tiles too.
+* **Silence is the default.** An unchanged screen yields `None`, so a planner
+  is not flooded with restatements. `silence_ratio` makes this measurable.
+* **Action feedback is honest.** `action_result()` maps a verified visible
+  effect to "the screen responded", an explicitly unseen effect to "no visible
+  effect", and an unknown outcome to "dispatched, effect not verified". An
+  unverified action is never narrated as success.
+* **Narration is advisory.** It is injected into the reasoning prompt labelled
+  as a local description that cannot read text and is not proof of success.
+  Judge confirmation still requires fresh, task-specific evidence.
+
+Narration is optional at runtime. If the AVCS package or a raw frame is
+unavailable the helper returns an empty string and the agent keeps its previous
+behaviour, so losing narration never breaks an action.
+
 
 ## End-to-end flow
 

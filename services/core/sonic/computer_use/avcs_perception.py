@@ -621,6 +621,8 @@ class AVCSPerception:
             "source_frame_id": source_frame_id,
             "width": state.width,
             "height": state.height,
+            "rows": state.rows,
+            "cols": state.cols,
             "scene_hash": state.scene_hash,
             "brightness": round(state.brightness, 3),
             "contrast": round(state.contrast, 3),
@@ -643,6 +645,12 @@ class AVCSPerception:
                     "salience": round(event.salience, 3),
                 }
                 for event in events
+            ],
+            # Tile grids let the local narrator phrase *where* and *what kind*
+            # of change happened without re-deriving it from pixels.  They are
+            # coarse (rows x cols) and carry no screen text.
+            "changed_grid": [
+                [round(float(value), 3) for value in row] for row in state.changed_grid
             ],
             "latency_ms": round(state.latency_ms, 3),
         }

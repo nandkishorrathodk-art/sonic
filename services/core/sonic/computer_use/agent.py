@@ -72,6 +72,21 @@ _POSTCONDITION_REQUIRED_GUI_ACTIONS = frozenset({
     ComputerActionType.GUI_DRAG,
 })
 
+# Actions whose outcome the narrator phrases for the next reasoning step.
+_GUI_ACTION_TYPES_FOR_NARRATION = frozenset({
+    ComputerActionType.GUI_CLICK,
+    ComputerActionType.GUI_DOUBLE_CLICK,
+    ComputerActionType.GUI_RIGHT_CLICK,
+    ComputerActionType.GUI_MOVE,
+    ComputerActionType.GUI_TYPE,
+    ComputerActionType.GUI_KEYPRESS,
+    ComputerActionType.GUI_HOTKEY,
+    ComputerActionType.GUI_SCROLL,
+    ComputerActionType.GUI_DRAG,
+    ComputerActionType.APP_LAUNCH,
+    ComputerActionType.APP_FOCUS,
+})
+
 
 def _extract_command_from_sig(sig_payload_str: str) -> str:
     """Extract the normalized ``command`` value from a stored action signature.
@@ -360,6 +375,11 @@ class ComputerUseAgent:
         # Keep the application desktop optional. Sandbox/operator missions
         # should not capture pixels merely because a workstation exists.
         self.observe_desktop = observe_desktop
+        # Live narration: AVCS describes what it sees in plain language so the
+        # reasoning model plans from words instead of full frames.  Built lazily
+        # on first use; a missing AVCS narrator module degrades to no narration
+        # rather than breaking observation.
+        self._avcs_narrator: Any | None = None
         # The graphical computer plane can be locked away from PTY/shell
         # execution. Backend operator tooling remains a separate plane.
         self.gui_only = gui_only
@@ -1088,6 +1108,79 @@ class ComputerUseAgent:
         screen.controls_age_ms = None
         screen.perception_version = int(state["frame_index"])
         return screen
+
+    # -- live narration ----------------------------------------------------
+
+    def _get_avcs_narrator(self) -> Any | None:
+        """Lazily build the AVCS narrator, or ``None`` when unavailable."""
+        narrator = getattr(self, "_avcs_narrator", None)
+        if narrator is not None:
+            return narrator
+        try:
+            from sonic.computer_use.avcs_narrator import AVCSNarrator
+
+            narrator = AVCSNarrator()
+            self._avcs_narrator = narrator
+            return narrator
+        except Exception as exc:
+            logger.warning("avcs_narrator_init_failed", error=str(exc))
+            return None
+
+    def _narrate_screen(
+        self, screen: ScreenObservation | None, active_window: str = ""
+    ) -> str:
+        """Narrate a fresh screen and return the prompt block ("" if silent).
+
+        Narration is an enhancement: any failure yields an empty string so the
+        caller's prompt is unchanged rather than broken.
+        """
+        if screen is None:
+            return ""
+        narrator = self._get_avcs_narrator()
+        if narrator is None or not getattr(narrator, "available", False):
+            return ""
+        try:
+            narrator.observe_screen(
+                self._narration_workspace_id(),
+                screen,
+                active_window=active_window or getattr(screen, "active_window", ""),
+            )
+            return narrator.format_for_prompt(self._narration_workspace_id())
+        except Exception as exc:
+            logger.warning("avcs_narrate_screen_failed", error=str(exc))
+            return ""
+
+    def _narrate_action_result(
+        self,
+        action_type: Any,
+        target: str,
+        visible_effect: bool | None,
+        screen: ScreenObservation | None,
+        latency_ms: float = 0.0,
+        detail: str = "",
+    ) -> str:
+        """Phrase an action's outcome for the next reasoning step ("" on fail)."""
+        narrator = self._get_avcs_narrator()
+        if narrator is None or not getattr(narrator, "available", False):
+            return ""
+        try:
+            action_name = getattr(action_type, "value", None) or str(action_type)
+            line = narrator.action_result(
+                self._narration_workspace_id(),
+                action_name,
+                target=target,
+                visible_effect=visible_effect,
+                screen=screen,
+                latency_ms=latency_ms,
+                detail=detail,
+            )
+            return str(line.get("text", "")) if line else ""
+        except Exception as exc:
+            logger.warning("avcs_narrate_action_failed", error=str(exc))
+            return ""
+
+    def _narration_workspace_id(self) -> str:
+        return str(getattr(self, "_active_workspace_id", "") or "default")
 
     async def _ground_target_with_avcs(
         self,
@@ -2459,6 +2552,16 @@ class ComputerUseAgent:
                 "UI labels or task proof): "
                 + avcs_summary
             )
+        # Live narration: the eye's own plain-language account of the screen.
+        # Appended only when it has something to say, so a still screen adds no
+        # noise to the prompt.
+        narration_block = self._narrate_screen(getattr(observation, "screen", None))
+        if narration_block:
+            raw_facts.append(
+                "AVCS live narration (local description of the visible screen; it "
+                "cannot read on-screen text and does not prove task success):\n  "
+                + narration_block
+            )
         facts_str = "\n  ".join(raw_facts) if raw_facts else "(no observations yet)"
 
         # Failure record (raw data, not conclusions about it)
@@ -2713,6 +2816,14 @@ class ComputerUseAgent:
             avcs_summary = self._fresh_avcs_reflex_summary(
                 getattr(observation, "screen", None)
             )
+            narration_block = self._narrate_screen(getattr(observation, "screen", None))
+            narration_line = (
+                f"AVCS LIVE NARRATION (local plain-language description of what the "
+                f"eye currently sees; it cannot read on-screen text and is not proof "
+                f"of success):\n{narration_block}\n"
+                if narration_block
+                else ""
+            )
             obs_summary = (
                 "ASSIGNED PLANE: visible desktop GUI only.\n"
                 f"OBJECTIVE: {goal}\n"
@@ -2722,6 +2833,7 @@ class ComputerUseAgent:
                 "(fresh local frame; coarse scene/change/motion signals only; "
                 "not semantic certainty or task proof; no screenshot is sent; "
                 f"no pixels are sent): {avcs_summary}\n"
+                f"{narration_line}"
                 "GROUNDING RULE: AVCS reflex state describes pixel changes and scene "
                 "motion; it does not provide OCR or semantic controls. Semantic targets "
                 "must be resolved locally by the configured, evaluated AVCS grounder. "
@@ -8535,6 +8647,28 @@ class ComputerUseAgent:
             if any(term in lower_obs for term in ("modal_blocked", "blocked by modal", "overlay detected", "dismiss modal")):
                 await self.motor.backtrack(workspace_id, reason="modal_blocked")
                 actual_obs_str = f"{actual_obs_str} | Reflexive backtrack: dismissed blocking modal"
+
+        # Live narration of the action's outcome, so the next reasoning step
+        # receives the eye's own account ("the screen responded" / "no visible
+        # effect") alongside the raw observation.  VERIFIED maps to a visible
+        # effect, UNVERIFIED to an explicitly unseen one, anything else to
+        # "not verified" -- an unverified action is never reported as success.
+        if action_type in _GUI_ACTION_TYPES_FOR_NARRATION:
+            if status == ActionExecutionStatus.VERIFIED:
+                visible_effect: bool | None = True
+            elif status == ActionExecutionStatus.UNVERIFIED:
+                visible_effect = False
+            else:
+                visible_effect = None
+            action_narration = self._narrate_action_result(
+                action_type,
+                target_resource,
+                visible_effect,
+                getattr(self, "_last_observed_screen", None),
+                latency_ms=(time.perf_counter() - t_start) * 1000.0,
+            )
+            if action_narration:
+                actual_obs_str = f"{actual_obs_str} | [AVCS NARRATION]: {action_narration}"
 
         actual_obs_str = _safe_str(actual_obs_str)
         trace = ComputerDecisionTrace(

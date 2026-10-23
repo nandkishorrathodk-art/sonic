@@ -280,6 +280,7 @@ def avcs_capability_state() -> dict[str, Any]:
     """
     capability: dict[str, Any] = {
         "reflex_perception": True,
+        "live_narration": False,
         "semantic_grounding": False,
         "focus_verification": False,
         "gui_actions_ready": False,
@@ -291,6 +292,15 @@ def avcs_capability_state() -> dict[str, Any]:
         "awareness_stats": {},
         "reason": "",
     }
+    # Live narration runs on the same reflex frames, so it needs no checkpoint
+    # and is available whenever the AVCS package is importable.  It describes
+    # pixels only and cannot read on-screen text.
+    try:
+        from sonic.computer_use.avcs_narrator import AVCSNarrator
+
+        capability["live_narration"] = bool(AVCSNarrator().available)
+    except Exception:
+        capability["live_narration"] = False
     try:
         perception = _shared_capability_probe()
         grounding_configured = bool(perception.goal_grounder_configured)
