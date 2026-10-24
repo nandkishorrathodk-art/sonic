@@ -139,6 +139,9 @@ def collect_worker_activity(
                 "evidence_verified": None,
                 "actions_taken": None,
                 "duration_seconds": None,
+                "file_references": [],
+                "test_results": [],
+                "evidence_incomplete": None,
                 "latest_action": "",
                 "latest_action_status": "",
                 "latest_thought": "",
@@ -166,6 +169,15 @@ def collect_worker_activity(
             worker["judge_notes"] = item.get("judge_notes")
             worker["evidence_verified"] = item.get("evidence_verified")
             worker["actions_taken"] = _as_int(item.get("actions_taken"))
+            file_refs = item.get("file_references")
+            worker["file_references"] = list(file_refs) if isinstance(file_refs, list) else []
+            test_results = item.get("test_results")
+            worker["test_results"] = list(test_results) if isinstance(test_results, list) else []
+            worker["evidence_incomplete"] = (
+                bool(item.get("evidence_incomplete"))
+                if item.get("evidence_incomplete") is not None
+                else None
+            )
             duration = item.get("duration_seconds")
             worker["duration_seconds"] = (
                 float(duration)

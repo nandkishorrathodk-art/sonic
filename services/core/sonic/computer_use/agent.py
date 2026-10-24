@@ -479,6 +479,9 @@ class ComputerUseAgent:
         self.tenant_id = tenant_id
         self.engagement_id = engagement_id
         self.agent_id = agent_id
+        # Run-unique worker handle (e.g. "worker-1-a1b2c3"); the coordinator
+        # inbox is keyed by it so the operator can steer this exact worker.
+        self.agent_uid = str(kwargs.get("agent_uid") or "")
         self.enable_llm_verification = enable_llm_verification
         self.enable_llm_decomposition = enable_llm_decomposition
         # Auto-detect compact mode for small models if not explicitly set.
@@ -2369,6 +2372,37 @@ class ComputerUseAgent:
         return actual_obs_str, aborted
 
 
+    def _render_operator_messages(self) -> str:
+        """Drain operator/coordinator messages and render them as instructions.
+
+        Returns "" when there is no handle or nothing pending, so the prompt is
+        unchanged for the common case. Messages are explicitly labelled as
+        operator directives and bounded in count/length.
+        """
+        uid = getattr(self, "agent_uid", "")
+        if not uid:
+            return ""
+        try:
+            from sonic.computer_use.coordinator_inbox import get_coordinator_inbox
+
+            messages = get_coordinator_inbox().drain(uid)
+        except Exception:
+            return ""
+        if not messages:
+            return ""
+        lines = "\n".join(
+            f"  - [{m.get('sender', 'operator')}] {m.get('message', '')}"
+            for m in messages[-5:]
+        )
+        return (
+            "=== OPERATOR INSTRUCTIONS (mid-run steering) ===\n"
+            "The coordinator sent these while you were working; treat them as\n"
+            "authoritative directives for the rest of this task:\n"
+            f"{lines}\n"
+            "Acknowledge them by adjusting your plan; do not ignore them.\n"
+            "=================================================\n\n"
+        )
+
     def _build_reasoning_context(
         self,
         goal: str,
@@ -2708,6 +2742,7 @@ class ComputerUseAgent:
             f"Steps taken so far: {len(self.traces)}\n"
             f"Strategy A state: {strat_a_state.value if strat_a_state != StrategyState.EXHAUSTED else 'EXHAUSTED — pivot needed'}\n"
             "=== END FACTS ===\n\n"
+            f"{self._render_operator_messages()}"
             "Autonomous Engineering Mindset:\n"
             "Think like an elite systems researcher/engineer. Analyze raw technical telemetry, correlate clues,\n"
             "synthesize root causes from command outputs, and reason freely in your THOUGHT block without rigid forms.\n"
@@ -3028,12 +3063,26 @@ class ComputerUseAgent:
             )
         if getattr(self, "initial_context", None):
             init_ctx = getattr(self, "initial_context", {}) or {}
+            owned_scope = init_ctx.get("owned_paths") or []
+            scope_block = ""
+            if isinstance(owned_scope, list) and owned_scope:
+                scope_lines = "\n".join(f"  - {str(p)}" for p in owned_scope[:20])
+                scope_block = (
+                    "=== ASSIGNED WRITE SCOPE (parallel workers own disjoint paths) ===\n"
+                    "You may only create or modify files under these paths:\n"
+                    f"{scope_lines}\n"
+                    "Other paths belong to peer workers running at the same time; do not "
+                    "edit them. If your task needs a file outside this scope, report the "
+                    "blocker instead of modifying it.\n"
+                    "====================================================================\n\n"
+                )
             if init_ctx.get("silent_background") or init_ctx.get("subagent_role"):
                 role_label = str(init_ctx.get("subagent_role") or "Subagent Worker")
                 obs_summary = (
                     f"=== ASSIGNED SUBAGENT ROLE & WORKSPACE: {role_label} ===\n"
                     f"{json.dumps(init_ctx, ensure_ascii=True)[:1200]}\n"
                     "===========================================================\n\n"
+                    + scope_block
                     + obs_summary
                 )
             else:
@@ -3042,6 +3091,7 @@ class ComputerUseAgent:
                     f"{json.dumps(init_ctx, ensure_ascii=True)[:1200]}\n"
                     "Validate these hints against live observations before acting.\n"
                     "==============================================\n\n"
+                    + scope_block
                     + obs_summary
                 )
         obs_summary = target_header + obs_summary

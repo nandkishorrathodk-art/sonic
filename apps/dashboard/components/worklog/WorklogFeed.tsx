@@ -75,6 +75,15 @@ interface WorkerActivity {
   judgeVerdict?: string;
   judgeNotes?: string;
   evidenceVerified?: boolean | null;
+  fileReferences?: { path: string; operations?: string[] }[];
+  testResults?: {
+    command?: string;
+    passed?: number;
+    failed?: number;
+    errors?: number;
+    exit_code?: number | null;
+  }[];
+  evidenceIncomplete?: boolean | null;
   step_count?: number;
   steps?: WorkerStep[];
 }
@@ -181,6 +190,9 @@ function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
       worker.judgeVerdict = item.judge_verdict || undefined;
       worker.judgeNotes = item.judge_notes || undefined;
       worker.evidenceVerified = item.evidence_verified;
+      worker.fileReferences = item.file_references || [];
+      worker.testResults = item.test_results || [];
+      worker.evidenceIncomplete = item.evidence_incomplete;
       continue;
     }
 
@@ -228,6 +240,9 @@ function workersFromServer(
     judgeVerdict: worker.judge_verdict || undefined,
     judgeNotes: worker.judge_notes || undefined,
     evidenceVerified: worker.evidence_verified,
+    fileReferences: worker.file_references || [],
+    testResults: worker.test_results || [],
+    evidenceIncomplete: worker.evidence_incomplete,
     step_count: worker.step_count,
     steps: worker.steps,
   }));
@@ -345,6 +360,69 @@ function WorkerDetail({ worker }: { worker: WorkerActivity }) {
           </ul>
         </div>
       )}
+      {(worker.fileReferences?.length || worker.testResults?.length) ? (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">
+            Verifiable evidence
+          </p>
+          {worker.fileReferences && worker.fileReferences.length > 0 && (
+            <ul className="mt-1 space-y-0.5">
+              {worker.fileReferences.map((ref, index) => (
+                <li
+                  key={`${worker.key}-file-${index}`}
+                  className="flex items-center gap-1.5 text-[10px] text-slate-300"
+                >
+                  <span className="shrink-0 rounded border border-ink-700 bg-ink-850 px-1 text-[8.5px] uppercase text-muted-dim">
+                    {(ref.operations || []).join("/") || "file"}
+                  </span>
+                  <span className="min-w-0 truncate font-mono text-[9.5px]">{ref.path}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {worker.testResults && worker.testResults.length > 0 && (
+            <ul className="mt-1 space-y-0.5">
+              {worker.testResults.map((test, index) => {
+                const green =
+                  (test.failed || 0) === 0 &&
+                  (test.errors || 0) === 0 &&
+                  (test.exit_code ?? 0) === 0;
+                return (
+                  <li
+                    key={`${worker.key}-test-${index}`}
+                    className="flex items-center gap-1.5 text-[10px]"
+                  >
+                    <span
+                      className={`shrink-0 rounded border px-1 text-[8.5px] uppercase ${
+                        green
+                          ? "border-emerald-800 bg-emerald-950 text-emerald-300"
+                          : "border-rose-800 bg-rose-950 text-rose-300"
+                      }`}
+                    >
+                      {green ? "pass" : "fail"}
+                    </span>
+                    <span className="min-w-0 truncate text-slate-300">
+                      {test.passed ?? 0} passed
+                      {(test.failed || 0) > 0 ? ` · ${test.failed} failed` : ""}
+                      {(test.errors || 0) > 0 ? ` · ${test.errors} errors` : ""}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      ) : worker.evidenceIncomplete ? (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">
+            Verifiable evidence
+          </p>
+          <p className="mt-0.5 text-[10.5px] text-rose-300">
+            Worker claimed success but produced no file, test, or discovery
+            evidence — treat as unproven.
+          </p>
+        </div>
+      ) : null}
       {worker.findings && (
         <div>
           <p className="text-[9px] uppercase tracking-wide text-muted-dim">Report</p>
@@ -476,6 +554,11 @@ function WorkerBoard({
                   {worker.actionsTaken !== undefined && worker.actionsTaken !== null && (
                     <p className="mt-1 text-[9px] text-muted-dim">
                       {worker.actionsTaken} recorded {worker.actionsTaken === 1 ? "action" : "actions"}
+                    </p>
+                  )}
+                  {!expanded && worker.evidenceIncomplete && (
+                    <p className="mt-1 inline-flex rounded border border-rose-800 bg-rose-950 px-1.5 py-0.5 text-[9px] text-rose-300">
+                      success claimed without verifiable evidence
                     </p>
                   )}
                   {worker.durationSeconds !== undefined &&

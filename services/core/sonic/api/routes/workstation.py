@@ -1385,6 +1385,64 @@ async def get_workstation_agent(
     }
 
 
+@router.post("/workstation/agents/{agent_uid}/message")
+async def message_workstation_agent(
+    agent_uid: str,
+    body: dict[str, Any],
+    session_id: str = Query("default"),
+    user: User = Depends(require_operator),
+):
+    """Send a mid-run steering message to one running worker.
+
+    Delivery only: the worker drains it on its next reasoning step and treats
+    it as an operator directive. This never marks the worker complete and does
+    not replace its evidence or the independent Judge.
+    """
+    tenant_id = _resolve_tenant_id(user)
+    state = _get_or_create_session(tenant_id, session_id)
+    task_alive = _mission_task_alive(tenant_id, session_id)
+    worker = find_worker(
+        state.get("worklog"),
+        agent_uid,
+        mission_task_alive=task_alive,
+    )
+    if worker is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No worker '{agent_uid}' in session '{session_id}'.",
+        )
+    message = str(body.get("message") or body.get("content") or "").strip()
+    if not message:
+        raise HTTPException(
+            status_code=422,
+            detail="message text is required.",
+        )
+    from sonic.computer_use.coordinator_inbox import get_coordinator_inbox
+
+    record = get_coordinator_inbox().post(
+        agent_uid, message, sender=str(user.email or "operator")
+    )
+    _mission_event(
+        state,
+        "info",
+        f"Operator message → {worker.get('agent_name') or agent_uid}",
+        record["message"],
+        orchestration_event="operator_message",
+        agent_uid=agent_uid,
+        sub_agent_uid=agent_uid,
+        sub_mission_id=worker.get("sub_mission_id"),
+        agent_id=worker.get("agent_id"),
+        agent_name=worker.get("agent_name"),
+        sender=record["sender"],
+    )
+    return {
+        "session_id": session_id,
+        "agent_uid": agent_uid,
+        "delivered": True,
+        "pending": get_coordinator_inbox().pending_count(agent_uid),
+    }
+
+
 @router.get("/workstation/sessions")
 async def list_workstation_sessions(user: User = Depends(require_auth)):
     """Returns all active and historical sessions for the authenticated tenant."""
@@ -4054,6 +4112,9 @@ async def _run_prompt_reasoning(
                                         key_discoveries=data.get("key_discoveries"),
                                         actions_taken=data.get("actions_taken"),
                                         duration_seconds=data.get("duration_seconds"),
+                                        file_references=data.get("file_references"),
+                                        test_results=data.get("test_results"),
+                                        evidence_incomplete=data.get("evidence_incomplete"),
                                     )
                                 elif event_type == "phase_complete":
                                     _mission_event(

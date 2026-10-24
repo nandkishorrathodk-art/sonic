@@ -733,6 +733,9 @@ class BossAgent:
                         "key_discoveries": res.key_discoveries,
                         "actions_taken": res.actions_taken,
                         "duration_seconds": res.duration_seconds,
+                        "file_references": res.file_references,
+                        "test_results": res.test_results,
+                        "evidence_incomplete": res.evidence_incomplete,
                     })
 
                     return res
@@ -1004,6 +1007,7 @@ Respond with EXACTLY this JSON format (no extra text):
       "name": "Short, distinct worker name",
       "role": "Specific responsibility such as desktop operator, software builder, or verifier",
       "goal": "Clear, focused goal for this worker agent with concrete inputs and expected observations.",
+      "owned_paths": ["repo/relative/path/or/dir this worker alone may modify"],
       "plane": "gui",
       "max_steps": 15,
       "priority": 1,
@@ -1016,6 +1020,7 @@ Rules:
 - Each sub_mission goal must be FOCUSED and SPECIFIC
 - Give each sub_mission a short, distinct human-readable name.
 - Assign a concise role that describes the worker's responsibility; use different roles when the tasks need different expertise.
+- owned_paths: repository-relative file or directory paths this worker is allowed to MODIFY. Two workers dispatched in the same phase MUST NOT list the same path; split work by file/directory so parallel workers cannot collide. Leave empty for read-only or GUI workers. Never claim a path you did not intend to change.
 - plane: "gui" for tasks requiring visible desktop interaction; "headless" ONLY for strictly non-visual CLI-only tasks
 - GUI workers must stay within visible desktop applications and controls. Do not substitute shell, file, or backend actions when a GUI operation fails; report the limitation or replan through another observed GUI path.
 - Keep multi-application desktop GUI tasks (launching, focusing, and switching between 1, 2, or more desktop GUI windows) inside a SINGLE unified sub_mission with plane="gui" and max_steps=30 so window state and visual grounding remain continuous
@@ -1090,12 +1095,21 @@ Rules:
 
             role = " ".join(str(sm.get("role") or "").split())[:60] or "subagent"
 
+            raw_paths = sm.get("owned_paths")
+            owned_paths: list[str] = []
+            if isinstance(raw_paths, list):
+                for p in raw_paths:
+                    cleaned = " ".join(str(p).split()).strip().strip("/")
+                    if cleaned and cleaned not in owned_paths:
+                        owned_paths.append(cleaned)
+
             sub_missions.append(SubMission(
                 id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
                 name=str(sm.get("name") or "").strip(),
                 goal=goal,
                 role=role,
                 plane=plane,
+                owned_paths=owned_paths,
                 depends_on=depends_on,
                 max_steps=max(1, min(requested_steps, 30)),
                 priority=max(0, int(sm.get("priority", 1) or 1)),
@@ -1261,6 +1275,11 @@ Rules:
             scoped_context["delegated_goal"] = sub_mission.goal
             scoped_context["delegated_plane"] = execution_plane
             scoped_context["execution_plane"] = execution_plane
+            # A worker must know its own write scope. Parallel workers in one
+            # phase are dispatched only when their owned paths do not overlap
+            # (see the wave path-lock); this tells each worker what that scope
+            # actually is so it does not wander into a peer's files.
+            scoped_context["owned_paths"] = list(sub_mission.owned_paths or [])
 
             # Allow structured task decomposition (enable_llm_decomposition=True) for multi-step GUI sub-missions
             # so sub-agents can follow human workflows (Focus -> Maximize -> Type -> Save).
@@ -1302,6 +1321,7 @@ Rules:
                 observe_desktop=(execution_plane == "gui"),
                 execution_plane=execution_plane,
                 initial_context=scoped_context,
+                agent_uid=agent_uid,
             )
             if not hasattr(agent, "execution_plane"):
                 agent.execution_plane = execution_plane
@@ -1504,6 +1524,18 @@ Rules:
                 status="WAITING_FOR_HUMAN" if waiting_for_human else ("SUCCESS" if is_successful else "FAILED"),
                 waiting_for_human=waiting_for_human,
                 waiting_for_human_reason=waiting_for_human_reason,
+            )
+            # Structured, verifiable evidence: which files were really touched
+            # and what a real test runner actually reported. A worker that
+            # claims success with none of this is flagged as evidence-incomplete
+            # so the coordinator demands proof rather than trusting the summary.
+            sub_result.file_references = self._extract_file_references(traces)
+            sub_result.test_results = self._extract_test_results(traces)
+            sub_result.evidence_incomplete = bool(
+                is_successful
+                and not sub_result.file_references
+                and not sub_result.test_results
+                and not sub_result.key_discoveries
             )
 
             # Independent Judge Agent evaluation (Anti-Self-Attestation). A
@@ -1843,6 +1875,79 @@ Rules:
                     discoveries.append(line_str[:200])
 
         return discoveries[:10]
+
+    # ------------------------------------------------------------------
+    # Structured Evidence Extraction (deterministic, never model-authored)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_file_references(traces: list[Any]) -> list[dict[str, Any]]:
+        """Collect the real files a worker created/modified/read from its traces.
+
+        Derived only from trace fields (action type + target_resource), never
+        from the model's prose, so a confident but wrong summary cannot invent
+        file references that were never touched.
+        """
+        refs: dict[str, dict[str, Any]] = {}
+        for t in traces:
+            action = _trace_value(t, "action_type", "")
+            action = action.value if hasattr(action, "value") else str(action)
+            action = action.upper()
+            target = str(_trace_value(t, "target_resource", "") or "").strip()
+            if not target:
+                continue
+            kind = None
+            if action in ("FILE_WRITE", "FILE_EDIT", "FILE_APPEND", "FILE_CREATE"):
+                kind = "write"
+            elif action in ("FILE_READ", "FILE_LIST", "FILE_VIEW"):
+                kind = "read"
+            if kind is None:
+                continue
+            status = str(_trace_value(t, "status", "")).upper()
+            if status not in ("COMPLETED", "SUCCESS", "VERIFIED"):
+                continue
+            entry = refs.setdefault(target, {"path": target, "operations": []})
+            if kind not in entry["operations"]:
+                entry["operations"].append(kind)
+        return list(refs.values())
+
+    @staticmethod
+    def _extract_test_results(traces: list[Any]) -> list[dict[str, Any]]:
+        """Parse real test-runner output from trace observations.
+
+        Recognises the pytest summary line (``N passed``, ``M failed``) and
+        npm-style summaries. Only executed-command output is parsed, so a
+        worker cannot fabricate a green test run it never performed.
+        """
+        results: list[dict[str, Any]] = []
+        passed_re = re.compile(r"(\d+)\s+passed")
+        failed_re = re.compile(r"(\d+)\s+failed")
+        error_re = re.compile(r"(\d+)\s+error")
+        for t in traces:
+            target = str(_trace_value(t, "target_resource", "") or "")
+            obs = str(
+                _trace_value(t, "actual_observation", "")
+                or _trace_value(t, "observation", "")
+            )
+            if not obs:
+                continue
+            haystack = f"{target}\n{obs}"
+            if not re.search(r"pytest|unittest|npm test|jest|vitest|\bTEST\b", haystack, re.IGNORECASE):
+                continue
+            p = passed_re.search(obs)
+            f = failed_re.search(obs)
+            e = error_re.search(obs)
+            if not (p or f or e):
+                continue
+            exit_code = _trace_value(t, "exit_code", None)
+            results.append({
+                "command": target[:200],
+                "passed": int(p.group(1)) if p else 0,
+                "failed": int(f.group(1)) if f else 0,
+                "errors": int(e.group(1)) if e else 0,
+                "exit_code": exit_code if isinstance(exit_code, int) else None,
+            })
+        return results
 
     # ------------------------------------------------------------------
     # Findings Aggregation

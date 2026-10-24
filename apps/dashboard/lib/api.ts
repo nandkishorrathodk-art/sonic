@@ -107,6 +107,17 @@ export const api = {
       { timeout: 30000 },
     ),
 
+  messageWorkstationAgent: (agentUid: string, message: string, sessionId = "default") =>
+    apiClient<any>(
+      `/workstation/agents/${encodeURIComponent(agentUid)}/message?session_id=${encodeURIComponent(sessionId)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+        timeout: 30000,
+      },
+    ),
+
   listSessions: async (): Promise<SessionItem[]> => {
     const data = await apiClient<any>("/workstation/sessions");
     return normalizeSessionList(data);

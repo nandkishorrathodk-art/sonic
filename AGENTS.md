@@ -3729,3 +3729,64 @@ status were already implemented and unit-tested; these were targeted
 visibility/identity bugs on the live event seam. No live Boss mission with a
 real LLM was run in this environment (no provider credentials / Docker), so
 end-to-end worker narration on a live desktop is not claimed here.
+
+## Phase 48 — Parallel-Worker Coordination: Scope Binding, Mid-Run Steering & Structured Evidence (DONE)
+
+Closed the three coordination gaps in the "parallel agents" workflow (Boss
+launches several bounded workers per phase). Each is a real seam that silently
+degraded the operator's ability to run and trust parallel work.
+
+### GAP 1 — Worker write-scope was never communicated
+`SubMission.owned_paths` existed and the Boss wave loop already *deferred* a
+candidate whose paths collided with an already-selected worker
+(`locked_paths`), but:
+- the decomposition prompt never asked the model for `owned_paths`, so it was
+  always empty and the path-lock was dead code;
+- the parsed `owned_paths` were never passed into the worker, so even when
+  present the worker had no idea what its scope was.
+Fixed: the decomposition prompt now requests `owned_paths` (with an explicit
+"two workers in one phase must not list the same path" rule), the parser
+collects them, `scoped_context["owned_paths"]` is passed to the worker, and
+`_build_reasoning_context` renders an `ASSIGNED WRITE SCOPE` block. This makes
+the existing collision guard effective and stops parallel workers wandering
+into a peer's files.
+
+### GAP 2 — No operator/coordinator steering of a running worker
+Workers run in their own contexts and never talk to each other (correct), but
+the operator had no way to steer a specific running worker mid-run. Added
+`sonic/computer_use/coordinator_inbox.py`: a bounded, thread-safe,
+per-`agent_uid` inbox. The agent drains it on its next reasoning step
+(`_render_operator_messages`) and renders the directives as an
+`OPERATOR INSTRUCTIONS` block. New route
+`POST /workstation/agents/{agent_uid}/message` (operator-gated, tenant-scoped,
+404 for an unknown worker, 422 for an empty message). Delivery only: it never
+marks a worker complete and does not replace its evidence or the Judge.
+
+### GAP 3 — Worker results carried only free text
+`SubMissionResult` had no structured, verifiable evidence, so a confident but
+unbacked summary looked identical to real work. Added deterministic extractors
+(`_extract_file_references`, `_extract_test_results`) that derive touched files
+and real test-runner results (passed/failed/errors/exit_code) **from traces
+only** — never from the model's prose. New fields `file_references`,
+`test_results`, and `evidence_incomplete` (True when a worker claims success
+with no file/test/discovery evidence). Surfaced through the `sub_report` event,
+the worker projection, `/workstation/agents`, and the dashboard drill-down
+(which now shows file refs, pass/fail test chips, or an explicit "claimed
+success without verifiable evidence" warning).
+
+### Tests
+- `services/core/tests/test_parallel_worker_coordination.py` (14): owned_paths
+  parse + render (and absence); inbox post/drain/bounds/rejections; agent
+  renders + drains exactly once via the real reasoning prompt; file/test
+  extraction from real traces only (prose ignored, failed writes excluded).
+- `services/core/tests/test_workstation_agent_activity.py` (+3): message
+  endpoint delivery, auth/404/422, tenant scoping.
+- `services/core/tests/test_worker_activity_end_to_end.py` (+1): structured
+  evidence survives the Boss → worklog → projection seam.
+- Red→green verified by reverting the owned_paths wiring and the operator-block
+  injection (each failed) and restoring.
+
+### Honesty
+These close real coordination seams and are unit/route-verified. No live Boss
+mission with a real LLM was run in this environment, so live parallel-worker
+steering on a real desktop is not claimed.

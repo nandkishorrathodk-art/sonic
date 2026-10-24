@@ -45,6 +45,15 @@ export interface WorklogItem {
   judge_verdict?: string | null;
   judge_notes?: string | null;
   evidence_verified?: boolean;
+  file_references?: { path: string; operations?: string[] }[];
+  test_results?: {
+    command?: string;
+    passed?: number;
+    failed?: number;
+    errors?: number;
+    exit_code?: number | null;
+  }[];
+  evidence_incomplete?: boolean;
   outcome_status?: string;
   dispatch_mode?: string;
   dispatch_reason?: string;
@@ -105,6 +114,15 @@ export interface WorkstationWorker {
   evidence_verified?: boolean | null;
   actions_taken?: number | null;
   duration_seconds?: number | null;
+  file_references?: { path: string; operations?: string[] }[];
+  test_results?: {
+    command?: string;
+    passed?: number;
+    failed?: number;
+    errors?: number;
+    exit_code?: number | null;
+  }[];
+  evidence_incomplete?: boolean | null;
   latest_action?: string;
   latest_action_status?: string;
   latest_thought?: string;

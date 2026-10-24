@@ -335,3 +335,71 @@ async def test_reasoning_heartbeat_attaches_to_its_worker(monkeypatch):
     assert worker is not None
     # The heartbeat content is attached to the worker, proving it was not dropped.
     assert "still reasoning" in worker["latest_thought"], worker["latest_thought"]
+
+
+@pytest.mark.asyncio
+async def test_sub_report_structured_evidence_reaches_the_projection(monkeypatch):
+    """A worker's structured evidence must survive the Boss->worklog->projection seam.
+
+    The Boss now derives real file references and test results from worker
+    traces. This asserts those fields actually reach the operator projection,
+    so a drilled-in worker can be checked against proof instead of a summary.
+    """
+    tenant_id, session_id = "tenant-act-e2e", "sess-act-e2e-7"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["desktop"] = {"workspace_id": "ws-activity-e2e"}
+    state["worklog"] = []
+
+    monkeypatch.setattr(
+        "sonic.api.routes.workstation.get_daytona_computer", lambda: _make_mock_computer()
+    )
+
+    with patch("sonic.computer_use.boss.BossAgent") as mock_boss_cls:
+        mock_boss = MagicMock()
+
+        async def fake_run(workspace_id, objective, phase_callback=None, interrupt_check=None, requested_plane=None):
+            if phase_callback:
+                await phase_callback("sub_dispatch", {
+                    "sub_agent_number": 1,
+                    "sub_mission_id": "sub-ev",
+                    "agent_id": "sub-agent-1",
+                    "agent_uid": "worker-1-aaa111",
+                    "agent_name": "Builder",
+                    "status": "RUNNING",
+                    "goal": "write and test the module",
+                    "role": "builder",
+                    "plane": "headless",
+                    "max_steps": 5,
+                })
+                await phase_callback("sub_report", {
+                    "sub_mission_id": "sub-ev",
+                    "agent_id": "sub-agent-1",
+                    "agent_uid": "worker-1-aaa111",
+                    "agent_name": "Builder",
+                    "role": "builder",
+                    "plane": "headless",
+                    "goal": "write and test the module",
+                    "success": True,
+                    "status": "SUCCESS",
+                    "findings_summary": "wrote and tested",
+                    "judge_verdict": "CONFIRMED",
+                    "evidence_verified": True,
+                    "key_discoveries": [],
+                    "actions_taken": 3,
+                    "duration_seconds": 4.2,
+                    "file_references": [{"path": "src/a.py", "operations": ["write"]}],
+                    "test_results": [{"command": "pytest", "passed": 5, "failed": 0, "errors": 0, "exit_code": 0}],
+                    "evidence_incomplete": False,
+                })
+            return _boss_report()
+
+        mock_boss.run = AsyncMock(side_effect=fake_run)
+        mock_boss_cls.return_value = mock_boss
+
+        await _run_prompt_reasoning(tenant_id, session_id, "build the module")
+
+    worker = find_worker(state["worklog"], "worker-1-aaa111", mission_task_alive=False)
+    assert worker is not None
+    assert worker["file_references"] == [{"path": "src/a.py", "operations": ["write"]}]
+    assert worker["test_results"][0]["passed"] == 5
+    assert worker["evidence_incomplete"] is False

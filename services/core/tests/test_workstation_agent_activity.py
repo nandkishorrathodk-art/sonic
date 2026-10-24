@@ -418,3 +418,75 @@ def test_state_endpoint_includes_workers_and_task_liveness(client):
     assert "workers" in body
     assert "mission_task_alive" in body
     assert body["workers"][0]["agent_uid"] == "worker-1-abc"
+
+
+def test_message_endpoint_delivers_to_the_running_worker(client):
+    from sonic.computer_use.coordinator_inbox import (
+        get_coordinator_inbox,
+        reset_coordinator_inbox,
+    )
+
+    reset_coordinator_inbox()
+    token = _login(client)
+    _seed_worklog("default", "msg-session", [_dispatch_event("worker-1-abc")])
+    res = client.post(
+        "/workstation/agents/worker-1-abc/message?session_id=msg-session",
+        headers=_auth(token),
+        json={"message": "stop editing src/a.py, use src/b.py instead"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["delivered"] is True
+    assert body["pending"] == 1
+    # The directive is queued for exactly this worker and drainable once.
+    drained = get_coordinator_inbox().drain("worker-1-abc")
+    assert drained[0]["message"] == "stop editing src/a.py, use src/b.py instead"
+    reset_coordinator_inbox()
+
+
+def test_message_endpoint_requires_auth_and_valid_target(client):
+    token = _login(client)
+    # No such worker -> 404 (never a silent success).
+    missing = client.post(
+        "/workstation/agents/nope/message?session_id=msg-session-2",
+        headers=_auth(token),
+        json={"message": "hello"},
+    )
+    assert missing.status_code == 404
+
+    _seed_worklog("default", "msg-session-3", [_dispatch_event("worker-2-def")])
+    # Empty message -> 422, so a caller cannot appear to have steered a worker.
+    empty = client.post(
+        "/workstation/agents/worker-2-def/message?session_id=msg-session-3",
+        headers=_auth(token),
+        json={"message": "   "},
+    )
+    assert empty.status_code == 422
+
+    unauth = client.post(
+        "/workstation/agents/worker-2-def/message?session_id=msg-session-3",
+        json={"message": "hi"},
+    )
+    assert unauth.status_code == 401
+
+
+def test_message_endpoint_is_tenant_scoped(client):
+    from sonic.computer_use.coordinator_inbox import (
+        get_coordinator_inbox,
+        reset_coordinator_inbox,
+    )
+
+    reset_coordinator_inbox()
+    token_a = _login(client, tenant_id="tenant-msg-a")
+    token_b = _login(client, tenant_id="tenant-msg-b")
+    _seed_worklog("tenant-msg-a", "scoped-msg", [_dispatch_event("worker-1-abc")])
+
+    # Tenant B cannot see (or message) tenant A's worker.
+    res_b = client.post(
+        "/workstation/agents/worker-1-abc/message?session_id=scoped-msg",
+        headers=_auth(token_b),
+        json={"message": "cross-tenant"},
+    )
+    assert res_b.status_code == 404
+    assert get_coordinator_inbox().pending_count("worker-1-abc") == 0
+    reset_coordinator_inbox()
