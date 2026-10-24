@@ -3901,3 +3901,55 @@ Verified: 70 related backend tests pass, ruff clean, `tsc --noEmit` clean,
 `next build` clean (21 routes; `/agents` grew from a stub to 5.07 kB).
 Honesty: no live Boss mission was run (no model credentials / Docker here);
 this validates the wiring and the API contract, not live mission success.
+
+## Workstation session ids — server-minted + display handle (2026-10-23)
+
+Sessions were minted **client-side** as `mission-<8 hex>` and the backend
+neither produced nor validated that id. Audit found three gaps: no server-side
+create route, no validation at all, and the real id was invisible in the UI
+(only `session_name` rendered).
+
+### Why `#` must not live in the id
+The requested `workstation#92098hahojczxkj2` form carries `#`, which is the URL
+**fragment delimiter** — `?session_id=abc#def` reaches the server as `abc`. It
+is also a shell comment character. Today every call site uses
+`encodeURIComponent` and `session_id` never reaches a shell, so it would work,
+but it is one forgotten encode away from a silent truncation. The fix keeps the
+operator-facing `#` in the **label** and out of the **id**.
+
+### Backend (`api/routes/workstation.py`)
+- `POST /workstation/session` (operator-only) mints `ws-<16 hex>` and returns
+  `{session_id, display_name, status}`. An optional client `session_id` is
+  accepted for compatibility but must be valid; a collision returns **409**
+  rather than silently returning an existing session.
+- `_is_valid_session_id` / `_require_valid_session_id`: alphanumerics + dashes,
+  max 64. **Deliberately not lowercase-only** — mixed-case ids such as
+  `desktop-vision-True` are already used by callers and stored sessions; an
+  over-strict rule broke `test_workstation_chat_and_observation.py` and was
+  relaxed. The rule only needs to exclude `#`, whitespace, shell
+  metacharacters and path separators.
+- `_get_or_create_session` now validates, so unsafe ids are rejected on **read**
+  routes too (400), not only on create.
+- `_session_display_name`: `ws-<hex>` -> `workstation#<hex>`; `default` ->
+  "New conversation"; legacy ids keep the historical `Session <last8>` label.
+- Existing ids in `sonic_data/workstations.json` (`mission-xxxxxxxx`) keep
+  working unchanged; only newly created sessions use the `ws-` form.
+
+### Frontend
+- `api.createSession()` added; `handleNewSession()` now asks the server for the
+  id instead of minting `mission-<8 hex>`, and surfaces a real error if the call
+  fails (previously it would have silently used a bogus id).
+- Sidebar renders the `workstation#<token>` handle under each session, with the
+  raw id in the `title` attribute. The `#` exists only in that label.
+
+### Tests
+`tests/test_workstation_session_ids.py` (18): minting + persistence, distinct
+ids per create, fresh-state isolation (a new session must not inherit another's
+desktop), rejection of `#` / `;` / spaces / traversal / oversize ids, rejection
+on read routes, reserved `default`, 409 on collision, legacy-id compatibility,
+auth required, and tenant scoping.
+
+Verified: full `services/core` suite **2349 passed, 40 skipped, 0 failures**;
+ruff clean; `tsc --noEmit` clean; `next build` clean (21 routes).
+Honesty: no live browser session was created; this validates the API contract,
+validation and rendering, not a live multi-session desktop run.
