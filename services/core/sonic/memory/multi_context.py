@@ -37,6 +37,7 @@ from sonic.logger import get_logger
 logger = get_logger(__name__)
 
 _WORD_RE = re.compile(r"[a-z][a-z0-9_-]{2,}")
+_GRAPH_QUERY_KEYWORD_LIMIT = 6
 _STOPWORDS = frozenset(
     {
         "the", "a", "an", "to", "for", "and", "or", "of", "in", "on", "with",
@@ -133,34 +134,56 @@ class GraphFindingSource:
     async def fetch(self, query: str, *, tenant_id: str, limit: int) -> list[ContextItem]:
         if not hasattr(self.graph_memory, "search_findings"):
             return []
-        rows = await self.graph_memory.search_findings(
-            query, limit=limit, tenant_id=tenant_id
-        )
-        items: list[ContextItem] = []
-        for row in rows or []:
-            finding = row.get("finding") if isinstance(row, dict) else None
-            if not isinstance(finding, dict):
+        # ``search_findings`` is a substring matcher over title/description/
+        # vulnerability_class, so a natural-language goal never matches as one
+        # string. Probe with the goal first, then with its distinct keywords,
+        # merging by finding uid. This keeps a specific query precise while
+        # still letting "scan the web target for SQLi" reach a finding titled
+        # "SQLi in login".
+        probes = [query]
+        probes.extend(sorted(_keywords(query))[:_GRAPH_QUERY_KEYWORD_LIMIT])
+        merged: dict[str, ContextItem] = {}
+        for probe in probes:
+            if not probe:
                 continue
-            title = str(finding.get("title") or finding.get("vulnerability_class") or "").strip()
-            description = str(finding.get("description") or "").strip()
-            content = " — ".join(part for part in (title, description) if part)
-            if not content:
-                continue
-            uid = str(finding.get("uid") or finding.get("finding_id") or title)
-            items.append(
-                ContextItem(
-                    source=self.name,
-                    content=content,
-                    citation=f"graph/finding/{uid}",
-                    score=float(row.get("score", 0.0)),
-                    metadata={
-                        "severity": finding.get("severity"),
-                        "status": finding.get("status"),
-                        "engagement_id": finding.get("engagement_id"),
-                    },
+            try:
+                rows = await self.graph_memory.search_findings(
+                    probe, limit=limit, tenant_id=tenant_id
                 )
-            )
-        return items
+            except Exception as exc:  # one probe failing must not kill the source
+                logger.warning("graph_context_probe_failed", error=str(exc))
+                continue
+            for row in rows or []:
+                item = self._row_to_item(row)
+                if item is None:
+                    continue
+                uid = item.citation
+                existing = merged.get(uid)
+                if existing is None or item.score > existing.score:
+                    merged[uid] = item
+        return list(merged.values())[:limit]
+
+    def _row_to_item(self, row: Any) -> ContextItem | None:
+        finding = row.get("finding") if isinstance(row, dict) else None
+        if not isinstance(finding, dict):
+            return None
+        title = str(finding.get("title") or finding.get("vulnerability_class") or "").strip()
+        description = str(finding.get("description") or "").strip()
+        content = " — ".join(part for part in (title, description) if part)
+        if not content:
+            return None
+        uid = str(finding.get("uid") or finding.get("finding_id") or title)
+        return ContextItem(
+            source=self.name,
+            content=content,
+            citation=f"graph/finding/{uid}",
+            score=float(row.get("score", 0.0)),
+            metadata={
+                "severity": finding.get("severity"),
+                "status": finding.get("status"),
+                "engagement_id": finding.get("engagement_id"),
+            },
+        )
 
 
 class EpisodicContextSource:

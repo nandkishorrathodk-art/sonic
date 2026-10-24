@@ -85,6 +85,66 @@ def test_graph_source_without_search_findings_is_empty():
     assert _run(GraphFindingSource(_NoSearch()).fetch("q", tenant_id="t1", limit=5)) == []
 
 
+class _SubstringGraph:
+    """Mirrors SqliteGraph.search_findings: full-string substring match."""
+
+    def __init__(self, findings):
+        self.findings = findings
+        self.probes = []
+
+    async def search_findings(self, text, limit=20, tenant_id=None):
+        self.probes.append(text)
+        out = []
+        for f in self.findings:
+            hay = f"{f.get('title','')} {f.get('description','')} {f.get('vulnerability_class','')}".lower()
+            if text.lower() in hay:
+                out.append({"finding": f, "score": 1.0})
+        return out[:limit]
+
+
+def test_graph_source_reaches_findings_from_a_natural_language_goal():
+    graph = _SubstringGraph([
+        {"uid": "f1", "title": "SQL injection in login", "description": "auth bypass OR 1=1",
+         "vulnerability_class": "sqli", "severity": "high"},
+        {"uid": "f2", "title": "Unrelated XSS", "description": "reflected", "severity": "low"},
+    ])
+    items = _run(GraphFindingSource(graph).fetch(
+        "scan the web target for SQL injection and auth bypass", tenant_id="t1", limit=5))
+    citations = {i.citation for i in items}
+    assert "graph/finding/f1" in citations
+    assert "graph/finding/f2" not in citations
+    # The full goal string is tried first, then distinct keywords.
+    assert graph.probes[0] == "scan the web target for SQL injection and auth bypass"
+    assert "sqli" in graph.probes or "injection" in graph.probes
+
+
+def test_graph_source_merges_duplicate_hits_across_probes():
+    graph = _SubstringGraph([
+        {"uid": "f1", "title": "SQL injection in login", "description": "auth bypass",
+         "vulnerability_class": "sqli", "severity": "high"},
+    ])
+    items = _run(GraphFindingSource(graph).fetch("sqli injection login", tenant_id="t1", limit=5))
+    assert len(items) == 1
+    assert items[0].citation == "graph/finding/f1"
+
+
+def test_graph_source_survives_a_probe_error():
+    class _Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        async def search_findings(self, text, limit=20, tenant_id=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("backend blip")
+            if text == "login":
+                return [{"finding": {"uid": "f9", "title": "login issue"}, "score": 1.0}]
+            return []
+
+    items = _run(GraphFindingSource(_Flaky()).fetch("login", tenant_id="t1", limit=5))
+    assert [i.citation for i in items] == ["graph/finding/f9"]
+
+
 class _Episode:
     def __init__(self, eid, target, goal, summary):
         self.episode_id = eid
