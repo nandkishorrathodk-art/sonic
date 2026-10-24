@@ -3673,3 +3673,59 @@ Three additions, all verified against real frames (no mocks of narration logic).
   dispatches an action; the agent surfaces and drains the lines.
 - Full suite: **2272 passed, 40 skipped, 0 failures**. Ruff clean.
 - Pushed to `origin/main` (`9c512b9`).
+
+## Boss subagent visibility: heartbeat/step identity fixes (2026-10-23)
+
+Operator report: "jab Boss agent launch karta hai, uska id hona chahiye aur
+agent ke id/name par click karne par dikhna chahiye ki wo kya kaam kar raha
+hai" — i.e. delegated workers must be individually addressable and their live
+work must be visible. Audited the whole seam (Boss emit -> workstation worklog
+-> `agent_activity` projection -> `/workstation/agents` -> dashboard
+`WorkerBoard`/`WorkerDetail`) and fixed three real bugs plus two display
+inconsistencies. Backend identity/drill-down already worked (the run-unique
+`agent_uid` = `worker-<n>-<hex>`, unique per mission because `_sub_agent_count`
+is monotonic); the breakage was in what travelled on each event and in the
+frontend mapping.
+
+### BUG A — reasoning heartbeat was silently dropped (real)
+`BossAgent._sub_heartbeat_callback` emitted `sub_heartbeat` **without**
+`agent_uid`. The projection keys every item by `uid:<agent_uid>` (falling back
+to `agent:sub-agent-N`), so a heartbeat keyed as `agent:sub-agent-1` never
+matched the dispatch record keyed `uid:worker-1-xxx` and was discarded. A long
+LLM reasoning turn therefore looked like a stalled worker with no update.
+Fixed: the heartbeat now carries `agent_uid`; the route forwards
+`agent_uid`/`sub_agent_uid`/`sub_agent_number` on the worklog item so it
+attaches to the owning worker (`latest_thought`).
+
+### BUG B — step worklog items lost their action target (real)
+Only `TERMINAL_EXEC`/`FILE_READ`/`FILE_WRITE` steps set `command`/`file`.
+A generic step (e.g. `GUI_CLICK`) had no field for its target, yet the
+projection derives the worker's "latest action" summary from
+`item["target_resource"]`. So a GUI worker's step showed a bare verb
+("gui click") with no resource. Fixed: `step_metadata` now always carries
+`target_resource`.
+
+### Frontend mapping/consistency fixes
+- `workersFromServer` never mapped the server's `step_count`, so the
+  drill-down card's "N steps" line could never render. Now mapped.
+- `WorkerBoard` header counted active workers with a raw
+  `status === "RUNNING"` check while each card rendered `workerStatusLabel`
+  (which can downgrade a stale RUNNING to `UNCONFIRMED`). The two could
+  disagree. The header now counts via `workerStatusLabel`.
+
+### Tests
+- `test_worker_activity_end_to_end.py` (+2): a generic GUI step keeps its
+  target in the drilled-in worker view; a reasoning heartbeat attaches to its
+  worker (`latest_thought`) instead of being dropped. Both verified red on the
+  unmodified code.
+- `test_boss_gui_worker_dispatch.py`: the heartbeat assertion now requires the
+  run-unique `agent_uid` (was asserting the buggy payload).
+- Full `services/core/tests`: **2280 passed, 40 skipped, 0 failures**. Ruff
+  clean; dashboard `npm run build` compiles.
+
+### Honesty
+Identity, per-worker drill-down, and honest RUNNING/INTERRUPTED/COMPLETED
+status were already implemented and unit-tested; these were targeted
+visibility/identity bugs on the live event seam. No live Boss mission with a
+real LLM was run in this environment (no provider credentials / Docker), so
+end-to-end worker narration on a live desktop is not claimed here.

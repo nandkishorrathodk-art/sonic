@@ -3719,6 +3719,9 @@ async def _run_prompt_reasoning(
                                 "step_index": step_index,
                                 "action_type": action_val,
                                 "action_status": trace_status,
+                                # Carried so the per-worker projection can show
+                                # what each step acted on, not just the verb.
+                                "target_resource": target_resource,
                             }
                             worker_label = f"{sub_agent_name} ({sub_agent_id}): " if worker_metadata else ""
                             state["current_action"] = f"{worker_label}Step {step_index}: {action_val} on {target_resource}"
@@ -4005,7 +4008,10 @@ async def _run_prompt_reasoning(
                                         ),
                                         orchestration_event="sub_heartbeat",
                                         sub_mission_id=data.get("sub_mission_id"),
+                                        sub_agent_number=data.get("sub_agent_number"),
                                         agent_id=data.get("agent_id"),
+                                        agent_uid=data.get("agent_uid"),
+                                        sub_agent_uid=data.get("agent_uid"),
                                         agent_name=data.get("agent_name"),
                                         worker_role=data.get("role", "subagent"),
                                         execution_plane=data.get("plane", "gui"),

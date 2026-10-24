@@ -228,6 +228,7 @@ function workersFromServer(
     judgeVerdict: worker.judge_verdict || undefined,
     judgeNotes: worker.judge_notes || undefined,
     evidenceVerified: worker.evidence_verified,
+    step_count: worker.step_count,
     steps: worker.steps,
   }));
 }
@@ -365,8 +366,10 @@ function WorkerBoard({
 }) {
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   if (workers.length === 0) return null;
-  const runningCount = workers.filter((worker) =>
-    ["RUNNING", "PENDING"].includes(worker.status.toUpperCase()),
+  // Count with the same function the cards render, so the header can never
+  // disagree with a card (e.g. a raw RUNNING worker shown as UNCONFIRMED).
+  const runningCount = workers.filter(
+    (worker) => workerStatusLabel(worker, missionRunning) === "RUNNING",
   ).length;
 
   return (

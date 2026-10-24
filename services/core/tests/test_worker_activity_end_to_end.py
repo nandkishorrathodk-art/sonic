@@ -208,3 +208,130 @@ async def test_worker_running_only_while_mission_task_alive(monkeypatch):
     # Unreported worker is RUNNING only because the task is still alive.
     assert alive["worker-2-bbb222"]["status"] == "RUNNING"
     assert alive["worker-2-bbb222"]["is_running"] is True
+
+
+@pytest.mark.asyncio
+async def test_worker_step_keeps_its_action_target(monkeypatch):
+    """A drilled-in worker must show *what* each step acted on, not just the verb.
+
+    Only TERMINAL_EXEC/FILE_READ/FILE_WRITE steps carried a ``command``/``file``
+    field. A generic step (e.g. GUI_CLICK) had no field for its target, so the
+    operator saw a bare action verb with no resource. The route now carries
+    ``target_resource`` on every step item.
+    """
+    tenant_id, session_id = "tenant-act-e2e", "sess-act-e2e-5"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["desktop"] = {"workspace_id": "ws-activity-e2e"}
+    state["worklog"] = []
+
+    monkeypatch.setattr(
+        "sonic.api.routes.workstation.get_daytona_computer", lambda: _make_mock_computer()
+    )
+
+    with patch("sonic.computer_use.boss.BossAgent") as mock_boss_cls:
+        mock_boss = MagicMock()
+
+        async def fake_run(workspace_id, objective, phase_callback=None, interrupt_check=None, requested_plane=None):
+            if phase_callback:
+                await phase_callback("sub_dispatch", {
+                    "sub_agent_number": 1,
+                    "sub_mission_id": "sub-click",
+                    "agent_id": "sub-agent-1",
+                    "agent_uid": "worker-1-aaa111",
+                    "agent_name": "Desktop Operator",
+                    "status": "RUNNING",
+                    "goal": "click the submit control",
+                    "role": "computer_operator",
+                    "plane": "gui",
+                    "max_steps": 5,
+                })
+                # A GUI step: it has no command/file field, only a target.
+                await phase_callback("sub_step", {
+                    "trace": {
+                        "step_index": 1,
+                        "action_type": "GUI_CLICK",
+                        "target": "submit control",
+                        "observation": "clicked",
+                        "status": "VERIFIED",
+                        "exit_code": None,
+                    },
+                    "agent_id": "sub-agent-1",
+                    "agent_uid": "worker-1-aaa111",
+                    "agent_name": "Desktop Operator",
+                    "sub_mission_id": "sub-click",
+                    "role": "computer_operator",
+                    "plane": "gui",
+                })
+            return _boss_report()
+
+        mock_boss.run = AsyncMock(side_effect=fake_run)
+        mock_boss_cls.return_value = mock_boss
+
+        await _run_prompt_reasoning(tenant_id, session_id, "click the submit button")
+
+    worker = find_worker(state["worklog"], "worker-1-aaa111", mission_task_alive=False)
+    assert worker is not None
+    assert worker["step_count"] == 1
+    # The generic step must retain its target so the operator can see the work.
+    assert "submit control" in worker["latest_action"], worker["latest_action"]
+    assert worker["steps"][0]["target"] == "submit control"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_heartbeat_attaches_to_its_worker(monkeypatch):
+    """A "still reasoning" heartbeat must reach the worker it belongs to.
+
+    The heartbeat previously travelled without ``agent_uid``, so the projection
+    could not key it to the dispatched worker and silently dropped it -- a long
+    reasoning turn looked like a stalled worker. The heartbeat now carries the
+    run-unique handle.
+    """
+    tenant_id, session_id = "tenant-act-e2e", "sess-act-e2e-6"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["desktop"] = {"workspace_id": "ws-activity-e2e"}
+    state["worklog"] = []
+
+    monkeypatch.setattr(
+        "sonic.api.routes.workstation.get_daytona_computer", lambda: _make_mock_computer()
+    )
+
+    with patch("sonic.computer_use.boss.BossAgent") as mock_boss_cls:
+        mock_boss = MagicMock()
+
+        async def fake_run(workspace_id, objective, phase_callback=None, interrupt_check=None, requested_plane=None):
+            if phase_callback:
+                await phase_callback("sub_dispatch", {
+                    "sub_agent_number": 1,
+                    "sub_mission_id": "sub-slow",
+                    "agent_id": "sub-agent-1",
+                    "agent_uid": "worker-1-aaa111",
+                    "agent_name": "Deep Thinker",
+                    "status": "RUNNING",
+                    "goal": "reason about the target",
+                    "role": "analyst",
+                    "plane": "headless",
+                    "max_steps": 5,
+                })
+                await phase_callback("sub_heartbeat", {
+                    "sub_mission_id": "sub-slow",
+                    "agent_id": "sub-agent-1",
+                    "agent_uid": "worker-1-aaa111",
+                    "agent_name": "Deep Thinker",
+                    "role": "analyst",
+                    "plane": "headless",
+                    "sub_agent_number": 1,
+                    "elapsed_seconds": 12.0,
+                    "step": 2,
+                    "last_observation_version": 7,
+                })
+            return _boss_report()
+
+        mock_boss.run = AsyncMock(side_effect=fake_run)
+        mock_boss_cls.return_value = mock_boss
+
+        await _run_prompt_reasoning(tenant_id, session_id, "analyze the target thoroughly")
+
+    worker = find_worker(state["worklog"], "worker-1-aaa111", mission_task_alive=True)
+    assert worker is not None
+    # The heartbeat content is attached to the worker, proving it was not dropped.
+    assert "still reasoning" in worker["latest_thought"], worker["latest_thought"]

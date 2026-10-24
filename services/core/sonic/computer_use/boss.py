@@ -1342,6 +1342,10 @@ Rules:
                     await self._emit(phase_callback, "sub_heartbeat", {
                         "sub_mission_id": sub_mission.id,
                         "agent_id": sub_agent_id,
+                        # The run-unique handle must travel with the heartbeat,
+                        # otherwise the UI cannot attach the "still reasoning"
+                        # signal to the worker it belongs to.
+                        "agent_uid": agent_uid,
                         "agent_name": _sub_mission_display_name(
                             sub_mission, sub_agent_num
                         ),

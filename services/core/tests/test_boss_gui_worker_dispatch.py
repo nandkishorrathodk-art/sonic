@@ -104,22 +104,23 @@ async def test_visual_worker_heartbeat_is_forwarded_to_boss_callback():
         }
     )
 
-    assert events == [
-        (
-            "sub_heartbeat",
-            {
-                "sub_mission_id": "sub-heartbeat",
-                "agent_id": "sub-agent-1",
-                "agent_name": "Desktop worker",
-                "role": "subagent",
-                "plane": "gui",
-                "sub_agent_number": 1,
-                "elapsed_seconds": 4.5,
-                "step": 2,
-                "last_observation_version": 7,
-            },
-        )
-    ]
+    assert len(events) == 1
+    event_type, data = events[0]
+    assert event_type == "sub_heartbeat"
+    # The heartbeat must carry the run-unique handle so the operator UI can
+    # attach the "still reasoning" signal to the right worker.
+    assert data.pop("agent_uid"), "heartbeat lost its run-unique worker handle"
+    assert data == {
+        "sub_mission_id": "sub-heartbeat",
+        "agent_id": "sub-agent-1",
+        "agent_name": "Desktop worker",
+        "role": "subagent",
+        "plane": "gui",
+        "sub_agent_number": 1,
+        "elapsed_seconds": 4.5,
+        "step": 2,
+        "last_observation_version": 7,
+    }
 
 
 @pytest.mark.asyncio
