@@ -43,6 +43,19 @@ const NAV = [
   { href: "/organization", label: "Organization", icon: <Users className="w-4 h-4 text-primary-400" /> },
 ];
 
+/**
+ * Operator-facing handle for a session.
+ *
+ * The stored id is `ws-<hex>` (URL- and shell-safe). Operators address a
+ * session by the more readable `workstation#<hex>` form, which is what the
+ * sidebar shows. The `#` lives only in this label, never in the id.
+ */
+function sessionDisplayHandle(sessionId: string): string {
+  if (!sessionId || sessionId === "default") return "";
+  if (sessionId.startsWith("ws-")) return `workstation#${sessionId.slice(3)}`;
+  return sessionId;
+}
+
 export function WorkstationSidebar({
   sidebarOpen,
   setSidebarOpen,
@@ -189,6 +202,14 @@ export function WorkstationSidebar({
                           </span>
                         )}
                       </div>
+                      {sessionDisplayHandle(sessId) && (
+                        <div
+                          className="truncate text-[9px] font-mono text-muted-dim"
+                          title={sessId}
+                        >
+                          {sessionDisplayHandle(sessId)}
+                        </div>
+                      )}
                     </div>
                   );
                 })

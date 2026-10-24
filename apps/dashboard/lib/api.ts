@@ -123,6 +123,16 @@ export const api = {
     return normalizeSessionList(data);
   },
 
+  createSession: (sessionId?: string) =>
+    apiClient<{ session_id: string; display_name?: string; status?: string }>(
+      "/workstation/session",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+      },
+    ),
+
   deleteSession: (sessionId: string) =>
     apiClient<any>(`/workstation/session?session_id=${encodeURIComponent(sessionId)}`, {
       method: "DELETE",

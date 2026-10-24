@@ -152,11 +152,21 @@ function SonicDevinWorkstation() {
   const handleNewSession = async () => {
     abortPollRef.current = true;
     setLoading(false);
-    const newSessionId = `mission-${
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID().slice(0, 8)
-        : Math.random().toString(36).substring(2, 10)
-    }`;
+    // The backend mints the id so every session has one canonical,
+    // URL-safe handle (ws-<hex>). The old client-side `mission-xxxxxxxx` id
+    // did not match the server's naming and could not be validated.
+    let newSessionId = "";
+    try {
+      const created = await api.createSession();
+      newSessionId = created?.session_id || "";
+    } catch (err: any) {
+      setErrorMessage(err.message || "Could not create a new session.");
+      return;
+    }
+    if (!newSessionId) {
+      setErrorMessage("Backend did not return a session id.");
+      return;
+    }
     setSessionId(newSessionId);
     setActiveFile("");
     setFileContent([]);

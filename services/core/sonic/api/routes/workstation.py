@@ -65,6 +65,12 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
+# Session ids are server-minted as ``ws-<16 hex>``. The stored id stays free of
+# URL fragment delimiters and shell metacharacters; the ``workstation#<token>``
+# form is a display handle derived from it (see ``_session_display_name``).
+_SESSION_ID_PREFIX = "ws-"
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
+
 _primary_computer_instance: Any | None = None
 _daytona_provider_instance: Any | None = None
 _foreground_operator_lock = asyncio.Lock()
@@ -444,8 +450,62 @@ def _persist_workstation_state() -> None:
 _load_workstation_state()
 
 
+def _session_display_name(session_id: str) -> str:
+    """Human-readable label for a session.
+
+    The stored id must stay URL- and shell-safe, so a session's display handle
+    uses ``workstation#<token>`` while the id itself stays ``ws-<token>``. The
+    ``#`` therefore only ever appears in presentation, never in a query string
+    or a command.
+    """
+    if session_id == "default":
+        return "New conversation"
+    if session_id.startswith(_SESSION_ID_PREFIX):
+        return f"workstation#{session_id[len(_SESSION_ID_PREFIX):]}"
+    # Legacy/pre-existing ids (e.g. mission-xxxxxxxx) keep their old label.
+    return f"Session {session_id[-8:]}"
+
+
+def _is_valid_session_id(session_id: str) -> bool:
+    """True when a client-supplied session id is safe to store and address.
+
+    Restricted to alphanumerics and dashes. That is enough to guarantee the id
+    can never carry a URL fragment delimiter (``#``), a shell metacharacter, a
+    whitespace, or a path separator -- while still accepting every id that
+    existing callers and stored sessions already use.
+    """
+    if not isinstance(session_id, str):
+        return False
+    if session_id == "default":
+        return True
+    return _SESSION_ID_RE.fullmatch(session_id) is not None
+
+
+def _require_valid_session_id(session_id: str) -> str:
+    """Validate a client-supplied session id or reject the request."""
+    if not _is_valid_session_id(session_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Invalid session_id. Use letters, digits and dashes "
+                "(max 64 chars), or omit it to let the server mint one."
+            ),
+        )
+    return session_id
+
+
+def _new_session_id() -> str:
+    """Mint a server-side session id: ``ws-<16 hex chars>``."""
+    return f"{_SESSION_ID_PREFIX}{uuid.uuid4().hex[:16]}"
+
+
 def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[str, Any]:
     """Retrieves or initializes a tenant-isolated workstation session."""
+    if not _is_valid_session_id(session_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid session_id '{session_id}'.",
+        )
     if tenant_id not in _tenant_workstations:
         _tenant_workstations[tenant_id] = {}
 
@@ -459,11 +519,7 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
         active_ws = str(def_desk.get("workspace_id") or def_desk.get("sandbox_id") or "") or active_ws
 
     if session_id not in _tenant_workstations[tenant_id]:
-        session_name = (
-            "New conversation"
-            if session_id == "default"
-            else f"Session {session_id[-8:]}"
-        )
+        session_name = _session_display_name(session_id)
         _tenant_workstations[tenant_id][session_id] = {
             "session_id": session_id,
             "tenant_id": tenant_id,
@@ -531,8 +587,7 @@ def _get_or_create_session(tenant_id: str, session_id: str = "default") -> dict[
         session = _tenant_workstations[tenant_id][session_id]
         if isinstance(session, dict) and not session.get("session_name"):
             session["session_name"] = (
-                session.get("mission_name")
-                or ("New conversation" if session_id == "default" else f"Session {session_id[-8:]}")
+                session.get("mission_name") or _session_display_name(session_id)
             )
         if isinstance(session, dict) and not session.get("mission_name"):
             session["mission_name"] = session["session_name"]
@@ -1458,8 +1513,8 @@ async def list_workstation_sessions(user: User = Depends(require_auth)):
             continue
         result.append({
             "session_id": sid,
-            "session_name": sdata.get("session_name") or sdata.get("mission_name") or f"Session {sid[-8:]}",
-            "mission_name": sdata.get("mission_name") or sdata.get("session_name") or f"Session {sid[-8:]}",
+            "session_name": sdata.get("session_name") or sdata.get("mission_name") or _session_display_name(sid),
+            "mission_name": sdata.get("mission_name") or sdata.get("session_name") or _session_display_name(sid),
             "status": sdata.get("status", "IDLE"),
             "workspace_id": _session_workspace_id_for_tenant(tenant_id, sid),
             "git_branch": sdata.get("git_branch") or "",
@@ -1467,6 +1522,54 @@ async def list_workstation_sessions(user: User = Depends(require_auth)):
             "last_action": sdata.get("current_action") or "Ready when you are.",
         })
     return result
+
+
+@router.post("/workstation/session")
+async def create_workstation_session(
+    body: dict[str, Any] | None = None,
+    user: User = Depends(require_operator),
+):
+    """Create a new workstation session and return its server-minted id.
+
+    The id is minted here rather than by the client so every session is
+    addressable by one canonical, URL- and shell-safe form (``ws-<16 hex>``).
+    An optional client-supplied ``session_id`` is accepted for backward
+    compatibility but must be valid, and a collision with an existing session
+    is rejected instead of silently returning someone else's session.
+    """
+    tenant_id = _resolve_tenant_id(user)
+    payload = body or {}
+    requested = str(payload.get("session_id") or "").strip()
+
+    if requested:
+        _require_valid_session_id(requested)
+        if requested == "default":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="'default' is a reserved session id and cannot be created.",
+            )
+        if requested in _tenant_workstations.get(tenant_id, {}):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Session '{requested}' already exists.",
+            )
+        session_id = requested
+    else:
+        # Mint until we land on an unused id (collisions are astronomically
+        # unlikely, but this keeps the invariant honest rather than assumed).
+        session_id = _new_session_id()
+        while session_id in _tenant_workstations.get(tenant_id, {}):
+            session_id = _new_session_id()
+
+    session = _get_or_create_session(tenant_id, session_id)
+    _persist_workstation_state()
+    logger.info("workstation_session_created", tenant_id=tenant_id, session_id=session_id)
+
+    return {
+        "session_id": session_id,
+        "display_name": session.get("session_name") or _session_display_name(session_id),
+        "status": session.get("status", "IDLE"),
+    }
 
 
 @router.delete("/workstation/session")
