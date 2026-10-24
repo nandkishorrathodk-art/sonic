@@ -288,27 +288,103 @@ function workerStatusClass(status: string): string {
   return "border-amber-500/25 bg-amber-500/10 text-amber-300";
 }
 
-function WorkerDetail({ worker }: { worker: WorkerActivity }) {
-  const steps = worker.steps || [];
+function WorkerDetail({
+  worker,
+  sessionId,
+}: {
+  worker: WorkerActivity;
+  sessionId: string;
+}) {
+  // The card is rendered from worklog events, which can lag or be truncated.
+  // Expanding it asks the backend for the authoritative record of this worker
+  // so the operator sees what it is doing now, not what it did when the last
+  // event arrived. The worklog-derived view stays as the fallback, so a failed
+  // fetch degrades to what we already had instead of an empty panel.
+  const [live, setLive] = useState<WorkerActivity | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [fetching, setFetching] = useState(false);
+
+  const agentUid = worker.agentUid;
+
+  useEffect(() => {
+    if (!agentUid) return;
+    let cancelled = false;
+    setFetching(true);
+    setFetchError(null);
+    api
+      .getWorkstationAgent(agentUid, sessionId)
+      .then((response: { worker?: WorkstationWorker }) => {
+        if (cancelled) return;
+        const record = response?.worker;
+        if (!record) {
+          setFetchError("Backend returned no record for this worker.");
+          return;
+        }
+        setLive(workersFromServer([record], [])[0] || null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setFetchError(err instanceof Error ? err.message : "Could not load live worker state.");
+      })
+      .finally(() => {
+        if (!cancelled) setFetching(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentUid, sessionId]);
+
+  const view = live || worker;
+  const steps = view.steps || [];
   return (
     <div className="mt-2 space-y-2 border-t border-ink-750 pt-2">
+      <div className="flex items-center gap-1.5 text-[9px] text-muted-dim">
+        {fetching ? (
+          <>
+            <Loader2 className="h-3 w-3 animate-spin" />
+            <span>Loading live worker state…</span>
+          </>
+        ) : live ? (
+          <span className="rounded border border-emerald-800 bg-emerald-950 px-1.5 py-0.5 text-emerald-300">
+            live
+          </span>
+        ) : null}
+        {fetchError && (
+          <span className="rounded border border-amber-800 bg-amber-950 px-1.5 py-0.5 text-amber-300">
+            {fetchError} · showing last known events
+          </span>
+        )}
+      </div>
       <div>
         <p className="text-[9px] uppercase tracking-wide text-muted-dim">Goal</p>
-        <p className="mt-0.5 text-[10.5px] leading-relaxed text-slate-200">{worker.goal}</p>
+        <p className="mt-0.5 text-[10.5px] leading-relaxed text-slate-200">{view.goal}</p>
       </div>
-      {worker.latestThought && (
+      {view.latestAction && (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">Current activity</p>
+          <p className="mt-0.5 text-[10.5px] leading-relaxed text-slate-200">
+            {view.latestAction}
+            {view.latestActionStatus && (
+              <span className="ml-1 text-[9.5px] text-muted-dim">
+                {view.latestActionStatus.toLowerCase()}
+              </span>
+            )}
+          </p>
+        </div>
+      )}
+      {view.latestThought && (
         <div>
           <p className="text-[9px] uppercase tracking-wide text-muted-dim">Latest thinking</p>
           <p className="mt-0.5 line-clamp-4 whitespace-pre-wrap text-[10.5px] leading-relaxed text-slate-300">
-            {worker.latestThought}
+            {view.latestThought}
           </p>
         </div>
       )}
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9.5px] text-muted-dim">
-        {worker.agentUid && <span>uid: {worker.agentUid}</span>}
-        {worker.agentId && <span>agent: {worker.agentId}</span>}
-        {worker.subMissionId && <span>mission: {worker.subMissionId}</span>}
-        {worker.step_count !== undefined && <span>{worker.step_count} steps</span>}
+        {view.agentUid && <span>uid: {view.agentUid}</span>}
+        {view.agentId && <span>agent: {view.agentId}</span>}
+        {view.subMissionId && <span>mission: {view.subMissionId}</span>}
+        {view.step_count !== undefined && <span>{view.step_count} steps</span>}
       </div>
       {steps.length > 0 && (
         <div>
@@ -335,24 +411,24 @@ function WorkerDetail({ worker }: { worker: WorkerActivity }) {
           </ol>
         </div>
       )}
-      {worker.judgeVerdict && (
+      {view.judgeVerdict && (
         <div>
           <p className="text-[9px] uppercase tracking-wide text-muted-dim">Independent Judge</p>
           <p className="mt-0.5 text-[10.5px] text-amber-300">
-            {worker.judgeVerdict}
-            {worker.evidenceVerified === true
+            {view.judgeVerdict}
+            {view.evidenceVerified === true
               ? " · evidence confirmed"
-              : worker.judgeNotes
-                ? ` · ${worker.judgeNotes}`
+              : view.judgeNotes
+                ? ` · ${view.judgeNotes}`
                 : " · evidence not confirmed"}
           </p>
         </div>
       )}
-      {worker.keyDiscoveries && worker.keyDiscoveries.length > 0 && (
+      {view.keyDiscoveries && view.keyDiscoveries.length > 0 && (
         <div>
           <p className="text-[9px] uppercase tracking-wide text-muted-dim">Discoveries</p>
           <ul className="mt-1 space-y-0.5">
-            {worker.keyDiscoveries.map((discovery, index) => (
+            {view.keyDiscoveries.map((discovery, index) => (
               <li key={`${worker.key}-disc-${index}`} className="text-[10px] text-secondary-300">
                 {discovery}
               </li>
@@ -360,14 +436,14 @@ function WorkerDetail({ worker }: { worker: WorkerActivity }) {
           </ul>
         </div>
       )}
-      {(worker.fileReferences?.length || worker.testResults?.length) ? (
+      {(view.fileReferences?.length || view.testResults?.length) ? (
         <div>
           <p className="text-[9px] uppercase tracking-wide text-muted-dim">
             Verifiable evidence
           </p>
-          {worker.fileReferences && worker.fileReferences.length > 0 && (
+          {view.fileReferences && view.fileReferences.length > 0 && (
             <ul className="mt-1 space-y-0.5">
-              {worker.fileReferences.map((ref, index) => (
+              {view.fileReferences.map((ref, index) => (
                 <li
                   key={`${worker.key}-file-${index}`}
                   className="flex items-center gap-1.5 text-[10px] text-slate-300"
@@ -380,9 +456,9 @@ function WorkerDetail({ worker }: { worker: WorkerActivity }) {
               ))}
             </ul>
           )}
-          {worker.testResults && worker.testResults.length > 0 && (
+          {view.testResults && view.testResults.length > 0 && (
             <ul className="mt-1 space-y-0.5">
-              {worker.testResults.map((test, index) => {
+              {view.testResults.map((test, index) => {
                 const green =
                   (test.failed || 0) === 0 &&
                   (test.errors || 0) === 0 &&
@@ -412,7 +488,7 @@ function WorkerDetail({ worker }: { worker: WorkerActivity }) {
             </ul>
           )}
         </div>
-      ) : worker.evidenceIncomplete ? (
+      ) : view.evidenceIncomplete ? (
         <div>
           <p className="text-[9px] uppercase tracking-wide text-muted-dim">
             Verifiable evidence
@@ -423,11 +499,11 @@ function WorkerDetail({ worker }: { worker: WorkerActivity }) {
           </p>
         </div>
       ) : null}
-      {worker.findings && (
+      {view.findings && (
         <div>
           <p className="text-[9px] uppercase tracking-wide text-muted-dim">Report</p>
           <p className="mt-0.5 whitespace-pre-wrap text-[10.5px] leading-relaxed text-slate-300">
-            {worker.findings}
+            {view.findings}
           </p>
         </div>
       )}
@@ -438,9 +514,11 @@ function WorkerDetail({ worker }: { worker: WorkerActivity }) {
 function WorkerBoard({
   workers,
   missionRunning,
+  sessionId,
 }: {
   workers: WorkerActivity[];
   missionRunning: boolean;
+  sessionId: string;
 }) {
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   if (workers.length === 0) return null;
@@ -570,7 +648,7 @@ function WorkerBoard({
                     )}
                 </div>
               </button>
-              {expanded && <WorkerDetail worker={worker} />}
+              {expanded && <WorkerDetail worker={worker} sessionId={sessionId} />}
             </article>
           );
         })}
@@ -1085,6 +1163,7 @@ export function WorklogFeed({
             <WorkerBoard
               workers={workerActivities}
               missionRunning={missionTaskAlive ?? !isFinished}
+              sessionId={sessionId}
             />
             {displayItems.map((item, idx) => {
             const itemId = item.id || `item-${idx}`;
