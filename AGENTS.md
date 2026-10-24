@@ -3855,3 +3855,49 @@ however, lives in several tenant-scoped stores that never talked to each other.
   live multi-source retrieval quality on a real desktop is not claimed; the
   configured embedding/planner models must be measured with
   `python -m sonic.memory.retrieval_eval` before claiming retrieval quality.
+
+## Boss worker observability — audit correction + UI wiring (2026-10-23)
+
+A reported gap ("subagent ids are broken; clicking an agent shows nothing") was
+investigated and **partly disproven**. Recording the correction so a future
+session does not repeat the wrong diagnosis.
+
+### What was actually already correct (do not "fix" these)
+- `agent_id` **is** run-unique. `BossAgent._sub_agent_count` is a single
+  instance counter incremented once per dispatched worker and is **not** reset
+  per phase (boss.py ~617), so Phase 1's `sub-agent-1` and Phase 2's are
+  different numbers. An earlier claim that it "repeats across phases" was
+  wrong.
+- `agent_uid` (`worker-<n>-<hex6>`) is the run-unique UI handle and travels on
+  every event (`sub_dispatch`, `sub_step`, `sub_heartbeat`, `sub_report`).
+- The backend observability layer is **complete**: `computer_use/agent_activity.py`
+  projects the worklog into per-worker truth (`RUNNING` only while the owning
+  background task is alive, else `INTERRUPTED` — never a stale RUNNING), and
+  three authenticated, tenant-scoped routes expose it:
+  `GET /workstation/agents`, `GET /workstation/agents/{agent_uid}`,
+  `POST /workstation/agents/{agent_uid}/message`.
+- `apps/dashboard/lib/api.ts` already declared `getWorkstationAgents`,
+  `getWorkstationAgent`, `messageWorkstationAgent`.
+
+### The real gap (what was fixed)
+Those API client functions had **zero callers**, and the `/agents` page
+rendered static `div` cards with no click handler. So the authoritative worker
+record was unreachable from the UI, and `WorkerDetail` in `WorklogFeed.tsx`
+rendered only from in-memory worklog events (which can lag or be truncated).
+
+Fixed:
+- `WorklogFeed.tsx`: `WorkerDetail` now fetches
+  `GET /workstation/agents/{uid}` on expand (loading / `live` / error states,
+  worklog view as fallback). `sessionId` threaded through `WorkerBoard`.
+- `app/agents/page.tsx`: new "Live Boss workers" section; each card is
+  clickable and loads current activity, recent steps and Judge verdict.
+- `tests/test_worker_detail_api_contract.py` (5 tests) pins the exact response
+  shape the newly-wired UI reads (`workers[]`, `worker{}`, `is_running`,
+  `latest_action`/`latest_thought`, `steps`, `step_count`) plus 404 and
+  cross-tenant non-leakage — so a backend rename cannot silently break the
+  drill-down while existing tests still pass.
+
+Verified: 70 related backend tests pass, ruff clean, `tsc --noEmit` clean,
+`next build` clean (21 routes; `/agents` grew from a stub to 5.07 kB).
+Honesty: no live Boss mission was run (no model credentials / Docker here);
+this validates the wiring and the API contract, not live mission success.
