@@ -147,6 +147,31 @@ when it is unavailable. Passing this suite does not substitute for the
 multi-application acceptance test described in
 [`docs/SONIC_COMPUTER_USER_GOAL.md`](docs/SONIC_COMPUTER_USER_GOAL.md).
 
+## Benchmarks
+
+Measured performance for the local decision layers, with a head-to-head
+comparison against TypeSafe's hosted **Jev** model, is in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+Highlights from that run (CPU-only, 1920×1080):
+
+| Layer | Metric | Value |
+|---|---|---|
+| AVCS reflex perception | latency p50 | **20.5 ms** |
+| AVCS narration | latency p50 | **34.4 ms** |
+| AVCS cortex (1.14 M params) | held-out category accuracy | **0.578** (chance 0.125) |
+| AVCS cortex | affordance pixel accuracy / mIoU | **0.964 / 0.702** |
+| Laya plane routing | accuracy | **12/12** |
+| Laya guard (Noul) | precision / recall | **1.000 / 0.214** |
+| Laya predict | latency p50 | **0.040 ms** |
+| Safety classifier | F1 | **0.783** |
+
+The key finding: Laya's zero-RAM fallback is high-precision but low-recall on
+dangerous commands, so the deterministic safety classifier remains the
+authority. Jev exposes the same primitive contract and is a candidate drop-in,
+but no Jev request was made in this environment (no API key), so its figures
+are vendor specifications only. See the document for what is and is not proven.
+
 ## Product principles
 
 - Start from the operator's requested outcome; do not force an application or tool sequence.
