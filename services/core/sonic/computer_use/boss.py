@@ -123,6 +123,7 @@ class BossAgent:
         toolsmith: Any = None,
         method_lab: Any = None,
         lessons_ledger: Any = None,
+        multi_context_sources: list[Any] | None = None,
         evolution_engine: Any = None,
         initial_context: dict[str, Any] | None = None,
         gui_only: bool = False,
@@ -201,6 +202,7 @@ class BossAgent:
         self.toolsmith = toolsmith
         self.method_lab = method_lab
         self.lessons_ledger = lessons_ledger
+        self.multi_context_sources = list(multi_context_sources or [])
         self.evolution_engine = evolution_engine
         self.initial_context = dict(initial_context or {})
         self.gui_only = gui_only
@@ -1317,6 +1319,7 @@ Rules:
                 method_lab=self.method_lab,
                 lessons_ledger=self.lessons_ledger,
                 evolution_engine=self.evolution_engine,
+                multi_context_sources=self.multi_context_sources,
                 gui_only=False,
                 observe_desktop=(execution_plane == "gui"),
                 execution_plane=execution_plane,

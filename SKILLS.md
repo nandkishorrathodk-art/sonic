@@ -123,6 +123,13 @@ never fabricates a skill.
       "evidence": "sonic/being/lessons.py, sonic/memory/agentic.py"
     },
     {
+      "name": "multi_context_retrieval",
+      "category": "memory",
+      "status": "available",
+      "summary": "Fuse vector memory, graph findings and episodic history into one bounded, deduplicated, cited context pack; optionally refined by LLM query planning.",
+      "evidence": "sonic/memory/multi_context.py"
+    },
+    {
       "name": "verified_computer_skills",
       "category": "memory",
       "status": "not_wired",

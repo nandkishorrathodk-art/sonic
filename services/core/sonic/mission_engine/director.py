@@ -74,6 +74,33 @@ class MissionDirector:
         # Persistent backing store (Redis with in-memory fallback)
         self.store = state_store or MissionStateStore()
 
+    async def _build_multi_context_sources(self, tenant_id: str) -> list[Any]:
+        """Compose the multi-context memory sources available to this process.
+
+        Graph memory is an async backend, so it is resolved through the memory
+        router; vector + episodic stores are always local. A source that cannot
+        be constructed is simply omitted — multi-context degrades to the sources
+        that do exist, never fails the mission.
+        """
+        from sonic.memory.episodic import EpisodicMemory
+        from sonic.memory.multi_context import build_default_sources
+        from sonic.memory.router import get_smart_memory
+        from sonic.memory.vector import get_vector_memory
+
+        try:
+            graph_memory = await get_smart_memory()
+        except Exception:
+            graph_memory = None
+        try:
+            return build_default_sources(
+                vector_memory=get_vector_memory(),
+                graph_memory=graph_memory,
+                episodic_memory=EpisodicMemory(),
+            )
+        except Exception as exc:
+            logger.warning("multi_context_sources_build_failed", error=str(exc))
+            return []
+
     async def connect_store(self) -> bool:
         """Initialize the state store connection. Call once at startup."""
         return await self.store.connect()
@@ -344,6 +371,7 @@ class MissionDirector:
             toolsmith=toolsmith,
             lessons_ledger=lessons_ledger,
         )
+        multi_context_sources = await self._build_multi_context_sources(state.tenant_id)
 
         workspace_root = "/home/sonic/workspace"
         if getattr(state, "objective", None) and getattr(state.objective, "scope", None):
@@ -381,6 +409,7 @@ class MissionDirector:
             method_lab=method_lab,
             lessons_ledger=lessons_ledger,
             evolution_engine=evolution_engine,
+            multi_context_sources=multi_context_sources,
         )
 
         ms_goal = (
@@ -573,6 +602,7 @@ class MissionDirector:
                 toolsmith=toolsmith,
                 lessons_ledger=lessons_ledger,
             )
+            multi_context_sources = await self._build_multi_context_sources(obj_tenant)
 
             workspace_root = "/home/sonic/workspace"
             if getattr(state, "objective", None) and getattr(state.objective, "scope", None):
@@ -606,6 +636,7 @@ class MissionDirector:
                         method_lab=method_lab,
                         lessons_ledger=lessons_ledger,
                         evolution_engine=evolution_engine,
+                        multi_context_sources=multi_context_sources,
                         gui_only=False,
                     )
                     report = await boss.run(

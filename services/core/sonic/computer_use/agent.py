@@ -353,6 +353,7 @@ class ComputerUseAgent:
         tenant_id: str = "default",
         engagement_id: str = "default",
         agent_id: str = "computer-use-agent",
+        multi_context_sources: list[Any] | None = None,
         enable_llm_verification: bool = False,
         enable_llm_decomposition: bool = False,
         compact_mode: bool | None = None,
@@ -449,6 +450,13 @@ class ComputerUseAgent:
         self.lessons_ledger = lessons_ledger
         self._agentic_lessons_goal: str | None = None
         self._agentic_lessons: list[Any] = []
+        # Multi-context retrieval: fuse several tenant-scoped memory sources
+        # (vector, graph findings, episodes) into one bounded pack. None or an
+        # empty list disables it; a single source still works.
+        self.multi_context_sources = list(multi_context_sources or [])
+        self._multi_context_goal: str | None = None
+        self._multi_context_block: str = ""
+        self._multi_context_pack: Any | None = None
         self.skill_ledger = skill_ledger
         # Optional Self-Evolution Engine: coordinates dynamic strategy, novel method invention,
         # toolsmithing, cross-mission learning, and codebase evolution.
@@ -2517,6 +2525,15 @@ class ComputerUseAgent:
             )
             lessons_block = inject_into_context(lessons)
 
+        # Multi-context pack (fused vector + graph findings + episodes). Only
+        # injected when the async pre-fetch ran for this same goal; otherwise
+        # empty, so a fresh being adds no noise.
+        multi_context_block = (
+            getattr(self, "_multi_context_block", "")
+            if getattr(self, "_multi_context_goal", None) == goal
+            else ""
+        )
+
         # Capability catalog (SKILLS.md). Advisory routing context so a worker
         # knows which skills exist and which are fail-closed; it grants no
         # permission and cannot widen the safety envelope.
@@ -2834,6 +2851,7 @@ class ComputerUseAgent:
             f"Git branch: {git_branch_str}, clean: {observation.git_clean}\n"
             f"Primary file: {primary_file_str}, Test file: {test_file_str}\n"
             f"{lessons_block}"
+            f"{multi_context_block}"
             f"{skill_catalog_block}"
             f"{living_block}"
         )
@@ -3363,6 +3381,43 @@ class ComputerUseAgent:
                 logger.warning("agentic_rag_lesson_retrieval_failed", error=str(exc))
                 self._agentic_lessons = self.lessons_ledger.relevant(goal)
                 self._agentic_lessons_goal = goal
+
+        # Multi-context retrieval: fuse the available memory sources once per
+        # goal so the reasoning prompt gets one coherent, cited picture. When a
+        # router is available the agentic planner refines the query first.
+        if getattr(self, "multi_context_sources", None) and getattr(
+            self, "_multi_context_goal", None
+        ) != goal:
+            try:
+                from sonic.memory.multi_context import (
+                    AgenticMultiContextRetriever,
+                    MultiContextAssembler,
+                    render_multi_context,
+                )
+
+                assembler = MultiContextAssembler(self.multi_context_sources)
+                if self.llm_router is not None:
+                    retriever = AgenticMultiContextRetriever(
+                        assembler, self.llm_router
+                    )
+                    pack = await retriever.retrieve(goal, tenant_id=self.tenant_id)
+                else:
+                    pack = await assembler.assemble(goal, tenant_id=self.tenant_id)
+                self._multi_context_pack = pack
+                self._multi_context_block = render_multi_context(pack)
+                self._multi_context_goal = goal
+                logger.info(
+                    "multi_context_assembled",
+                    tenant_id=self.tenant_id,
+                    items=len(pack.items),
+                    sources_used=list(pack.sources_used),
+                    sources_failed=list(pack.sources_failed),
+                )
+            except Exception as exc:
+                logger.warning("multi_context_assembly_failed", error=str(exc))
+                self._multi_context_block = ""
+                self._multi_context_pack = None
+                self._multi_context_goal = goal
 
         plane = str(getattr(self, "execution_plane", "dual") or "dual").lower().strip()
         gui_reasoning = (
@@ -9549,6 +9604,9 @@ class ComputerUseAgent:
         self._active_workspace_id = workspace_id
         self._agentic_lessons_goal = None
         self._agentic_lessons = []
+        self._multi_context_goal = None
+        self._multi_context_block = ""
+        self._multi_context_pack = None
         t_start = time.perf_counter()
         self._interrupted = False
         interrupt_event = getattr(self, "_interrupt_event", None)

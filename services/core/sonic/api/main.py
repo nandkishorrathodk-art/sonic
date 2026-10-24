@@ -160,6 +160,21 @@ async def _maybe_start_being_life_loop(settings):
             queue_self_update_goal=False,
         )
         self_coder.configure_evolution_engine(evolution_engine)
+        # Multi-context: fuse vector + graph findings + episodes for the being's
+        # self-directed reasoning too.
+        from sonic.memory.episodic import EpisodicMemory
+        from sonic.memory.multi_context import build_default_sources
+        from sonic.memory.router import get_smart_memory
+
+        try:
+            graph_memory = await get_smart_memory()
+        except Exception:
+            graph_memory = None
+        multi_context_sources = build_default_sources(
+            vector_memory=get_vector_memory(),
+            graph_memory=graph_memory,
+            episodic_memory=EpisodicMemory(),
+        )
         agent = ComputerUseAgent(
             computer_provider=provider, llm_router=router,
             security_tools=security_registry.as_dict(),
@@ -170,6 +185,7 @@ async def _maybe_start_being_life_loop(settings):
             toolsmith=toolsmith,
             method_lab=method_lab,
             lessons_ledger=lessons_ledger,
+            multi_context_sources=multi_context_sources,
             evolution_engine=evolution_engine,
             being_mind=get_being_store().get_mind(being.being_id),
         )

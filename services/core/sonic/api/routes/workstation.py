@@ -3934,6 +3934,23 @@ async def _run_prompt_reasoning(
                             semantic_memory=vec_mem,
                         )
 
+                        # Multi-context: fuse vector memory, graph findings and
+                        # episodic history so workers reason from one coherent,
+                        # cited picture instead of a single store.
+                        from sonic.memory.episodic import EpisodicMemory
+                        from sonic.memory.multi_context import build_default_sources
+                        from sonic.memory.router import get_smart_memory
+
+                        try:
+                            graph_memory = await get_smart_memory()
+                        except Exception:
+                            graph_memory = None
+                        multi_context_sources = build_default_sources(
+                            vector_memory=vec_mem,
+                            graph_memory=graph_memory,
+                            episodic_memory=EpisodicMemory(),
+                        )
+
                         # Every actionable workstation objective is planned and
                         # delegated by Boss. Simple objectives naturally become
                         # a single bounded worker instead of bypassing orchestration.
@@ -3952,6 +3969,7 @@ async def _run_prompt_reasoning(
                                 toolsmith=toolsmith,
                                 method_lab=method_lab,
                                 lessons_ledger=lessons_ledger,
+                                multi_context_sources=multi_context_sources,
                                 max_phases=4,
                                 sub_agent_steps=25,
                                 gui_only=False,

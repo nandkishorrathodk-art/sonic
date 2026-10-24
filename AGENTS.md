@@ -3790,3 +3790,68 @@ success without verifiable evidence" warning).
 These close real coordination seams and are unit/route-verified. No live Boss
 mission with a real LLM was run in this environment, so live parallel-worker
 steering on a real desktop is not claimed.
+
+## Multi-context retrieval + agentic-RAG extension (2026-10-24)
+
+The operator asked to tackle "multi-context" and "agentic-RAG" in SONIC. Recon
+found that **"multi-context" had zero references anywhere** in the codebase, and
+agentic-RAG was limited to a single store: `AgenticRetriever` (`memory/agentic.py`)
+refines queries only over `VectorMemory`, consumed by `being/lessons.py`
+(`relevant_agentic`) and injected as REUSE/AVOID lessons. The being's knowledge,
+however, lives in several tenant-scoped stores that never talked to each other.
+
+### `sonic/memory/multi_context.py` (NEW) — fuse independent memory sources
+- `ContextSource` protocol + three adapters, each tenant-scoped:
+  - `VectorContextSource` — wraps `VectorMemory.search` (sync store).
+  - `GraphFindingSource` — wraps `GraphMemory.search_findings` (async backend;
+    works with Neo4j / SqliteGraph / InMemoryGraph, all of which expose it).
+  - `EpisodicContextSource` — keyword-ranks past `Episode`s.
+- `build_default_sources(...)` composes whatever stores exist; a missing store
+  is simply omitted (degrades, never fails).
+- `MultiContextAssembler.assemble(query, tenant_id)` queries every source,
+  **fuses by reciprocal-rank** (a fact found by two sources outranks a
+  single-source hit), deduplicates by content fingerprint, and hard-bounds the
+  pack by `max_items`/`max_chars`/`per_source_limit`. A source that raises is
+  recorded in `sources_failed` and skipped — one bad backend never sinks the pack.
+- `render_multi_context(pack)` renders a compact `=== MULTI-CONTEXT ===` block;
+  empty pack renders `""` (zero prompt noise for a fresh being).
+- `AgenticMultiContextRetriever(assembler, llm_router)` — the agentic half:
+  the model judges sufficiency and proposes ≤2 alternate queries per round,
+  bounded to `max_rounds=2` / `max_queries=4`; each round re-fuses all sources.
+  Identical discipline to `AgenticRetriever`: the model plans queries only,
+  never invents evidence; repeated/invalid queries are rejected; a planner
+  failure leaves the initial pack intact.
+
+### Wiring
+- `ComputerUseAgent.__init__` gains `multi_context_sources`. `_llm_choose_action`
+  assembles the pack once per goal (agentic when a router exists) and
+  `_build_reasoning_context` injects `multi_context_block` beside the lessons
+  block; the block is goal-scoped so a stale pack never leaks across goals.
+  Per-mission state (`_multi_context_goal/_block/_pack`) is reset in `run_mission`.
+- `BossAgent` gains `multi_context_sources` and forwards it to every worker.
+- Production callers compose real sources: `api/routes/workstation.py`,
+  `api/main.py` (being life loop), and `MissionDirector._build_multi_context_sources`
+  (vector + graph via the memory router + episodic).
+- `SKILLS.md` catalog gains a `multi_context_retrieval` entry (`available`).
+
+### Tests (`services/core/tests/test_multi_context.py`, 26)
+- Adapters map rows→cited items and skip blanks; graph source is empty without
+  `search_findings`; episodic ranks by keyword overlap.
+- Fusion ranks multi-source hits higher; dedup collapses identical content and
+  merges citations; a failing source is recorded (not fatal); empty → empty pack
+  with no render; `max_items`/`max_chars` bounds enforced; tenant forwarded
+  unchanged; invalid args rejected.
+- Agentic: refines + merges across rounds; stops when sufficient; keeps initial
+  results on planner failure; bounded and rejects repeated queries; plan parser
+  rejects malformed/unbounded output; constructor bounds.
+- Agent wiring: the real `_build_reasoning_context` contains the block for the
+  matching goal, omits it for a different goal, and adds no noise with no sources.
+- `BossAgent` stores and forwards the sources.
+
+### Honesty
+- Full `services/core/tests`: 2324 passed, 40 skipped, 0 failures (was 2298/40/0).
+- Ruff clean on every changed file.
+- These are unit-level contracts. No live mission with a real LLM was run, so
+  live multi-source retrieval quality on a real desktop is not claimed; the
+  configured embedding/planner models must be measured with
+  `python -m sonic.memory.retrieval_eval` before claiming retrieval quality.
