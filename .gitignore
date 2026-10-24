@@ -80,3 +80,4 @@ profile.md
 services/core/sonic/research/_fast_graph*.so
 services/core/sonic/research/fast_graph*.so
 services/core/sonic/research/*.c
+runs/

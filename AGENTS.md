@@ -4057,3 +4057,81 @@ cause.
   figures are provider-tier conditions; a faster reachable model (or a
   configured second provider key) is still needed for reliable slow-tail GUI
   reasoning within the 60 s GUI budget.
+
+## AVCS "Live Talking Human Eye" made real on the live VNC desktop (2026-10-24)
+
+Track B of the Boss/observability session. The AVCS eye previously reported
+`live_narration: true` but had **never been exercised against a real desktop**,
+and the learned cortex had **no trained checkpoint anywhere in the repo**, so
+`learned_cortex_ready` was permanently false. Both are now real.
+
+### Docker daemon was simply not running in this environment
+`docker`/`dockerd` were installed but no daemon was up, which is why earlier
+sessions reported "Docker nahi hai". Starting `sudo dockerd` + building the
+workstation image made the real VNC desktop available:
+- `docker build -t sonic-workstation:latest -f docker/Dockerfile.workstation .`
+  (2.22 GB, includes Xvfb/XFCE4/x11vnc/noVNC/xdotool/wmctrl/scrot/firefox-esr).
+- Container `sonic-desktop-workstation` runs Xvfb `:99` **1920x1080x24**, XFCE4
+  session, x11vnc on 5900, noVNC on 6080 (HTTP 200 verified).
+
+### REAL BUG — the provider could not reach the Docker socket
+`DockerComputerProvider` shells out to `docker`, but the runtime user
+(`openhands`) was not in the `docker` group, so every call failed
+`permission denied ... /var/run/docker.sock` and the provider correctly
+fail-closed to `desktop_state=NO_DISPLAY` with `raw_rgb` empty. The awareness
+loop therefore started (`awareness_monitor_started`) but published **0 frames**
+and never narrated. This looked like "AVCS is broken"; it was an access bug.
+Fix (environment): `usermod -aG docker openhands` + socket permission; after
+that the provider returned `INTERACTIVE`, 1920x1080, 6.2 MB raw frames and
+`avcs_raw_frame_processed` streamed at ~9-10 FPS.
+
+### AVCS eye verified end-to-end on real desktop pixels
+In-process run of the real `AwarenessMonitor` against the live container while
+real applications were opened:
+- `frames published: 27, capture errors: 0`
+- `lines spoken: 9`, e.g.
+  - `Active window: Terminal -. A mid-tone, detailed screen. A new block appeared in the bottom left on top of the scene.`
+  - `Active window: root - Thunar. A new block appeared in the centre on top of the scene.`
+- Learned cortex semantics rode along: `category=terminal_shell`, 3 action
+  hotspots — i.e. the cortex correctly read the terminal scene.
+- Silence on unchanged frames and narration only on real change (no flooding),
+  matching the narrator's design contract.
+
+### AVCS cortex trained on real captured desktop frames
+No checkpoint existed in the repo. Captured **40 real 1920x1080 X11 frames**
+from the live desktop (downscaled to 640x360) while opening/moving real apps,
+wrote a `video_ingest.json` with honest provenance
+(`watched_video_unlabeled_pixels`, no invented labels), and trained the cortex:
+predictive loss 0.15 -> 0.08 over 12 epochs (~3.7 s/epoch on CPU).
+- Checkpoint: `sonic_data/avcs/cortex_model.pt` (1.14 M params, 4.5 MB).
+  `sonic_data/` is gitignored, so the binary is not committed.
+- `.env`: `SONIC_AVCS_CORTEX_CHECKPOINT=sonic_data/avcs/cortex_model.pt`.
+- `ensure_cortex_ready()` -> `cortex_ready=True`; `perceive_semantics_rgb()`
+  emits `primary_category`, `category_confidence`, `action_hotspots`,
+  `surprise_score`, `stability_state`, `text_density`.
+
+### Live capability surface after this pass
+`reflex_perception: true`, `live_narration: true`,
+`learned_cortex_configured: true`, `learned_cortex_ready: true`,
+`continuous_awareness: true`, `awareness_stats.running: true` (83+ frames,
+0 errors via the API). `semantic_grounding` and `gui_actions_ready` remain
+**false by design** — no evaluated AVCS grounding checkpoint exists, so
+semantic clicks and text entry stay blocked. That is the documented fail-closed
+contract, not a regression.
+
+### Tests
+`services/core/tests/test_avcs_talking_eye.py` (8): first frame describes the
+scene; unchanged frame is silent; a real change is narrated; narration carries
+the active window; the awareness loop publishes narration and never dispatches
+GUI actions; a narrator exception does not kill the loop; cortex semantics
+present with a checkpoint and honestly empty without one.
+Full `services/core` suite: **2372 passed, 40 skipped, 0 failures**; ruff clean.
+
+### Honest limits
+- The cortex was trained on ~40 frames of this one desktop for a short run; the
+  category accuracy is not measured against a held-out real-desktop set, so do
+  not claim general scene-understanding quality.
+- Narration is coarse (tone/motion/position/colour/change) by design: AVCS has
+  no OCR or semantic UI tree. It never reports what text says.
+- Semantic grounding / focus verification remain unbuilt; GUI text entry and
+  described-control clicks are still blocked.
