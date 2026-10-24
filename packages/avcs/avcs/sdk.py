@@ -230,6 +230,21 @@ class HumanEyeClient:
             return centroid
         return None
 
+    def _point_at(self, x: float, y: float) -> None:
+        """Move the pointer to normalized ``(x, y)`` using whatever the driver offers.
+
+        Drivers expose either ``move_to_normalized`` (the virtual and OS cursor
+        drivers) or ``move_to``. Calling ``move_to`` blindly raised
+        AttributeError on every driver in this package, so ``click`` and
+        ``type_and_verify`` could never run. Probe the capability instead.
+        """
+        if hasattr(self.motor_driver, "move_to_normalized"):
+            self.motor_driver.move_to_normalized(x, y)
+        elif hasattr(self.motor_driver, "move_to"):
+            self.motor_driver.move_to(x, y, realtime=False)
+        else:
+            raise RuntimeError("Cursor driver does not support pointer movement.")
+
     def click(
         self,
         target: Optional[str | Tuple[float, float]] = None,
@@ -244,7 +259,7 @@ class HumanEyeClient:
             state = self.current_state
             tx, ty = state.gaze_fixation
 
-        self.motor_driver.move_to(tx, ty, realtime=False)
+        self._point_at(tx, ty)
         if double_click:
             self.motor_driver.double_click(button=button)
         else:
@@ -312,7 +327,7 @@ class HumanEyeClient:
             coords = target
 
         if clear_first:
-            self.motor_driver.move_to(coords[0], coords[1], realtime=False)
+            self._point_at(coords[0], coords[1])
             self.motor_driver.click(button="left")
             self.motor_driver.press_hotkey("ctrl", "a")
             self.motor_driver.press_key("backspace")
