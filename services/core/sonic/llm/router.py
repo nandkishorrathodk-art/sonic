@@ -57,8 +57,11 @@ REFUSAL_PHRASES = (
     "unethical",
     "against safety policies",
     "against safety policy",
-    "as an ai",
     "i am unable to fulfill",
+    "i'm unable to fulfill",
+    "i cannot help with this",
+    "i can't help with this",
+    "i won't help with",
 )
 
 
@@ -88,12 +91,23 @@ class LLMBudgetEstimateUnavailableError(RuntimeError):
 
 
 def is_refusal_response(response: LLMResponse) -> bool:
-    """Detect if an LLM returned a safety refusal rather than an actionable answer."""
-    content = (response.content or "").lower()
-    reasoning = (response.reasoning_content or "").lower()
-    combined = f"{content} {reasoning}"
-    has_refusal = any(p in combined for p in REFUSAL_PHRASES)
-    has_action = bool(re.search(r"\baction\s*:\s*[a-z_]+", combined))
+    """Detect if an LLM returned a safety refusal rather than an actionable answer.
+
+    The verdict is made on the *answer* (``content``), not on the model's private
+    reasoning trace. A reasoning model routinely narrates refusal-adjacent wording
+    while still answering correctly ("the user asks X; I should not claim I cannot
+    assist"), and SONIC's own identity text ("...an AI-Human engineer") must never
+    read as a refusal. Reasoning is only consulted when the answer itself is empty,
+    which is the one case where a refusal can live solely in the trace.
+    """
+    content = (response.content or "").strip()
+    reasoning = (response.reasoning_content or "").strip()
+    answer_text = content if content else reasoning
+    if not answer_text:
+        return False
+    lowered = answer_text.lower()
+    has_refusal = any(p in lowered for p in REFUSAL_PHRASES)
+    has_action = bool(re.search(r"\baction\s*:\s*[a-z_]+", lowered))
     return has_refusal and not has_action
 
 

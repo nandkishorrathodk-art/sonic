@@ -3526,6 +3526,22 @@ _WORKSTATION_PERCEPTION_CONTRACT = (
 )
 
 
+def _workstation_chat_timeout_seconds() -> float:
+    """Per-request budget for workstation chat reasoning.
+
+    Provider reasoning latency is variable and can exceed the historical 25 s
+    ceiling on slow tails, which surfaced as intermittent "LLM Response
+    Unavailable" worklog entries. The budget stays bounded (floor 10 s, ceiling
+    300 s) so a genuinely stuck call still fails closed.
+    """
+    raw = os.environ.get("SONIC_WORKSTATION_CHAT_TIMEOUT_SECONDS", "").strip()
+    try:
+        value = float(raw) if raw else 25.0
+    except ValueError:
+        value = 25.0
+    return min(300.0, max(10.0, value))
+
+
 def _generate_grounded_workstation_response(
     prompt: str,
     session_id: str,
@@ -4750,7 +4766,7 @@ async def _run_prompt_reasoning(
                             task_type="reasoning",
                         )
                     ),
-                    timeout=25,
+                    timeout=_workstation_chat_timeout_seconds(),
                 )
                 if llm_res and (llm_res.content or llm_res.reasoning_content):
                     if llm_res.reasoning_content:

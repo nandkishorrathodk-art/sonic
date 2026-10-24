@@ -3953,3 +3953,107 @@ Verified: full `services/core` suite **2349 passed, 40 skipped, 0 failures**;
 ruff clean; `tsc --noEmit` clean; `next build` clean (21 routes).
 Honesty: no live browser session was created; this validates the API contract,
 validation and rendering, not a live multi-session desktop run.
+
+## Boss subagent identity + live LLM path diagnostic (2026-10-24)
+
+Manual (no parallel subagents) live pass against the running backend on
+`127.0.0.1:12000` with real NVIDIA credentials from `.env`.
+
+### Confirmed working (live, not unit tests)
+- **Session minting + validation.** `POST /workstation/session` (operator-only)
+  returns `{"session_id":"ws-<hex>","display_name":"workstation#<hex>"}`.
+  Live status codes: `workstation#abc` → 400, `ws-abc;id` → 400, `default` → 400,
+  duplicate id → 409, unauthenticated → 401. Canonical id stays `ws-<hex>`; the
+  `#` appears only in the display label. 12 tests pass; ruff clean.
+- **Subagent identity model.** `SubMissionResult` carries `agent_uid` (stable,
+  run-unique, e.g. `worker-1-a1b2c3`) *separate* from positional `agent_id`
+  (restarts per Boss run). `workstation.py` exposes
+  `GET /workstation/agents/{agent_uid}` and
+  `POST /workstation/agents/{agent_uid}/message`, and emits `sub_dispatch` /
+  `sub_step` / `dispatch_decision` / `boss_thinking` / `boss_report` worklog
+  events keyed by `agent_uid`. The dashboard worker card is click-to-expand
+  (`WorklogFeed.tsx` `expandedKey` → `WorkerDetail`), so clicking a worker shows
+  what it is doing. This is the user's core ask and it is wired end-to-end.
+- **LLM reasoning is live.** `/llm/chat` → `nvidia/nemotron-3-ultra-550b-a55b`
+  in 1.3 s; router `task_type="reasoning"` → 1.8–1.9 s OK.
+- **AVCS reflex works** on real numpy frames: black→white change →
+  `scene_changed=True` (change_fraction 0.64); identical frames → False;
+  1-pixel edit → False but `scene_hash` **still differs** (agent verification
+  uses the hash, not the coarse threshold — correct and more sensitive).
+
+### Real findings (environmental / latency, NOT code defects)
+1. **Provider availability on this NVIDIA account tier.** Only
+   `nvidia/nemotron-3-ultra-550b-a55b` and `openai/gpt-oss-20b` answer (HTTP 200).
+   `nvidia/nemotron-3-super-120b-a12b` returns **404** ("Function … Not found for
+   account") and `meta/llama-3.2-11b-vision-instruct` failed intermittently in
+   the SDK path though a raw curl to it returned 200. The 404 is recovered by the
+   model-level fallback chain (a wasted round-trip, not a failure).
+2. **Only `NVIDIA_API_KEY` is configured.** GROQ / OPENROUTER / DEEPSEEK /
+   OPENAI / ANTHROPIC / XAI keys are all unset, so the global fallback chain
+   beyond nvidia cannot actually help. Config models (groq `qwen/qwen3.8-27b`,
+   openrouter `gpt-4o`) are declared but not reachable here.
+3. **Measured LLM latency is highly variable and provider-side.**
+   - router `computer_use` (vision route): **29 s / 168 s / 140 s** across three
+     attempts (succeeded each time with a 240 s outer budget).
+   - direct `meta/llama-3.2-11b-vision-instruct`: **36.7 s** at `max_tokens=900`
+     and **308 s** at `max_tokens=64` for a trivial prompt.
+   - The agent's `_GUI_REASONING_TIMEOUT_SECONDS = 60.0` therefore times out on
+     the slow tail, producing an honest `reasoning unavailable` blocked action
+     (fail-closed, correct) rather than a wrong action.
+   - Note: `/workstation/prompt` on a session with no provisioned desktop
+     correctly returns `BLOCKED` ("no provisioned workstation") — that is the
+     documented fail-closed contract, not a bug.
+
+### REAL BUG — false-positive safety refusal discarded correct answers (FIXED)
+The dominant cause of the intermittent "LLM Response Unavailable" worklog entry
+was **not** latency or rate limiting. `sonic/llm/router.py` had the substring
+`"as an ai"` in `REFUSAL_PHRASES`, and `is_refusal_response()` scanned
+`content + reasoning_content` together. SONIC's own identity answer contains
+"…collaborate as an **AI-Human** engineer", so the model's *correct* reply
+matched the refusal list, was discarded, and the fallback chain then failed
+closed (no other provider key configured).
+
+Live trace proving it: `llm_request_complete latency_ms=19733.6
+model=nvidia/nemotron-3-ultra-550b-a55b` followed immediately by
+`llm_safety_refusal_detected_triggering_fallback` → `complete_failed`. The
+captured answer was correct: *"I'm SONIC (being-…) — an autonomous AI-Human
+Digital Being … as an AI-Human engineer."*
+
+Fix:
+- Removed the over-broad `"as an ai"` phrase; added precise refusal wording
+  (`"i cannot help with this"`, `"i won't help with"`, `"i'm unable to fulfill"`).
+- `is_refusal_response()` now judges the **answer** (`content`), consulting the
+  private `reasoning_content` only when the answer is empty — a reasoning trace
+  narrating refusal-adjacent wording can no longer discard a real answer.
+- The agent's own refusal lists (`computer_use/agent.py`) already scoped
+  correctly and did not need changes.
+- Live verification: workstation chat `who are you` went from **3/3
+  "LLM Response Unavailable"** to **4/4 real "SONIC Response"** with **0**
+  fallbacks; the answer correctly describes SONIC's identity.
+
+### Also changed — configurable workstation chat timeout
+`/workstation/prompt` hardcoded `asyncio.wait_for(..., timeout=25)`. Since
+provider reasoning latency regularly exceeds 25 s, the budget is now
+`_workstation_chat_timeout_seconds()` (env `SONIC_WORKSTATION_CHAT_TIMEOUT_SECONDS`,
+default 25 s, clamped 10–300 s). This was a contributing factor, not the root
+cause.
+
+### Tests added
+- `tests/test_llm_refusal_detection.py` (8): identity text is not a refusal;
+  reasoning trace alone cannot trigger refusal; genuine refusal detected;
+  refusal-in-reasoning detected only when the answer is empty; action-bearing
+  refusal is not a refusal; empty response is not a refusal; `"as an ai"` gone;
+  common refusal phrases retained.
+- `tests/test_workstation_chat_timeout.py` (7): default, env override, floor,
+  ceiling, invalid/blank fallback, and a guard that the literal `timeout=25,`
+  is not reintroduced.
+- Full `services/core` suite: **2364 passed, 40 skipped, 0 failures**.
+
+### Honesty / limits
+- Docker is unavailable in this environment, so no GUI action or Boss swarm was
+  executed live; the subagent/dashboard wiring was verified by code path and by
+  the real API surface, not by a live multi-worker desktop run.
+- The refusal fix is verified live on the real chat path. The remaining latency
+  figures are provider-tier conditions; a faster reachable model (or a
+  configured second provider key) is still needed for reliable slow-tail GUI
+  reasoning within the 60 s GUI budget.
