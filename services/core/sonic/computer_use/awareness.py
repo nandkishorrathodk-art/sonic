@@ -142,6 +142,12 @@ class AwarenessMonitor:
         # simply absent and the monitor keeps publishing raw state.
         self._narrator: Any | None = None
         self._narrator_ready = False
+        # One perception engine per monitor (i.e. per desktop).  Sharing a
+        # single engine across desktops would mix their frames into one
+        # temporal memory, producing phantom "changed/motion" lines and tripping
+        # the monotonic frame-id guard between unrelated captures.
+        self._perception: Any | None = None
+        self._perception_ready = False
 
     # -- lifecycle ---------------------------------------------------------
     @property
@@ -204,7 +210,7 @@ class AwarenessMonitor:
         if screen is None or getattr(screen, "desktop_state", None) != "INTERACTIVE":
             return None
 
-        perception = _shared_perception()
+        perception = self._perception_engine()
         state: dict[str, Any] = {}
         semantics: dict[str, Any] = {}
         rgb_frame: Any = None
@@ -256,6 +262,27 @@ class AwarenessMonitor:
 
         self._publish(TOPIC_FRAME, frame, previous)
         return frame
+
+    def _perception_engine(self) -> Any:
+        """Lazily build this monitor's own AVCS perception engine.
+
+        One engine per desktop, not one per process: the engine holds temporal
+        state (previous frame, frame-id watermark, prediction memory) that is
+        only meaningful within a single capture stream.  Sharing it would blend
+        two desktops' frames together.
+        """
+        if not self._perception_ready:
+            try:
+                from sonic.computer_use.avcs_perception import AVCSPerception
+
+                self._perception = AVCSPerception()
+            except Exception as exc:  # pragma: no cover - environment dependent
+                logger.warning("awareness_perception_unavailable", error=str(exc))
+                self._perception = None
+            self._perception_ready = True
+        if self._perception is None:
+            raise RuntimeError("AVCS perception engine is unavailable")
+        return self._perception
 
     def _narrate(
         self, rgb_frame: Any, state: dict[str, Any], screen: Any
@@ -394,26 +421,6 @@ def _decode_png_to_rgb(png_bytes: bytes) -> Any:
         return None
 
 
-_perception_singleton: Any | None = None
-_perception_lock = threading.Lock()
-
-
-def _shared_perception() -> Any:
-    """One AVCSPerception for the process.
-
-    Constructing a fresh one per call would re-load the cortex checkpoint and
-    discard the temporal memory that makes change detection meaningful.
-    """
-    global _perception_singleton
-    if _perception_singleton is None:
-        with _perception_lock:
-            if _perception_singleton is None:
-                from sonic.computer_use.avcs_perception import AVCSPerception
-
-                _perception_singleton = AVCSPerception()
-    return _perception_singleton
-
-
 _monitors: dict[str, AwarenessMonitor] = {}
 _monitors_lock = threading.Lock()
 
@@ -446,9 +453,6 @@ def reset_awareness_monitors() -> None:
     """Drop all monitor singletons (test helper)."""
     with _monitors_lock:
         _monitors.clear()
-    global _perception_singleton
-    with _perception_lock:
-        _perception_singleton = None
 
 
 def awareness_stats() -> dict[str, Any]:

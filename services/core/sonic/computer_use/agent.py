@@ -2590,8 +2590,12 @@ class ComputerUseAgent:
                 "cannot read on-screen text and does not prove task success):\n  "
                 + narration_block
             )
+        # Drain the eye's unsolicited lines once, here, and reuse the same text
+        # in the GUI-only branch below. Draining twice would silently drop the
+        # second copy, and the GUI-only branch is exactly the worker most likely
+        # to be facing the popup the eye just reported.
         ambient_block = self._ambient_narration_block()
-        if ambient_block:
+        if ambient_block and not self._gui_action_contract_active():
             raw_facts.append(
                 "AVCS unsolicited observations since your last step (the eye noticed "
                 "these on its own while you were working; they are not proof of "
@@ -2852,7 +2856,8 @@ class ComputerUseAgent:
                 getattr(observation, "screen", None)
             )
             narration_block = self._narrate_screen(getattr(observation, "screen", None))
-            ambient_block = self._ambient_narration_block()
+            # ``ambient_block`` was drained once above; reuse it so the GUI-only
+            # worker still hears what the eye said (draining again yields "").
             narration_line = (
                 f"AVCS LIVE NARRATION (local plain-language description of what the "
                 f"eye currently sees; it cannot read on-screen text and is not proof "
