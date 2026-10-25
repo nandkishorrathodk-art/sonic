@@ -351,3 +351,28 @@ def test_cli_patch_command_blocks_traversal(tmp_path: Path):
         with patch("sonic.evolution.cli.CodebaseEvolver", return_value=mock_evolver):
             ret = main()
             assert ret == 1
+
+
+def test_cli_status_command_lists_protected_components(tmp_path: Path, capsys):
+    """`status` must import the protected-component registry from its real home.
+
+    Regression: the registry lives in ``evolution.pipeline`` but the CLI once
+    imported it from ``codebase_evolver``, raising ImportError and breaking the
+    whole ``status`` command.
+    """
+    from sonic.evolution.pipeline import _PROTECTED_COMPONENTS
+
+    fake_args = argparse.Namespace(command="status", repo_root=str(tmp_path))
+    with patch("sonic.evolution.cli.build_parser") as mock_bp:
+        mock_parser = MagicMock()
+        mock_parser.parse_args.return_value = fake_args
+        mock_bp.return_value = mock_parser
+        ret = main()
+
+    assert ret == 0
+    out = capsys.readouterr().out
+    assert "Protected Safety Components" in out
+    # Every protected component must be printed (proves the import resolved).
+    for component in _PROTECTED_COMPONENTS:
+        assert component in out
+    assert "sonic/safety" in out

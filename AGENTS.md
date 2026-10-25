@@ -4409,3 +4409,53 @@ on arbitrary unseen applications.
 
 Tests: `test_avcs_apprenticeship.py` + `test_continuous_avcs_awareness.py` +
 `test_gui_capability_aware_prompt.py` = 54 passed. Ruff clean.
+
+## Self-evolution auto-mode live run — two real bugs fixed (2026-10-25)
+
+Ran the self-developer in **auto mode** (`ContinuousAutoEvolutionRunner`,
+3 cycles, real LLM) and watched it think. Two genuine defects were found and
+fixed; the loop now advances and produces verified candidates.
+
+### LIVE evidence (before → after)
+- **Before:** cycle 1 discovered 5 real signals, attempted `signals[0]`
+  (`developer_agent.py:449`), rejected it; cycles 2+ re-pinned the *same*
+  signal, which the coder-side dedup filtered out → `no_candidate` **forever**.
+  Signals 1..4 were unreachable. Historical DB: 0 promoted.
+- **After:** cycle 1 → `developer_agent.py:461`, cycle 2 →
+  `computer/headless.py:347`, cycle 3 → `context.py:98` → **VERIFIED candidate**
+  (`2ce771f9`, `awaiting_approval`): real minimal patch turning
+  `except: pass` into a logged exception; **2496 tests passed, 0 failed**,
+  security regression clean, active checkout untouched (report-only).
+
+### BUG A — runner permanently stuck on `signals[0]` (`continuous_runner.py`)
+The runner pinned `signals[0]` every cycle while `run_candidate` filters
+already-attempted `(target_file, description)` pairs at the same commit. Once
+signal 0 was recorded, every later cycle resolved to zero signals →
+`no_candidate`, and signals 1..N were never tried. Fix: added
+`SelfCoderCandidateStore.attempted_signal_keys()` + `_select_signal()`; the
+runner now advances to the first unattempted signal and emits `cycle_idle` when
+all are exhausted. A new commit makes every signal eligible again.
+
+### BUG B — "corrupt patch" discarded otherwise-correct LLM diffs
+Models emit structurally valid diffs whose `@@` header counts disagree with the
+body (e.g. `@@ -1,5 +1,5 @@` above one context line); `git apply` rejects that
+as `corrupt patch`. The counts are fully derivable, so
+`patch_synthesizer._repair_hunk_counts()` now recomputes them deterministically
+(start lines preserved; `\ No newline` markers excluded). 12/21 historical
+failures were this class. Valid diffs pass through byte-for-byte unchanged.
+
+### Also fixed
+- CLI `status` imported `_PROTECTED_COMPONENTS` from `codebase_evolver` (wrong
+  module) → `ImportError` broke the whole command. Now imports from `pipeline`.
+
+### Honest scope
+Machinery is real and wired (API `/self-coder/*`, background loop in `main.py`,
+CLI). The remaining limiter is **LLM diff quality**: the model still fails many
+attempts on wrong hunk context/line numbers (`patch does not apply`). Diagnosis
+quality is high (correct root cause + minimal fix), but reliable unified diffs
+need a stronger coding model or the agentic `edit_file` path. Do not claim
+sustained promotion until that is measured over many cycles.
+
+Tests: evolution + self-coder suites green (169 passed); full `services/core`
+**2436 passed, 40 skipped, 0 failures**; ruff clean. Regression tests added for
+`_select_signal`, store dedup, hunk-count repair, and CLI `status`.
