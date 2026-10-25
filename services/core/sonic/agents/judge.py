@@ -83,6 +83,28 @@ def _t_val(t: Any, key: str, default: Any = "") -> Any:
     return getattr(t, key, default)
 
 
+# Trace statuses that mean the action actually did its job. GUI actions reach
+# one of these without ever producing a subprocess exit code.
+_SUCCESS_TRACE_STATUSES = frozenset(
+    {"SUCCESS", "SUCCEEDED", "COMPLETED", "VERIFIED", "RECOVERED"}
+)
+
+
+def _trace_succeeded(t: Any) -> bool:
+    """Whether one trace is real evidence that its action succeeded.
+
+    Terminal/tool actions prove success with exit code 0. GUI actions are not
+    subprocesses and legitimately have ``exit_code is None``, so they prove
+    success through their status instead. Requiring an exit code would falsify
+    every GUI worker that only launched or observed an application.
+    """
+    exit_c = _t_val(t, "exit_code", None)
+    if isinstance(exit_c, int) and not isinstance(exit_c, bool) and exit_c == 0:
+        return True
+    status = str(_t_val(t, "status", "")).upper()
+    return status in _SUCCESS_TRACE_STATUSES
+
+
 class JudgeVerdict(StrEnum):
     CONFIRMED = "CONFIRMED"
     FALSIFIED = "FALSIFIED"
@@ -339,8 +361,15 @@ class JudgeAgent:
                     is_gui_mission = True
                     break
 
-        # 1. Total Execution Failure Check (Zero successful traces and non-zero exit codes)
-        if not result.success and not any(_t_val(t, "exit_code", 1) == 0 for t in traces):
+        # 1. Total Execution Failure Check (no successful trace of any kind).
+        #
+        # A trace succeeds either by returning a zero exit code (terminal/tool
+        # actions) or by reaching a success status. GUI actions (APP_LAUNCH,
+        # APP_FOCUS, GUI_SCREENSHOT, ...) legitimately carry exit_code=None --
+        # they are not subprocesses -- so keying this gate on `exit_code == 0`
+        # alone falsified genuinely successful GUI workers whose only evidence
+        # was a completed GUI action.
+        if not result.success and not any(_trace_succeeded(t) for t in traces):
             all_errors = [
                 str(_t_val(t, "actual_observation") or _t_val(t, "observation") or "")
                 for t in traces

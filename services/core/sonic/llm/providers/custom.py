@@ -347,6 +347,10 @@ class CustomLLMProvider(LLMProvider):
         self.default_model = default_model
         # Model-level fallback chain (tried when the primary model is EOL/not-found)
         self.fallback_models: list[str] = fallback_models or []
+        # Models this account/endpoint reported as not-found. Without this a
+        # decommissioned model id (e.g. a retired NIM model) costs a wasted
+        # round-trip on EVERY request before the fallback recovers.
+        self._unavailable_models: set[str] = set()
         self.cost_per_1k_input = cost_per_1k_input
         self.cost_per_1k_output = cost_per_1k_output
         self.model_pricing = dict(model_pricing or {})
@@ -635,11 +639,23 @@ class CustomLLMProvider(LLMProvider):
         router's provider-level fallback chain.
         """
         original_model = request.model or self.default_model
+        # Skip a model this endpoint already reported as not-found, so the
+        # request goes straight to a known-good fallback instead of paying a
+        # guaranteed 404 on every turn.
+        if original_model in self._unavailable_models:
+            recovered = await self._try_fallback_models(request, original_model)
+            if recovered is not None:
+                return recovered
+            raise RuntimeError(
+                f"Model '{original_model}' is unavailable on provider "
+                f"'{self.name}' and no configured fallback model succeeded."
+            )
         try:
             call = self._complete_anthropic if self.is_anthropic else self._complete_openai
             return await self._with_retry(request, call)
         except Exception as e:
             if _is_model_not_found_error(e) and self.fallback_models:
+                self._unavailable_models.add(original_model)
                 logger.warning(
                     "model_not_found_trying_fallbacks",
                     name=self.name,
@@ -647,21 +663,36 @@ class CustomLLMProvider(LLMProvider):
                     fallbacks=self.fallback_models,
                     error=str(e),
                 )
-                for fb_model in self.fallback_models:
-                    if fb_model == original_model:
-                        continue
-                    try:
-                        request.model = fb_model
-                        logger.info("model_fallback_attempt", name=self.name, model=fb_model)
-                        call = self._complete_anthropic if self.is_anthropic else self._complete_openai
-                        return await self._with_retry(request, call)
-                    except Exception as fb_err:
-                        if _is_model_not_found_error(fb_err):
-                            logger.warning("model_fallback_also_not_found", name=self.name, model=fb_model)
-                            continue
-                        raise  # Different error — propagate
+                recovered = await self._try_fallback_models(request, original_model)
+                if recovered is not None:
+                    return recovered
                 # All fallbacks exhausted — re-raise original
             raise
+
+    async def _try_fallback_models(
+        self, request: LLMRequest, original_model: str
+    ) -> LLMResponse | None:
+        """Try each configured fallback model, returning the first success.
+
+        ``None`` means no fallback model produced a completion. Non-model-not-found
+        errors propagate: a fallback that fails for another reason is a real
+        failure, not a signal to keep trying more model ids.
+        """
+        for fb_model in self.fallback_models:
+            if fb_model == original_model or fb_model in self._unavailable_models:
+                continue
+            try:
+                request.model = fb_model
+                logger.info("model_fallback_attempt", name=self.name, model=fb_model)
+                call = self._complete_anthropic if self.is_anthropic else self._complete_openai
+                return await self._with_retry(request, call)
+            except Exception as fb_err:
+                if _is_model_not_found_error(fb_err):
+                    self._unavailable_models.add(fb_model)
+                    logger.warning("model_fallback_also_not_found", name=self.name, model=fb_model)
+                    continue
+                raise  # Different error — propagate
+        return None
 
     async def _complete_openai(self, request: LLMRequest) -> LLMResponse:
         """Complete via OpenAI-compatible API (works for most providers)."""

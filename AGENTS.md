@@ -4135,3 +4135,143 @@ Full `services/core` suite: **2372 passed, 40 skipped, 0 failures**; ruff clean.
   no OCR or semantic UI tree. It never reports what text says.
 - Semantic grounding / focus verification remain unbuilt; GUI text entry and
   described-control clicks are still blocked.
+
+## AVCS VLM narration + torch construction race + Boss GUI-progress fix (2026-10-25)
+
+Three real defects fixed this pass; each is backed by a regression test that
+fails on the pre-fix logic.
+
+### 1. Non-blocking VLM narration (AVCS "talking eye" can name apps / read text)
+`AVCSNarrator` gained an opt-in vision-language captioner
+(`SONIC_AVCS_VLM_DESCRIBER=<hf-model-id>`). The reflex line stays pure-numpy and
+fast; the VLM runs only on a notable change and is rate-limited.
+
+The first implementation ran the VLM **synchronously on the awareness loop**,
+which blocked the event loop for ~19 s per caption: the loop produced 2 frames
+instead of >=3 in a 0.4 s window and could not sample continuously. Fixed with
+`_BackgroundVLMCaptioner` (`services/core/sonic/computer_use/avcs_narrator.py`):
+a load thread plus a single inference worker; `caption(frame)` is
+**non-blocking**, queues the newest frame, and returns the most recent completed
+caption (deduplicated so a static screen does not repeat itself). A caption
+therefore describes a recent frame, never an invented one.
+
+### 2. Torch construction race: `from_pretrained` leaks a global dtype
+`transformers`' `from_pretrained` calls `torch.set_default_dtype` around model
+construction and restores it afterwards. That default is **process-global**, so
+a background thread loading the VLM while another thread built the AVCS cortex
+made the cortex's parameters come out in the wrong dtype -- every frame failed
+with `Input type (torch.FloatTensor) and weight type (CPUBFloat16Type)`, and
+`perceive_semantics_rgb` silently returned `{}` (a broad `except` hid it).
+
+Fixed with `packages/avcs/forge/vision/torch_build.py` (`build_model`), which
+serializes construction under a shared `RLock` and restores the captured default
+dtype. Wired into `load_cortex_checkpoint` and `VLMDescriber.__init__`.
+
+### 3. Boss counted a successful APP_LAUNCH as "no phase progress"
+The phase-progress predicate required `state_changed is True` for any action
+whose name started with `GUI_`/`APP_`/`BROWSER_`. APP_LAUNCH / APP_FOCUS /
+GUI_SCREENSHOT open or refocus windows asynchronously and often produce no
+immediate frame delta, so a genuinely successful launch was discarded and the
+mission died with "no phase progress" after one action.
+
+Fixed by gating on the shared `GUI_STATE_VERIFICATION_ACTIONS` set
+(`models.py`), which lists only the actions whose success is judged by a pixel
+delta (click/type/keypress/hotkey/scroll/drag). Agent verification and Boss
+phase progress now share one definition and cannot disagree.
+
+### 4. Capability probe cached stale checkpoint config
+`_shared_capability_probe()` reused one `AVCSPerception` forever, so the
+`/workstation/desktop/status` honesty surface kept reporting a checkpoint that
+had since been unset (and vice versa). Now keyed on the three
+`SONIC_AVCS_*_CHECKPOINT` env vars and re-created when they change.
+
+### Tests
+- `services/core/tests/test_continuous_avcs_awareness.py`:
+  `TestNarratorNeverBlocksPerception` (2) -- load off-thread + `caption()` is
+  non-blocking, and the awareness loop keeps sampling while a VLM loads (uses
+  the real wrapper with a slow fake loader, so it measures production code).
+- `services/core/tests/test_boss_agent.py`:
+  `test_boss_counts_app_launch_as_progress_without_state_change` -- verified to
+  FAIL on the pre-fix predicate and pass after.
+- `packages/avcs/tests/test_focus_verifier.py`:
+  `TestTorchConstructionSerialization` (2) -- `build_model` restores the default
+  dtype and serializes concurrent constructions.
+- `packages/avcs/tests/test_labeled_frame_dataset.py` (6) -- real labels map to
+  category indices, unknown labels are masked (-1) not guessed, affordance
+  targets stay masked (-100), temporal pairs share a scene, empty manifest fails
+  closed.
+
+### Verified state
+- Full `services/core` suite: **2389 passed, 40 skipped, 0 failures**.
+- Dashboard `next build`: 21 routes compile clean.
+- Ruff clean on every changed file (the 7 `UP0xx` in `describer.py` and the
+  `N812` in `losses.py` are pre-existing at HEAD).
+- Honest limit: the VLM path is opt-in and off by default; enabling it downloads
+  a model on first use. No live end-to-end GUI task was re-run this pass.
+
+## Boss worker-truthfulness fixes + live GUI acceptance (2026-10-25)
+
+Ran the real `BossAgent` against the live `sonic-desktop-workstation` (Xvfb
+`:99`, 1920x1080) with a genuine objective ("Open the terminal application on
+the desktop."). The run exposed three real defects that unit tests could not
+see, all of the "worker reported a failure that never happened" class. All three
+are fixed with regression tests that fail on the pre-fix code.
+
+### BUG 1 — Judge falsified every successful GUI worker (real)
+`JudgeAgent.evaluate_sub_mission` gated its "total execution failure" branch on
+`exit_code == 0`. GUI actions (`APP_LAUNCH`, `APP_FOCUS`, `GUI_SCREENSHOT`, ...)
+are not subprocesses and legitimately carry `exit_code=None`, so a worker whose
+only evidence was a completed GUI action was reported FALSIFIED with "Worker
+produced no successful execution traces" — even though the live desktop showed
+the launched `Terminal -` window.
+- Fix: added `_trace_succeeded()` in `agents/judge.py`; a trace succeeds on
+  `exit_code == 0` **or** a success status (`SUCCESS/SUCCEEDED/COMPLETED/
+  VERIFIED/RECOVERED`). Genuinely failed GUI workers (status FAILED, exit 126)
+  are still falsified.
+- Tests: `test_judge_agent.py::test_judge_does_not_falsify_gui_worker_that_completed_actions`
+  (verified FAIL pre-fix, PASS post-fix) and
+  `...::test_judge_still_falsifies_when_every_gui_action_failed`.
+
+### BUG 2 — Boss reported an INCONCLUSIVE Judge verdict as worker FAILED (real)
+`BossAgent._dispatch_sub_agent` mapped every non-CONFIRMED verdict to
+`status="FAILED"`. The Judge returns INCONCLUSIVE for GUI work until an
+evaluated local verification head exists — that is an honest "cannot confirm",
+not a failure. The dashboard therefore showed a worker that really launched the
+application as `FAILED`.
+- Fix: added `BossAgent._status_for_judge_verdict()`; only `FALSIFIED` maps to
+  `FAILED`, everything else maps to `UNVERIFIED`. Wired at the verdict site.
+- Test: `test_boss_plane_routing_and_truthfulness.py::test_boss_reports_inconclusive_judge_as_unverified_not_failed`.
+
+### BUG 3 — Dashboard rendered UNVERIFIED/PARTIAL/FAILED indistinctly
+`apps/dashboard/app/agents/page.tsx` `STATUS_STYLE` only knew running/idle/
+completed/blocked/error, so an `UNVERIFIED` worker fell through to the neutral
+idle style and `FAILED` was not styled as an error.
+- Fix: added explicit `success`, `failed`, `timed_out`, `interrupted`,
+  `skipped`, `unverified`, `partial`, `waiting_for_human` styles, and the
+  `StatusDot` colour map. UNVERIFIED/PARTIAL now read as caution, not failure.
+
+### Live evidence (real Docker workstation, real LLM, real desktop)
+- Worker visibility works: `GET /workstation/agents?session_id=...` reports the
+  live worker with stable `agent_uid`, name, plane, RUNNING status, step list,
+  and latest action — the dashboard "click the agent to see what it is doing"
+  path is backed by real data.
+- The worker really launched a terminal: after the run `wmctrl -l` on the live
+  desktop showed multiple `Terminal -` windows while `pgrep thunar`/window
+  checks confirmed the GUI was genuinely mutated.
+- Post-fix the same run reports the worker `UNVERIFIED` (was `FAILED`), with
+  `judge: INCONCLUSIVE` and the honest note that AVCS reflex state cannot
+  establish the semantic postcondition without an evaluated local head.
+
+### Honest remaining limit (unchanged, fail-closed by design)
+Semantic GUI targeting and text entry still require evaluated local AVCS heads
+(`SONIC_AVCS_GROUNDING_CHECKPOINT`, `SONIC_AVCS_FOCUS_CHECKPOINT`); none exists
+in-repo. `avcs_capability_state()` reports `semantic_grounding=false`,
+`focus_verification=false`. So a Boss objective that must *click a described
+control* or *type text* still cannot complete — but it now fails honestly
+(UNVERIFIED), not with a fabricated FAILED.
+
+### Tests / verification
+- New/updated tests: 4 (2 judge GUI, 1 boss verdict mapping, 1 dashboard build).
+- `services/core` full suite: **2392 passed, 40 skipped, 0 failures**.
+- Dashboard `next build`: all routes compile clean.
+- Ruff clean on every changed file; `git diff --check` clean.

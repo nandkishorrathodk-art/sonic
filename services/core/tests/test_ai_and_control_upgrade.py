@@ -756,7 +756,10 @@ def test_execute_action_handles_blocked_refusal_action_type():
     assert trace.status == ActionExecutionStatus.BLOCKED
     assert trace.exit_code == 126
     assert "Action blocked: refusal-recorded" in trace.actual_observation
-    assert trace.action_type == ComputerActionType.TERMINAL_EXEC
+    # A blocked proposal executes nothing, so it must not be recorded as a
+    # terminal command (the old TERMINAL_EXEC label made blocked GUI workers
+    # show up in the operator UI as "terminal exec").
+    assert trace.action_type != ComputerActionType.TERMINAL_EXEC
 
 
 def test_computer_decision_trace_coerces_blocked_status_into_valid_action_type():

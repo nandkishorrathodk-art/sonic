@@ -374,14 +374,23 @@ class LiveNarrator:
         self,
         min_speak_interval_s: float = 0.0,
         describe_scene_on_first_frame: bool = True,
+        describer: Any | None = None,
+        vlm_min_interval_s: float = 8.0,
     ) -> None:
         self.min_speak_interval_s = max(0.0, float(min_speak_interval_s))
         self.describe_scene_on_first_frame = bool(describe_scene_on_first_frame)
+        # Optional vision-language describer (e.g. ``VLMDescriber``).  The reflex
+        # path stays pure-numpy and fast; the VLM is invoked only on a notable
+        # change and rate-limited, because a caption costs seconds, not ms.
+        self._describer = describer
+        self._vlm_min_interval_s = max(0.0, float(vlm_min_interval_s))
+        self._last_vlm_at: float = -1e9
         self._last_spoken_at: float = -1e9
         self._last_signature: tuple[Any, ...] | None = None
         self._prev_rgb_tiles: np.ndarray | None = None
         self._frames_seen = 0
         self._lines_spoken = 0
+        self._vlm_calls = 0
 
     # -- introspection ------------------------------------------------------
 
@@ -402,10 +411,12 @@ class LiveNarrator:
 
     def reset(self) -> None:
         self._last_spoken_at = -1e9
+        self._last_vlm_at = -1e9
         self._last_signature = None
         self._prev_rgb_tiles = None
         self._frames_seen = 0
         self._lines_spoken = 0
+        self._vlm_calls = 0
 
     # -- observation --------------------------------------------------------
 
@@ -453,6 +464,22 @@ class LiveNarrator:
         self._last_signature = signature
         self._last_spoken_at = state.timestamp
         self._lines_spoken += 1
+
+        # Optional vision-language caption on top of the reflex line.  This is
+        # what lets the eye name the application and read on-screen text; it is
+        # best-effort and rate-limited, and a failure never suppresses the
+        # reflex line (the eye still speaks, just without the semantic detail).
+        if self._describer is not None and frame is not None:
+            if (state.timestamp - self._last_vlm_at) >= self._vlm_min_interval_s:
+                try:
+                    caption = self._describer.caption(frame)
+                except Exception:  # pragma: no cover - defensive
+                    caption = ""
+                if caption:
+                    self._last_vlm_at = state.timestamp
+                    self._vlm_calls += 1
+                    line.data["vlm_caption"] = caption
+                    line.text = f"{line.text} Looks like: {caption}"
         return line
 
     # -- action feedback ----------------------------------------------------

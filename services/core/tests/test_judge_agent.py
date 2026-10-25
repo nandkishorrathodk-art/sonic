@@ -626,3 +626,83 @@ async def test_judge_allows_routine_open_port_and_bypass_markers():
     )
     # Should NOT be flagged as INCONCLUSIVE by vuln_markers check
     assert evaluation.verdict == JudgeVerdict.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_judge_does_not_falsify_gui_worker_that_completed_actions():
+    """A successful GUI action must not be read as a total execution failure.
+
+    GUI actions (APP_LAUNCH, APP_FOCUS, GUI_SCREENSHOT, ...) are not
+    subprocesses, so their traces legitimately carry ``exit_code=None``. The
+    "total execution failure" gate used to require ``exit_code == 0``, which
+    falsified a worker that had actually launched an application -- the real
+    desktop showed the launched window while the Judge reported FALSIFIED.
+    """
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Open the terminal application", plane="gui")
+    traces = [
+        {
+            "action_type": "GUI_SCREENSHOT",
+            "target": "visible-desktop",
+            "status": "COMPLETED",
+            "exit_code": None,
+            "actual_observation": "Screenshot captured (1920x1080)",
+        },
+        {
+            "action_type": "APP_LAUNCH",
+            "target": "xfce4-terminal",
+            "status": "COMPLETED",
+            "exit_code": None,
+            "actual_observation": "Launched and focused xfce4-terminal (active window: Terminal -)",
+        },
+    ]
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=traces,
+        success=False,
+        findings_summary="Launched xfce4-terminal.",
+    )
+
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="ws-gui",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="worker-1",
+    )
+
+    assert evaluation.verdict != JudgeVerdict.FALSIFIED
+    assert "no successful execution traces" not in evaluation.notes
+
+
+@pytest.mark.asyncio
+async def test_judge_still_falsifies_when_every_gui_action_failed():
+    """A GUI worker whose every action failed is still falsified honestly."""
+    judge = JudgeAgent()
+    sub_m = SubMission(goal="Open the terminal application", plane="gui")
+    traces = [
+        {
+            "action_type": "APP_LAUNCH",
+            "target": "xfce4-terminal",
+            "status": "FAILED",
+            "exit_code": 126,
+            "actual_observation": "application 'xfce4-terminal' did not produce a verified window",
+        },
+    ]
+    result = SubMissionResult(
+        sub_mission_id=sub_m.id,
+        goal=sub_m.goal,
+        traces=traces,
+        success=False,
+        findings_summary="Launch failed",
+    )
+
+    evaluation = await judge.evaluate_sub_mission(
+        workspace_id="ws-gui",
+        sub_mission=sub_m,
+        result=result,
+        worker_agent_id="worker-1",
+    )
+
+    assert evaluation.verdict == JudgeVerdict.FALSIFIED
+    assert "no successful execution traces" in evaluation.notes

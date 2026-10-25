@@ -18,7 +18,7 @@ class AVCSMultiTaskLoss(nn.Module):
         super().__init__()
         self.cfg = cfg or TrainingConfig()
 
-        self.ce_loss = nn.CrossEntropyLoss()
+        self.ce_loss = nn.CrossEntropyLoss(ignore_index=-100)
         # Separate loss for the category head so unlabeled samples (index -1)
         # are ignored instead of trained as a fabricated class.
         self.category_loss = nn.CrossEntropyLoss(ignore_index=-1)
@@ -50,9 +50,18 @@ class AVCSMultiTaskLoss(nn.Module):
         loss_predictive = (1.0 - (norm_pred * norm_next).sum(dim=-1)).mean()
 
         # 2. Dorsal Affordance Loss
-        # Logits shape: (B, C, H, W), Targets: (B, H, W)
+        # Logits shape: (B, C, H, W), Targets: (B, H, W).  ``ignore_index=-100``
+        # lets real-desktop frames without a hand-labeled affordance mask
+        # contribute nothing instead of training on invented click regions.
+        # When a batch is entirely masked, CrossEntropyLoss returns nan;
+        # substitute a real zero so the term is honestly absent.
         affordance_logits = model_outputs_t["affordance_logits"]
-        loss_affordance = self.ce_loss(affordance_logits, affordance_targets)
+        if bool((affordance_targets != -100).any()):
+            loss_affordance = self.ce_loss(affordance_logits, affordance_targets)
+        else:
+            loss_affordance = torch.zeros(
+                (), device=affordance_logits.device, dtype=affordance_logits.dtype
+            )
 
         # 3. Ventral UI Category Loss
         # ``ignore_index=-1`` lets unlabeled data (e.g. watched-video frames,

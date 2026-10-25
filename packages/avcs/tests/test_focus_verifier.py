@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-
 from avcs.focus_verifier import (
     FOCUS_ACCEPTANCE_METRIC,
     FOCUS_CHECKPOINT_SCHEMA,
@@ -270,3 +269,53 @@ def test_end_to_end_training_reports_runtime_ready_flag(tmp_path):
     # The flag must reflect the real held-out gate, not be hardcoded true.
     assert report["runtime_ready"] == report["evaluation"]["passed"]
     assert report["dataset_provenance"] == FOCUS_DATASET_PROVENANCE
+
+
+class TestTorchConstructionSerialization:
+    """Model construction must not be corrupted by a concurrent dtype change.
+
+    ``transformers``' ``from_pretrained`` temporarily sets the process-global
+    torch default dtype.  Without serialization a concurrently built model can
+    be created with the wrong parameter dtype, which surfaces as
+    "Input type (torch.FloatTensor) and weight type (CPUBFloat16Type)".
+    """
+
+    def test_build_model_restores_default_dtype(self):
+        import torch
+        from forge.vision.torch_build import build_model
+
+        original = torch.get_default_dtype()
+
+        def _mutating_factory():
+            torch.set_default_dtype(torch.bfloat16)
+            return torch.nn.Linear(2, 2)
+
+        build_model(_mutating_factory)
+        assert torch.get_default_dtype() == original
+
+    def test_build_model_serializes_concurrent_constructions(self):
+        import threading
+        import time
+
+        from forge.vision.torch_build import build_model
+
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def _factory():
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return object()
+
+        threads = [threading.Thread(target=build_model, args=(_factory,)) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert max_active == 1, "model construction was not serialized"

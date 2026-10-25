@@ -44,6 +44,10 @@ from sonic.computer_use.dispatch_policy import (
     decide_dispatch,
     workstreams_from_sub_missions,
 )
+from sonic.computer_use.models import (
+    GUI_STATE_VERIFICATION_ACTIONS,
+    ComputerActionType,
+)
 from sonic.computer_use.models_boss import (
     BossReport,
     BossThinking,
@@ -55,6 +59,21 @@ from sonic.computer_use.replay import evaluate_traces
 from sonic.orchestration.dual_process import DualProcessController
 
 logger = structlog.get_logger(__name__)
+
+
+def _is_state_verified_gui_action(action_type: Any) -> bool:
+    """Whether this action's success is judged by an observable pixel delta.
+
+    Only actions in ``GUI_STATE_VERIFICATION_ACTIONS`` are verified that way.
+    Application lifecycle actions (APP_LAUNCH/APP_FOCUS) and screenshot refresh
+    can complete with no immediate frame change, so their ``state_changed`` is
+    not a progress signal.
+    """
+    raw = getattr(action_type, "value", action_type)
+    try:
+        return ComputerActionType(str(raw)) in GUI_STATE_VERIFICATION_ACTIONS
+    except ValueError:
+        return False
 
 
 def _trace_value(trace: Any, name: str, default: Any = "") -> Any:
@@ -882,11 +901,15 @@ class BossAgent:
                             if hasattr(trace_status, "value"):
                                 trace_status = trace_status.value
                             trace_status = str(trace_status).upper()
+                            # Only actions whose success is judged by a pixel
+                            # delta must show one. APP_LAUNCH / APP_FOCUS /
+                            # GUI_SCREENSHOT can succeed without an immediate
+                            # frame change; requiring `state_changed is True`
+                            # there discarded real progress and killed the
+                            # mission ("no phase progress").
                             if (
                                 self.requested_plane == "gui"
-                                and str(action_type).upper().startswith(
-                                    ("GUI_", "APP_", "BROWSER_")
-                                )
+                                and _is_state_verified_gui_action(action_type)
                                 and getattr(trace, "state_changed", None) is not True
                             ):
                                 continue
@@ -1735,7 +1758,18 @@ Rules:
                             sub_result.evidence_verified = False
                             sub_result.success = False
                             if not sub_result.waiting_for_human:
-                                sub_result.status = "FAILED"
+                                # Only a FALSIFIED verdict means the worker's
+                                # work was shown to be wrong. INCONCLUSIVE (and
+                                # BENIGN/UNVERIFIED) mean the Judge could not
+                                # confirm the outcome -- for GUI work this is
+                                # expected until an evaluated local verification
+                                # head exists. Reporting those as FAILED claimed
+                                # the worker failed even after it really did the
+                                # work (a live desktop showed the launched
+                                # window). Keep the honest distinction.
+                                sub_result.status = self._status_for_judge_verdict(
+                                    judge_eval.verdict
+                                )
                             verdict_label = (
                                 "FALSIFIED"
                                 if judge_eval.verdict == JudgeVerdict.FALSIFIED
@@ -1829,6 +1863,23 @@ Rules:
         except Exception:
             # Fallback: return raw observations
             return observations[:1000]
+
+    @staticmethod
+    def _status_for_judge_verdict(verdict: Any) -> str:
+        """Map a Judge verdict onto an honest worker status.
+
+        Only ``FALSIFIED`` proves the worker's work was wrong. ``INCONCLUSIVE``
+        and ``UNVERIFIED`` mean the outcome could not be confirmed -- the
+        expected state for GUI work until an evaluated local verification head
+        exists. Reporting those as ``FAILED`` claimed a failure that never
+        happened (a live desktop showed the launched window while the worker
+        was reported FAILED).
+        """
+        from sonic.agents.judge import JudgeVerdict
+
+        if verdict == JudgeVerdict.FALSIFIED:
+            return "FAILED"
+        return "UNVERIFIED"
 
     def _extract_key_discoveries(self, traces: list[Any]) -> list[str]:
         """Extract verified, high-information observations from SubAgent traces."""

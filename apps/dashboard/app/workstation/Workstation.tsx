@@ -37,6 +37,7 @@ import { ResearchView } from "../../components/research/ResearchView";
 import { EvidenceView } from "../../components/evidence/EvidenceView";
 import { EvolutionView } from "../../components/evolution/EvolutionView";
 import { MissionView } from "../../components/mission/MissionView";
+import { setActiveSessionId, getActiveSessionId } from "../../lib/session";
 
 const TABS: { id: WorkstationTab; label: string; icon: React.ReactNode }[] = [
   { id: "desktop", label: "Computer", icon: <Monitor className="w-3.5 h-3.5 text-success" /> },
@@ -53,7 +54,7 @@ function SonicDevinWorkstation() {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [activeTab, setActiveTab] = useState<WorkstationTab>("desktop");
   const [connectionStatus, setConnectionStatus] = useState<SystemStatus>("CONNECTING");
-  const [sessionId, setSessionId] = useState("default");
+  const [sessionId, setSessionId] = useState(() => getActiveSessionId());
   const [workstationState, setWorkstationState] = useState<WorkstationState | null>(null);
   const [activeFile, setActiveFile] = useState("");
   const [fileContent, setFileContent] = useState<string[]>([]);
@@ -232,6 +233,12 @@ function SonicDevinWorkstation() {
     fetchDiff();
     const interval = setInterval(() => fetchWorkstationData(sessionId), 5000);
     return () => clearInterval(interval);
+  }, [sessionId]);
+
+  // Publish the active session so the Agents registry follows the same
+  // workspace the operator is actually running missions in.
+  useEffect(() => {
+    setActiveSessionId(sessionId);
   }, [sessionId]);
 
   const handleSendPrompt = async (prompt: string, mode: "Normal" | "Autonomous" | "Pair-Program") => {

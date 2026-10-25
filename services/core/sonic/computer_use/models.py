@@ -226,6 +226,25 @@ class ComputerActionType(StrEnum):
     GOAL_COMPLETE = "GOAL_COMPLETE"
 
 
+# GUI actions whose success is judged by an observable pixel/state change.
+# Actions outside this set (APP_LAUNCH, APP_FOCUS, GUI_SCREENSHOT, ...) can
+# succeed while producing no immediate frame delta, so a False `state_changed`
+# must not be read as failure for them. Agent verification and Boss phase
+# progress share this set so they cannot disagree.
+GUI_STATE_VERIFICATION_ACTIONS: frozenset[ComputerActionType] = frozenset(
+    {
+        ComputerActionType.GUI_CLICK,
+        ComputerActionType.GUI_DOUBLE_CLICK,
+        ComputerActionType.GUI_RIGHT_CLICK,
+        ComputerActionType.GUI_TYPE,
+        ComputerActionType.GUI_KEYPRESS,
+        ComputerActionType.GUI_HOTKEY,
+        ComputerActionType.GUI_SCROLL,
+        ComputerActionType.GUI_DRAG,
+    }
+)
+
+
 class VerificationProbeKind(StrEnum):
     PYTEST = "pytest"
     EXECUTABLE = "executable"

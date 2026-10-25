@@ -165,13 +165,34 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument("--save-path", default="runs/cortex_model.pt")
+    parser.add_argument(
+        "--labeled-manifest",
+        default="",
+        help=(
+            "Path to a capture manifest.json of hand-labeled real-desktop "
+            "frames. Trains the cortex with REAL scene-category supervision "
+            "(unlike --video-manifest, which is unlabeled)."
+        ),
+    )
     args = parser.parse_args()
 
     cfg = CortexConfig()
     cfg.training.batch_size = args.batch_size
     cfg.training.epochs = args.epochs
 
-    if args.video_manifest:
+    if args.labeled_manifest:
+        from forge.vision.cortex.data.labeled_dataset import LabeledFrameDataset
+
+        dataset = LabeledFrameDataset(args.labeled_manifest)
+        print(
+            f"Real-desktop supervised training: {len(dataset)} labeled frames, "
+            f"labeled_ratio={dataset.labeled_ratio:.2f} "
+            "(affordance/grounding labels are absent and masked, not invented)."
+        )
+        dl = DataLoader(
+            dataset, batch_size=args.batch_size, shuffle=True, num_workers=0
+        )
+    elif args.video_manifest:
         from forge.vision.cortex.data.video_dataset import VideoFrameDataset
 
         dataset = VideoFrameDataset(args.video_manifest)

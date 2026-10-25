@@ -366,3 +366,113 @@ def test_life_loop_consumes_perception_changes():
 
     # Consuming the context clears the buffer (no double-counting next tick).
     assert loop.perception_context()["change_count"] == 0
+
+
+class TestNarratorNeverBlocksPerception:
+    """The VLM captioner must never stall the awareness loop.
+
+    A synchronous VLM load/inference on the sampling loop blocked the event
+    loop for ~19 s, so the loop produced 2 frames instead of >=3 and the
+    monitor could not sample continuously.
+    """
+
+    def test_captioner_load_is_off_thread_and_caption_is_non_blocking(self):
+        import threading
+        import time
+
+        from sonic.computer_use import avcs_narrator as module
+
+        started = threading.Event()
+        release = threading.Event()
+
+        class _SlowDescriber:
+            def caption(self, frame):  # noqa: ANN001
+                started.set()
+                release.wait(5)
+                return "A window is open."
+
+        class _SlowLoader:
+            @staticmethod
+            def try_load(model_name=""):  # noqa: ANN001
+                started.set()
+                release.wait(5)
+                return _SlowDescriber()
+
+        import sys
+        import types
+
+        fake_describer_mod = types.ModuleType("forge.vision.describer")
+        fake_describer_mod.VLMDescriber = _SlowLoader  # type: ignore[attr-defined]
+        fake_pkg = types.ModuleType("forge.vision")
+        fake_pkg.describer = fake_describer_mod  # type: ignore[attr-defined]
+        prev_forge = sys.modules.get("forge.vision")
+        prev_desc = sys.modules.get("forge.vision.describer")
+        sys.modules["forge.vision"] = fake_pkg
+        sys.modules["forge.vision.describer"] = fake_describer_mod
+        try:
+            captioner = module._BackgroundVLMCaptioner("slow-model")
+            # Construction must return immediately despite the 5 s load.
+            t0 = time.perf_counter()
+            frame = np.zeros((4, 4, 3), dtype=np.uint8)
+            first = captioner.caption(frame)
+            elapsed = time.perf_counter() - t0
+            assert elapsed < 1.0, "caption() blocked the caller"
+            assert first == "", "no caption can exist before the model loads"
+        finally:
+            release.set()
+            if prev_forge is None:
+                sys.modules.pop("forge.vision", None)
+            else:
+                sys.modules["forge.vision"] = prev_forge
+            if prev_desc is None:
+                sys.modules.pop("forge.vision.describer", None)
+            else:
+                sys.modules["forge.vision.describer"] = prev_desc
+
+    def test_awareness_loop_keeps_sampling_while_vlm_loads(self, monkeypatch):
+        """Perception must keep sampling while a VLM is loading.
+
+        Keeps the real non-blocking captioner and only makes the underlying
+        model load slow, so this measures the production wrapper rather than a
+        hand-written stand-in.
+        """
+        import threading
+        import sys
+        import types
+
+        gate = threading.Event()
+
+        class _SlowDescriber:
+            def caption(self, frame):  # noqa: ANN001
+                gate.wait(10)
+                return ""
+
+        class _SlowLoader:
+            @staticmethod
+            def try_load(model_name=""):  # noqa: ANN001
+                gate.wait(10)
+                return _SlowDescriber()
+
+        fake_mod = types.ModuleType("forge.vision.describer")
+        fake_mod.VLMDescriber = _SlowLoader  # type: ignore[attr-defined]
+        prev = sys.modules.get("forge.vision.describer")
+        sys.modules["forge.vision.describer"] = fake_mod
+        monkeypatch.setenv("SONIC_AVCS_VLM_DESCRIBER", "slow-fake")
+        try:
+            async def scenario():
+                provider = _StubProvider()
+                provider.set_frame(_structured_frame())
+                monitor = AwarenessMonitor(provider, "ws-vlm", fps=20.0)
+                monitor.start()
+                await asyncio.sleep(0.4)
+                await monitor.stop()
+                return provider
+
+            provider = asyncio.run(scenario())
+        finally:
+            gate.set()
+            if prev is None:
+                sys.modules.pop("forge.vision.describer", None)
+            else:
+                sys.modules["forge.vision.describer"] = prev
+        assert provider.screenshot_calls >= 3, "a loading VLM stalled perception"

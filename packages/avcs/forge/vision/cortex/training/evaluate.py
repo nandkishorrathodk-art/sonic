@@ -126,11 +126,19 @@ def load_cortex_checkpoint(path: str | Path, device: str = "cpu") -> ArtificialV
     state = torch.load(checkpoint, map_location=device)
     if not isinstance(state, dict):
         raise ValueError("AVCS cortex checkpoint must be a state_dict mapping")
-    model = ArtificialVisualCortex(ModelConfig())
-    model.load_state_dict(state, strict=True)
-    model.to(device)
-    model.eval()
-    return model
+    from forge.vision.torch_build import build_model
+
+    def _construct() -> ArtificialVisualCortex:
+        model = ArtificialVisualCortex(ModelConfig())
+        model.load_state_dict(state, strict=True)
+        model.to(device)
+        model.eval()
+        return model
+
+    # Serialized: a concurrent ``transformers`` ``from_pretrained`` temporarily
+    # changes the process-global torch default dtype, which would otherwise make
+    # this model's parameters come out in the wrong dtype.
+    return build_model(_construct)
 
 
 def write_evaluation_sidecar(

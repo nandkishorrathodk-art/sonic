@@ -44,6 +44,7 @@ from sonic.computer_use.models import (
     ComputerUseMetrics,
     ComputerWorldObservation,
     EngineeringMissionMode,
+    GUI_STATE_VERIFICATION_ACTIONS,
     StrategyState,
     SubGoal,
     SubGoalChecklist,
@@ -1770,6 +1771,61 @@ class ComputerUseAgent:
         observation.observation_age_ms = capture_age_ms + elapsed_ns / 1_000_000
 
     @staticmethod
+    def _frame_true_age_ms(screen: Any) -> float | None:
+        """Return a frame's honest age in ms, or ``None`` when unmeasurable.
+
+        ``capture_age_ms`` is stamped at capture time and never grows, so a
+        frame observed a minute ago still reports ~47 ms. The wall-clock delta
+        from ``capture_timestamp_ns`` is the only true age signal, so freshness
+        must use the larger of the two. A clock that is ahead (negative delta)
+        is unusable rather than proof of staleness, so it falls back to the
+        capture-time stamp.
+        """
+        if screen is None:
+            return None
+        age_ms = getattr(screen, "capture_age_ms", None)
+        if (
+            isinstance(age_ms, bool)
+            or not isinstance(age_ms, (int, float))
+            or not math.isfinite(float(age_ms))
+            or age_ms < 0
+        ):
+            age_ms = None
+        timestamp_ns = getattr(screen, "capture_timestamp_ns", None)
+        if isinstance(timestamp_ns, int) and not isinstance(timestamp_ns, bool):
+            timestamp_age_ms = (time.time_ns() - timestamp_ns) / 1_000_000
+            if math.isfinite(timestamp_age_ms) and timestamp_age_ms >= 0:
+                age_ms = max(float(age_ms or 0.0), timestamp_age_ms)
+        return None if age_ms is None else float(age_ms)
+
+    def _frame_is_fresh_for_reasoning(self, screen: Any) -> bool:
+        """Whether a frame is fresh enough to ground a reasoning decision.
+
+        Uses true wall-clock age so a reused/stale observation cannot pass here
+        and then fail the AVCS gate, which would block a GUI worker whose pixels
+        were actually fine.
+        """
+        has_pixels = bool(
+            getattr(screen, "raw_rgb", b"")
+            or getattr(screen, "screenshot_base64", "")
+        )
+        if not has_pixels:
+            return False
+        true_age = self._frame_true_age_ms(screen)
+        return true_age is not None and true_age <= 2_000
+
+    def _adopt_reasoning_pixels(self, screen: Any, is_fresh: bool) -> None:
+        """Adopt (or clear) the frame used to ground the next GUI decision."""
+        if is_fresh:
+            self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
+            self._last_screen_has_pixels = True
+            self._last_screen_frame_id = getattr(screen, "frame_id", None)
+        else:
+            self._last_screenshot_b64 = ""
+            self._last_screen_has_pixels = False
+            self._last_screen_frame_id = None
+
+    @staticmethod
     def _gui_only_recovery_action(
         goal: str,
         reason: str,
@@ -3425,28 +3481,9 @@ class ComputerUseAgent:
             or getattr(self, "gui_only", False)
         )
         structured_scene_available = False
-        current_capture_age = getattr(observation.screen, "capture_age_ms", None)
-        current_frame_is_fresh = (
-            bool(
-                getattr(observation.screen, "raw_rgb", b"")
-                or getattr(observation.screen, "screenshot_base64", "")
-            )
-            and
-            isinstance(current_capture_age, (int, float))
-            and not isinstance(current_capture_age, bool)
-            and math.isfinite(current_capture_age)
-            and 0 <= current_capture_age <= 2_000
-        )
-        if gui_reasoning and current_frame_is_fresh:
-            self._last_screenshot_b64 = observation.screen.screenshot_base64
-            self._last_screen_has_pixels = True
-            self._last_screen_frame_id = getattr(
-                observation.screen, "frame_id", None
-            )
-        elif gui_reasoning:
-            self._last_screenshot_b64 = ""
-            self._last_screen_has_pixels = False
-            self._last_screen_frame_id = None
+        current_frame_is_fresh = self._frame_is_fresh_for_reasoning(observation.screen)
+        if gui_reasoning:
+            self._adopt_reasoning_pixels(observation.screen, current_frame_is_fresh)
         if (
             gui_reasoning
             and not current_frame_is_fresh
@@ -3457,7 +3494,9 @@ class ComputerUseAgent:
             visual_observation = await self.computer.screenshot(
                 self._active_workspace_id
             )
-            visual_age = getattr(visual_observation, "capture_age_ms", None)
+            # Same honest-age rule as the gate above: a re-captured frame must be
+            # judged by true wall-clock age, not the frozen capture-time stamp.
+            visual_true_age = self._frame_true_age_ms(visual_observation)
             if (
                 (
                     getattr(visual_observation, "raw_rgb", b"")
@@ -3465,10 +3504,8 @@ class ComputerUseAgent:
                 )
                 and visual_observation.width > 0
                 and visual_observation.height > 0
-                and isinstance(visual_age, (int, float))
-                and not isinstance(visual_age, bool)
-                and math.isfinite(visual_age)
-                and 0 <= visual_age <= 2_000
+                and visual_true_age is not None
+                and visual_true_age <= 2_000
             ):
                 visual_observation = self._ensure_avcs_state(visual_observation)
                 self._last_screenshot_b64 = visual_observation.screenshot_base64
@@ -3493,7 +3530,7 @@ class ComputerUseAgent:
                 )
                 observation.perception_version = refreshed.version
                 observation.visible_text = visual_observation.visible_text
-                observation.observation_age_ms = visual_age
+                observation.observation_age_ms = visual_true_age
                 observation.perception_source = "avcs_frame_refresh"
             else:
                 logger.warning(
@@ -3501,7 +3538,7 @@ class ComputerUseAgent:
                     active_window=getattr(visual_observation, "active_window", ""),
                     width=getattr(visual_observation, "width", 0),
                     height=getattr(visual_observation, "height", 0),
-                    capture_age_ms=visual_age,
+                    capture_age_ms=visual_true_age,
                 )
         avcs_summary = self._fresh_avcs_reflex_summary(
             getattr(observation, "screen", None)
@@ -6041,7 +6078,12 @@ class ComputerUseAgent:
             )
             trace = ComputerDecisionTrace(
                 step_index=self.action_counter,
-                action_type=ComputerActionType.TERMINAL_EXEC,
+                # A blocked pre-execution proposal has no executed action. It was
+                # previously recorded as TERMINAL_EXEC unconditionally, so a
+                # blocked GUI worker (reasoning-unavailable, gui-contract) showed
+                # up in the operator UI as "terminal exec". Report it as a
+                # non-action so the trace describes what actually happened.
+                action_type=ComputerActionType.GUI_SCREENSHOT,
                 target_resource=target_resource or "blocked-action",
                 payload=str(payload),
                 predicted_outcome=predicted_outcome,
@@ -8665,16 +8707,7 @@ class ComputerUseAgent:
                     raw_error=str(e),
                 )
         state_delta = getattr(self, "_last_gui_state_delta", None)
-        state_verification_actions = {
-            ComputerActionType.GUI_CLICK,
-            ComputerActionType.GUI_DOUBLE_CLICK,
-            ComputerActionType.GUI_RIGHT_CLICK,
-            ComputerActionType.GUI_TYPE,
-            ComputerActionType.GUI_KEYPRESS,
-            ComputerActionType.GUI_HOTKEY,
-            ComputerActionType.GUI_SCROLL,
-            ComputerActionType.GUI_DRAG,
-        }
+        state_verification_actions = GUI_STATE_VERIFICATION_ACTIONS
         if (
             isinstance(state_delta, dict)
             and action_type in state_verification_actions

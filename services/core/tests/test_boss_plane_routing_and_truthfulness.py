@@ -393,3 +393,20 @@ async def test_shared_desktop_wave_admits_one_gui_worker_and_concurrent_headless
     # and g2 must be deferred to the subsequent wave!
     assert dispatched_ids[:3] == ["g1", "h1", "h2"]
     assert dispatched_ids[3] == "g2"
+
+
+@pytest.mark.asyncio
+async def test_boss_reports_inconclusive_judge_as_unverified_not_failed():
+    """An INCONCLUSIVE Judge verdict must not be reported as worker FAILED.
+
+    The Judge returns INCONCLUSIVE for GUI work until an evaluated local
+    verification head exists. The worker may still have really done the work
+    (a live desktop showed the launched window). Reporting that as FAILED
+    claimed a failure that never happened; UNVERIFIED is the honest status.
+    """
+    from sonic.agents.judge import JudgeVerdict
+
+    assert BossAgent._status_for_judge_verdict(JudgeVerdict.FALSIFIED) == "FAILED"
+    assert BossAgent._status_for_judge_verdict(JudgeVerdict.INCONCLUSIVE) == "UNVERIFIED"
+    assert BossAgent._status_for_judge_verdict(JudgeVerdict.UNVERIFIED) == "UNVERIFIED"
+    assert BossAgent._status_for_judge_verdict(JudgeVerdict.BENIGN) == "UNVERIFIED"

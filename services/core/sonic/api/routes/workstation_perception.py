@@ -11,6 +11,18 @@ from typing import Any
 from fastapi import HTTPException, status
 
 _capability_probe: Any = None
+_capability_probe_key: tuple[str, ...] = ()
+
+
+def _capability_probe_config_key() -> tuple[str, ...]:
+    """Env vars that change what the capability probe would report."""
+    import os
+
+    return (
+        os.environ.get("SONIC_AVCS_CORTEX_CHECKPOINT", "").strip(),
+        os.environ.get("SONIC_AVCS_GROUNDING_CHECKPOINT", "").strip(),
+        os.environ.get("SONIC_AVCS_FOCUS_CHECKPOINT", "").strip(),
+    )
 
 
 def _shared_capability_probe() -> Any:
@@ -19,12 +31,20 @@ def _shared_capability_probe() -> Any:
     Constructing a fresh instance per poll is wasteful once a focus checkpoint
     is configured, because loading a checkpoint is expensive. The probe is
     read-only capability reporting, so a process-wide instance is safe.
+
+    It is re-created when the checkpoint configuration changes. The instance
+    resolves its checkpoint paths in ``__init__``, so a cached instance would
+    otherwise keep reporting a checkpoint that has since been unset (or miss a
+    newly configured one), which is exactly the honesty surface an operator
+    relies on.
     """
-    global _capability_probe
-    if _capability_probe is None:
+    global _capability_probe, _capability_probe_key
+    key = _capability_probe_config_key()
+    if _capability_probe is None or key != _capability_probe_key:
         from sonic.computer_use.avcs_perception import AVCSPerception
 
         _capability_probe = AVCSPerception()
+        _capability_probe_key = key
     return _capability_probe
 
 

@@ -22,6 +22,7 @@ helper returns empty results and the agent keeps its existing behaviour.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any, Optional
 
@@ -79,6 +80,89 @@ def peek_ambient_narration(key: str) -> list[dict[str, Any]]:
         return list(_ambient.get(key or "default", []))
 
 
+class _BackgroundVLMCaptioner:
+    """Loads a VLM describer and captions frames on a background worker.
+
+    ``VLMDescriber.try_load`` loads a multi-hundred-MB model and ``caption``
+    runs inference; both take seconds on CPU.  The continuous awareness loop
+    samples at ~10 FPS, so doing either on the loop would stall perception and
+    block the whole event loop.  This wrapper owns a load thread and a single
+    inference worker:
+
+    * ``caption(frame)`` is **non-blocking**.  It queues the frame and returns
+      the most recent completed caption (deduplicated, so a static screen does
+      not repeat the same sentence), or ``""`` while none is ready.
+    * A caption therefore describes a recent frame rather than this exact one.
+      That is acceptable for ambient commentary -- the alternative is blocking
+      the eye -- and it is never invented: it is a real caption of a real frame.
+    """
+
+    def __init__(self, model_name: str) -> None:
+        self._model_name = model_name
+        self._describer: Any = None
+        self._ready = False
+        self._pending: np.ndarray | None = None
+        self._latest: str = ""
+        self._last_returned: str = ""
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        threading.Thread(target=self._load, name="avcs-vlm-load", daemon=True).start()
+        threading.Thread(
+            target=self._work_loop, name="avcs-vlm-caption", daemon=True
+        ).start()
+
+    def _load(self) -> None:
+        try:
+            from forge.vision.describer import VLMDescriber
+
+            describer = VLMDescriber.try_load(model_name=self._model_name)
+        except Exception as exc:  # pragma: no cover - environment dependent
+            logger.warning("avcs_vlm_describer_failed", error=str(exc))
+            describer = None
+        with self._lock:
+            self._describer = describer
+            self._ready = True
+        if describer is not None:
+            logger.info("avcs_vlm_describer_ready", model=self._model_name)
+        else:
+            logger.warning("avcs_vlm_describer_unavailable", model=self._model_name)
+
+    def _work_loop(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait(0.25)
+            self._wake.clear()
+            with self._lock:
+                frame = self._pending
+                self._pending = None
+                describer = self._describer if self._ready else None
+            if frame is None or describer is None:
+                continue
+            try:
+                caption = describer.caption(frame) or ""
+            except Exception:  # pragma: no cover - defensive
+                caption = ""
+            if caption:
+                with self._lock:
+                    self._latest = caption
+
+    def caption(self, frame: np.ndarray) -> str:
+        """Queue ``frame`` for captioning; return a new caption if one arrived.
+
+        Non-blocking and never raises.  Returns ``""`` when no caption is ready
+        or when the newest caption was already returned once.
+        """
+        with self._lock:
+            if self._ready and self._describer is not None:
+                self._pending = frame
+                self._wake.set()
+            latest = self._latest
+            if not latest or latest == self._last_returned:
+                return ""
+            self._last_returned = latest
+            return latest
+
+
 class AVCSNarrator:
     """Thin wrapper around ``forge.vision.narrator.LiveNarrator``.
 
@@ -92,8 +176,27 @@ class AVCSNarrator:
         self._narrators: dict[str, Any] = {}
         self._recent: dict[str, list[dict[str, Any]]] = {}
         self._available: Optional[bool] = None
+        self._describer: Any = None
+        self._describer_checked = False
 
     # -- capability ---------------------------------------------------------
+
+    def _get_describer(self) -> Any:
+        """Lazily start the optional VLM describer's background load.
+
+        Enabled only when ``SONIC_AVCS_VLM_DESCRIBER`` names a model.  The model
+        load itself happens on a background thread; until it finishes the
+        narrator produces reflex-only lines, so perception is never stalled.
+        Returns ``None`` (and stays None) when disabled.
+        """
+        if self._describer_checked:
+            return self._describer
+        self._describer_checked = True
+        model = os.environ.get("SONIC_AVCS_VLM_DESCRIBER", "").strip()
+        if not model:
+            return None
+        self._describer = _BackgroundVLMCaptioner(model)
+        return self._describer
 
     @property
     def available(self) -> bool:
@@ -114,7 +217,7 @@ class AVCSNarrator:
         if narrator is None:
             from forge.vision.narrator import LiveNarrator
 
-            narrator = LiveNarrator()
+            narrator = LiveNarrator(describer=self._get_describer())
             self._narrators[key] = narrator
             self._recent[key] = []
         return narrator

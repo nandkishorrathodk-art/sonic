@@ -128,14 +128,43 @@ class VLMDescriber:
     """
 
     name = "vlm"
+    # Prompt is deliberately descriptive: empirically, a narrow "just name the
+    # app" instruction makes SmolVLM-500M answer with a single word ("Xfce."),
+    # while a describe-the-screen instruction makes it read real on-screen text
+    # ("Example Domain", "Mozilla Firefox").  The trailing clause keeps it from
+    # inventing detail.
+    DEFAULT_PROMPT = (
+        "Describe what is happening on this computer screen. Name any "
+        "applications and windows you can see, and read the important visible "
+        "text or button labels. Do not guess about things you cannot see."
+    )
 
-    def __init__(self, model_name: str = "HuggingFaceTB/SmolVLM-256M-Instruct", device: str = "cpu") -> None:
-        from transformers import AutoModelForVision2Seq, AutoProcessor  # noqa: F401
+    def __init__(
+        self,
+        model_name: str = "HuggingFaceTB/SmolVLM-256M-Instruct",
+        device: str = "cpu",
+        max_new_tokens: int = 48,
+    ) -> None:
+        from transformers import AutoProcessor
+
+        # ``AutoModelForVision2Seq`` was removed in transformers 5.x; the same
+        # image-text family is now ``AutoModelForImageTextToText``.  Accept both
+        # so one code path works on either major version.
+        try:
+            from transformers import AutoModelForImageTextToText as _ImageTextModel
+        except ImportError:  # transformers < 5
+            from transformers import AutoModelForVision2Seq as _ImageTextModel
 
         self.processor = AutoProcessor.from_pretrained(model_name)
-        self.model = AutoModelForVision2Seq.from_pretrained(model_name)
+        # ``from_pretrained`` temporarily changes the process-global torch
+        # default dtype; serialize construction so a concurrently built model
+        # (e.g. the AVCS cortex) cannot pick up the wrong dtype.
+        from forge.vision.torch_build import build_model
+
+        self.model = build_model(lambda: _ImageTextModel.from_pretrained(model_name))
         self.model.eval()
         self.device = device
+        self.max_new_tokens = int(max_new_tokens)
 
     @staticmethod
     def try_load(model_name: str = "HuggingFaceTB/SmolVLM-256M-Instruct") -> Optional["VLMDescriber"]:
@@ -144,10 +173,11 @@ class VLMDescriber:
         except Exception:
             return None
 
-    def caption(self, frame: np.ndarray, prompt: str = "Describe what is happening on this computer screen.") -> str:
+    def caption(self, frame: np.ndarray, prompt: str = "") -> str:
         from PIL import Image
         import torch
 
+        prompt = prompt or self.DEFAULT_PROMPT
         img = Image.fromarray(frame[:, :, ::-1] if frame.shape[-1] == 3 else frame)
         messages = [
             {
@@ -158,8 +188,13 @@ class VLMDescriber:
         text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
         inputs = self.processor(text=text, images=[img], return_tensors="pt")
         with torch.no_grad():
-            out = self.model.generate(**inputs, max_new_tokens=64)
-        return self.processor.batch_decode(out, skip_special_tokens=True)[0].strip()
+            out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
+        decoded = self.processor.batch_decode(out, skip_special_tokens=True)[0].strip()
+        # SmolVLM echoes the chat template; keep only the assistant's reply.
+        marker = "Assistant:"
+        if marker in decoded:
+            decoded = decoded.split(marker, 1)[-1].strip()
+        return decoded
 
     def describe(
         self, state: SceneState, understanding: Optional[Understanding], events: list[SceneEvent]

@@ -75,6 +75,7 @@ def _make_trace(
     target="test_target",
     observation="command output",
     status="COMPLETED",
+    state_changed=None,
 ):
     return ComputerDecisionTrace(
         action_type=action_type,
@@ -85,6 +86,7 @@ def _make_trace(
         if status == "COMPLETED"
         else ActionExecutionStatus.FAILED,
         verification_evidence="Test fixture independently verified the observed result.",
+        state_changed=state_changed,
     )
 
 
@@ -449,6 +451,58 @@ async def test_boss_does_not_replan_after_unverified_gui_action_without_state_ch
 
     assert len(report.phases) == 1
     plan_next.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_boss_counts_app_launch_as_progress_without_state_change():
+    """An application launch is real progress even with no pixel delta.
+
+    APP_LAUNCH opens a window asynchronously, so the immediate post-action frame
+    often shows no change. Treating that as "no phase progress" discarded a
+    genuinely successful worker and killed the mission after one action.
+    """
+    boss = BossAgent(computer_provider=_make_computer_mock(), llm_router=MagicMock())
+    first_phase = Phase(
+        phase_number=1,
+        name="Launch",
+        sub_missions=[
+            SubMission(id="sub-launch", goal="open the terminal", plane="gui")
+        ],
+    )
+    # The worker's overall verdict is False (it could not independently verify
+    # its goal), but it DID successfully launch the application. Progress must
+    # be recognized from the successful action trace, not from res.success.
+    launch_result = SubMissionResult(
+        sub_mission_id="sub-launch",
+        goal="open the terminal",
+        success=False,
+        status="FAILED",
+        actions_taken=1,
+        traces=[
+            _make_trace(
+                action_type=ComputerActionType.APP_LAUNCH,
+                target="terminal",
+                status="COMPLETED",
+                state_changed=False,
+            )
+        ],
+        findings_summary="Launched the terminal; could not verify further.",
+    )
+
+    with patch.object(boss, "_strategic_decomposition", AsyncMock(return_value=first_phase)), \
+         patch.object(boss, "_dispatch_sub_agent", AsyncMock(return_value=launch_result)), \
+         patch.object(boss, "_aggregate_findings", AsyncMock(return_value="")), \
+         patch.object(boss, "_check_objective_complete", AsyncMock(return_value=(False, ""))), \
+         patch.object(boss, "_plan_next_phase", AsyncMock(return_value=None)) as plan_next:
+        await boss.run(
+            workspace_id="ws-1",
+            objective="open the terminal and run whoami",
+            requested_plane="gui",
+        )
+
+    # Progress was recognized, so the Boss advanced to plan a next phase instead
+    # of stopping dead with "no phase progress".
+    plan_next.assert_awaited()
 
 
 @pytest.mark.asyncio

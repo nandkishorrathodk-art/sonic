@@ -14,6 +14,11 @@ import {
   Loader2,
 } from "lucide-react";
 import { api } from "../../lib/api";
+import {
+  getActiveSessionId,
+  setActiveSessionId,
+  subscribeToActiveSession,
+} from "../../lib/session";
 import { PageShell, PageHeader, StateBlock } from "../../components/common/PageShell";
 
 interface AgentEntry {
@@ -61,8 +66,19 @@ const STATUS_STYLE: Record<string, string> = {
   active: "text-warning border-warning/40 bg-warning/10",
   idle: "text-muted border-ink-600 bg-ink-800",
   completed: "text-success border-success/40 bg-success/10",
+  success: "text-success border-success/40 bg-success/10",
   blocked: "text-danger border-danger/40 bg-danger/10",
   error: "text-danger border-danger/40 bg-danger/10",
+  failed: "text-danger border-danger/40 bg-danger/10",
+  timed_out: "text-danger border-danger/40 bg-danger/10",
+  interrupted: "text-muted border-ink-600 bg-ink-800",
+  skipped: "text-muted border-ink-600 bg-ink-800",
+  // UNVERIFIED / PARTIAL / WAITING_FOR_HUMAN are not failures: the worker may
+  // have really done the work but independent verification could not confirm
+  // it. Show them distinctly from FAILED.
+  unverified: "text-warning border-warning/40 bg-warning/10",
+  partial: "text-warning border-warning/40 bg-warning/10",
+  waiting_for_human: "text-warning border-warning/40 bg-warning/10",
 };
 
 function StatusDot({ status }: { status: string }) {
@@ -72,7 +88,7 @@ function StatusDot({ status }: { status: string }) {
       ? "bg-warning animate-pulse"
       : s === "completed" || s === "success"
         ? "bg-success"
-        : s === "blocked" || s === "error"
+        : s === "blocked" || s === "error" || s === "failed" || s === "timed_out"
           ? "bg-danger"
           : "bg-muted-dim";
   return <span className={`inline-block w-2 h-2 rounded-full ${color}`} />;
@@ -93,6 +109,15 @@ export default function AgentsPage() {
   const [expandedWorker, setExpandedWorker] = useState<string | null>(null);
   const [workerDetail, setWorkerDetail] = useState<Record<string, LiveWorker>>({});
   const [detailLoading, setDetailLoading] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState("default");
+  const [missionTaskAlive, setMissionTaskAlive] = useState(false);
+
+  // Follow the workstation's active session so the Boss workers it launched are
+  // actually listed here (this page used to hardcode "default").
+  useEffect(() => {
+    setSessionId(getActiveSessionId());
+    return subscribeToActiveSession((next) => setSessionId(next));
+  }, []);
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
@@ -112,18 +137,26 @@ export default function AgentsPage() {
   const fetchWorkers = useCallback(async () => {
     setWorkersError(null);
     try {
-      const data = await api.getWorkstationAgents();
+      const data = await api.getWorkstationAgents(sessionId);
       setWorkers(data.workers || []);
+      setMissionTaskAlive(Boolean(data.mission_task_alive));
     } catch (err: any) {
       setWorkersError(err.message || "Could not load live workers.");
       setWorkers([]);
     }
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     fetchAgents();
     fetchWorkers();
   }, [fetchAgents, fetchWorkers]);
+
+  // Workers run in the background, so this view must refresh on its own; a
+  // manual-only refresh meant a launched worker never appeared until reload.
+  useEffect(() => {
+    const interval = setInterval(fetchWorkers, 4000);
+    return () => clearInterval(interval);
+  }, [fetchWorkers]);
 
   const toggleWorker = useCallback(
     async (worker: LiveWorker) => {
@@ -136,7 +169,7 @@ export default function AgentsPage() {
       if (!worker.agent_uid) return;
       setDetailLoading(uid);
       try {
-        const response = await api.getWorkstationAgent(worker.agent_uid);
+        const response = await api.getWorkstationAgent(worker.agent_uid, sessionId);
         if (response?.worker) {
           setWorkerDetail((prev) => ({ ...prev, [uid]: response.worker }));
         }
@@ -146,13 +179,23 @@ export default function AgentsPage() {
         setDetailLoading(null);
       }
     },
-    [expandedWorker],
+    [expandedWorker, sessionId],
   );
 
   const activeCount = agents.filter((a) =>
     ["running", "active"].includes((a.status || "").toLowerCase()),
   ).length;
   const runningWorkers = workers.filter((w) => w.is_running).length;
+
+  const switchSession = useCallback(
+    (next: string) => {
+      setActiveSessionId(next);
+      setSessionId(next);
+      setWorkerDetail({});
+      setExpandedWorker(null);
+    },
+    [],
+  );
 
   return (
     <PageShell>
@@ -197,13 +240,29 @@ export default function AgentsPage() {
           aria-label="Live Boss workers"
           className="mb-4 rounded-2xl border border-ink-750 bg-ink-850/60 p-4"
         >
-          <div className="mb-3 flex items-center gap-2">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
             <Users className="w-4 h-4 shrink-0 text-secondary-400" />
             <h2 className="text-sm font-semibold text-slate-100">Live Boss workers</h2>
             <span className="text-[10px] font-mono text-muted-dim">
               {runningWorkers > 0 ? `${runningWorkers} active · ` : ""}
               {workers.length} {workers.length === 1 ? "worker" : "workers"}
             </span>
+            {missionTaskAlive && (
+              <span className="inline-flex items-center gap-1 rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[9px] font-mono uppercase text-warning">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" />
+                background mission running
+              </span>
+            )}
+            <div className="ml-auto flex items-center gap-1.5">
+              <span className="text-[9px] font-mono text-muted-dim">session</span>
+              <input
+                value={sessionId}
+                onChange={(e) => switchSession(e.target.value)}
+                spellCheck={false}
+                aria-label="Workstation session id"
+                className="w-40 rounded border border-ink-700 bg-ink-900 px-1.5 py-0.5 font-mono text-[10px] text-slate-200"
+              />
+            </div>
           </div>
 
           <div className="space-y-2">
