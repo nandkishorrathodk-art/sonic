@@ -187,6 +187,31 @@ async def test_application_list_discovers_path_only_binaries():
 
 
 @pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_desktop_applications_returns_only_gui_entries():
+    """GUI workers need the small desktop set, not ~800 PATH binaries.
+
+    Regression: ``application_list`` also enumerates every executable on
+    ``$PATH``; a GUI prompt truncated to the first N names then hid real
+    desktop apps (a text editor) and the model wrongly reported them "not
+    installed". ``desktop_applications`` must query only ``.desktop`` entries
+    and must not include the PATH scan.
+    """
+    provider = DockerComputerProvider(container_name="desktop-apps-workstation")
+    provider._docker_exec = AsyncMock(
+        return_value=(0, "mousepad\nxfce4-terminal\n", "")
+    )
+
+    apps = await provider.desktop_applications("ws-1")
+
+    assert apps == ["mousepad", "xfce4-terminal"]
+    command = provider._docker_exec.await_args.args[0]
+    # Only the .desktop scan -- no PATH enumeration.
+    assert "/usr/share/applications" in command
+    assert 'printf \'%s\\n\' "$PATH"' not in command
+
+
+@pytest.mark.no_live_infra
 def test_scroll_action_requires_nonzero_delta():
     with pytest.raises(ValueError, match="non-zero scroll_delta"):
         GUIAction(action=GUIActionType.SCROLL, x=10, y=10, scroll_delta=0)

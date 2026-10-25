@@ -1930,6 +1930,51 @@ class DockerComputerProvider(ComputerProvider):
             self._cached_app_list = (now, list(apps))
         return apps
 
+    async def desktop_applications(self, workspace_id: str) -> list[str]:
+        """Return only genuine GUI applications (from ``.desktop`` entries).
+
+        ``application_list`` also enumerates every executable on ``$PATH``
+        (~800 entries on this image), which is useful for terminal/CLI lookups
+        but floods a GUI worker's context when truncated to the first N names:
+        the real desktop applications (e.g. a text editor) get pushed out and
+        the model wrongly concludes the app is not installed. GUI work needs
+        the small, high-signal desktop set, so expose it separately.
+        """
+        now = asyncio.get_event_loop().time()
+        cached = getattr(self, "_cached_desktop_apps", None)
+        if cached is not None and (now - cached[0]) < 60.0:
+            return list(cached[1])
+
+        discovery_cmd = (
+            "find /root/Desktop /home/sonic/Desktop /usr/share/applications "
+            "/usr/local/share/applications ~/.local/share/applications "
+            "-name '*.desktop' 2>/dev/null | while read -r f; do "
+            "[ -f \"$f\" ] || continue; "
+            "grep -qi '^NoDisplay=true' \"$f\" 2>/dev/null && continue; "
+            "grep -qi '^Terminal=true' \"$f\" 2>/dev/null && continue; "
+            "grep -qi 'TerminalEmulator' \"$f\" 2>/dev/null && continue; "
+            "ex=$(grep -m1 -E '^Exec=' \"$f\" 2>/dev/null | cut -d= -f2- | awk '{print $1}'); "
+            "[ -n \"$ex\" ] && basename \"$ex\"; "
+            "b=$(basename \"$f\" .desktop); echo \"$b\"; "
+            "done; true"
+        )
+        code, out, _ = await self._docker_exec(discovery_cmd, timeout=10)
+        apps: list[str] = []
+        if code == 0 and out.strip():
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                app = line.rsplit("/", 1)[-1].strip()
+                if app.endswith(".desktop"):
+                    app = app[:-8]
+                app = app.strip("\"' ")
+                if app and app not in apps:
+                    apps.append(app)
+        if apps:
+            self._cached_desktop_apps = (now, list(apps))
+        return apps
+
     @staticmethod
     def _split_app_and_args(clean_app: str) -> tuple[str, list[str]]:
         """Separates an application command string into application query and arguments.

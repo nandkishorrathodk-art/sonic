@@ -45,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     x11vnc \
     xfce4 \
     xfce4-terminal \
+    mousepad \
     dbus-x11 \
     x11-utils \
     x11-xserver-utils \

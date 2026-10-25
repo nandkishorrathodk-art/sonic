@@ -284,7 +284,8 @@ async def test_reasoning_heartbeat_attaches_to_its_worker(monkeypatch):
     The heartbeat previously travelled without ``agent_uid``, so the projection
     could not key it to the dispatched worker and silently dropped it -- a long
     reasoning turn looked like a stalled worker. The heartbeat now carries the
-    run-unique handle.
+    run-unique handle and is stored as a liveness signal (``heartbeat``),
+    separate from the worker's real ``latest_thought``.
     """
     tenant_id, session_id = "tenant-act-e2e", "sess-act-e2e-6"
     state = _get_or_create_session(tenant_id, session_id)
@@ -333,8 +334,12 @@ async def test_reasoning_heartbeat_attaches_to_its_worker(monkeypatch):
 
     worker = find_worker(state["worklog"], "worker-1-aaa111", mission_task_alive=True)
     assert worker is not None
-    # The heartbeat content is attached to the worker, proving it was not dropped.
-    assert "still reasoning" in worker["latest_thought"], worker["latest_thought"]
+    # The heartbeat must attach to the worker (proving it was not dropped) but
+    # as a LIVENESS signal, never as the worker's last thought. Otherwise the
+    # operator's "Latest thinking" panel shows "still reasoning after Ns"
+    # instead of what the worker actually reasoned.
+    assert "still reasoning" in worker["heartbeat"], worker["heartbeat"]
+    assert worker["latest_thought"] == "", worker["latest_thought"]
 
 
 @pytest.mark.asyncio
@@ -403,3 +408,178 @@ async def test_sub_report_structured_evidence_reaches_the_projection(monkeypatch
     assert worker["file_references"] == [{"path": "src/a.py", "operations": ["write"]}]
     assert worker["test_results"][0]["passed"] == 5
     assert worker["evidence_incomplete"] is False
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_never_overwrites_a_real_thought(monkeypatch):
+    """A liveness heartbeat must not clobber the worker's real last thought.
+
+    Regression: heartbeats are ``type == "thought"`` worklog items, so the
+    projection's thought branch set ``latest_thought`` to "Step N still
+    reasoning after Ns". The operator's expanded "Latest thinking" panel then
+    showed a liveness tick instead of what the worker actually reasoned.
+    """
+    tenant_id, session_id = "tenant-act-e2e", "sess-act-e2e-hb"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["desktop"] = {"workspace_id": "ws-activity-e2e"}
+    state["worklog"] = []
+
+    monkeypatch.setattr(
+        "sonic.api.routes.workstation.get_daytona_computer", lambda: _make_mock_computer()
+    )
+
+    with patch("sonic.computer_use.boss.BossAgent") as mock_boss_cls:
+        mock_boss = MagicMock()
+
+        async def fake_run(workspace_id, objective, phase_callback=None, interrupt_check=None, requested_plane=None):
+            if phase_callback:
+                await phase_callback("sub_dispatch", {
+                    "sub_agent_number": 1,
+                    "sub_mission_id": "sub-hb",
+                    "agent_id": "sub-agent-1",
+                    "agent_uid": "worker-1-hb0001",
+                    "agent_name": "Analyst",
+                    "status": "RUNNING",
+                    "goal": "reason about the target",
+                    "role": "analyst",
+                    "plane": "headless",
+                    "max_steps": 5,
+                })
+                # A real reasoning thought first ...
+                await phase_callback("sub_step", {"trace": {
+                    "step_index": 1,
+                    "action_type": "TERMINAL_EXEC",
+                    "target": "hostname",
+                    "observation": "box-1",
+                    "status": "SUCCESS",
+                    "exit_code": 0,
+                }, "agent_id": "sub-agent-1", "agent_name": "Analyst",
+                    "sub_mission_id": "sub-hb", "role": "analyst", "plane": "headless"})
+                # ... then a liveness heartbeat on the SAME step.
+                await phase_callback("sub_heartbeat", {
+                    "sub_mission_id": "sub-hb",
+                    "agent_id": "sub-agent-1",
+                    "agent_uid": "worker-1-hb0001",
+                    "agent_name": "Analyst",
+                    "role": "analyst",
+                    "plane": "headless",
+                    "sub_agent_number": 1,
+                    "elapsed_seconds": 9.0,
+                    "step": 1,
+                    "last_observation_version": 3,
+                })
+            return _boss_report()
+
+        mock_boss.run = AsyncMock(side_effect=fake_run)
+        mock_boss_cls.return_value = mock_boss
+
+        await _run_prompt_reasoning(tenant_id, session_id, "analyze the target thoroughly")
+
+    worker = find_worker(state["worklog"], "worker-1-hb0001", mission_task_alive=True)
+    assert worker is not None
+    # Liveness is recorded separately ...
+    assert "still reasoning" in worker["heartbeat"], worker["heartbeat"]
+    # ... and the real thought is untouched.
+    assert "still reasoning" not in worker["latest_thought"], worker["latest_thought"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_heartbeats_are_throttled_in_the_worklog(monkeypatch):
+    """Heartbeats fire ~every 2s; they must not flood the persisted worklog.
+
+    Regression: each tick appended a full worklog item (and persisted the
+    session), so liveness noise crowded out real steps in the operator feed.
+    """
+    tenant_id, session_id = "tenant-act-e2e", "sess-act-e2e-throttle"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["desktop"] = {"workspace_id": "ws-activity-e2e"}
+    state["worklog"] = []
+
+    monkeypatch.setattr(
+        "sonic.api.routes.workstation.get_daytona_computer", lambda: _make_mock_computer()
+    )
+
+    with patch("sonic.computer_use.boss.BossAgent") as mock_boss_cls:
+        mock_boss = MagicMock()
+
+        async def fake_run(workspace_id, objective, phase_callback=None, interrupt_check=None, requested_plane=None):
+            if phase_callback:
+                await phase_callback("sub_dispatch", {
+                    "sub_agent_number": 1,
+                    "sub_mission_id": "sub-hb2",
+                    "agent_id": "sub-agent-1",
+                    "agent_uid": "worker-1-hb0002",
+                    "agent_name": "Analyst",
+                    "status": "RUNNING",
+                    "goal": "reason",
+                    "role": "analyst",
+                    "plane": "headless",
+                    "max_steps": 5,
+                })
+                for i in range(6):
+                    await phase_callback("sub_heartbeat", {
+                        "sub_mission_id": "sub-hb2",
+                        "agent_id": "sub-agent-1",
+                        "agent_uid": "worker-1-hb0002",
+                        "agent_name": "Analyst",
+                        "role": "analyst",
+                        "plane": "headless",
+                        "sub_agent_number": 1,
+                        "elapsed_seconds": float(2 * (i + 1)),
+                        "step": 1,
+                        "last_observation_version": i + 1,
+                    })
+            return _boss_report()
+
+        mock_boss.run = AsyncMock(side_effect=fake_run)
+        mock_boss_cls.return_value = mock_boss
+
+        await _run_prompt_reasoning(tenant_id, session_id, "analyze the target")
+
+    heartbeats = [
+        item for item in state["worklog"]
+        if item.get("orchestration_event") == "sub_heartbeat"
+    ]
+    # Six ticks on the same (worker, step) inside one window collapse to one.
+    assert len(heartbeats) == 1, f"expected 1 throttled heartbeat, got {len(heartbeats)}"
+
+
+@pytest.mark.asyncio
+async def test_phase_with_no_dispatched_worker_is_not_reported_complete(monkeypatch):
+    """A phase that ran no worker must not be titled "Phase N Complete".
+
+    Regression: a replan phase that dispatched zero workers still emitted a
+    "Phase N Complete" event, a phantom completion.
+    """
+    tenant_id, session_id = "tenant-act-e2e", "sess-act-e2e-phase"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["desktop"] = {"workspace_id": "ws-activity-e2e"}
+    state["worklog"] = []
+
+    monkeypatch.setattr(
+        "sonic.api.routes.workstation.get_daytona_computer", lambda: _make_mock_computer()
+    )
+
+    with patch("sonic.computer_use.boss.BossAgent") as mock_boss_cls:
+        mock_boss = MagicMock()
+
+        async def fake_run(workspace_id, objective, phase_callback=None, interrupt_check=None, requested_plane=None):
+            if phase_callback:
+                await phase_callback("phase_complete", {
+                    "phase_number": 2,
+                    "name": "Terminal Focus",
+                    "results_count": 0,
+                    "success_count": 0,
+                    "dispatched_count": 0,
+                    "planned_count": 0,
+                })
+            return _boss_report()
+
+        mock_boss.run = AsyncMock(side_effect=fake_run)
+        mock_boss_cls.return_value = mock_boss
+
+        await _run_prompt_reasoning(tenant_id, session_id, "do the task")
+
+    titles = [w.get("title") for w in state.get("worklog", [])]
+    assert any("no worker dispatched" in str(t) for t in titles), titles
+    assert not any("Phase 2 Complete" in str(t) for t in titles), titles

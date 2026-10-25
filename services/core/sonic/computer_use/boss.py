@@ -856,6 +856,11 @@ class BossAgent:
                 "name": current_phase.name,
                 "results_count": len(current_phase.results),
                 "success_count": sum(1 for r in current_phase.results if r.success),
+                # A phase that dispatched no worker has nothing to have
+                # "completed". Surface the dispatch count so the operator UI
+                # never reports a phantom completion.
+                "dispatched_count": len(current_phase.results),
+                "planned_count": len(current_phase.sub_missions),
             })
 
             # Aggregate findings from this phase

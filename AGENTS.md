@@ -4275,3 +4275,79 @@ control* or *type text* still cannot complete — but it now fails honestly
 - `services/core` full suite: **2392 passed, 40 skipped, 0 failures**.
 - Dashboard `next build`: all routes compile clean.
 - Ruff clean on every changed file; `git diff --check` clean.
+
+## Boss subagent visibility + worker drill-down honesty pass (2026-10-25)
+
+Operator report: "jab agent launch karta hai to unka id hona chahiye ... background
+mein agent run hota hai ya nahi ... id/name par click kiya to dikhna chahiye kya
+kaam kar raha hai." Audited the Boss → subagent → dashboard projection path
+manually (no parallel subagents) and found the visibility core already worked;
+fixed four real defects found along the way.
+
+### What already worked (verified live, not asserted)
+- `/workstation` and `/agents` render a live worker board with `agent_uid`,
+  `agent_name`, `status`, `latest_action` and a `mission_task_alive` flag.
+- `/agents` follows the active session (`getActiveSessionId`) instead of a
+  hardcoded `"default"`.
+- Worker drill-down (`/workstation/agents/{uid}?session_id=...`) returns the
+  per-step timeline. Live drill-down on `worker-1-fb6b1c` showed real steps
+  (`APP_LAUNCH`, `GUI_KEYPRESS`, `GUI_SCREENSHOT`, `WAIT_FOR_HUMAN`).
+
+### Bugs fixed
+1. **Heartbeats flooded the worklog.** Each ~2 s liveness tick appended a full
+   worklog item (and persisted the session). A 39-item worklog had 18 heartbeat
+   entries. Fixed with a module-level throttle in `api/routes/workstation.py`
+   keyed by `(tenant, session, agent_uid, step)` so repeated ticks collapse to
+   one; real steps and phase transitions are unaffected.
+2. **Heartbeats clobbered the real "latest thinking".** Heartbeats are
+   `type == "thought"` items, so `computer_use/agent_activity.py` set
+   `latest_thought` to "Step N still reasoning after Ns" — the operator's
+   expanded "Latest thinking" panel showed a liveness tick instead of the
+   worker's actual reasoning. `collect_worker_activity()` now has a dedicated
+   heartbeat branch: it records `heartbeat` / `heartbeat_at` on the worker
+   without touching `latest_thought`. The dashboard surfaces them separately
+   (`types/workstation.ts`, `components/worklog/WorklogFeed.tsx`).
+3. **Phantom "Phase N Complete".** A replan phase that dispatched zero workers
+   still emitted a completion event. `boss.py` and `_on_boss_event()` now render
+   an honest "Phase N — no worker dispatched" title when nothing ran.
+4. **GUI workers could not see real desktop applications.** This is why the
+   operator's own "open a text editor" task kept failing. `application_list()`
+   enumerates every `$PATH` executable (~800 on this image) alongside ~44 real
+   `.desktop` apps, and the prompt truncated the merged list to 30 entries —
+   `mousepad` sat at index 41, so the model concluded it was "not installed"
+   and stalled on `WAIT_FOR_HUMAN`. Fixes:
+   - New `DockerComputerProvider.desktop_applications()` queries only
+     `.desktop` entries (no PATH scan); GUI workers use it exclusively
+     (`agent.py`), text workers keep the full inventory.
+   - New `ComputerUseAgent._rank_apps_for_goal()` reorders the app list by
+     goal-token overlap (specific app-name match wins over a generic shared word
+     like "editor"), name-agnostic, stable, no vendor literals; applied in both
+     the detailed and compact prompts, with the visible cap raised 30 → 60.
+   - `docker/Dockerfile.workstation` now installs `mousepad` (the image shipped
+     `xfce4` + `xfce4-terminal` but no GUI text editor at all).
+   Live result: after the fix the worker actually launched mousepad
+   (`Untitled 1 - Mousepad` window via `wmctrl -l`), where before it declared
+   the app missing on step 1.
+
+### Honest remaining blocker (fail-closed, unchanged)
+Text entry into the launched editor still stops: `GUI_KEYPRESS` on a semantic
+target needs an evaluated local AVCS focus-verification head, which does not
+exist in the repo. The worker records an honest `UNVERIFIED` / fail-closed
+result rather than pretending to type. This is the documented contract, not a
+regression: the operator must train and configure
+`SONIC_AVCS_FOCUS_CHECKPOINT` (and the grounding head for semantic clicks)
+before GUI text entry can complete. What is now proven live: the Boss dispatches
+a worker with an id/name/status, the worker appears and is drillable in the
+dashboard, and it can launch the requested installed application.
+
+### Tests
+- `services/core/tests/test_worker_activity_end_to_end.py` (+3): heartbeat does
+  not overwrite a real thought; repeated heartbeats throttle to one worklog
+  item; a zero-dispatch phase is not titled "Phase N Complete".
+- `services/core/tests/test_docker_computer_provider.py` (+1): `desktop_applications`
+  queries only `.desktop` entries and never the PATH scan.
+- `services/core/tests/test_gui_capability_aware_prompt.py` (+2): goal-relevant
+  app ranking; ranking is name-agnostic and order-stable.
+- Boss/worker/dashboard subset: **206 passed** (one unrelated HF-hub 429 flake
+  passes in isolation). Provider/agent/GUI subset: **189 passed, 2 skipped**.
+- Dashboard `tsc --noEmit`: clean. Ruff clean on all changed files.

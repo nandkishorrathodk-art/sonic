@@ -126,6 +126,8 @@ export interface WorkstationWorker {
   latest_action?: string;
   latest_action_status?: string;
   latest_thought?: string;
+  heartbeat?: string;
+  heartbeat_at?: string;
   started_at?: string;
   updated_at?: string;
   step_count?: number;
