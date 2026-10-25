@@ -156,15 +156,40 @@ class DesktopSceneLabeler:
 
     def __init__(self, exec_runner: Callable[[str], Awaitable[str]] | None = None) -> None:
         self._exec = exec_runner
-        self._categories_cache: dict[str, list[str]] = {}
+        # Two tiers. Identity keys (desktop-file basename, StartupWMClass) name
+        # the application itself. Exec/TryExec keys only name the *binary* it
+        # runs, which several desktop entries can share (an app and its settings
+        # dialog both launch the same binary), so they are consulted second.
+        self._identity_cache: dict[str, list[tuple[str, list[str]]]] = {}
+        self._exec_cache: dict[str, list[tuple[str, list[str]]]] = {}
         self._category_map_loaded = False
+
+    @staticmethod
+    def _pick(candidates: list[tuple[str, list[str]]], key: str) -> Optional[list[str]]:
+        """Choose among desktop entries sharing a key.
+
+        Reverse-DNS application ids end in the application name
+        (``org.xfce.mousepad``), so an entry whose final dotted segment equals
+        the window class is the application itself rather than a sibling such as
+        its settings dialog. Falls back to the shortest basename, which is the
+        least-qualified (most likely the primary) entry.
+        """
+        if not candidates:
+            return None
+        for base, categories in candidates:
+            if base.rsplit(".", 1)[-1] == key:
+                return categories
+        return min(candidates, key=lambda item: len(item[0]))[1]
 
     async def _load_category_map(self) -> None:
         if self._category_map_loaded or self._exec is None:
             return
-        # One pass over every application directory; keyed by the desktop file's
-        # basename (lowercased) AND its StartupWMClass, since a window class may
-        # match either.
+        # One pass over every application directory. A window's WM_CLASS may
+        # match the desktop file's basename, its StartupWMClass, or the basename
+        # of its Exec/TryExec binary -- different packages advertise different
+        # subsets. Keying on only the first two silently drops any app whose
+        # desktop file omits StartupWMClass (e.g. org.xfce.mousepad.desktop),
+        # so its frames are never labeled and the eye learns nothing from it.
         script = (
             "for d in /usr/share/applications /usr/local/share/applications "
             "~/.local/share/applications; do "
@@ -172,7 +197,9 @@ class DesktopSceneLabeler:
             'b=$(basename "$f" .desktop); '
             'c=$(grep -m1 "^Categories=" "$f" | cut -d= -f2-); '
             'w=$(grep -m1 "^StartupWMClass=" "$f" | cut -d= -f2-); '
-            'printf "%s\\t%s\\t%s\\n" "$b" "$w" "$c"; '
+            'e=$(grep -m1 "^Exec=" "$f" | cut -d= -f2- | awk \'{print $1}\'); '
+            't=$(grep -m1 "^TryExec=" "$f" | cut -d= -f2-); '
+            'printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "$b" "$w" "$e" "$t" "$c"; '
             "done; done 2>/dev/null"
         )
         try:
@@ -182,16 +209,22 @@ class DesktopSceneLabeler:
             return
         for line in output.splitlines():
             parts = line.split("\t")
-            if len(parts) < 3:
+            if len(parts) < 5:
                 continue
-            base, wm_class, categories = parts[0], parts[1], parts[2]
+            base, wm_class, exec_field, try_exec, categories = parts[:5]
             parsed = [c.strip() for c in categories.split(";") if c.strip()]
             if not parsed:
                 continue
-            if base:
-                self._categories_cache.setdefault(base.lower(), parsed)
-            if wm_class:
-                self._categories_cache.setdefault(wm_class.lower(), parsed)
+            for raw_key in (base, wm_class):
+                key = str(raw_key).strip().lower()
+                if key:
+                    self._identity_cache.setdefault(key, []).append((base.lower(), parsed))
+            for raw_key in (exec_field, try_exec):
+                # Exec/TryExec may carry a path or arguments; the window class is
+                # the binary's basename.
+                key = str(raw_key).strip().split("/")[-1].strip("\"'").lower()
+                if key:
+                    self._exec_cache.setdefault(key, []).append((base.lower(), parsed))
         self._category_map_loaded = True
 
     async def label_for(self, wm_class: str, has_active_window: bool) -> tuple[Optional[str], str]:
@@ -210,12 +243,13 @@ class DesktopSceneLabeler:
         candidates = [normalized]
         if "." in normalized:
             candidates.append(normalized.split(".")[-1])
-        for candidate in candidates:
-            categories = self._categories_cache.get(candidate)
-            if categories:
-                ui = freedesktop_categories_to_ui(categories)
-                if ui:
-                    return ui, f"freedesktop_categories:{','.join(categories)}"
+        for cache in (self._identity_cache, self._exec_cache):
+            for candidate in candidates:
+                categories = self._pick(cache.get(candidate, []), candidate)
+                if categories:
+                    ui = freedesktop_categories_to_ui(categories)
+                    if ui:
+                        return ui, f"freedesktop_categories:{','.join(categories)}"
         return None, "unmapped_wm_class"
 
 

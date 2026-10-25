@@ -100,6 +100,10 @@ async def apprenticeship_status(user: User = Depends(require_operator)):
     """Current apprenticeship state: samples, labels, rounds, deployed accuracy."""
     loop = _get_loop()
     status = loop.status.to_dict()
+    # The awareness monitor owns its own loop instance; the sample count is a
+    # property of the shared on-disk store, so read it from the store rather
+    # than this instance's possibly-stale counter.
+    status["samples"] = loop.store.count()
     status["label_counts"] = loop.store.label_counts()
     status["store_dir"] = str(loop.store.root)
     status["checkpoint"] = str(loop.checkpoint_path)

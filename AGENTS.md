@@ -4351,3 +4351,61 @@ dashboard, and it can launch the requested installed application.
 - Boss/worker/dashboard subset: **206 passed** (one unrelated HF-hub 429 flake
   passes in isolation). Provider/agent/GUI subset: **189 passed, 2 skipped**.
 - Dashboard `tsc --noEmit`: clean. Ruff clean on all changed files.
+
+## AVCS self-learning (apprenticeship) unblocked (2026-10-25)
+
+Operator asked whether AVCS can self-learn/self-train. It can — the loop already
+existed (`sonic/computer_use/apprenticeship.py`: capture -> label -> learn ->
+verify -> promote, driven by `AwarenessMonitor` when
+`SONIC_AVCS_APPRENTICESHIP=1`). It was producing **zero samples** because of a
+real labeler bug, so the eye never actually learned from lived experience.
+
+### The bug
+`DesktopSceneLabeler._load_category_map` keyed desktop entries only by the
+`.desktop` file basename and its `StartupWMClass`. Many packages omit
+`StartupWMClass` (e.g. `org.xfce.mousepad.desktop` has neither `mousepad` nor a
+`StartupWMClass`), so a window whose WM_CLASS is `mousepad` matched nothing and
+its frames were silently skipped as `unmapped_wm_class`. Any app in that state
+contributed no training data at all.
+
+### The fix
+- The scan now also reads `Exec=` and `TryExec=` and keys on the **binary
+  basename**, since that is what a window class usually names.
+- Two tiers: identity keys (basename, `StartupWMClass`) are consulted before
+  binary keys. Several entries can share a binary (an app and its settings
+  dialog both run `mousepad`), so `_pick()` prefers the entry whose
+  reverse-DNS final segment equals the window class, falling back to the
+  shortest basename. This keeps `mousepad -> editor_code` instead of
+  `settings_panel`.
+- `GET /avcs/apprenticeship/status` now reads `samples`/`label_counts` from the
+  shared on-disk store. The awareness monitor runs its own loop instance, so the
+  route's own counter stayed at 0 while the store held hundreds of samples — a
+  misleading "learning nothing" report.
+
+### Verified live (real Docker workstation, real frames)
+- Labeler resolution before -> after: `mousepad` = None -> `editor_code`;
+  `xfce4-terminal` -> `terminal_shell`; `firefox-esr` -> `browser_webpage`.
+- With `SONIC_AVCS_APPRENTICESHIP=1`, cycling focus across Firefox / Thunar /
+  Terminal / Settings accumulated 300 honestly-labeled frames across 5 labels
+  and 8 groups (labels are OS-derived from freedesktop `Categories=`, never
+  guessed).
+- A real `POST /avcs/apprenticeship/learn` trained a candidate and **promoted**
+  it: held-out accuracy **0.986** (chance 0.125) on 69 held-out frames, written
+  to `sonic_data/avcs/apprenticeship/cortex_learned.pt` with an
+  `.eval.json` provenance sidecar.
+- The learned checkpoint predicts the live desktop correctly: with the active
+  window "Settings", it returned `settings_panel` at confidence 1.0 (the
+  previous offline checkpoint returned `media_playback` at 0.23 on the same
+  frame).
+
+### Honest scope
+This unblocks the **eye's** self-learning (scene-category perception). It does
+**not** unblock semantic GUI grounding or text entry: those still require the
+separately trained, held-out-evaluated `SONIC_AVCS_GROUNDING_CHECKPOINT` and
+`SONIC_AVCS_FOCUS_CHECKPOINT`, which need real recorded click/focus
+demonstrations (see `packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md`). The
+promoted accuracy is measured on this workstation's own frames and classes, not
+on arbitrary unseen applications.
+
+Tests: `test_avcs_apprenticeship.py` + `test_continuous_avcs_awareness.py` +
+`test_gui_capability_aware_prompt.py` = 54 passed. Ruff clean.
