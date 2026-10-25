@@ -63,8 +63,62 @@ class AVCSPerception:
         # keeps the numpy reflex semantics and does not pretend to have them.
         self._cortex = None
         self._cortex_failed = False
-        self._cortex_checkpoint = os.environ.get("SONIC_AVCS_CORTEX_CHECKPOINT", "").strip()
+        self._cortex_checkpoint = self._resolve_cortex_checkpoint()
         self._cortex_device = os.environ.get("SONIC_AVCS_CORTEX_DEVICE", "cpu").strip() or "cpu"
+
+    @staticmethod
+    def _resolve_cortex_checkpoint() -> str:
+        """The cortex checkpoint to load, preferring an explicit configuration.
+
+        When ``SONIC_AVCS_CORTEX_CHECKPOINT`` is unset, a checkpoint the being's
+        own apprenticeship loop has already learned and verified is used
+        instead, so the eye keeps improving from lived experience without an
+        operator having to re-point an env var after every learning round.
+
+        A relative configured path is resolved against the repository root as
+        well as the process CWD: the backend is normally launched from
+        ``services/core`` while ``.env`` paths are written relative to the repo
+        root, and silently loading nothing would misreport the eye as untrained.
+        """
+        explicit = os.environ.get("SONIC_AVCS_CORTEX_CHECKPOINT", "").strip()
+        if explicit:
+            resolved = AVCSPerception._resolve_path(explicit)
+            return resolved or explicit
+        try:
+            from sonic.computer_use.apprenticeship import ApprenticeshipStore
+
+            learned = ApprenticeshipStore().root / "cortex_learned.pt"
+            if learned.is_file():
+                return str(learned)
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _resolve_path(path: str) -> str:
+        """Return an existing absolute path, checking CWD and the repo root."""
+        candidate = Path(path)
+        if candidate.is_file():
+            return str(candidate.resolve())
+        if not candidate.is_absolute():
+            # services/core/sonic/computer_use/ -> repo root
+            repo_root = Path(__file__).resolve().parents[4]
+            from_root = repo_root / path
+            if from_root.is_file():
+                return str(from_root)
+        return ""
+
+    def reload_cortex(self) -> bool:
+        """Drop the loaded cortex so the next read loads the current checkpoint.
+
+        Called after the apprenticeship loop promotes a newly verified
+        checkpoint so the running process starts using the improved eye instead
+        of the one it loaded at startup.
+        """
+        self._cortex = None
+        self._cortex_failed = False
+        self._cortex_checkpoint = self._resolve_cortex_checkpoint()
+        return self.ensure_cortex_ready()
 
     @property
     def cortex_configured(self) -> bool:

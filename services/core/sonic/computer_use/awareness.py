@@ -26,6 +26,7 @@ Design constraints, deliberately chosen:
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 from collections import deque
@@ -148,6 +149,16 @@ class AwarenessMonitor:
         # the monotonic frame-id guard between unrelated captures.
         self._perception: Any | None = None
         self._perception_ready = False
+        # Apprenticeship: when enabled, frames the eye is already looking at
+        # become honestly-labeled training data for its own cortex.  Off by
+        # default; a normal boot pays nothing.  The window class is only probed
+        # when the active window actually changes, so the cost is near zero.
+        self._apprenticeship: Any | None = None
+        self._apprenticeship_ready = False
+        self._apprenticeship_key = ""
+        self._apprenticeship_round = 0
+        self._last_wm_class: str | None = None
+        self._window_generation = 0
 
     # -- lifecycle ---------------------------------------------------------
     @property
@@ -261,7 +272,101 @@ class AwarenessMonitor:
         self._frames_published += 1
 
         self._publish(TOPIC_FRAME, frame, previous)
+        await self._maybe_apprentice(rgb_frame, screen)
         return frame
+
+    async def _maybe_apprentice(self, rgb_frame: Any, screen: Any) -> None:
+        """Store this frame as a labeled sample, when apprenticeship is on.
+
+        Best-effort and bounded: a capture/learn failure must never stop
+        awareness.  The frame is only stored when its window resolves to an
+        honest label; an unlabelable frame is skipped rather than guessed.
+        """
+        loop = self._apprenticeship_loop()
+        if loop is None or rgb_frame is None:
+            return
+        try:
+            wm_class, has_active_window = await self._window_identity(screen)
+            label, source = await loop.labeler.label_for(wm_class, has_active_window)
+            if label is None:
+                return
+            loop.store.add(
+                rgb_frame, label, wm_class, source, group=self._apprenticeship_group()
+            )
+            self._apprenticeship_round += 1
+            await self._maybe_learn(loop)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("awareness_apprenticeship_failed", error=str(exc))
+
+    def _apprenticeship_group(self) -> str:
+        """A group id that changes when the focused window changes.
+
+        Frames of one continuous look at a window are near-duplicates and must
+        stay on one side of the train/held-out split, so they share a group.
+        """
+        return f"{self._apprenticeship_key or 'desktop'}:{self._window_generation}"
+
+    async def _window_identity(self, screen: Any) -> tuple[str, bool]:
+        """The active window's WM_CLASS, probed only when the window changes."""
+        active_window = str(getattr(screen, "active_window", "") or "")
+        has_active_window = active_window not in ("", "Desktop", "None")
+        get_class = getattr(self._provider, "get_active_window_class", None)
+        if not callable(get_class):
+            return "", has_active_window
+        if self._last_wm_class is not None and self._last_wm_class == active_window:
+            return self._apprenticeship_key, has_active_window
+        try:
+            wm_class = await get_class(self._workspace_id)
+        except Exception:
+            wm_class = ""
+        self._last_wm_class = active_window
+        self._apprenticeship_key = wm_class or ""
+        self._window_generation += 1
+        return self._apprenticeship_key, has_active_window
+
+    async def _maybe_learn(self, loop: Any) -> None:
+        """Trigger a learning round once enough new samples have accrued."""
+        try:
+            every = int(os.environ.get("SONIC_AVCS_APPRENTICE_LEARN_EVERY", "40") or 40)
+        except ValueError:
+            every = 40
+        if every <= 0 or self._apprenticeship_round < every:
+            return
+        self._apprenticeship_round = 0
+        result = await loop.learn()
+        logger.info(
+            "awareness_apprenticeship_round",
+            promoted=result.promoted,
+            reason=result.reason,
+            candidate_accuracy=result.candidate_accuracy,
+        )
+
+    def _apprenticeship_loop(self) -> Any | None:
+        """Lazily build the apprenticeship loop when enabled (env-gated)."""
+        if self._apprenticeship_ready:
+            return self._apprenticeship
+        self._apprenticeship_ready = True
+        if os.environ.get("SONIC_AVCS_APPRENTICESHIP", "") != "1":
+            return None
+        try:
+            from sonic.computer_use.apprenticeship import (
+                AVCSApprenticeshipLoop,
+                build_provider_labeler,
+            )
+
+            self._apprenticeship = AVCSApprenticeshipLoop()
+            # The labeler must read .desktop metadata inside the same sandbox
+            # that supplies the frames, or it can honestly label nothing.
+            self._apprenticeship.labeler = build_provider_labeler(self._provider)
+            logger.info(
+                "avcs_apprenticeship_enabled", store=str(self._apprenticeship.store.root)
+            )
+        except Exception as exc:
+            logger.warning("avcs_apprenticeship_init_failed", error=str(exc))
+            self._apprenticeship = None
+        return self._apprenticeship
 
     def _perception_engine(self) -> Any:
         """Lazily build this monitor's own AVCS perception engine.
