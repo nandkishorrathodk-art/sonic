@@ -870,6 +870,43 @@ class ComputerUseAgent:
             or str(getattr(self, "execution_plane", "") or "").lower().strip() == "gui"
         )
 
+    @staticmethod
+    def _rank_apps_for_goal(apps: list, goal: str) -> list:
+        """Order installed applications so goal-relevant ones appear first.
+
+        Generic and name-agnostic: an app is scored by how much of its own name
+        overlaps the goal text, so a specific match (the goal names the app, or
+        the app name is mostly composed of goal words) outranks an app that
+        merely shares one generic word such as "editor". No vendor names are
+        hardcoded; apps with no overlap keep their discovery order. This keeps
+        the operator's requested app inside the visible portion of a truncated
+        app list.
+        """
+        if not apps or not goal:
+            return list(apps or [])
+        goal_tokens = {
+            tok for tok in re.findall(r"[a-z0-9]+", str(goal).lower()) if len(tok) >= 3
+        }
+        if not goal_tokens:
+            return list(apps)
+
+        def score(name: str) -> float:
+            name_tokens = set(re.findall(r"[a-z0-9]+", str(name).lower()))
+            matched = name_tokens & goal_tokens
+            if not matched:
+                return -1.0
+            # Fraction of the app's name that the goal mentions: rewards a
+            # specific app ("mousepad") over a generic utility that happens to
+            # share one word ("xfce4-settings-editor").
+            base = len(matched) / max(len(name_tokens), 1)
+            # The goal naming the app outright is the strongest signal.
+            exact = 2.0 if str(name).lower().strip() in goal_tokens else 0.0
+            return base + exact
+
+        # Stable sort: equal scores keep discovery order, so unmatched apps
+        # (score -1) are never reshuffled.
+        return sorted(apps, key=score, reverse=True)
+
     def _gui_only_system_prompt(
         self,
     ) -> str:
@@ -1496,6 +1533,22 @@ class ComputerUseAgent:
         self._screen_width = int(getattr(screen_obs, "width", self._screen_width) or self._screen_width)
         self._screen_height = int(getattr(screen_obs, "height", self._screen_height) or self._screen_height)
         status = await self.computer.status(workspace_id)
+        # A GUI worker needs the small set of real desktop applications. The
+        # provider's full inventory also enumerates ~800 PATH binaries, which
+        # overflows the truncated app list the prompt shows and hides the real
+        # GUI apps (a text editor gets pushed out and the model wrongly reports
+        # it "not installed"). Prefer the desktop-only list when available.
+        gui_apps: list[str] = []
+        if hasattr(self.computer, "desktop_applications"):
+            try:
+                desktop_apps = await self.computer.desktop_applications(workspace_id)
+                gui_apps = [
+                    str(getattr(item, "name", item)).strip()
+                    for item in (desktop_apps or [])
+                    if str(getattr(item, "name", item)).strip()
+                ]
+            except Exception as exc:
+                logger.debug("desktop_application_inventory_unavailable", error=str(exc))
         if hasattr(self.computer, "application_list"):
             try:
                 discovered_apps = await self.computer.application_list(workspace_id)
@@ -1504,12 +1557,26 @@ class ComputerUseAgent:
                     for item in (discovered_apps or [])
                     if str(getattr(item, "name", item)).strip()
                 ]
-                if discovered_names:
-                    status.installed_applications = list(
-                        dict.fromkeys(list(getattr(status, "installed_applications", []) or []) + discovered_names)
+                if self._gui_action_contract_active() and gui_apps:
+                    # GUI worker: only real desktop applications are usable
+                    # (it cannot use the terminal), so show the small desktop
+                    # set rather than merging in ~800 PATH binaries that would
+                    # crowd the real apps out of the truncated list.
+                    merged = gui_apps
+                else:
+                    merged = list(
+                        dict.fromkeys(
+                            list(getattr(status, "installed_applications", []) or []) + discovered_names
+                        )
                     )
+                if merged:
+                    status.installed_applications = merged
             except Exception as exc:
                 logger.debug("application_inventory_unavailable", error=str(exc))
+        elif gui_apps:
+            status.installed_applications = list(
+                dict.fromkeys(list(getattr(status, "installed_applications", []) or []) + gui_apps)
+            )
         if self._gui_action_contract_active():
             files = []
             git_st = None
@@ -2671,7 +2738,10 @@ class ComputerUseAgent:
         if active_app != "UNKNOWN":
             raw_facts.append(f"Active app: {active_app}")
         if getattr(observation, "installed_applications", None):
-            raw_facts.append(f"Installed/Desktop apps: {', '.join(observation.installed_applications[:15])}")
+            ranked_apps = self._rank_apps_for_goal(
+                list(observation.installed_applications), goal
+            )
+            raw_facts.append(f"Installed/Desktop apps: {', '.join(ranked_apps[:15])}")
         if windows_str != "UNKNOWN":
             raw_facts.append(f"Open desktop windows: {windows_str}")
         if git_branch_str != "UNKNOWN":
@@ -2872,8 +2942,15 @@ class ComputerUseAgent:
         effective_goal = goal
 
         installed_apps_list = getattr(observation, "installed_applications", []) or []
+        # Surface applications relevant to the goal first. A real desktop can
+        # expose dozens of settings/utility entries before the app the task
+        # needs (e.g. a text editor), and truncating the list then hides it, so
+        # the model wrongly concludes the app is "not installed". Ranking by
+        # goal-token overlap is generic (no vendor names) and keeps the app the
+        # operator actually asked for inside the visible window.
+        installed_apps_list = self._rank_apps_for_goal(installed_apps_list, effective_goal)
         installed_str = (
-            ", ".join(str(a) for a in installed_apps_list[:30])
+            ", ".join(str(a) for a in installed_apps_list[:60])
             if installed_apps_list
             else "Discover dynamically via PATH / .desktop entries"
         )

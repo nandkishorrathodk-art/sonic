@@ -80,3 +80,34 @@ def test_gui_only_observation_surfaces_installed_apps():
     end = src.index("CURRENT AVCS PIXEL STATE SUMMARY", start)
     gui_branch = src[start:end]
     assert "Available Installed Desktop Applications" in gui_branch
+
+
+def test_goal_relevant_apps_are_ranked_first():
+    """The goal's application must survive the app-list truncation.
+
+    Regression: a real desktop exposes dozens of settings/utility entries
+    before the app the task needs, and the prompt truncated the list, so the
+    model concluded the app was "not installed". Ranking by goal-token overlap
+    (generic, no vendor names) must promote the requested app to the front.
+    """
+    apps = ["xfce4-terminal", "thunar", "xfce4-settings-editor", "mousepad"]
+    ranked = ComputerUseAgent._rank_apps_for_goal(
+        apps, "Open the mousepad text editor and save a note"
+    )
+    assert ranked[0] == "mousepad"
+    assert set(ranked) == set(apps)
+
+
+def test_app_ranking_is_name_agnostic_and_stable():
+    """No hardcoded app names: a non-matching goal keeps discovery order, and
+    an unrelated app is not promoted."""
+    apps = ["alpha-app", "beta-tool", "gamma-editor"]
+    # Goal mentions none of the apps -> original order preserved.
+    assert ComputerUseAgent._rank_apps_for_goal(apps, "do something generic") == apps
+    # Goal mentions one -> only that one is promoted, order of the rest kept.
+    ranked = ComputerUseAgent._rank_apps_for_goal(apps, "please use beta-tool now")
+    assert ranked[0] == "beta-tool"
+    assert ranked[1:] == ["alpha-app", "gamma-editor"]
+    # Empty inputs are handled without raising.
+    assert ComputerUseAgent._rank_apps_for_goal([], "goal") == []
+    assert ComputerUseAgent._rank_apps_for_goal(apps, "") == apps

@@ -145,6 +145,11 @@ def collect_worker_activity(
                 "latest_action": "",
                 "latest_action_status": "",
                 "latest_thought": "",
+                # Liveness-only signal, kept separate from ``latest_thought`` so
+                # a "still reasoning" tick can never masquerade as the worker's
+                # actual last reasoning.
+                "heartbeat": "",
+                "heartbeat_at": "",
                 "started_at": item.get("timestamp") or "",
                 "updated_at": item.get("timestamp") or "",
                 "step_count": 0,
@@ -187,6 +192,19 @@ def collect_worker_activity(
             if item.get("agent_name"):
                 worker["agent_name"] = item["agent_name"]
             worker["updated_at"] = item.get("timestamp") or worker["updated_at"]
+            continue
+
+        # Heartbeats are liveness signals, not reasoning. Attach them to their
+        # worker but never overwrite ``latest_thought`` -- otherwise a "still
+        # reasoning" tick replaces the worker's real last thought in the
+        # operator's expanded panel.
+        if event == "sub_heartbeat":
+            key = _worker_key(item)
+            worker = workers.get(key) if key else None
+            if worker is not None:
+                worker["heartbeat"] = item.get("content") or ""
+                worker["heartbeat_at"] = item.get("timestamp") or ""
+                worker["updated_at"] = item.get("timestamp") or worker["updated_at"]
             continue
 
         # Step-level items carry the worker identity but not the orchestration

@@ -68,6 +68,8 @@ interface WorkerActivity {
   latestAction?: string;
   latestActionStatus?: string;
   latestThought?: string;
+  heartbeat?: string;
+  heartbeatAt?: string;
   findings?: string;
   keyDiscoveries?: string[];
   actionsTaken?: number | null;
@@ -233,6 +235,8 @@ function workersFromServer(
     latestAction: worker.latest_action,
     latestActionStatus: worker.latest_action_status,
     latestThought: worker.latest_thought,
+    heartbeat: worker.heartbeat,
+    heartbeatAt: worker.heartbeat_at,
     findings: worker.findings_summary,
     keyDiscoveries: worker.key_discoveries || [],
     actionsTaken: worker.actions_taken,
@@ -377,6 +381,14 @@ function WorkerDetail({
           <p className="text-[9px] uppercase tracking-wide text-muted-dim">Latest thinking</p>
           <p className="mt-0.5 line-clamp-4 whitespace-pre-wrap text-[10.5px] leading-relaxed text-slate-300">
             {view.latestThought}
+          </p>
+        </div>
+      )}
+      {view.heartbeat && (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">Liveness</p>
+          <p className="mt-0.5 text-[10px] leading-relaxed text-muted-bright">
+            {view.heartbeat}
           </p>
         </div>
       )}

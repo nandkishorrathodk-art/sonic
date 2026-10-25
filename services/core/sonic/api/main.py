@@ -23,6 +23,7 @@ load_dotenv()
 from sonic import __codename__, __version__
 from sonic.api.routes import (
     agents,
+    apprenticeship,
     auth,
     checkpoints,
     engagements,
@@ -488,6 +489,7 @@ app.include_router(workstation.router, tags=["Workstation"])
 app.include_router(checkpoints.router, tags=["Workstation Checkpoints"])
 app.include_router(security.router, prefix="/security", tags=["Self-Security Lab"])
 app.include_router(self_coder.router, prefix="/self-coder", tags=["Self-Coder"])
+app.include_router(apprenticeship.router, tags=["AVCS Apprenticeship"])
 
 
 

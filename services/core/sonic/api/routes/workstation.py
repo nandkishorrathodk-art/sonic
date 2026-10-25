@@ -208,6 +208,12 @@ _tenant_workstations: dict[str, dict[str, dict[str, Any]]] = {}
 _background_tasks: dict[tuple[str, str], asyncio.Task] = {}
 _pending_operator_approvals: dict[tuple[str, str, str], asyncio.Future[bool]] = {}
 
+# Reasoning heartbeats fire every ~2s per worker. Keep the operator timeline
+# (and persisted session) free of liveness spam by emitting at most one per
+# (worker, step) per window. Keyed by "<agent_uid>:<step>" -> monotonic time.
+_boss_heartbeat_emitted_at: dict[str, float] = {}
+_BOSS_HEARTBEAT_MIN_INTERVAL_SECONDS = 15.0
+
 
 def _resolve_tenant_id(user: Any) -> str:
     """Resolve the canonical multi-tenant partition key."""
@@ -4192,27 +4198,43 @@ async def _run_prompt_reasoning(
                                     await _record_step_trace(trace_data)
                                 elif event_type == "sub_heartbeat":
                                     elapsed = data.get("elapsed_seconds", 0)
-                                    _mission_event(
-                                        state,
-                                        "thought",
-                                        f"Reasoning heartbeat — {data.get('agent_name') or data.get('agent_id') or 'SubAgent'}",
-                                        (
-                                            f"Step {data.get('step', '?')} still reasoning "
-                                            f"after {elapsed:.1f}s; observation version "
-                                            f"{data.get('last_observation_version', 0)}."
-                                        ),
-                                        orchestration_event="sub_heartbeat",
-                                        sub_mission_id=data.get("sub_mission_id"),
-                                        sub_agent_number=data.get("sub_agent_number"),
-                                        agent_id=data.get("agent_id"),
-                                        agent_uid=data.get("agent_uid"),
-                                        sub_agent_uid=data.get("agent_uid"),
-                                        agent_name=data.get("agent_name"),
-                                        worker_role=data.get("role", "subagent"),
-                                        execution_plane=data.get("plane", "gui"),
-                                        elapsed_seconds=elapsed,
-                                        step=data.get("step"),
+                                    # Heartbeats fire every ~2s per worker. Persisting
+                                    # each one floods the worklog (and the persisted
+                                    # session) with liveness noise that crowds out real
+                                    # steps. Emit at most one per worker per window.
+                                    hb_uid = str(
+                                        data.get("agent_uid")
+                                        or data.get("agent_id")
+                                        or data.get("sub_mission_id")
+                                        or "worker"
                                     )
+                                    hb_step = data.get("step")
+                                    hb_key = f"{tenant_id}:{session_id}:{hb_uid}:{hb_step}"
+                                    hb_last = _boss_heartbeat_emitted_at.get(hb_key, 0.0)
+                                    hb_now = time.monotonic()
+                                    if hb_now - hb_last >= _BOSS_HEARTBEAT_MIN_INTERVAL_SECONDS:
+                                        _boss_heartbeat_emitted_at[hb_key] = hb_now
+                                        _mission_event(
+                                            state,
+                                            "thought",
+                                            f"Reasoning heartbeat — {data.get('agent_name') or data.get('agent_id') or 'SubAgent'}",
+                                            (
+                                                f"Step {data.get('step', '?')} still reasoning "
+                                                f"after {elapsed:.1f}s; observation version "
+                                                f"{data.get('last_observation_version', 0)}."
+                                            ),
+                                            orchestration_event="sub_heartbeat",
+                                            sub_mission_id=data.get("sub_mission_id"),
+                                            sub_agent_number=data.get("sub_agent_number"),
+                                            agent_id=data.get("agent_id"),
+                                            agent_uid=data.get("agent_uid"),
+                                            sub_agent_uid=data.get("agent_uid"),
+                                            agent_name=data.get("agent_name"),
+                                            worker_role=data.get("role", "subagent"),
+                                            execution_plane=data.get("plane", "gui"),
+                                            elapsed_seconds=elapsed,
+                                            step=data.get("step"),
+                                        )
                                 elif event_type == "sub_report":
                                     sub_num = data.get("sub_agent_number")
                                     agent_id = str(data.get("agent_id") or "")
@@ -4254,15 +4276,41 @@ async def _run_prompt_reasoning(
                                         evidence_incomplete=data.get("evidence_incomplete"),
                                     )
                                 elif event_type == "phase_complete":
+                                    dispatched = data.get("dispatched_count")
+                                    if dispatched is None:
+                                        dispatched = data.get("results_count")
+                                    phase_no = data.get("phase_number")
+                                    phase_name = data.get("name")
+                                    if not dispatched:
+                                        # No worker ran in this phase. Reporting
+                                        # "Complete" would be a phantom result;
+                                        # say plainly that nothing was executed.
+                                        title = (
+                                            f"Phase {phase_no} — no worker dispatched"
+                                            if phase_no is not None
+                                            else "Phase — no worker dispatched"
+                                        )
+                                        content = (
+                                            "This phase planned no executable sub-mission, "
+                                            "so nothing was run. It is not a completed result."
+                                        )
+                                    else:
+                                        title = f"Phase {phase_no} Complete ({phase_name})"
+                                        content = (
+                                            f"Completed {data.get('results_count')} sub-missions "
+                                            f"({data.get('success_count')} succeeded)"
+                                        )
                                     _mission_event(
                                         state,
                                         "info",
-                                        f"Phase {data.get('phase_number')} Complete ({data.get('name')})",
-                                        f"Completed {data.get('results_count')} sub-missions ({data.get('success_count')} succeeded)",
-                                        phase_number=data.get("phase_number"),
-                                        phase_name=data.get("name"),
+                                        title,
+                                        content,
+                                        phase_number=phase_no,
+                                        phase_name=phase_name,
                                         results_count=data.get("results_count"),
                                         success_count=data.get("success_count"),
+                                        dispatched_count=dispatched,
+                                        planned_count=data.get("planned_count"),
                                     )
                                 elif event_type == "boss_report":
                                     _mission_event(

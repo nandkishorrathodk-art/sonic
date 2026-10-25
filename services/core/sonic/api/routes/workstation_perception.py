@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import math
+import os
 import time
 from io import BytesIO
 from typing import Any
@@ -310,6 +311,9 @@ def avcs_capability_state() -> dict[str, Any]:
         "learned_cortex_ready": False,
         "continuous_awareness": False,
         "awareness_stats": {},
+        "apprenticeship_enabled": False,
+        "apprenticeship_samples": 0,
+        "apprenticeship_labels": {},
         "reason": "",
     }
     # Live narration runs on the same reflex frames, so it needs no checkpoint
@@ -340,6 +344,15 @@ def avcs_capability_state() -> dict[str, Any]:
         )
         capability["continuous_awareness"] = bool(_awareness_snapshot().get("running"))
         capability["awareness_stats"] = _awareness_snapshot()
+        capability["apprenticeship_enabled"] = os.environ.get("SONIC_AVCS_APPRENTICESHIP") == "1"
+        try:
+            from sonic.computer_use.apprenticeship import ApprenticeshipStore
+
+            store = ApprenticeshipStore()
+            capability["apprenticeship_samples"] = store.count()
+            capability["apprenticeship_labels"] = store.label_counts()
+        except Exception:
+            pass
     except Exception as exc:  # pragma: no cover - defensive, stays fail-closed
         capability["reason"] = f"AVCS capability probe failed: {exc}"
         return capability
