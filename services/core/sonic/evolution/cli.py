@@ -239,7 +239,7 @@ def main() -> int:
         print(f"Total Cycles:       {metrics['total_cycles']} (Promoted: {metrics['promoted']}, Rollbacks: {metrics['rolled_back']})")
         print(f"Evolution Fitness:  {metrics['success_rate'] * 100:.1f}%")
         print("\nProtected Safety Components (AI Self-Modification FORBIDDEN):")
-        from sonic.evolution.codebase_evolver import _PROTECTED_COMPONENTS
+        from sonic.evolution.pipeline import _PROTECTED_COMPONENTS
         for c in sorted(_PROTECTED_COMPONENTS):
             print(f"  ⛔ {c}")
         print("\nAll other components (tools, agents, research, mission_engine) are EVOLVABLE.")

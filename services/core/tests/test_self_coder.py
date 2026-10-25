@@ -904,6 +904,67 @@ def test_synthesizer_accepts_bare_hunk_diff(repo: Path):
     assert "@@ -1,2 +1,2 @@" in res.proposal.diff
 
 
+def test_repair_hunk_counts_fixes_wrong_line_counts(repo: Path):
+    """A structurally valid diff whose header counts disagree with its body must
+    be repaired, not discarded.
+
+    Regression: models frequently emit e.g. ``@@ -1,5 +1,5 @@`` above a single
+    context line. ``git apply`` rejects that as ``corrupt patch`` and the whole
+    (otherwise correct) patch was thrown away.
+    """
+    from sonic.evolution.patch_synthesizer import _repair_hunk_counts
+
+    corrupted = (
+        "diff --git a/services/core/sonic/agents/widget.py b/services/core/sonic/agents/widget.py\n"
+        "--- a/services/core/sonic/agents/widget.py\n"
+        "+++ b/services/core/sonic/agents/widget.py\n"
+        "@@ -1,99 +1,99 @@\n"
+        " def total(items):\n"
+        "-    return sum(items)\n"
+        "+    return sum(i for i in items if i is not None)\n"
+    )
+    repaired = _repair_hunk_counts(corrupted)
+    assert "@@ -1,2 +1,2 @@" in repaired
+
+
+def test_synthesizer_recovers_from_corrupt_hunk_counts(repo: Path):
+    """The synthesizer must recover a patch that only fails due to bad counts."""
+    corrupted = (
+        "```diff\n"
+        "diff --git a/services/core/sonic/agents/widget.py b/services/core/sonic/agents/widget.py\n"
+        "--- a/services/core/sonic/agents/widget.py\n"
+        "+++ b/services/core/sonic/agents/widget.py\n"
+        "@@ -1,99 +1,99 @@\n"
+        " def total(items):\n"
+        "-    return sum(items)\n"
+        "+    return sum(i for i in items if i is not None)\n"
+        "```"
+    )
+    synth = PatchSynthesizer(llm=_StubLLM([corrupted]), repo_root=repo, is_protected=lambda _p: False)
+    res = asyncio.run(synth.synthesize(_Goal(), ["services/core/sonic/agents/widget.py"]))
+    assert res.proposal is not None
+    assert "@@ -1,2 +1,2 @@" in res.proposal.diff
+
+
+def test_repair_hunk_counts_leaves_correct_diff_untouched():
+    """A diff with correct counts must pass through byte-for-byte unchanged."""
+    from sonic.evolution.patch_synthesizer import _repair_hunk_counts
+
+    good = (
+        "diff --git a/x.py b/x.py\n"
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " a\n"
+        "+b\n"
+        " c\n"
+        "@@ -10,1 +11,1 @@\n"
+        "-z\n"
+        "+y\n"
+    )
+    assert _repair_hunk_counts(good) == good
+
+
 def test_import_integrity_gate_blocks_broken_import(repo: Path):
     """A patch adding a top-level import of a missing module must be blocked,
     even when the test subset never imports the changed file."""

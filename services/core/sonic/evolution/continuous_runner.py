@@ -48,6 +48,21 @@ class ContinuousAutoEvolutionRunner:
         self._running = False
         self._current_cycle = 0
 
+    @staticmethod
+    def _select_signal(
+        signals: list[tuple[str, str, str]],
+        attempted: set[tuple[str, str]],
+    ) -> tuple[str, str, str] | None:
+        """Return the first signal not yet attempted, else ``None``.
+
+        ``signals`` entries are ``(description, target_file, category)`` and the
+        attempted keys are ``(target_file, description)``.
+        """
+        for sig in signals:
+            if (sig[1], sig[0]) not in attempted:
+                return sig
+        return None
+
     def stop(self) -> None:
         """Signal the continuous loop to pause or halt."""
         self._stop.set()
@@ -121,7 +136,20 @@ class ContinuousAutoEvolutionRunner:
                     pass
                 continue
 
-            target_sig = signals[0]
+            # Advance past signals already attempted at this commit; otherwise the
+            # runner re-pins signals[0] every cycle and can never reach the rest.
+            attempted = self.candidate_store.attempted_signal_keys(self.tenant_id)
+            target_sig = self._select_signal(signals, attempted)
+            if target_sig is None:
+                self._emit(
+                    "cycle_idle",
+                    f"[Cycle {self._current_cycle}] All discovered signals were already attempted; waiting.",
+                )
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
+                except TimeoutError:
+                    pass
+                continue
             desc, target_file, category = target_sig
             self._emit(
                 "signal_found",

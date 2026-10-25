@@ -102,6 +102,46 @@ class SelfCoderCandidateStore:
                 records.append(record)
         return records
 
+    #: Candidate statuses that mean the signal was already attempted at a commit.
+    ATTEMPTED_STATUSES = frozenset({
+        "verified",
+        "rejected",
+        "applied",
+        "approved",
+        "auto_promoted",
+        "failed",
+        "failed_revalidation",
+        "stale",
+        "tampered",
+    })
+
+    def attempted_signal_keys(
+        self,
+        tenant_id: str,
+        base_commit: str | None = None,
+    ) -> set[tuple[str, str]]:
+        """Return ``(target_file, description)`` pairs already attempted.
+
+        Used to advance past a signal that has already been tried so the
+        continuous runner does not pin the same signal on every cycle. When
+        ``base_commit`` is omitted the current ``HEAD`` is used, matching the
+        per-commit dedup applied inside :meth:`run_candidate`; a new commit
+        therefore makes every signal eligible again.
+        """
+        if base_commit is None:
+            try:
+                base_commit, _ = self._base_state()
+            except CandidateWorkflowError:
+                base_commit = None
+        return {
+            (str(record.get("target_file", "")), str(record.get("description", "")))
+            for record in self.list(tenant_id)
+            if (base_commit is None or record.get("base_commit") == base_commit)
+            and record.get("target_file")
+            and record.get("description")
+            and record.get("status") in self.ATTEMPTED_STATUSES
+        }
+
     def delete(self, candidate_id: str, tenant_id: str) -> bool:
         path = self._path(candidate_id)
         record = self.get(candidate_id, tenant_id)

@@ -47,6 +47,50 @@ _FENCE_RE = re.compile(r"```(?:diff|patch|git)?\s*\n(.*?)```", re.DOTALL)
 _DIFF_FILE_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)", re.MULTILINE)
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.MULTILINE)
 _BARE_HUNK_RE = re.compile(r"^@@\s*$", re.MULTILINE)
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", re.MULTILINE)
+
+
+def _repair_hunk_counts(diff: str) -> str:
+    """Recompute every hunk header's line counts from its own body.
+
+    Models frequently emit a structurally valid unified diff whose ``@@``
+    header counts disagree with the body (e.g. ``@@ -1,5 +1,5 @@`` above a
+    single context line). ``git apply`` rejects that outright with
+    ``corrupt patch``, discarding an otherwise-correct patch. The counts are
+    fully derivable from the body, so we recompute them deterministically and
+    keep the model's start lines untouched.
+    """
+    if not _HUNK_HEADER_RE.search(diff):
+        return diff
+    lines = diff.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _HUNK_HEADER_RE.match(line)
+        if not m:
+            out.append(line)
+            i += 1
+            continue
+
+        body: list[str] = []
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if _HUNK_HEADER_RE.match(nxt) or nxt.startswith(("diff --git ", "--- ", "+++ ")):
+                break
+            body.append(nxt)
+            j += 1
+
+        # ``\ No newline at end of file`` is a marker, not a counted line.
+        counted = [b for b in body if not b.startswith("\\")]
+        old_count = sum(1 for b in counted if b[:1] in (" ", "-"))
+        new_count = sum(1 for b in counted if b[:1] in (" ", "+"))
+        suffix = line[m.end():]
+        out.append(f"@@ -{m.group(1)},{old_count} +{m.group(2)},{new_count} @@{suffix}")
+        out.extend(body)
+        i = j
+    return "\n".join(out) + "\n"
 
 
 def _normalize_hunks(diff: str, read_file: Any) -> tuple[str, str]:
@@ -298,6 +342,7 @@ class PatchSynthesizer:
                 last_reason = f"could not normalize hunk headers: {norm_err}"
                 result.notes.append(f"attempt {attempt}: {last_reason}")
                 continue
+            diff = _repair_hunk_counts(diff)
             ok, reason, proposal = self._validate_and_measure(goal, diff)
             if ok and proposal is not None:
                 result.proposal = proposal

@@ -4351,3 +4351,111 @@ dashboard, and it can launch the requested installed application.
 - Boss/worker/dashboard subset: **206 passed** (one unrelated HF-hub 429 flake
   passes in isolation). Provider/agent/GUI subset: **189 passed, 2 skipped**.
 - Dashboard `tsc --noEmit`: clean. Ruff clean on all changed files.
+
+## AVCS self-learning (apprenticeship) unblocked (2026-10-25)
+
+Operator asked whether AVCS can self-learn/self-train. It can — the loop already
+existed (`sonic/computer_use/apprenticeship.py`: capture -> label -> learn ->
+verify -> promote, driven by `AwarenessMonitor` when
+`SONIC_AVCS_APPRENTICESHIP=1`). It was producing **zero samples** because of a
+real labeler bug, so the eye never actually learned from lived experience.
+
+### The bug
+`DesktopSceneLabeler._load_category_map` keyed desktop entries only by the
+`.desktop` file basename and its `StartupWMClass`. Many packages omit
+`StartupWMClass` (e.g. `org.xfce.mousepad.desktop` has neither `mousepad` nor a
+`StartupWMClass`), so a window whose WM_CLASS is `mousepad` matched nothing and
+its frames were silently skipped as `unmapped_wm_class`. Any app in that state
+contributed no training data at all.
+
+### The fix
+- The scan now also reads `Exec=` and `TryExec=` and keys on the **binary
+  basename**, since that is what a window class usually names.
+- Two tiers: identity keys (basename, `StartupWMClass`) are consulted before
+  binary keys. Several entries can share a binary (an app and its settings
+  dialog both run `mousepad`), so `_pick()` prefers the entry whose
+  reverse-DNS final segment equals the window class, falling back to the
+  shortest basename. This keeps `mousepad -> editor_code` instead of
+  `settings_panel`.
+- `GET /avcs/apprenticeship/status` now reads `samples`/`label_counts` from the
+  shared on-disk store. The awareness monitor runs its own loop instance, so the
+  route's own counter stayed at 0 while the store held hundreds of samples — a
+  misleading "learning nothing" report.
+
+### Verified live (real Docker workstation, real frames)
+- Labeler resolution before -> after: `mousepad` = None -> `editor_code`;
+  `xfce4-terminal` -> `terminal_shell`; `firefox-esr` -> `browser_webpage`.
+- With `SONIC_AVCS_APPRENTICESHIP=1`, cycling focus across Firefox / Thunar /
+  Terminal / Settings accumulated 300 honestly-labeled frames across 5 labels
+  and 8 groups (labels are OS-derived from freedesktop `Categories=`, never
+  guessed).
+- A real `POST /avcs/apprenticeship/learn` trained a candidate and **promoted**
+  it: held-out accuracy **0.986** (chance 0.125) on 69 held-out frames, written
+  to `sonic_data/avcs/apprenticeship/cortex_learned.pt` with an
+  `.eval.json` provenance sidecar.
+- The learned checkpoint predicts the live desktop correctly: with the active
+  window "Settings", it returned `settings_panel` at confidence 1.0 (the
+  previous offline checkpoint returned `media_playback` at 0.23 on the same
+  frame).
+
+### Honest scope
+This unblocks the **eye's** self-learning (scene-category perception). It does
+**not** unblock semantic GUI grounding or text entry: those still require the
+separately trained, held-out-evaluated `SONIC_AVCS_GROUNDING_CHECKPOINT` and
+`SONIC_AVCS_FOCUS_CHECKPOINT`, which need real recorded click/focus
+demonstrations (see `packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md`). The
+promoted accuracy is measured on this workstation's own frames and classes, not
+on arbitrary unseen applications.
+
+Tests: `test_avcs_apprenticeship.py` + `test_continuous_avcs_awareness.py` +
+`test_gui_capability_aware_prompt.py` = 54 passed. Ruff clean.
+
+## Self-evolution auto-mode live run — two real bugs fixed (2026-10-25)
+
+Ran the self-developer in **auto mode** (`ContinuousAutoEvolutionRunner`,
+3 cycles, real LLM) and watched it think. Two genuine defects were found and
+fixed; the loop now advances and produces verified candidates.
+
+### LIVE evidence (before → after)
+- **Before:** cycle 1 discovered 5 real signals, attempted `signals[0]`
+  (`developer_agent.py:449`), rejected it; cycles 2+ re-pinned the *same*
+  signal, which the coder-side dedup filtered out → `no_candidate` **forever**.
+  Signals 1..4 were unreachable. Historical DB: 0 promoted.
+- **After:** cycle 1 → `developer_agent.py:461`, cycle 2 →
+  `computer/headless.py:347`, cycle 3 → `context.py:98` → **VERIFIED candidate**
+  (`2ce771f9`, `awaiting_approval`): real minimal patch turning
+  `except: pass` into a logged exception; **2496 tests passed, 0 failed**,
+  security regression clean, active checkout untouched (report-only).
+
+### BUG A — runner permanently stuck on `signals[0]` (`continuous_runner.py`)
+The runner pinned `signals[0]` every cycle while `run_candidate` filters
+already-attempted `(target_file, description)` pairs at the same commit. Once
+signal 0 was recorded, every later cycle resolved to zero signals →
+`no_candidate`, and signals 1..N were never tried. Fix: added
+`SelfCoderCandidateStore.attempted_signal_keys()` + `_select_signal()`; the
+runner now advances to the first unattempted signal and emits `cycle_idle` when
+all are exhausted. A new commit makes every signal eligible again.
+
+### BUG B — "corrupt patch" discarded otherwise-correct LLM diffs
+Models emit structurally valid diffs whose `@@` header counts disagree with the
+body (e.g. `@@ -1,5 +1,5 @@` above one context line); `git apply` rejects that
+as `corrupt patch`. The counts are fully derivable, so
+`patch_synthesizer._repair_hunk_counts()` now recomputes them deterministically
+(start lines preserved; `\ No newline` markers excluded). 12/21 historical
+failures were this class. Valid diffs pass through byte-for-byte unchanged.
+
+### Also fixed
+- CLI `status` imported `_PROTECTED_COMPONENTS` from `codebase_evolver` (wrong
+  module) → `ImportError` broke the whole command. Now imports from `pipeline`.
+
+### Honest scope
+Machinery is real and wired (API `/self-coder/*`, background loop in `main.py`,
+CLI). The remaining limiter is **LLM diff quality**: the model still fails many
+attempts on wrong hunk context/line numbers (`patch does not apply`). Diagnosis
+quality is high (correct root cause + minimal fix), but reliable unified diffs
+need a stronger coding model or the agentic `edit_file` path. Do not claim
+sustained promotion until that is measured over many cycles.
+
+Tests: evolution + self-coder suites green (169 passed); full `services/core`
+**2436 passed, 40 skipped, 0 failures**; ruff clean. Regression tests added for
+`_select_signal`, store dedup, hunk-count repair, and CLI `status`.

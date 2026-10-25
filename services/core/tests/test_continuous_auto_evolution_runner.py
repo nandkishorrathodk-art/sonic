@@ -378,3 +378,117 @@ def test_candidate_store_auto_promote_with_commit_and_journal(tmp_path, monkeypa
     journal_content = journal_file.read_text(encoding="utf-8")
     assert cand_id[:8] in journal_content
     assert "Improve greeting output" in journal_content
+
+
+# =====================================================================
+# Signal advancement (stuck-loop regression)
+# =====================================================================
+
+
+def test_select_signal_skips_attempted_signals():
+    """_select_signal must advance past signals already attempted.
+
+    Regression: the runner pinned ``signals[0]`` every cycle. Once that signal
+    was recorded as attempted the coder-side dedup filtered it out, so the
+    runner reported ``no_candidate`` forever and never reached signals 1..N.
+    """
+    sigs = [("d0", "f0", "bug_fix"), ("d1", "f1", "bug_fix"), ("d2", "f2", "bug_fix")]
+
+    assert ContinuousAutoEvolutionRunner._select_signal(sigs, set()) == sigs[0]
+    assert ContinuousAutoEvolutionRunner._select_signal(sigs, {("f0", "d0")}) == sigs[1]
+    assert (
+        ContinuousAutoEvolutionRunner._select_signal(sigs, {("f0", "d0"), ("f1", "d1")})
+        == sigs[2]
+    )
+    assert (
+        ContinuousAutoEvolutionRunner._select_signal(
+            sigs, {("f0", "d0"), ("f1", "d1"), ("f2", "d2")}
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_continuous_runner_advances_to_next_signal(tmp_path):
+    """A second cycle must attempt a DIFFERENT signal, not repeat the first."""
+    events = []
+    runner = ContinuousAutoEvolutionRunner(
+        repo_root=tmp_path,
+        max_cycles=2,
+        interval_seconds=0,
+        on_event=lambda ev: events.append(ev),
+    )
+
+    sig_a = ("desc A", "file_a.py", "bug_fix")
+    sig_b = ("desc B", "file_b.py", "bug_fix")
+
+    # Cycle 1 records sig_a as attempted; cycle 2 must therefore pick sig_b.
+    store = runner.candidate_store
+    store.attempted_signal_keys = MagicMock(
+        side_effect=[
+            set(),
+            {("file_a.py", "desc A")},
+        ]
+    )
+
+    with patch("sonic.evolution.continuous_runner.SelfCoder") as mock_coder_cls, patch.object(
+        runner.candidate_store, "run_candidate", new=AsyncMock(return_value={"candidates": []})
+    ):
+        mock_coder = MagicMock()
+        mock_coder.discover_signals.return_value = [sig_a, sig_b]
+        mock_coder_cls.return_value = mock_coder
+        await runner.run()
+
+    found = [e for e in events if e.get("type") == "signal_found"]
+    assert len(found) == 2
+    assert found[0]["target_file"] == "file_a.py"
+    assert found[1]["target_file"] == "file_b.py"
+
+
+@pytest.mark.asyncio
+async def test_continuous_runner_idle_when_all_signals_attempted(tmp_path):
+    """When every discovered signal was already attempted, emit cycle_idle."""
+    events = []
+    runner = ContinuousAutoEvolutionRunner(
+        repo_root=tmp_path,
+        max_cycles=1,
+        interval_seconds=0,
+        on_event=lambda ev: events.append(ev),
+    )
+    runner.candidate_store.attempted_signal_keys = MagicMock(
+        return_value={("file_a.py", "desc A")}
+    )
+
+    with patch("sonic.evolution.continuous_runner.SelfCoder") as mock_coder_cls:
+        mock_coder = MagicMock()
+        mock_coder.discover_signals.return_value = [("desc A", "file_a.py", "bug_fix")]
+        mock_coder_cls.return_value = mock_coder
+        await runner.run()
+
+    types = [e.get("type") for e in events]
+    assert "cycle_idle" in types
+    assert "signal_found" not in types
+
+
+def test_candidate_store_attempted_signal_keys(tmp_path):
+    """attempted_signal_keys returns only attempted (file, description) pairs."""
+    store = SelfCoderCandidateStore(repo_root=tmp_path)
+    store.storage_dir.mkdir(parents=True, exist_ok=True)
+    (store.storage_dir / "a.json").write_text(
+        '{"tenant_id": "t", "base_commit": "c1", "target_file": "f1",'
+        ' "description": "d1", "status": "rejected"}',
+        encoding="utf-8",
+    )
+    (store.storage_dir / "b.json").write_text(
+        '{"tenant_id": "t", "base_commit": "c1", "target_file": "f2",'
+        ' "description": "d2", "status": "no_candidate"}',
+        encoding="utf-8",
+    )
+    (store.storage_dir / "c.json").write_text(
+        '{"tenant_id": "other", "base_commit": "c1", "target_file": "f3",'
+        ' "description": "d3", "status": "rejected"}',
+        encoding="utf-8",
+    )
+
+    keys = store.attempted_signal_keys("t", base_commit="c1")
+    assert keys == {("f1", "d1")}

@@ -69,9 +69,11 @@ class TestDesktopCategories:
 
 class TestDesktopSceneLabeler:
     _SCAN = (
-        "xfce4-terminal\tXfce4-terminal\tGTK;System;TerminalEmulator;\n"
-        "firefox-esr\tfirefox\tNetwork;WebBrowser;\n"
-        "remote\t\tNetwork;RemoteAccess;\n"
+        "xfce4-terminal\tXfce4-terminal\txfce4-terminal\t\tGTK;System;TerminalEmulator;\n"
+        "firefox-esr\tfirefox\t/usr/lib/firefox-esr/firefox-esr\t\tNetwork;WebBrowser;\n"
+        "remote\t\t\t\tNetwork;RemoteAccess;\n"
+        "org.xfce.mousepad\t\tmousepad\t\tUtility;TextEditor;GTK;\n"
+        "org.xfce.mousepad-settings\t\tmousepad --preferences\t\tXFCE;GTK;Settings;DesktopSettings;\n"
     )
 
     def _labeler(self) -> DesktopSceneLabeler:
@@ -92,6 +94,24 @@ class TestDesktopSceneLabeler:
         labeler = self._labeler()
         label, _ = asyncio.run(labeler.label_for("firefox.Firefox", True))
         assert label == "browser_webpage"
+
+    def test_exec_binary_resolves_when_startup_wm_class_absent(self):
+        """A desktop entry without StartupWMClass still labels via its Exec binary.
+
+        org.xfce.mousepad.desktop publishes no StartupWMClass; keying only on
+        basename/StartupWMClass left its frames unlabeled, so the eye could
+        never learn from that application.
+        """
+        labeler = self._labeler()
+        label, source = asyncio.run(labeler.label_for("mousepad", True))
+        assert label == "editor_code"
+        assert source.startswith("freedesktop_categories:")
+
+    def test_exec_collision_prefers_the_application_not_its_settings_dialog(self):
+        """Two entries sharing an Exec binary must resolve to the app itself."""
+        labeler = self._labeler()
+        label, _ = asyncio.run(labeler.label_for("mousepad", True))
+        assert label == "editor_code"  # not settings_panel
 
     def test_unmapped_window_yields_no_label(self):
         labeler = self._labeler()
@@ -166,8 +186,8 @@ class TestCaptureRound:
     def test_unlabelable_frames_are_skipped_not_guessed(self, tmp_path):
         async def _exec(_cmd: str) -> str:
             return (
-                "xfce4-terminal\tXfce4-terminal\tGTK;System;TerminalEmulator;\n"
-                "remote\t\tNetwork;RemoteAccess;\n"
+                "xfce4-terminal\tXfce4-terminal\txfce4-terminal\t\tGTK;System;TerminalEmulator;\n"
+                "remote\t\t\t\tNetwork;RemoteAccess;\n"
             )
 
         store = ApprenticeshipStore(root=tmp_path)
