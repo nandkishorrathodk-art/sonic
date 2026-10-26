@@ -65,6 +65,11 @@ class AVCSPerception:
         self._cortex_failed = False
         self._cortex_checkpoint = self._resolve_cortex_checkpoint()
         self._cortex_device = os.environ.get("SONIC_AVCS_CORTEX_DEVICE", "cpu").strip() or "cpu"
+        # Whether the loaded cortex's dorsal (affordance) head was actually
+        # trained. A checkpoint existing does not prove its heads were trained;
+        # an untrained dorsal head returns random "hotspots" that look like
+        # confident detections, so it must not be reported as real targets.
+        self._affordance_head_trained: bool | None = None
 
     @staticmethod
     def _resolve_cortex_checkpoint() -> str:
@@ -128,6 +133,30 @@ class AVCSPerception:
     def cortex_ready(self) -> bool:
         """True only when a trained cortex checkpoint actually loaded."""
         return self._cortex is not None
+
+    @property
+    def affordance_head_trained(self) -> bool:
+        """True only when the loaded cortex's dorsal head was actually trained.
+
+        Hotspots from an untrained dorsal head are random, so callers must treat
+        them as unavailable rather than as detected controls. Fails closed: no
+        loaded cortex, no configured checkpoint, or no recorded training
+        provenance all return ``False``.
+        """
+        if self._cortex is None or not self.cortex_configured:
+            return False
+        if self._affordance_head_trained is None:
+            try:
+                from forge.vision.cortex.training.affordance_provenance import (
+                    affordance_head_trained,
+                )
+
+                self._affordance_head_trained = bool(
+                    affordance_head_trained(self._cortex_checkpoint)
+                )
+            except Exception:
+                self._affordance_head_trained = False
+        return bool(self._affordance_head_trained)
 
     def ensure_cortex_ready(self) -> bool:
         """Load the semantic cortex once, fail-closed on any error.
@@ -715,24 +744,35 @@ class AVCSPerception:
         Returns ``{}`` when no trained cortex checkpoint is loaded. The caller
         must treat an empty mapping as "semantics unavailable", never as a
         neutral/negative classification.
+
+        ``action_hotspots`` is reported ONLY when the dorsal head was actually
+        trained. An untrained head returns random peaks that look like confident
+        detections; publishing those as ``interactive_targets`` would tell the
+        reasoning model that controls exist where none were detected. When the
+        head is untrained the field is omitted and ``affordance_head_trained``
+        is set to ``False`` so the caller can say so honestly.
         """
         if not self.ensure_cortex_ready():
             return {}
         try:
             assert self._cortex is not None
             state = self._cortex.perceive(frame)
-            return {
+            affordance_trained = self.affordance_head_trained
+            semantics: dict[str, Any] = {
                 "primary_category": state.primary_category,
                 "category_confidence": float(state.category_confidence),
                 "text_density": float(state.text_density),
                 "stability_state": state.stability_state,
                 "surprise_score": float(state.surprise_score),
-                "action_hotspots": [
+                "latent_dim": int(getattr(state.visual_latent, "shape", (0,))[0]),
+                "affordance_head_trained": affordance_trained,
+            }
+            if affordance_trained:
+                semantics["action_hotspots"] = [
                     {"x": float(x), "y": float(y), "action": action, "confidence": float(conf)}
                     for x, y, action, conf in (state.action_hotspots or [])
-                ],
-                "latent_dim": int(getattr(state.visual_latent, "shape", (0,))[0]),
-            }
+                ]
+            return semantics
         except Exception:
             self._cortex_failed = True
             return {}

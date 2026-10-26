@@ -96,6 +96,10 @@ _FREEDESKTOP_CATEGORY_TO_UI: tuple[tuple[str, str], ...] = (
 
 _FRAME_SIZE = (640, 360)
 _CHANCE_ACCURACY = 1.0 / len(UI_CATEGORIES)
+# Minimum measured click outcomes before the dorsal head is fine-tuned. Below
+# this the held-out split would be too small to measure honestly, so training is
+# refused rather than producing an unverifiable checkpoint.
+_MIN_AFFORDANCE_SAMPLES = 24
 
 
 def _repo_root() -> Path:
@@ -389,6 +393,110 @@ class ApprenticeshipStore:
         return counts
 
 
+class OutcomeSampleStore:
+    """Durable store of clicks paired with their measured outcome.
+
+    This is the affordance head's training data, and it comes from real work:
+    every pointer action the being dispatches is a sample. The label is not
+    guessed from pixels -- it is the observed result of the action:
+
+    * the screen changed after the click  -> the point was an interactive
+      control of that action's class (a positive example);
+    * the screen did not change           -> the point was not that class
+      (a negative example).
+
+    The frame is stored downscaled alongside the label, and the manifest keeps
+    ``outcome`` plus ``label_source`` so a later reader can tell a measured
+    outcome from an assumed one. A click whose outcome could not be observed is
+    simply not recorded -- there is no "unknown outcome" row.
+    """
+
+    def __init__(self, root: str | Path | None = None) -> None:
+        base = Path(root) if root is not None else Path(_default_apprenticeship_root())
+        self.root = base
+        self.frames_dir = base / "outcome_frames"
+        self.manifest_path = base / "outcome_samples.json"
+
+    def _load(self) -> list[dict[str, Any]]:
+        if not self.manifest_path.is_file():
+            return []
+        try:
+            data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        samples = data.get("samples")
+        return samples if isinstance(samples, list) else []
+
+    def count(self) -> int:
+        return len(self._load())
+
+    def add(
+        self,
+        rgb: np.ndarray,
+        click: tuple[float, float],
+        action: str,
+        changed: bool,
+        *,
+        query: str = "",
+        category: str = "",
+        group: str = "",
+        label_source: str = "click_outcome",
+    ) -> dict[str, Any]:
+        """Persist one (frame, click, measured outcome) training sample.
+
+        ``click`` is normalized ``(x, y)`` in [0, 1]; ``changed`` is the observed
+        post-action screen change and is required -- an unobserved outcome is not
+        stored rather than assumed.
+        """
+        from PIL import Image
+
+        if not (isinstance(click, (tuple, list)) and len(click) == 2):
+            raise ValueError("outcome sample requires a 2-tuple click point")
+
+        self.frames_dir.mkdir(parents=True, exist_ok=True)
+        samples = self._load()
+        index = len(samples)
+        name = f"outcome_{index:05d}.png"
+        image = Image.fromarray(rgb)
+        if image.size != _FRAME_SIZE:
+            image = image.resize(_FRAME_SIZE)
+        image.save(self.frames_dir / name)
+        record = {
+            "frame": f"outcome_frames/{name}",
+            "click": [float(click[0]), float(click[1])],
+            "action": str(action),
+            "changed": bool(changed),
+            "query": str(query),
+            "category": str(category),
+            "group": group or f"outcome:{index}",
+            "label_source": label_source,
+            "recorded_at": time.time(),
+        }
+        samples.append(record)
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest_path.write_text(
+            json.dumps(
+                {
+                    "provenance": "measured_click_outcomes",
+                    "label_rule": "post_action_screen_change",
+                    "samples": samples,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return record
+
+    def outcome_counts(self) -> dict[str, int]:
+        samples = self._load()
+        positives = sum(1 for s in samples if s.get("changed"))
+        return {
+            "total": len(samples),
+            "positive": positives,
+            "negative": len(samples) - positives,
+        }
+
+
 def _grouped_split(
     samples: list[dict[str, Any]], held_out_fraction: float, seed: int
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -477,6 +585,7 @@ class AVCSApprenticeshipLoop:
     ) -> None:
         self.store = store or ApprenticeshipStore()
         self.labeler = labeler or DesktopSceneLabeler()
+        self.outcome_store = OutcomeSampleStore(self.store.root)
         self.checkpoint_path = Path(
             checkpoint_path
             or os.environ.get(
@@ -674,6 +783,102 @@ class AVCSApprenticeshipLoop:
             checkpoint=str(self.checkpoint_path),
             per_class=per_class,
         )
+
+    # -- affordance learning from measured click outcomes -------------------
+
+    def record_click_outcome(
+        self,
+        rgb: np.ndarray,
+        click: tuple[float, float],
+        action: str,
+        changed: bool,
+        *,
+        query: str = "",
+        category: str = "",
+        group: str = "",
+    ) -> dict[str, Any] | None:
+        """Record one dispatched pointer action and its measured outcome.
+
+        ``changed`` must be the *observed* post-action screen change. A caller
+        that did not observe the outcome must not call this -- there is no
+        "assumed" outcome, because a fabricated label would train the head on
+        something that never happened.
+        """
+        if rgb is None:
+            return None
+        try:
+            return self.outcome_store.add(
+                rgb,
+                click,
+                action,
+                bool(changed),
+                query=query,
+                category=category,
+                group=group,
+            )
+        except Exception as exc:
+            logger.warning("avcs_outcome_record_failed", error=str(exc))
+            return None
+
+    def affordance_sample_counts(self) -> dict[str, int]:
+        return self.outcome_store.outcome_counts()
+
+    async def learn_affordance(self) -> dict[str, Any]:
+        """Fine-tune the dorsal head on accumulated click outcomes.
+
+        Runs the real trainer against the base cortex checkpoint and writes the
+        result to the store's ``cortex_affordance.pt`` with a provenance sidecar.
+        The checkpoint is only *usable* once that sidecar records a held-out
+        point accuracy above chance; until then the agent keeps reporting
+        hotspots as unavailable.
+        """
+        async with self._lock:
+            return await asyncio.to_thread(self._learn_affordance_sync)
+
+    def _learn_affordance_sync(self) -> dict[str, Any]:
+        from forge.vision.cortex.training.affordance_trainer import AffordanceTrainer
+
+        manifest = self.outcome_store.manifest_path
+        counts = self.outcome_store.outcome_counts()
+        if counts["total"] < _MIN_AFFORDANCE_SAMPLES:
+            return {
+                "trained": False,
+                "reason": (
+                    f"insufficient outcome samples ({counts['total']}); "
+                    f"need >= {_MIN_AFFORDANCE_SAMPLES}"
+                ),
+                **counts,
+            }
+        if not self.checkpoint_path.is_file():
+            return {
+                "trained": False,
+                "reason": f"base cortex checkpoint missing: {self.checkpoint_path}",
+                **counts,
+            }
+
+        output = self.store.root / "cortex_affordance.pt"
+        try:
+            trainer = AffordanceTrainer(
+                self.checkpoint_path,
+                epochs=self.epochs,
+                seed=self.seed,
+                held_out_fraction=self.held_out_fraction,
+                dataset_provenance="measured_click_outcomes_from_live_desktop",
+            )
+            result = trainer.train(manifest, output, work_dir=self.store.root)
+        except Exception as exc:
+            logger.warning("avcs_affordance_learn_failed", error=str(exc))
+            return {"trained": False, "reason": f"affordance training failed: {exc}", **counts}
+
+        payload = result.to_dict()
+        payload.update(counts)
+        logger.info(
+            "avcs_affordance_learned",
+            trained=payload.get("trained"),
+            point_accuracy=payload.get("held_out_point_accuracy"),
+            samples=payload.get("samples"),
+        )
+        return payload
 
     # -- internals ----------------------------------------------------------
 

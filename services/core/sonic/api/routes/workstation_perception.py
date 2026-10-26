@@ -309,6 +309,8 @@ def avcs_capability_state() -> dict[str, Any]:
         "focus_checkpoint_configured": False,
         "learned_cortex_configured": False,
         "learned_cortex_ready": False,
+        "affordance_head_trained": False,
+        "affordance_outcome_samples": 0,
         "continuous_awareness": False,
         "awareness_stats": {},
         "apprenticeship_enabled": False,
@@ -342,6 +344,9 @@ def avcs_capability_state() -> dict[str, Any]:
         capability["learned_cortex_ready"] = bool(
             getattr(perception, "ensure_cortex_ready", lambda: False)()
         )
+        capability["affordance_head_trained"] = bool(
+            getattr(perception, "affordance_head_trained", False)
+        )
         capability["continuous_awareness"] = bool(_awareness_snapshot().get("running"))
         capability["awareness_stats"] = _awareness_snapshot()
         capability["apprenticeship_enabled"] = os.environ.get("SONIC_AVCS_APPRENTICESHIP") == "1"
@@ -351,6 +356,14 @@ def avcs_capability_state() -> dict[str, Any]:
             store = ApprenticeshipStore()
             capability["apprenticeship_samples"] = store.count()
             capability["apprenticeship_labels"] = store.label_counts()
+            try:
+                from sonic.computer_use.apprenticeship import OutcomeSampleStore
+
+                capability["affordance_outcome_samples"] = OutcomeSampleStore(
+                    store.root
+                ).count()
+            except Exception:
+                pass
         except Exception:
             pass
     except Exception as exc:  # pragma: no cover - defensive, stays fail-closed

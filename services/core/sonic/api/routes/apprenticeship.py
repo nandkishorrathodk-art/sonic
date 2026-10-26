@@ -160,3 +160,56 @@ async def apprenticeship_learn(
     loop.epochs = max(1, min(req.epochs, 50))
     result = await loop.learn()
     return result.to_dict()
+
+
+@router.get("/avcs/apprenticeship/affordance")
+async def apprenticeship_affordance_status(user: User = Depends(require_operator)):
+    """State of the affordance head: collected click outcomes and its training proof.
+
+    Reports the measured outcome counts and whether the current affordance
+    checkpoint has a provenance sidecar proving a real, above-chance training
+    run. When it does not, the agent reports hotspots as unavailable rather than
+    as detected controls.
+    """
+    loop = _get_loop()
+    counts = loop.affordance_sample_counts()
+    checkpoint = loop.store.root / "cortex_affordance.pt"
+    trained = False
+    provenance = None
+    try:
+        from forge.vision.cortex.training.affordance_provenance import (
+            affordance_head_trained,
+            read_affordance_provenance,
+        )
+
+        trained = bool(checkpoint.is_file()) and affordance_head_trained(checkpoint)
+        provenance = read_affordance_provenance(checkpoint)
+    except Exception:
+        trained = False
+    return {
+        "outcome_samples": counts,
+        "checkpoint": str(checkpoint),
+        "checkpoint_exists": checkpoint.is_file(),
+        "affordance_head_trained": trained,
+        "provenance": provenance,
+        "label_rule": "post_action_screen_change",
+        "note": (
+            "Hotspots are reported only when a provenance sidecar proves the "
+            "dorsal head was trained to an above-chance held-out accuracy."
+        ),
+    }
+
+
+@router.post("/avcs/apprenticeship/learn-affordance")
+async def apprenticeship_learn_affordance(
+    req: LearnRequest, user: User = Depends(require_operator)
+):
+    """Fine-tune the dorsal head on accumulated click outcomes.
+
+    Trains only the affordance head, verifies it on a held-out split grouped by
+    working run, and records the measured accuracy in a provenance sidecar. The
+    head is treated as usable only if that measurement clears chance.
+    """
+    loop = _get_loop()
+    loop.epochs = max(1, min(req.epochs, 50))
+    return await loop.learn_affordance()
