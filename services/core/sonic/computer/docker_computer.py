@@ -753,6 +753,32 @@ class DockerComputerProvider(ComputerProvider):
         return ".".join(class_match.groups())
 
     # -------------------------------------------------------------
+    async def cursor_position(
+        self,
+        workspace_id: str,
+    ) -> tuple[int, int] | None:
+        """Return the live pointer position in screen pixels, or None.
+
+        This is the proprioceptive half of the eye-hand loop: the servo reads
+        where the hand actually is before deciding the next corrective step.
+        It is a pure read -- it never moves the pointer -- and it fails closed by
+        returning ``None`` rather than a guessed coordinate when the display
+        query fails.
+        """
+        disp = self._get_display(workspace_id)
+        code, output, _ = await self._docker_exec(
+            f"DISPLAY={disp} xdotool getmouselocation --shell",
+            timeout=5,
+        )
+        if code != 0:
+            return None
+        x_match = re.search(r"(?m)^X=(-?\d+)$", output)
+        y_match = re.search(r"(?m)^Y=(-?\d+)$", output)
+        if x_match is None or y_match is None:
+            return None
+        return int(x_match.group(1)), int(y_match.group(1))
+
+    # -------------------------------------------------------------
     async def _resolve_novnc_url(self) -> str | None:
         """Resolve this container's locally published noVNC URL."""
         now = asyncio.get_running_loop().time()

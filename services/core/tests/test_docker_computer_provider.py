@@ -103,6 +103,39 @@ def _workstation_container_up(container_name: str = "sonic-desktop-workstation")
 
 @pytest.mark.no_live_infra
 @pytest.mark.asyncio
+async def test_cursor_position_parses_the_display_query():
+    provider = DockerComputerProvider(container_name="cursor-test-workstation")
+    provider._docker_exec = AsyncMock(
+        return_value=(0, "X=1234\nY=567\nSCREEN=0\nWINDOW=12345\n", "")
+    )
+
+    position = await provider.cursor_position("ws-cursor")
+
+    assert position == (1234, 567)
+    command = provider._docker_exec.await_args.args[0]
+    assert "xdotool getmouselocation --shell" in command
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_cursor_position_fails_closed_on_a_failed_query():
+    provider = DockerComputerProvider(container_name="cursor-test-workstation")
+    provider._docker_exec = AsyncMock(return_value=(1, "", "no display"))
+
+    assert await provider.cursor_position("ws-cursor") is None
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_cursor_position_fails_closed_on_unparseable_output():
+    provider = DockerComputerProvider(container_name="cursor-test-workstation")
+    provider._docker_exec = AsyncMock(return_value=(0, "garbage", ""))
+
+    assert await provider.cursor_position("ws-cursor") is None
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
 async def test_close_app_uses_window_manager_not_broad_process_kill():
     provider = DockerComputerProvider(container_name="close-test-workstation")
     provider._docker_exec = AsyncMock(return_value=(0, "", ""))

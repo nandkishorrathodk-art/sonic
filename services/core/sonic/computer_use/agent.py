@@ -488,6 +488,11 @@ class ComputerUseAgent:
         self.tenant_id = tenant_id
         self.engagement_id = engagement_id
         self.agent_id = agent_id
+        # Closed-loop eye-hand servo (lazily built). It drives the pointer onto a
+        # pixel target by re-observing after each corrective step, so a
+        # mis-estimated coordinate is fixed by the next frame instead of being
+        # committed blindly. The model itself is torch-free (forge.vision.servo).
+        self._visual_servo: Any | None = None
         # Run-unique worker handle (e.g. "worker-1-a1b2c3"); the coordinator
         # inbox is keyed by it so the operator can steer this exact worker.
         self.agent_uid = str(kwargs.get("agent_uid") or "")
@@ -5496,6 +5501,105 @@ class ComputerUseAgent:
             self._last_screenshot_b64 = ""
         return result
 
+    def _get_visual_servo(self, workspace_id: str) -> Any | None:
+        """Build (once) the closed-loop eye-hand servo for this provider.
+
+        Returns ``None`` when the provider cannot report pointer position, in
+        which case the caller keeps the existing open-loop behaviour rather than
+        moving blind. Each corrective step is re-checked against the fail-closed
+        safety envelope before it reaches the provider, so the loop cannot widen
+        what the agent is allowed to do -- it only makes an allowed reach
+        self-correcting.
+        """
+        if self._visual_servo is not None:
+            return self._visual_servo
+        provider = getattr(self, "computer", None)
+        if provider is None or not callable(getattr(provider, "cursor_position", None)):
+            return None
+
+        async def read_cursor() -> tuple[int, int] | None:
+            position = await provider.cursor_position(workspace_id)
+            # A provider that merely *has* the attribute (e.g. a test double)
+            # must not be treated as a real sensor; reject anything that is not
+            # a two-integer point so the caller keeps its open-loop path.
+            if position is None:
+                return None
+            if (
+                not isinstance(position, tuple)
+                or len(position) != 2
+                or any(
+                    not isinstance(value, int) or isinstance(value, bool)
+                    for value in position
+                )
+            ):
+                raise TypeError("cursor_position did not return an integer point")
+            return int(position[0]), int(position[1])
+
+        async def move_cursor(x: int, y: int) -> Any:
+            # Re-evaluate the envelope for every corrective step. The servo
+            # executes one already-authorized reach, but it must not become a
+            # side channel that skips the policy on any of its moves.
+            if self.safety is not None:
+                verdict = self.safety.evaluate(
+                    ComputerActionType.GUI_MOVE.value,
+                    f"{x},{y}",
+                    {"x": x, "y": y},
+                )
+                if not verdict.allowed:
+                    raise RuntimeError(
+                        f"servo move blocked by safety policy: {verdict.reason}"
+                    )
+            return await provider.gui_action(
+                workspace_id,
+                GUIAction(action=GUIActionType.MOVE, x=int(x), y=int(y)),
+            )
+
+        def screen_size() -> tuple[int, int]:
+            return self._screen_width, self._screen_height
+
+        try:
+            from sonic.computer_use.visual_servo import VisualServo
+
+            self._visual_servo = VisualServo(
+                read_cursor=read_cursor,
+                move_cursor=move_cursor,
+                screen_size=screen_size,
+            )
+        except Exception as exc:
+            logger.debug("visual_servo_unavailable", error=str(exc))
+            return None
+        return self._visual_servo
+
+    async def _servo_to_pixel_target(
+        self,
+        workspace_id: str,
+        x: int,
+        y: int,
+    ) -> dict[str, Any] | None:
+        """Converge the pointer onto ``(x, y)`` and return a measured receipt.
+
+        Best-effort and non-fatal: if the servo cannot run (no pointer readback)
+        this returns ``None`` and the caller proceeds with its normal single
+        dispatch, preserving the previous behaviour. A converged reach still
+        does not authorise a click on its own -- the caller decides that.
+        """
+        servo = self._get_visual_servo(workspace_id)
+        if servo is None:
+            return None
+        try:
+            receipt = await servo.reach(
+                workspace_id,
+                (int(x), int(y)),
+                should_stop=self._mission_interrupt_requested,
+            )
+        except Exception as exc:
+            # Fail closed on the *servo*, not on the action: log and let the
+            # caller fall back to its normal dispatch path.
+            logger.debug("visual_servo_reach_failed", error=str(exc))
+            return None
+        self._last_servo_receipt = receipt.to_dict()
+        return self._last_servo_receipt
+
     def _avcs_focus_head_ready(self) -> bool:
         """True only when a configured, evaluated local focus head can be loaded.
 
@@ -6976,6 +7080,11 @@ class ComputerUseAgent:
                     y = int(payload.get("y", 0))
                     pre_screen_b64 = getattr(self, "_last_screenshot_b64", "")
                     pre_screen_state = getattr(self, "_last_observed_screen", None)
+                    # Reach before clicking, like a hand: converge the pointer
+                    # onto the target so the click lands where it was aimed even
+                    # if the coordinate estimate was slightly off. The click
+                    # itself still goes through the normal dispatch path.
+                    servo_receipt = await self._servo_to_pixel_target(workspace_id, x, y)
                     if self._last_screenshot_b64:
                         self._last_screenshot_b64 = draw_action_marker(
                             self._last_screenshot_b64, (x, y), label="CLICK", color="#00ffcc"
@@ -6996,10 +7105,17 @@ class ComputerUseAgent:
                         self._last_screenshot_b64 = post_screen_b64
                         self._update_screen_dims(obs_after)
                     scene_changed = self._screen_pixels_changed(pre_screen_state, obs_after)
+                    servo_note = ""
+                    if isinstance(servo_receipt, dict):
+                        servo_note = (
+                            f" [servo: converged={servo_receipt.get('converged')}"
+                            f" residual={servo_receipt.get('final_residual_px')}px"
+                            f" latency={servo_receipt.get('latency_ms')}ms]"
+                        )
                     if resolved_via_grounding:
-                        actual_obs_str = f"Visual grounding resolved '{target_resource}' to ({x}, {y}) and clicked"
+                        actual_obs_str = f"Visual grounding resolved '{target_resource}' to ({x}, {y}) and clicked{servo_note}"
                     else:
-                        actual_obs_str = f"Clicked at ({x}, {y})"
+                        actual_obs_str = f"Clicked at ({x}, {y}){servo_note}"
                     if (
                         scene_changed is False
                         or (
@@ -7427,6 +7543,13 @@ class ComputerUseAgent:
                 else:
                     x = int(payload.get("x", 0))
                     y = int(payload.get("y", 0))
+                    # Closed-loop reach: converge the pointer onto the target and
+                    # carry the measured receipt. Falls back to a single dispatch
+                    # when no pointer readback is available (open-loop, as before).
+                    # The final MOVE still goes through the normal dispatch path so
+                    # the pre-dispatch freshness revalidation is preserved; it is
+                    # now only a sub-tolerance precision correction.
+                    servo_receipt = await self._servo_to_pixel_target(workspace_id, x, y)
                     obs_move = await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(
@@ -7443,10 +7566,18 @@ class ComputerUseAgent:
                         self._last_screenshot_b64 = move_b64
                         self._prev_screenshot_hash = hashlib.md5(move_b64.encode()).hexdigest()
                         self._update_screen_dims(obs_move)
+                    servo_note = ""
+                    if isinstance(servo_receipt, dict):
+                        servo_note = (
+                            f" [servo: converged={servo_receipt.get('converged')}"
+                            f" iterations={servo_receipt.get('iterations')}"
+                            f" residual={servo_receipt.get('final_residual_px')}px"
+                            f" latency={servo_receipt.get('latency_ms')}ms]"
+                        )
                     if resolved_via_grounding:
-                        actual_obs_str = f"Visual grounding resolved '{target_resource}' to ({x}, {y}) and moved mouse"
+                        actual_obs_str = f"Visual grounding resolved '{target_resource}' to ({x}, {y}) and moved mouse{servo_note}"
                     else:
-                        actual_obs_str = f"Moved mouse to ({x}, {y})"
+                        actual_obs_str = f"Moved mouse to ({x}, {y}){servo_note}"
 
             elif action_type == ComputerActionType.GUI_DRAG:
                 # Press-move-release (a human drag). Source (x,y) may come from
