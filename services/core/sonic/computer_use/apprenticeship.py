@@ -98,6 +98,36 @@ _FRAME_SIZE = (640, 360)
 _CHANCE_ACCURACY = 1.0 / len(UI_CATEGORIES)
 
 
+def _repo_root() -> Path:
+    """Repository root, resolved from this file, independent of the CWD."""
+    # services/core/sonic/computer_use/apprenticeship.py -> repo root
+    return Path(__file__).resolve().parents[4]
+
+
+def _default_apprenticeship_root() -> str:
+    """Resolve the apprenticeship store root to a single, CWD-independent place.
+
+    The store previously defaulted to a relative ``sonic_data/...`` path, so the
+    eye's lived experience split in two: the backend launched from
+    ``services/core`` wrote to ``services/core/sonic_data/...`` while tooling run
+    from the repository root read ``<repo>/sonic_data/...``. Two divergent
+    ``cortex_learned.pt`` files resulted and the running process kept using the
+    smaller one.
+
+    Resolution order:
+      1. ``SONIC_AVCS_APPRENTICESHIP_DIR`` (explicit override, used as given);
+      2. ``SONIC_DATA_DIR`` (used as given, matching the deployment convention);
+      3. ``<repo>/sonic_data/avcs/apprenticeship`` (anchored, never CWD-relative).
+    """
+    explicit = os.environ.get("SONIC_AVCS_APPRENTICESHIP_DIR", "").strip()
+    if explicit:
+        return explicit
+    data_dir = os.environ.get("SONIC_DATA_DIR", "").strip()
+    if data_dir:
+        return os.path.join(data_dir, "avcs", "apprenticeship")
+    return str(_repo_root() / "sonic_data" / "avcs" / "apprenticeship")
+
+
 def parse_desktop_categories(desktop_text: str) -> list[str]:
     """Extract the ``Categories=`` list from a freedesktop ``.desktop`` file."""
     for raw in desktop_text.splitlines():
@@ -285,11 +315,7 @@ class ApprenticeshipStore:
     """
 
     def __init__(self, root: str | Path | None = None) -> None:
-        base = root or os.environ.get(
-            "SONIC_AVCS_APPRENTICESHIP_DIR",
-            os.path.join(os.environ.get("SONIC_DATA_DIR", "sonic_data"), "avcs", "apprenticeship"),
-        )
-        self.root = Path(base)
+        self.root = Path(root) if root is not None else Path(_default_apprenticeship_root())
         self.frames_dir = self.root / "frames"
         self.manifest_path = self.root / "samples.json"
 

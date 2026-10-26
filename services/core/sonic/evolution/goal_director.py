@@ -62,6 +62,74 @@ class GoalCategory(StrEnum):
     REFACTOR = "refactor"
 
 
+# Aliases an operator, an LLM proposal, or a persisted row may plausibly use.
+# Keys are normalised (lowercase, non-alphanumerics collapsed to "_") before
+# lookup, so "Bug Fix", "BUGFIX" and "bug-fix" all resolve without guessing.
+_CATEGORY_ALIASES: dict[str, GoalCategory] = {
+    "bug": GoalCategory.BUG_FIX,
+    "bugfix": GoalCategory.BUG_FIX,
+    "bug_fix": GoalCategory.BUG_FIX,
+    "defect": GoalCategory.BUG_FIX,
+    "fix": GoalCategory.BUG_FIX,
+    "hotfix": GoalCategory.BUG_FIX,
+    "logic": GoalCategory.LOGIC_IMPROVEMENT,
+    "logic_improvement": GoalCategory.LOGIC_IMPROVEMENT,
+    "improvement": GoalCategory.LOGIC_IMPROVEMENT,
+    "improve": GoalCategory.LOGIC_IMPROVEMENT,
+    "enhancement": GoalCategory.LOGIC_IMPROVEMENT,
+    "capability": GoalCategory.CAPABILITY_ADD,
+    "capability_add": GoalCategory.CAPABILITY_ADD,
+    "feature": GoalCategory.CAPABILITY_ADD,
+    "new_feature": GoalCategory.CAPABILITY_ADD,
+    "perf": GoalCategory.PERFORMANCE,
+    "performance": GoalCategory.PERFORMANCE,
+    "optimisation": GoalCategory.PERFORMANCE,
+    "optimization": GoalCategory.PERFORMANCE,
+    "speed": GoalCategory.PERFORMANCE,
+    "cleanup": GoalCategory.REFACTOR,
+    "refactor": GoalCategory.REFACTOR,
+    "refactoring": GoalCategory.REFACTOR,
+    "maintenance": GoalCategory.REFACTOR,
+}
+
+
+def coerce_goal_category(
+    category: GoalCategory | str | None,
+    *,
+    default: GoalCategory = GoalCategory.LOGIC_IMPROVEMENT,
+) -> GoalCategory:
+    """Resolve a goal category from an enum, a canonical value, or an alias.
+
+    A single malformed or unrecognised category string must never abort an
+    entire evolution cycle. Previously ``GoalCategory(value)`` raised a raw
+    ``ValueError``, which killed the cycle and recorded a failed candidate for
+    what is only a labelling problem. Unknown values now fall back to
+    ``default`` (logged), so the cycle proceeds with an honest, conservative
+    category instead of crashing.
+    """
+    if isinstance(category, GoalCategory):
+        return category
+    if category is None:
+        return default
+    text = str(category).strip()
+    if not text:
+        return default
+    try:
+        return GoalCategory(text)
+    except ValueError:
+        pass
+    normalised = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+    alias = _CATEGORY_ALIASES.get(normalised)
+    if alias is not None:
+        return alias
+    logger.warning(
+        "evolution_goal_category_unrecognised",
+        received=text[:120],
+        fallback=default.value,
+    )
+    return default
+
+
 class GoalStatus(StrEnum):
     QUEUED = "queued"
     ANALYZING = "analyzing"
@@ -73,6 +141,35 @@ class GoalStatus(StrEnum):
     ROLLED_BACK = "rolled_back"
     REJECTED = "rejected"
     FAILED = "failed"
+
+
+def coerce_goal_status(
+    status: GoalStatus | str | None,
+    *,
+    default: GoalStatus = GoalStatus.QUEUED,
+) -> GoalStatus:
+    """Resolve a persisted goal status, falling back instead of raising.
+
+    Same rationale as :func:`coerce_goal_category`: a row written by an older
+    build (or hand-edited) must not crash the whole queue read. An unknown
+    status resolves to ``default`` with a warning rather than a raw ValueError.
+    """
+    if isinstance(status, GoalStatus):
+        return status
+    if status is None:
+        return default
+    text = str(status).strip()
+    if not text:
+        return default
+    try:
+        return GoalStatus(text)
+    except ValueError:
+        logger.warning(
+            "evolution_goal_status_unrecognised",
+            received=text[:120],
+            fallback=default.value,
+        )
+        return default
 
 
 def create_self_update_goal(director: EvolutionGoalDirector) -> EvolutionGoal:
@@ -212,7 +309,7 @@ class EvolutionGoalDirector:
     ) -> EvolutionGoal:
         """Enqueues a new evolution goal into the persistent queue."""
         goal_id = f"goal-{uuid.uuid4().hex[:8]}"
-        cat = GoalCategory(category) if isinstance(category, str) else category
+        cat = coerce_goal_category(category)
         v_current = self.version_tracker.current_version()
 
         goal = EvolutionGoal(
@@ -320,8 +417,8 @@ class EvolutionGoalDirector:
             title=row["title"],
             description=row["description"],
             priority=row["priority"],
-            category=GoalCategory(row["category"]),
-            status=GoalStatus(row["status"]),
+            category=coerce_goal_category(row["category"]),
+            status=coerce_goal_status(row["status"]),
             target_files=json.loads(row["target_files_json"] or "[]"),
             created_at=row["created_at"],
             completed_at=row["completed_at"],

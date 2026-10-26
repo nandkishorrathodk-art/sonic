@@ -93,6 +93,73 @@ def _repair_hunk_counts(diff: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def _first_hunk_context(diff: str) -> str | None:
+    """The first real (context/removed) line of the diff's first hunk."""
+    lines = diff.splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith("@@"):
+            for b in lines[i + 1:]:
+                if b.startswith("@@") or b.startswith(("diff --git ", "--- ", "+++ ")):
+                    break
+                if b[:1] in (" ", "-") and not b.startswith("\\"):
+                    return b[1:]
+            return None
+        i += 1
+    return None
+
+
+def _ensure_file_header(
+    diff: str,
+    target_files: list[str],
+    read_file: Any,
+) -> tuple[str, str]:
+    """Add a ``--- a/<f>`` / ``+++ b/<f>`` header to a headerless hunk block.
+
+    A model sometimes emits only the hunk body (``@@ ... @@`` plus lines) with no
+    file header. ``git apply`` rejects that with ``patch fragment without header``,
+    discarding an otherwise-correct patch. When the diff already carries a
+    ``---``/``+++`` pair, or begins with ``diff --git``, it is returned untouched.
+
+    The owning file is chosen from the candidate ``target_files`` by matching the
+    first hunk's context line against each file's real content. When more than one
+    candidate matches, the result is ambiguous and the diff is returned with an
+    error rather than a guessed filename (fail closed).
+    """
+    lines = diff.splitlines()
+    first = next((ln for ln in lines if ln.strip()), "")
+    if not first.startswith("@@"):
+        return diff, ""
+
+    context = _first_hunk_context(diff)
+    if context is None:
+        return diff, "headerless hunk has no context line to locate its file"
+
+    matches: list[str] = []
+    for rel in target_files:
+        content = read_file(rel)
+        if content is None:
+            continue
+        needle = context.rstrip()
+        if any(hl.rstrip() == needle for hl in content.splitlines()):
+            matches.append(rel)
+
+    if len(matches) != 1:
+        if not matches:
+            return diff, (
+                "headerless hunk context not found in any candidate target file"
+            )
+        return diff, (
+            "headerless hunk context is ambiguous across target files: "
+            + ", ".join(sorted(matches))
+        )
+
+    rel = matches[0].replace("\\", "/")
+    header = f"--- a/{rel}\n+++ b/{rel}"
+    body = "\n".join(lines).strip("\n")
+    return f"{header}\n{body}\n", ""
+
+
 def _normalize_hunks(diff: str, read_file: Any) -> tuple[str, str]:
     """Fill in hunk headers that lack line numbers (models love bare `@@`).
 
@@ -337,6 +404,11 @@ class PatchSynthesizer:
                 continue
 
             diff = _extract_diff(diff_text)
+            diff, header_err = _ensure_file_header(diff, target_files, self._read_target)
+            if header_err:
+                last_reason = f"could not add file header: {header_err}"
+                result.notes.append(f"attempt {attempt}: {last_reason}")
+                continue
             diff, norm_err = _normalize_hunks(diff, self._read_target)
             if norm_err:
                 last_reason = f"could not normalize hunk headers: {norm_err}"
