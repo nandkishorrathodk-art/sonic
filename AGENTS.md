@@ -4680,3 +4680,64 @@ plus IoU. Provenance is written only after a real run.
   not wired to the cortex), LoRA/PEFT (only pays off on a large frozen
   backbone — `peft` not installed). The blocker was never the architecture; it
   was the absent supervision signal, which this change supplies.
+
+## AVCS affordance loop closed and verified (2026-10-23, part 2)
+
+Part 1 built the honesty gate and the outcome-supervision dataset but left two
+gaps that made the loop non-functional. Both are now closed and the loop is
+verified end to end.
+
+### Gap A — the capture path was dead code
+Three places constructed their own `AVCSApprenticeshipLoop` (the awareness
+monitor, the apprenticeship API route, and the agent hook added in part 1), so
+an agent's measured clicks went into a store that no trainer ever read.
+`get_shared_apprenticeship_loop(provider)` now hands the process ONE loop, bound
+once to a labeler; a later caller with a different provider keeps the first
+binding rather than silently re-pointing the store. The workstation route
+attaches it to the production `ComputerUseAgent`.
+
+### Gap B — the loop could not close itself
+`AwarenessMonitor._maybe_learn` only retrained the *category* head. Added
+`_maybe_learn_affordance`, keyed on the **outcome** count (clicks are far rarer
+than frames) and guarded so a static desktop never re-runs the trainer. Env:
+`SONIC_AVCS_AFFORDANCE_LEARN_EVERY` (default 40).
+
+### Synthetic warm-start — measured, and defaulted OFF
+An optional synthetic warm-start stage exists (synthetic screens carry real
+ground truth, so it is genuine supervision). It is **off by default** because it
+is not measurably beneficial: on a 60-click set, 400 samples / 4 epochs scored
+**0.457** held-out point accuracy vs **0.585** for real clicks alone, and more
+epochs overfit. Enable with `SONIC_AVCS_AFFORDANCE_WARM_START=<n>` only if a
+large real set is too slow to train from scratch. It is recorded as its own
+provenance stage and never confers readiness.
+
+### Readiness now also requires the real-click domain
+A synthetic-trained head has a real synthetic score, but its real-desktop
+quality is unmeasurable (real frames carry no affordance ground truth), so
+publishing its hotspots would be unverifiable. `affordance_head_trained()`
+requires `domain == "live_click_outcomes"` in addition to clearing the accuracy
+threshold. Recorded, not assumed.
+
+### Verified end to end (measured, not asserted)
+- **80 measured clicks → held-out point accuracy 0.664** (chance 0.20) → gate
+  flips to **True**. With only 30 clicks it correctly stays **False** at 0.257.
+  The gate tracks the evidence in both directions.
+- Architecture capacity confirmed separately: full synthetic supervision lifts
+  affordance pixel accuracy **0.57 → 0.96**, IoU **0.26 → 0.57**. The head was
+  never the limitation; the missing supervision was. Do not conclude the head is
+  weak from the 0.66 real-click number — that reflects ~80 samples, not capacity.
+- Tests: 21 AVCS + 21 core (shared-loop isolation, domain gate both directions,
+  frozen-head invariant under warm-start, auto-train fires once). AVCS package
+  **612 passed / 20 skipped**; core agent/avcs/gui/awareness subset **876 passed
+  / 9 skipped**; ruff clean. Commits `aca97ee`, `2073644`.
+
+### Still NOT done (do not claim otherwise)
+- No live GUI end-to-end run: this environment has no LLM/vision credentials and
+  no Docker daemon, so the being has not yet accumulated real desktop clicks.
+  The 0.664 figure comes from procedural screens standing in for a live desktop.
+- Semantic grounding ("click the Save button") still needs a trained
+  `GoalConditionedGrounder` checkpoint (`SONIC_AVCS_GROUNDING_CHECKPOINT`), which
+  is a different, stricter contract (`recorded_ui_click_demonstrations`
+  provenance + held-out point accuracy + calibrated query confidence). The
+  outcome store already captures `query → click point` pairs, so the training
+  data for it now accumulates as the being works.
