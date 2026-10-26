@@ -157,7 +157,10 @@ class GUIAction(BaseModel):
 class ScreenObservation(BaseModel):
     """Visual and state perception of the computer desktop screen."""
     screenshot_base64: str = ""
-    raw_rgb: bytes = Field(default=b"", exclude=True)
+    # ``repr=False`` is load-bearing, not cosmetic: a full 1920x1080 frame is
+    # ~6 MB, and any accidental f-string/logger interpolation of this object
+    # would dump the raw bytes and flood logs (observed: 81 MB from one run).
+    raw_rgb: bytes = Field(default=b"", exclude=True, repr=False)
     frame_id: int | None = Field(default=None, ge=1)
     avcs_state: dict[str, Any] = Field(default_factory=dict)
     capture_timestamp_ns: int | None = Field(default=None, ge=0)

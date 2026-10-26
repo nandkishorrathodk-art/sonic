@@ -3890,12 +3890,17 @@ async def _run_prompt_reasoning(
                                 )
                                 image_escalation_count = getattr(trace, "image_escalation_count", 0)
 
-                                sub_agent_id = ""
-                                sub_agent_name = ""
-                                sub_agent_uid = ""
-                                sub_mission_id = ""
-                                worker_role = ""
-                                execution_plane = ""
+                                # Preserve worker identity when the trace
+                                # object carries it. Hardcoding these to ""
+                                # silently dropped a worker's identity and made
+                                # its steps unattributable on the operator
+                                # board, so a card could never be drilled into.
+                                sub_agent_id = str(getattr(trace, "sub_agent_id", "") or "")
+                                sub_agent_name = str(getattr(trace, "sub_agent_name", "") or "")
+                                sub_agent_uid = str(getattr(trace, "sub_agent_uid", "") or "")
+                                sub_mission_id = str(getattr(trace, "sub_mission_id", "") or "")
+                                worker_role = str(getattr(trace, "worker_role", "") or "")
+                                execution_plane = str(getattr(trace, "execution_plane", "") or "")
                             worker_metadata = (
                                 {
                                     "sub_agent_id": sub_agent_id,
@@ -4503,6 +4508,24 @@ async def _run_prompt_reasoning(
                                     tenant_id, session_id, state
                                 ),
                             )
+                            # Attach the shared apprenticeship loop so every
+                            # dispatched pointer action is recorded with its
+                            # measured outcome. That is the only source of real
+                            # affordance supervision; without it the dorsal head
+                            # stays untrained and hotspots stay unavailable.
+                            try:
+                                from sonic.computer_use.apprenticeship import (
+                                    get_shared_apprenticeship_loop,
+                                )
+
+                                agent.apprenticeship = get_shared_apprenticeship_loop(
+                                    computer
+                                )
+                            except Exception as exc:
+                                logger.debug(
+                                    "workstation_apprenticeship_attach_skipped",
+                                    error=str(exc),
+                                )
 
                             _append_worklog(
                                 state, "action", "Agent Visual Computer Use",

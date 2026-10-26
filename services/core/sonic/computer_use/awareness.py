@@ -157,6 +157,9 @@ class AwarenessMonitor:
         self._apprenticeship_ready = False
         self._apprenticeship_key = ""
         self._apprenticeship_round = 0
+        # Outcome count at the last affordance fine-tune, so a static desktop
+        # does not re-run the trainer on every frame.
+        self._last_affordance_trained_count = 0
         self._last_wm_class: str | None = None
         self._window_generation = 0
 
@@ -332,15 +335,53 @@ class AwarenessMonitor:
             every = int(os.environ.get("SONIC_AVCS_APPRENTICE_LEARN_EVERY", "40") or 40)
         except ValueError:
             every = 40
-        if every <= 0 or self._apprenticeship_round < every:
+        if every > 0 and self._apprenticeship_round >= every:
+            self._apprenticeship_round = 0
+            result = await loop.learn()
+            logger.info(
+                "awareness_apprenticeship_round",
+                promoted=result.promoted,
+                reason=result.reason,
+                candidate_accuracy=result.candidate_accuracy,
+            )
+        await self._maybe_learn_affordance(loop)
+
+    async def _maybe_learn_affordance(self, loop: Any) -> None:
+        """Fine-tune the affordance head once enough new click outcomes exist.
+
+        Clicks are far rarer than frames, so this is keyed on the *outcome*
+        count, not the frame count. Training only runs when the count has grown
+        by a real batch since the last round, so a static desktop does not spin
+        the trainer. The head's readiness is still decided by the provenance
+        gate; this only produces the candidate.
+        """
+        try:
+            every = int(
+                os.environ.get("SONIC_AVCS_AFFORDANCE_LEARN_EVERY", "40") or 40
+            )
+        except ValueError:
+            every = 40
+        if every <= 0:
             return
-        self._apprenticeship_round = 0
-        result = await loop.learn()
+        try:
+            total = int(loop.affordance_sample_counts().get("total", 0))
+        except Exception:
+            return
+        if total < every:
+            return
+        if total - self._last_affordance_trained_count < every:
+            return
+        self._last_affordance_trained_count = total
+        try:
+            result = await loop.learn_affordance()
+        except Exception as exc:
+            logger.warning("awareness_affordance_learn_failed", error=str(exc))
+            return
         logger.info(
-            "awareness_apprenticeship_round",
-            promoted=result.promoted,
-            reason=result.reason,
-            candidate_accuracy=result.candidate_accuracy,
+            "awareness_affordance_round",
+            trained=result.get("trained"),
+            point_accuracy=result.get("held_out_point_accuracy"),
+            samples=result.get("samples"),
         )
 
     def _apprenticeship_loop(self) -> Any | None:
@@ -352,17 +393,17 @@ class AwarenessMonitor:
             return None
         try:
             from sonic.computer_use.apprenticeship import (
-                AVCSApprenticeshipLoop,
-                build_provider_labeler,
+                get_shared_apprenticeship_loop,
             )
 
-            self._apprenticeship = AVCSApprenticeshipLoop()
-            # The labeler must read .desktop metadata inside the same sandbox
-            # that supplies the frames, or it can honestly label nothing.
-            self._apprenticeship.labeler = build_provider_labeler(self._provider)
-            logger.info(
-                "avcs_apprenticeship_enabled", store=str(self._apprenticeship.store.root)
-            )
+            # Share the process-wide loop so category frames and measured click
+            # outcomes land in ONE store; separate loops split the eye's memory.
+            self._apprenticeship = get_shared_apprenticeship_loop(self._provider)
+            if self._apprenticeship is not None:
+                logger.info(
+                    "avcs_apprenticeship_enabled",
+                    store=str(self._apprenticeship.store.root),
+                )
         except Exception as exc:
             logger.warning("avcs_apprenticeship_init_failed", error=str(exc))
             self._apprenticeship = None

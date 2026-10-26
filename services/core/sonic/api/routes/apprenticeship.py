@@ -27,26 +27,33 @@ from sonic.logger import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 
-_loop = None
-
 
 def _get_loop():
-    """One apprenticeship loop per process, bound to the live provider."""
-    global _loop
-    if _loop is not None:
-        return _loop
-    from sonic.computer_use.apprenticeship import AVCSApprenticeshipLoop
+    """The process-wide apprenticeship loop, bound to the live provider.
 
-    _loop = AVCSApprenticeshipLoop()
-    # Bind a perception engine so a promoted checkpoint is hot-reloaded into the
-    # running eye instead of only existing on disk.
-    try:
-        from sonic.computer_use.avcs_perception import AVCSPerception
+    Shares one loop with the awareness monitor and the agent so a learning round
+    trains on the same store the being's frames and clicks were written to.
+    """
+    from sonic.computer_use.apprenticeship import (
+        AVCSApprenticeshipLoop,
+        get_shared_apprenticeship_loop,
+    )
 
-        _loop._perception_engine = AVCSPerception()
-    except Exception:
-        pass
-    return _loop
+    loop = get_shared_apprenticeship_loop()
+    if loop is None:
+        # The API exposes an explicit learning surface even when continuous
+        # capture is off, so an operator can trigger a round on demand.
+        loop = AVCSApprenticeshipLoop()
+    if getattr(loop, "_perception_engine", None) is None:
+        # Bind a perception engine so a promoted checkpoint is hot-reloaded into
+        # the running eye instead of only existing on disk.
+        try:
+            from sonic.computer_use.avcs_perception import AVCSPerception
+
+            loop._perception_engine = AVCSPerception()
+        except Exception:
+            pass
+    return loop
 
 
 class CaptureRequest(BaseModel):
@@ -160,3 +167,56 @@ async def apprenticeship_learn(
     loop.epochs = max(1, min(req.epochs, 50))
     result = await loop.learn()
     return result.to_dict()
+
+
+@router.get("/avcs/apprenticeship/affordance")
+async def apprenticeship_affordance_status(user: User = Depends(require_operator)):
+    """State of the affordance head: collected click outcomes and its training proof.
+
+    Reports the measured outcome counts and whether the current affordance
+    checkpoint has a provenance sidecar proving a real, above-chance training
+    run. When it does not, the agent reports hotspots as unavailable rather than
+    as detected controls.
+    """
+    loop = _get_loop()
+    counts = loop.affordance_sample_counts()
+    checkpoint = loop.store.root / "cortex_affordance.pt"
+    trained = False
+    provenance = None
+    try:
+        from forge.vision.cortex.training.affordance_provenance import (
+            affordance_head_trained,
+            read_affordance_provenance,
+        )
+
+        trained = bool(checkpoint.is_file()) and affordance_head_trained(checkpoint)
+        provenance = read_affordance_provenance(checkpoint)
+    except Exception:
+        trained = False
+    return {
+        "outcome_samples": counts,
+        "checkpoint": str(checkpoint),
+        "checkpoint_exists": checkpoint.is_file(),
+        "affordance_head_trained": trained,
+        "provenance": provenance,
+        "label_rule": "post_action_screen_change",
+        "note": (
+            "Hotspots are reported only when a provenance sidecar proves the "
+            "dorsal head was trained to an above-chance held-out accuracy."
+        ),
+    }
+
+
+@router.post("/avcs/apprenticeship/learn-affordance")
+async def apprenticeship_learn_affordance(
+    req: LearnRequest, user: User = Depends(require_operator)
+):
+    """Fine-tune the dorsal head on accumulated click outcomes.
+
+    Trains only the affordance head, verifies it on a held-out split grouped by
+    working run, and records the measured accuracy in a provenance sidecar. The
+    head is treated as usable only if that measurement clears chance.
+    """
+    loop = _get_loop()
+    loop.epochs = max(1, min(req.epochs, 50))
+    return await loop.learn_affordance()

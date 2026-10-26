@@ -4612,3 +4612,268 @@ AVCS grounding checkpoint, and text entry still requires the focus-verification
 head. Both remain fail-closed until trained. No live end-to-end GUI task was run
 in this pass (no workstation/credentials here); the loop was validated with real
 code paths against fake laggy desktops. SONIC remains unfinished.
+
+## AVCS affordance head: trained from measured click outcomes (2026-10-23)
+
+Closed the root cause behind "AVCS reports 4 interactive targets but clicking
+them does nothing". The dorsal (affordance) head had NO honest training signal:
+`labeled_dataset.py` masked every real-desktop frame's affordance map to `-100`
+("real frames carry no hand-labeled affordance mask"), so the head kept its
+random initialisation and `find_action_hotspots` returned noise. `agent.py` then
+reported that count to the reasoning model as `interactive_targets=4`.
+
+### 1. Honesty gate (fail-closed) — `affordance_provenance.py`
+A checkpoint file cannot prove a head inside it was trained, so the fact is
+recorded in a sidecar (`<checkpoint>.affordance.json`): named dataset, sample
+counts, and the measured held-out point accuracy.
+`affordance_head_trained()` returns True only when that evidence exists AND the
+accuracy clears `MIN_HELD_OUT_POINT_ACCURACY = 0.40` (chance for 5 classes is
+0.20). A head fine-tuned but still at chance is treated as untrained, because
+publishing its hotspots is equally misleading.
+
+Wiring: `AVCSPerception.affordance_head_trained` →
+`perceive_semantics_rgb` omits `action_hotspots` unless proven trained →
+`agent.py` prints `interactive_targets=unavailable:affordance-head-untrained`
+instead of a fabricated count. `avcs_capability_state()` exposes
+`affordance_head_trained` + `affordance_outcome_samples`.
+
+### 2. Environment-reward supervision — `outcome_affordance.py`
+The being already produces the missing label while it works: it clicks, then
+observes whether the screen changed.
+- changed → clicked point was an interactive control of that class (positive)
+- unchanged → clicked point was not that class (negative)
+- everything else → `-100` (ignored). The loss never asserts an unobserved
+  region is static; that would be the same fabrication class as before.
+A click with an operator-named target also yields a real (query → point)
+grounding pair.
+
+`build_point_mask` labels a small disk (radius 2 of the 32x32 head grid), so
+supervision is sparse and honest rather than dense and invented.
+
+### 3. Trainer — `affordance_trainer.py`
+Fine-tunes ONLY the dorsal head; trunk and ventral head are frozen so a sparse
+click set cannot degrade the already-verified category model (asserted by a test
+that only `dorsal.*` keys may change). Split is by `group` (one working run) so
+near-duplicates never leak. Metrics: held-out point accuracy (the gate's number)
+plus IoU. Provenance is written only after a real run.
+
+### 4. Capture wiring
+- `OutcomeSampleStore` (in `apprenticeship.py`) persists clicks + measured
+  outcomes durably under `sonic_data/avcs/apprenticeship/`.
+- `ComputerUseAgent._record_click_outcome` hooks `_dispatch_gui_action`, where
+  the screen-change verdict is already computed. Records only CLICK /
+  DOUBLE_CLICK / RIGHT_CLICK with integer pixel coords and a real pre-action
+  frame; keyboard and coordinate-less actions are skipped.
+- `AVCSApprenticeshipLoop.learn_affordance()` runs the trainer (min 24 samples,
+  else refuses). API: `GET /avcs/apprenticeship/affordance`,
+  `POST /avcs/apprenticeship/learn-affordance`.
+
+### Honest state after this change
+- 30 synthetic click outcomes → held-out point accuracy **0.257** (chance 0.20),
+  so the gate correctly reports the head **not yet usable**. The plumbing is
+  real and verified; the head needs far more measured clicks from live desktop
+  work before hotspots can be trusted. Do NOT claim the affordance head works.
+- Tests: 17 AVCS + 15 core; AVCS package 608 passed / 20 skipped; core
+  agent/avcs/gui subset 867 passed / 9 skipped; ruff clean. Commit `aca97ee`.
+- Techniques assessed for AVCS and NOT adopted (with reasons): GAN/VAE (nothing
+  to generate or reconstruct), RoPE/MoE (no text generation; `forge/model/` is
+  not wired to the cortex), LoRA/PEFT (only pays off on a large frozen
+  backbone — `peft` not installed). The blocker was never the architecture; it
+  was the absent supervision signal, which this change supplies.
+
+## AVCS affordance loop closed and verified (2026-10-23, part 2)
+
+Part 1 built the honesty gate and the outcome-supervision dataset but left two
+gaps that made the loop non-functional. Both are now closed and the loop is
+verified end to end.
+
+### Gap A — the capture path was dead code
+Three places constructed their own `AVCSApprenticeshipLoop` (the awareness
+monitor, the apprenticeship API route, and the agent hook added in part 1), so
+an agent's measured clicks went into a store that no trainer ever read.
+`get_shared_apprenticeship_loop(provider)` now hands the process ONE loop, bound
+once to a labeler; a later caller with a different provider keeps the first
+binding rather than silently re-pointing the store. The workstation route
+attaches it to the production `ComputerUseAgent`.
+
+### Gap B — the loop could not close itself
+`AwarenessMonitor._maybe_learn` only retrained the *category* head. Added
+`_maybe_learn_affordance`, keyed on the **outcome** count (clicks are far rarer
+than frames) and guarded so a static desktop never re-runs the trainer. Env:
+`SONIC_AVCS_AFFORDANCE_LEARN_EVERY` (default 40).
+
+### Synthetic warm-start — measured, and defaulted OFF
+An optional synthetic warm-start stage exists (synthetic screens carry real
+ground truth, so it is genuine supervision). It is **off by default** because it
+is not measurably beneficial: on a 60-click set, 400 samples / 4 epochs scored
+**0.457** held-out point accuracy vs **0.585** for real clicks alone, and more
+epochs overfit. Enable with `SONIC_AVCS_AFFORDANCE_WARM_START=<n>` only if a
+large real set is too slow to train from scratch. It is recorded as its own
+provenance stage and never confers readiness.
+
+### Readiness now also requires the real-click domain
+A synthetic-trained head has a real synthetic score, but its real-desktop
+quality is unmeasurable (real frames carry no affordance ground truth), so
+publishing its hotspots would be unverifiable. `affordance_head_trained()`
+requires `domain == "live_click_outcomes"` in addition to clearing the accuracy
+threshold. Recorded, not assumed.
+
+### Verified end to end (measured, not asserted)
+- **80 measured clicks → held-out point accuracy 0.664** (chance 0.20) → gate
+  flips to **True**. With only 30 clicks it correctly stays **False** at 0.257.
+  The gate tracks the evidence in both directions.
+- Architecture capacity confirmed separately: full synthetic supervision lifts
+  affordance pixel accuracy **0.57 → 0.96**, IoU **0.26 → 0.57**. The head was
+  never the limitation; the missing supervision was. Do not conclude the head is
+  weak from the 0.66 real-click number — that reflects ~80 samples, not capacity.
+- Tests: 21 AVCS + 21 core (shared-loop isolation, domain gate both directions,
+  frozen-head invariant under warm-start, auto-train fires once). AVCS package
+  **612 passed / 20 skipped**; core agent/avcs/gui/awareness subset **876 passed
+  / 9 skipped**; ruff clean. Commits `aca97ee`, `2073644`.
+
+### Still NOT done (do not claim otherwise)
+- No live GUI end-to-end run: this environment has no LLM/vision credentials and
+  no Docker daemon, so the being has not yet accumulated real desktop clicks.
+  The 0.664 figure comes from procedural screens standing in for a live desktop.
+- Semantic grounding ("click the Save button") still needs a trained
+  `GoalConditionedGrounder` checkpoint (`SONIC_AVCS_GROUNDING_CHECKPOINT`), which
+  is a different, stricter contract (`recorded_ui_click_demonstrations`
+  provenance + held-out point accuracy + calibrated query confidence). The
+  outcome store already captures `query → click point` pairs, so the training
+  data for it now accumulates as the being works.
+
+## Docker VNC live test — AVCS was blind to its own cursor (2026-10-26)
+
+Ran SONIC against the real Docker workstation (`sonic-desktop-workstation`:
+Xvfb `:99` 1920x1080, XFCE, x11vnc `5900`, noVNC `6080`) after starting the
+daemon (`sudo dockerd`; socket is root-only, `chmod 666 /var/run/docker.sock`)
+and building `sonic-workstation:latest` (2.24 GB, ~6 min).
+
+### What worked on the live desktop
+- AVCS perception: real frames, `avcs_raw_frame_processed` at the configured
+  10 FPS, ~21-38 ms/frame, `desktop_state=INTERACTIVE`, active window reported.
+- Real GUI actions through `ComputerUseAgent`: `APP_LAUNCH` opened Thunar and
+  Mousepad (confirmed out-of-band with `wmctrl -l` / `pgrep`), `GUI_MOVE`
+  reached the exact target via the visual servo, `GUI_CLICK`/`GUI_DOUBLE_CLICK`
+  dispatched and honestly returned `UNVERIFIED` when the screen did not change.
+- Honest fail-closed: a semantic click ("the Firefox window") returned
+  `BLOCKED` (no grounder) without touching the provider; `GUI_TYPE` returned
+  `BLOCKED` (no focus head). No blind click, no fabricated success.
+- VNC itself is genuinely live: noVNC `HTTP 200` and a real `RFB 003.008`
+  handshake on `5900`.
+
+### REAL BUG FOUND — the eye could not see the pointer
+`mss` captures the root window, and the X server composites the hardware cursor
+separately, so the pointer is absent from every AVCS frame. Measured: moved the
+cursor to `(400,300)`, captured, moved to `(1500,850)`, captured again —
+`cursor_position` reported both positions correctly but the two frames differed
+by **0 pixels**. Consequences: AVCS could never confirm where a click landed,
+and a human watching noVNC saw no cursor at all.
+
+Fix (`docker/avcs_frame_stream.py`): read the sprite via XFixes
+(`XFixesGetCursorImage`) and alpha-blend it into each frame; `--no-cursor` opts
+out, and the compositor disables itself softly when XFixes is unavailable so a
+missing cursor can never break perception entirely. Requires an image rebuild
+(the script is `COPY`-ed to `/opt/sonic/avcs_frame_stream.py`).
+
+Measured after the fix (live): frames at `(400,300)` vs `(1500,850)` differ in
+**219 px**, changed bbox `x[403..1514] y[302..870]` — exactly the two cursor
+positions — and the composited sprite renders as a recognisable arrow. A/B at
+the same position (`--no-cursor` vs cursor-on) differs only inside the 24x24
+sprite box at the cursor, so nothing else in the frame is perturbed.
+
+Note: XFixes stores each CARD32 ARGB sprite pixel in a C ``long`` (8-byte)
+slot; reading only the low 4 bytes is required on x86-64.
+
+Tests: `services/core/tests/test_avcs_cursor_compositing.py` (9) pin the blend,
+alpha handling, edge clipping (no wrap), 64-bit slot parsing, soft failure, and
+the `--no-cursor` escape hatch. Full core suite: **2516 passed, 40 skipped, 0
+failures**; ruff clean.
+
+### Still fail-closed (capability genuinely absent, not a bug)
+- Semantic targeting (`SONIC_AVCS_GROUNDING_CHECKPOINT`) — no evaluated local
+  grounder checkpoint in the repo.
+- Text entry (`SONIC_AVCS_FOCUS_CHECKPOINT`) — no evaluated local focus head.
+- `avcs_capability_state()` correctly reports
+  `semantic_grounding=false, focus_verification=false, gui_actions_ready=false`
+  while `learned_cortex_ready=true`.
+
+### Honesty note on the learned cortex metric
+The promoted `cortex_learned.eval.json` reports `category_accuracy=0.998`, but
+the class distribution is heavily imbalanced (`settings_panel` 663/920 =
+0.721 majority; `editor_code` 193; `browser_webpage` 23; `form_input` 22;
+`terminal_shell` 19) and the held-out split scored 560/560 on the majority
+class. A constant "settings_panel" predictor would score 0.721, so the headline
+number is dominated by one class and must not be read as general scene
+understanding. Report per-class accuracy (or balanced accuracy) before quoting
+cortex quality.
+
+## Boss worker visibility + raw-frame log-flood audit (2026-10-26)
+
+Operator complaint: "Boss launches agents but clicking the agent's id/name shows
+nothing about what it is doing." Investigated the full seam end to end
+(manual, single-agent — no parallel subagents) and separated real defects from
+fail-closed-by-design behavior.
+
+### Verified working (evidence-backed, not assumed)
+- **Worker identity is minted correctly.** A live `BossAgent.run()` against the
+  real `sonic-desktop-workstation` emitted `sub_dispatch` with
+  `agent_id="sub-agent-1"`, run-unique `agent_uid="worker-1-<hex>"`,
+  `agent_name` (e.g. "File Manager Explorer"), `role`, `plane="gui"`,
+  `sub_mission_id="sub-1"`. Each launched agent does get an ID and a name.
+- **The route → worklog → projection seam works.** Replaying the *real* captured
+  Boss events through the route's exact translation produced a worker record
+  with `step_count=3`, `latest_action="gui hotkey · Thunar location bar"`, and a
+  resolvable `find_worker(uid)` drill-down listing every step
+  (`GUI_SCREENSHOT [COMPLETED]`, `GUI_HOTKEY [UNVERIFIED]`, `GUI_HOTKEY [RECOVERED]`).
+- **The dashboard click-to-view pipeline is complete and wired.** `WorklogFeed`
+  renders a `WorkerBoard` of clickable cards (uid badge, role, plane, status,
+  latest action); expanding a card fetches `/workstation/agents/{uid}` and shows
+  the full step list; `app/agents/page.tsx` polls `/workstation/agents` and has a
+  `toggleWorker` drill-down. `Workstation.tsx` passes `workers` and
+  `mission_task_alive` through.
+- **The motor is real.** Provider-level `gui_action` MOVE/CLICK glided the X11
+  cursor on the live desktop (sampled out-of-band via `xdotool`:
+  `640,[]` → `300,[]`), so the mouse genuinely moves.
+
+### REAL BUG 1 — raw frame bytes flooded the logs (fixed)
+`ScreenObservation.raw_rgb` holds a full 1920x1080 RGB frame (~6 MB) and was
+rendered by `repr()`. A single run that interpolated the observation produced an
+**81 MB log file** of `\xf6\xf5\xf4…` pixel data — drowning the real telemetry
+and leaking workstation pixels into the log stream. Fixed with
+`Field(default=b"", exclude=True, repr=False)` on `raw_rgb`
+(`sonic/computer/models.py`); `model_dump()` still excludes it and callers still
+read the frame normally. `repr()` of a full frame is now < 1 KB.
+
+### REAL BUG 2 — object-branch traces silently lost worker identity (fixed)
+`_record_step_trace` in `sonic/api/routes/workstation.py` hardcoded
+`sub_agent_id/name/uid`, `sub_mission_id`, `worker_role`, `execution_plane` to
+`""` on the `ComputerDecisionTrace`-object branch (only the dict branch carried
+them). Any step arriving as an object became unattributable and its card could
+never be drilled into. Now read via `getattr(trace, ..., "")`, so identity is
+preserved when present and stays safely empty when absent (a plain
+`ComputerDecisionTrace` has no such fields).
+
+### Fail-closed by design (NOT bugs — do not "fix" by attaching pixels)
+- Semantic GUI clicks ("click the Save button") remain blocked because no
+  evaluated `SONIC_AVCS_GROUNDING_CHECKPOINT` exists in the repo. A worker that
+  proposes one gets `avcs_target_grounding_failed_closed` and the mission stops
+  with `gui_mission_stopped_for_unavailable_avcs_capability`.
+- Text entry stays blocked without an evaluated `SONIC_AVCS_FOCUS_CHECKPOINT`.
+- The affordance (clickable-hotspot) path is unavailable because
+  `affordance_head_trained=False` for the shipped `cortex_real.pt`.
+- `image_attached=False` is **correct** under the current AVCS-only perception
+  contract: workstation pixels are processed locally and are NOT sent to the
+  workstation reasoning model; only the AVCS text summary reaches System 2. Do
+  not re-introduce screenshot transfer to "fix" grounding — train/configure the
+  local AVCS heads instead.
+- Net effect: a GUI worker can launch apps and use keyboard/pointer at explicit
+  coordinates, but cannot click a *described* control, so such Boss objectives
+  end INCOMPLETE honestly rather than fabricating success.
+
+### Tests
+`services/core/tests/test_worker_board_visibility_fixes.py` (7) pins both fixes:
+repr/model_dump no longer expose raw pixels, a worker-aware trace keeps its
+identity through the route's reads, and a plain trace stays safely empty.
+Regression: 164 passed across the Boss/worker suites, 212 passed across the
+computer-use/perception suites, ruff clean on all changed files.

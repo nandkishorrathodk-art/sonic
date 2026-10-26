@@ -546,6 +546,11 @@ class ComputerUseAgent:
         # Last structured security-tool result, surfaced to the next reasoning
         # step so the LLM acts on real scan findings rather than a claim.
         self._last_tool_result: Any | None = None
+        # Optional AVCS apprenticeship loop. When attached, every dispatched
+        # pointer action is recorded with its *measured* outcome (did the screen
+        # change?) so the dorsal affordance head can later be trained on real
+        # clicks instead of staying untrained and emitting random hotspots.
+        self.apprenticeship: Any | None = None
         self._last_screenshot_b64: str = ""
         self._last_screen_has_pixels: bool = False
         self._last_screen_frame_id: int | None = None
@@ -3341,14 +3346,26 @@ class ComputerUseAgent:
         semantics = state.get("semantics")
         semantics_summary = "unavailable"
         if isinstance(semantics, dict) and semantics:
-            hotspots = semantics.get("action_hotspots")
-            hotspot_count = len(hotspots) if isinstance(hotspots, list) else 0
-            semantics_summary = (
-                f"{str(semantics.get('primary_category', 'unknown'))[:32]} "
-                f"(confidence={format_number(semantics.get('category_confidence'))}, "
-                f"stability={str(semantics.get('stability_state', 'unknown'))[:20]}, "
-                f"interactive_targets={hotspot_count})"
-            )
+            if semantics.get("affordance_head_trained") is True:
+                hotspots = semantics.get("action_hotspots")
+                hotspot_count = len(hotspots) if isinstance(hotspots, list) else 0
+                semantics_summary = (
+                    f"{str(semantics.get('primary_category', 'unknown'))[:32]} "
+                    f"(confidence={format_number(semantics.get('category_confidence'))}, "
+                    f"stability={str(semantics.get('stability_state', 'unknown'))[:20]}, "
+                    f"interactive_targets={hotspot_count})"
+                )
+            else:
+                # The dorsal head was never trained (or its training is
+                # unproven), so it has no real interactive-target predictions.
+                # Say so rather than reporting a hotspot count the model would
+                # read as detected controls.
+                semantics_summary = (
+                    f"{str(semantics.get('primary_category', 'unknown'))[:32]} "
+                    f"(confidence={format_number(semantics.get('category_confidence'))}, "
+                    f"stability={str(semantics.get('stability_state', 'unknown'))[:20]}, "
+                    "interactive_targets=unavailable:affordance-head-untrained)"
+                )
         return (
             "pixel-only; "
             f"frame={frame_id}, screen={dimensions}, "
@@ -5079,6 +5096,56 @@ class ComputerUseAgent:
             separators=(",", ":"),
         )
 
+    def _record_click_outcome(
+        self, action: GUIAction, before_screen: Any, changed: bool
+    ) -> None:
+        """Feed one dispatched pointer action and its measured outcome to AVCS.
+
+        Only pointer actions that carry a pixel target are recorded: a click
+        with no coordinates cannot be turned into a point label, and a keyboard
+        or window action says nothing about *where* a control is. The frame
+        captured *before* the action is the one the click was aimed at, so that
+        is what the head is trained on. Recording is best-effort and never
+        allowed to break a live action.
+        """
+        loop = getattr(self, "apprenticeship", None)
+        if loop is None:
+            return
+        try:
+            from sonic.computer.models import GUIActionType
+
+            pointer_actions = {
+                GUIActionType.CLICK,
+                GUIActionType.DOUBLE_CLICK,
+                GUIActionType.RIGHT_CLICK,
+            }
+            if action.action not in pointer_actions:
+                return
+            x = getattr(action, "x", None)
+            y = getattr(action, "y", None)
+            width = int(getattr(before_screen, "width", 0) or 0)
+            height = int(getattr(before_screen, "height", 0) or 0)
+            raw_rgb = getattr(before_screen, "raw_rgb", None)
+            if not (isinstance(x, int) and isinstance(y, int)) or width <= 0 or height <= 0:
+                return
+            if not isinstance(raw_rgb, (bytes, bytearray)) or not raw_rgb:
+                return
+            frame = np.frombuffer(raw_rgb, dtype=np.uint8).reshape(height, width, 3)
+            action_class = {
+                GUIActionType.CLICK: "clickable",
+                GUIActionType.DOUBLE_CLICK: "clickable",
+                GUIActionType.RIGHT_CLICK: "clickable",
+            }[action.action]
+            loop.record_click_outcome(
+                frame,
+                (min(max(x / width, 0.0), 1.0), min(max(y / height, 0.0), 1.0)),
+                action_class,
+                bool(changed),
+                query=str(getattr(action, "target_query", "") or ""),
+            )
+        except Exception as exc:
+            logger.debug("avcs_click_outcome_record_skipped", error=str(exc))
+
     @staticmethod
     def _screen_has_pixel_data(screen: Any) -> bool:
         return bool(
@@ -5493,6 +5560,7 @@ class ComputerUseAgent:
                     "after_version": getattr(result, "perception_version", 0),
                     "active_window": getattr(result, "active_window", ""),
                 }
+                self._record_click_outcome(action, before_screen, changed)
         else:
             self._last_gui_action_observation_valid = False
             self._last_observed_screen = result
