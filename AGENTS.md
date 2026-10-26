@@ -4612,3 +4612,71 @@ AVCS grounding checkpoint, and text entry still requires the focus-verification
 head. Both remain fail-closed until trained. No live end-to-end GUI task was run
 in this pass (no workstation/credentials here); the loop was validated with real
 code paths against fake laggy desktops. SONIC remains unfinished.
+
+## AVCS affordance head: trained from measured click outcomes (2026-10-23)
+
+Closed the root cause behind "AVCS reports 4 interactive targets but clicking
+them does nothing". The dorsal (affordance) head had NO honest training signal:
+`labeled_dataset.py` masked every real-desktop frame's affordance map to `-100`
+("real frames carry no hand-labeled affordance mask"), so the head kept its
+random initialisation and `find_action_hotspots` returned noise. `agent.py` then
+reported that count to the reasoning model as `interactive_targets=4`.
+
+### 1. Honesty gate (fail-closed) — `affordance_provenance.py`
+A checkpoint file cannot prove a head inside it was trained, so the fact is
+recorded in a sidecar (`<checkpoint>.affordance.json`): named dataset, sample
+counts, and the measured held-out point accuracy.
+`affordance_head_trained()` returns True only when that evidence exists AND the
+accuracy clears `MIN_HELD_OUT_POINT_ACCURACY = 0.40` (chance for 5 classes is
+0.20). A head fine-tuned but still at chance is treated as untrained, because
+publishing its hotspots is equally misleading.
+
+Wiring: `AVCSPerception.affordance_head_trained` →
+`perceive_semantics_rgb` omits `action_hotspots` unless proven trained →
+`agent.py` prints `interactive_targets=unavailable:affordance-head-untrained`
+instead of a fabricated count. `avcs_capability_state()` exposes
+`affordance_head_trained` + `affordance_outcome_samples`.
+
+### 2. Environment-reward supervision — `outcome_affordance.py`
+The being already produces the missing label while it works: it clicks, then
+observes whether the screen changed.
+- changed → clicked point was an interactive control of that class (positive)
+- unchanged → clicked point was not that class (negative)
+- everything else → `-100` (ignored). The loss never asserts an unobserved
+  region is static; that would be the same fabrication class as before.
+A click with an operator-named target also yields a real (query → point)
+grounding pair.
+
+`build_point_mask` labels a small disk (radius 2 of the 32x32 head grid), so
+supervision is sparse and honest rather than dense and invented.
+
+### 3. Trainer — `affordance_trainer.py`
+Fine-tunes ONLY the dorsal head; trunk and ventral head are frozen so a sparse
+click set cannot degrade the already-verified category model (asserted by a test
+that only `dorsal.*` keys may change). Split is by `group` (one working run) so
+near-duplicates never leak. Metrics: held-out point accuracy (the gate's number)
+plus IoU. Provenance is written only after a real run.
+
+### 4. Capture wiring
+- `OutcomeSampleStore` (in `apprenticeship.py`) persists clicks + measured
+  outcomes durably under `sonic_data/avcs/apprenticeship/`.
+- `ComputerUseAgent._record_click_outcome` hooks `_dispatch_gui_action`, where
+  the screen-change verdict is already computed. Records only CLICK /
+  DOUBLE_CLICK / RIGHT_CLICK with integer pixel coords and a real pre-action
+  frame; keyboard and coordinate-less actions are skipped.
+- `AVCSApprenticeshipLoop.learn_affordance()` runs the trainer (min 24 samples,
+  else refuses). API: `GET /avcs/apprenticeship/affordance`,
+  `POST /avcs/apprenticeship/learn-affordance`.
+
+### Honest state after this change
+- 30 synthetic click outcomes → held-out point accuracy **0.257** (chance 0.20),
+  so the gate correctly reports the head **not yet usable**. The plumbing is
+  real and verified; the head needs far more measured clicks from live desktop
+  work before hotspots can be trusted. Do NOT claim the affordance head works.
+- Tests: 17 AVCS + 15 core; AVCS package 608 passed / 20 skipped; core
+  agent/avcs/gui subset 867 passed / 9 skipped; ruff clean. Commit `aca97ee`.
+- Techniques assessed for AVCS and NOT adopted (with reasons): GAN/VAE (nothing
+  to generate or reconstruct), RoPE/MoE (no text generation; `forge/model/` is
+  not wired to the cortex), LoRA/PEFT (only pays off on a large frozen
+  backbone — `peft` not installed). The blocker was never the architecture; it
+  was the absent supervision signal, which this change supplies.
