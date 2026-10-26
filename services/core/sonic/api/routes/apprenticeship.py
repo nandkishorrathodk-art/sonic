@@ -27,26 +27,33 @@ from sonic.logger import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 
-_loop = None
-
 
 def _get_loop():
-    """One apprenticeship loop per process, bound to the live provider."""
-    global _loop
-    if _loop is not None:
-        return _loop
-    from sonic.computer_use.apprenticeship import AVCSApprenticeshipLoop
+    """The process-wide apprenticeship loop, bound to the live provider.
 
-    _loop = AVCSApprenticeshipLoop()
-    # Bind a perception engine so a promoted checkpoint is hot-reloaded into the
-    # running eye instead of only existing on disk.
-    try:
-        from sonic.computer_use.avcs_perception import AVCSPerception
+    Shares one loop with the awareness monitor and the agent so a learning round
+    trains on the same store the being's frames and clicks were written to.
+    """
+    from sonic.computer_use.apprenticeship import (
+        AVCSApprenticeshipLoop,
+        get_shared_apprenticeship_loop,
+    )
 
-        _loop._perception_engine = AVCSPerception()
-    except Exception:
-        pass
-    return _loop
+    loop = get_shared_apprenticeship_loop()
+    if loop is None:
+        # The API exposes an explicit learning surface even when continuous
+        # capture is off, so an operator can trigger a round on demand.
+        loop = AVCSApprenticeshipLoop()
+    if getattr(loop, "_perception_engine", None) is None:
+        # Bind a perception engine so a promoted checkpoint is hot-reloaded into
+        # the running eye instead of only existing on disk.
+        try:
+            from sonic.computer_use.avcs_perception import AVCSPerception
+
+            loop._perception_engine = AVCSPerception()
+        except Exception:
+            pass
+    return loop
 
 
 class CaptureRequest(BaseModel):

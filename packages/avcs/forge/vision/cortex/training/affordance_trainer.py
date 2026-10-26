@@ -38,6 +38,8 @@ from forge.vision.cortex.data.outcome_affordance import (
 )
 from forge.vision.cortex.model import ArtificialVisualCortex
 from forge.vision.cortex.training.affordance_provenance import (
+    DOMAIN_LIVE_CLICKS,
+    DOMAIN_SYNTHETIC,
     write_affordance_provenance,
 )
 from forge.vision.cortex.training.evaluate import load_cortex_checkpoint
@@ -121,6 +123,8 @@ class AffordanceTrainer:
         held_out_fraction: float = 0.25,
         seed: int = 7,
         dataset_provenance: str = "click_outcome_supervision",
+        warm_start_samples: int = 0,
+        warm_start_epochs: int = 6,
     ) -> None:
         self.base_checkpoint = Path(base_checkpoint)
         self.device = torch.device(device)
@@ -131,6 +135,13 @@ class AffordanceTrainer:
         self.held_out_fraction = held_out_fraction
         self.seed = seed
         self.dataset_provenance = dataset_provenance
+        # Optional synthetic warm-start: synthetic screens carry real ground
+        # truth, so they can pre-shape the head before real clicks refine it.
+        # It never makes the head ready on its own (the provenance domain stays
+        # synthetic until real-click training runs), it only gives the real
+        # fine-tune a better starting point.
+        self.warm_start_samples = int(warm_start_samples)
+        self.warm_start_epochs = int(warm_start_epochs)
 
     # -- data ---------------------------------------------------------------
 
@@ -201,6 +212,10 @@ class AffordanceTrainer:
         )
         criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 
+        stages: list[dict[str, Any]] = []
+        if self.warm_start_samples > 0 and self.warm_start_epochs > 0:
+            self._warm_start(model, criterion, optimizer, stages)
+
         history: list[dict[str, float]] = []
         for epoch in range(1, self.epochs + 1):
             model.dorsal.train()
@@ -240,6 +255,8 @@ class AffordanceTrainer:
             held_out_point_accuracy=point_accuracy,
             base_checkpoint=str(self.base_checkpoint),
             trained_at=time.time(),
+            domain=DOMAIN_LIVE_CLICKS,
+            stages=stages or None,
         )
 
         return AffordanceTrainingResult(
@@ -256,6 +273,64 @@ class AffordanceTrainer:
             provenance=str(sidecar),
             history=history,
         )
+
+    def _warm_start(
+        self,
+        model: Any,
+        criterion: Any,
+        optimizer: Any,
+        stages: list[dict[str, Any]],
+    ) -> float:
+        """Pre-shape the dorsal head on synthetic screens that carry ground truth.
+
+        Synthetic procedural screens have real affordance masks, so training on
+        them is genuine supervision, not a shortcut. It is recorded as its own
+        stage and never makes the head ready: only a later real-click run sets
+        the provenance domain to ``live_click_outcomes``.
+        """
+        from forge.vision.cortex.data.dataset import ScreenDataset
+
+        ds = ScreenDataset(num_samples=self.warm_start_samples)
+        dl = DataLoader(
+            ds,
+            batch_size=min(self.batch_size, len(ds)),
+            shuffle=True,
+            num_workers=0,
+        )
+        first_loss = last_loss = 0.0
+        for epoch in range(1, self.warm_start_epochs + 1):
+            model.dorsal.train()
+            epoch_loss = 0.0
+            steps = 0
+            for batch in dl:
+                frame = batch["frame_t"].to(self.device)
+                target = batch["affordance_mask"].to(self.device)
+                optimizer.zero_grad()
+                view = model.retina.extract_views(frame)
+                out = model.forward(
+                    view.peripheral.to(self.device), view.foveal.to(self.device)
+                )
+                if not bool((target != IGNORE_INDEX).any()):
+                    continue
+                loss = criterion(out["affordance_logits"], target)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += float(loss.item())
+                steps += 1
+            last_loss = epoch_loss / max(steps, 1)
+            if epoch == 1:
+                first_loss = last_loss
+        stages.append(
+            {
+                "stage": "synthetic_warm_start",
+                "domain": DOMAIN_SYNTHETIC,
+                "samples": self.warm_start_samples,
+                "epochs": self.warm_start_epochs,
+                "first_epoch_loss": first_loss,
+                "last_epoch_loss": last_loss,
+            }
+        )
+        return last_loss
 
     @torch.no_grad()
     def _held_out_metrics(

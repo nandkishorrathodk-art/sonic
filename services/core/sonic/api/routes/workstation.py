@@ -4503,6 +4503,24 @@ async def _run_prompt_reasoning(
                                     tenant_id, session_id, state
                                 ),
                             )
+                            # Attach the shared apprenticeship loop so every
+                            # dispatched pointer action is recorded with its
+                            # measured outcome. That is the only source of real
+                            # affordance supervision; without it the dorsal head
+                            # stays untrained and hotspots stay unavailable.
+                            try:
+                                from sonic.computer_use.apprenticeship import (
+                                    get_shared_apprenticeship_loop,
+                                )
+
+                                agent.apprenticeship = get_shared_apprenticeship_loop(
+                                    computer
+                                )
+                            except Exception as exc:
+                                logger.debug(
+                                    "workstation_apprenticeship_attach_skipped",
+                                    error=str(exc),
+                                )
 
                             _append_worklog(
                                 state, "action", "Agent Visual Computer Use",

@@ -37,6 +37,16 @@ AFFORDANCE_PROVENANCE_SUFFIX = ".affordance.json"
 # before its hotspots are published as detected controls.
 MIN_HELD_OUT_POINT_ACCURACY = 0.40
 
+# Domains a provenance record can name. Only supervision from *real* clicks
+# counts toward readiness: a head trained on synthetic screens has a measured
+# synthetic accuracy, but its real-desktop quality is unmeasurable (real frames
+# carry no affordance ground truth), so it must not be published as a control
+# detector. Synthetic training is a warm-start for the real fine-tune, not a
+# substitute for it.
+DOMAIN_LIVE_CLICKS = "live_click_outcomes"
+DOMAIN_SYNTHETIC = "synthetic_procedural_screens"
+READY_DOMAINS = frozenset({DOMAIN_LIVE_CLICKS})
+
 
 def affordance_provenance_path(checkpoint_path: str | Path) -> Path:
     """Sidecar path for a cortex checkpoint (``x.pt`` -> ``x.affordance.json``)."""
@@ -55,11 +65,15 @@ def write_affordance_provenance(
     held_out_point_accuracy: float | None = None,
     base_checkpoint: str = "",
     trained_at: float | None = None,
+    domain: str = DOMAIN_LIVE_CLICKS,
+    stages: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Persist the affordance head's training provenance beside its checkpoint.
 
     ``dataset_provenance`` is required: a metric without provenance is not
     evidence, so callers are forced to name what the head was trained on.
+    ``domain`` says whether the *supervision* came from real clicks or from
+    synthetic screens; only the former can make the head ready.
     """
     if not str(dataset_provenance).strip():
         raise ValueError("affordance provenance requires a dataset_provenance string")
@@ -71,6 +85,7 @@ def write_affordance_provenance(
         "checkpoint": Path(checkpoint_path).name,
         "trained": True,
         "dataset_provenance": str(dataset_provenance),
+        "domain": str(domain),
         "samples": int(samples),
         "positive_samples": int(positive_samples),
         "negative_samples": int(negative_samples),
@@ -82,6 +97,8 @@ def write_affordance_provenance(
         "base_checkpoint": str(base_checkpoint),
         "trained_at": float(trained_at if trained_at is not None else time.time()),
     }
+    if stages is not None:
+        payload["stages"] = stages
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     sidecar.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return sidecar
@@ -114,6 +131,12 @@ def affordance_head_trained(checkpoint_path: str | Path) -> bool:
     if not bool(payload.get("trained")):
         return False
     if not str(payload.get("dataset_provenance", "")).strip():
+        return False
+    # Only real-click supervision can make the head ready. A synthetic-trained
+    # head has a measured synthetic accuracy, but its real-desktop quality is
+    # unmeasurable (real frames carry no affordance ground truth), so publishing
+    # its hotspots would be an unverifiable claim.
+    if str(payload.get("domain", DOMAIN_LIVE_CLICKS)) not in READY_DOMAINS:
         return False
     try:
         if int(payload.get("samples", 0)) <= 0:

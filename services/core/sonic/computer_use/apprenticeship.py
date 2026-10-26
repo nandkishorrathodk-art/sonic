@@ -582,6 +582,8 @@ class AVCSApprenticeshipLoop:
         seed: int = 7,
         epochs: int = 6,
         perception_engine: Any | None = None,
+        affordance_warm_start_samples: int | None = None,
+        affordance_warm_start_epochs: int = 6,
     ) -> None:
         self.store = store or ApprenticeshipStore()
         self.labeler = labeler or DesktopSceneLabeler()
@@ -597,6 +599,22 @@ class AVCSApprenticeshipLoop:
         self.seed = seed
         self.epochs = epochs
         self._perception_engine = perception_engine
+        # Synthetic warm-start for the dorsal head. Synthetic screens carry real
+        # affordance ground truth, so pre-shaping on them is genuine supervision;
+        # it never makes the head ready on its own (only real clicks do). It is
+        # OFF by default because it is not measurably beneficial: on a 60-click
+        # set a 400-sample/4-epoch warm-start scored 0.457 held-out point
+        # accuracy against 0.585 for real clicks alone. Enable it only when a
+        # larger real set is too slow to train from scratch.
+        if affordance_warm_start_samples is None:
+            try:
+                affordance_warm_start_samples = int(
+                    os.environ.get("SONIC_AVCS_AFFORDANCE_WARM_START", "0")
+                )
+            except ValueError:
+                affordance_warm_start_samples = 0
+        self.affordance_warm_start_samples = max(0, affordance_warm_start_samples)
+        self.affordance_warm_start_epochs = max(0, affordance_warm_start_epochs)
         self.status = ApprenticeshipStatus(checkpoint=str(self.checkpoint_path))
         self._lock = asyncio.Lock()
 
@@ -864,6 +882,8 @@ class AVCSApprenticeshipLoop:
                 seed=self.seed,
                 held_out_fraction=self.held_out_fraction,
                 dataset_provenance="measured_click_outcomes_from_live_desktop",
+                warm_start_samples=self.affordance_warm_start_samples,
+                warm_start_epochs=self.affordance_warm_start_epochs,
             )
             result = trainer.train(manifest, output, work_dir=self.store.root)
         except Exception as exc:
@@ -1041,3 +1061,51 @@ def build_provider_frame_source(
         return rgb, wm_class, has_active_window
 
     return _source
+
+
+# -- process-wide apprenticeship loop ---------------------------------------
+
+_shared_loop: "AVCSApprenticeshipLoop | None" = None
+_shared_loop_key: str = ""
+
+
+def get_shared_apprenticeship_loop(provider: Any | None = None) -> "AVCSApprenticeshipLoop | None":
+    """The one apprenticeship loop this process uses, or ``None`` when disabled.
+
+    The eye's learning is stateful: category frames, measured click outcomes,
+    and the promoted checkpoint all belong to a single store. Building a fresh
+    loop per caller split that store in two, so an agent recorded click outcomes
+    into a file nothing ever trained on. Everything that learns therefore shares
+    this loop.
+
+    ``provider`` is only used the first time, to bind a labeler that can read
+    ``.desktop`` metadata inside the sandbox that supplies the frames; a later
+    caller with a different provider keeps the first binding rather than
+    silently re-pointing the store. Returns ``None`` when
+    ``SONIC_AVCS_APPRENTICESHIP`` is not ``1``, so nothing is captured unless an
+    operator has opted in.
+    """
+    global _shared_loop, _shared_loop_key
+    if _shared_loop is not None:
+        return _shared_loop
+    if os.environ.get("SONIC_AVCS_APPRENTICESHIP", "") != "1":
+        return None
+    try:
+        _shared_loop = AVCSApprenticeshipLoop()
+        if provider is not None:
+            _shared_loop.labeler = build_provider_labeler(provider)
+        _shared_loop_key = str(_shared_loop.store.root)
+        logger.info(
+            "avcs_apprenticeship_shared_loop_ready", store=_shared_loop_key
+        )
+    except Exception as exc:
+        logger.warning("avcs_apprenticeship_shared_loop_failed", error=str(exc))
+        _shared_loop = None
+    return _shared_loop
+
+
+def reset_shared_apprenticeship_loop() -> None:
+    """Drop the shared loop (used by tests to isolate state)."""
+    global _shared_loop, _shared_loop_key
+    _shared_loop = None
+    _shared_loop_key = ""

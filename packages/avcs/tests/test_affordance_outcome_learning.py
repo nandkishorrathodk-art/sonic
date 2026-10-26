@@ -28,6 +28,8 @@ from forge.vision.cortex.data.outcome_affordance import (
 )
 from forge.vision.cortex.model import ArtificialVisualCortex
 from forge.vision.cortex.training.affordance_provenance import (
+    DOMAIN_LIVE_CLICKS,
+    DOMAIN_SYNTHETIC,
     MIN_HELD_OUT_POINT_ACCURACY,
     affordance_head_trained,
     read_affordance_provenance,
@@ -272,3 +274,67 @@ def test_trainer_leaves_the_category_head_untouched(tmp_path):
     # be identical so a sparse click set cannot degrade the category model.
     assert changed, "expected the dorsal head to change"
     assert all(key.startswith("dorsal.") for key in changed), changed
+
+
+def test_gate_rejects_a_synthetic_only_training_run(tmp_path):
+    """Synthetic accuracy is real but real-desktop quality is unmeasurable."""
+    checkpoint = _write_cortex(tmp_path / "cortex.pt")
+    write_affordance_provenance(
+        checkpoint,
+        dataset_provenance="procedural_screens",
+        domain=DOMAIN_SYNTHETIC,
+        samples=400,
+        positive_samples=200,
+        negative_samples=200,
+        held_out_samples=64,
+        held_out_iou=0.6,
+        held_out_point_accuracy=0.95,
+    )
+    assert affordance_head_trained(checkpoint) is False
+
+
+def test_gate_accepts_the_live_click_domain(tmp_path):
+    checkpoint = _write_cortex(tmp_path / "cortex.pt")
+    write_affordance_provenance(
+        checkpoint,
+        dataset_provenance="measured_click_outcomes",
+        domain=DOMAIN_LIVE_CLICKS,
+        samples=60,
+        positive_samples=40,
+        negative_samples=20,
+        held_out_samples=15,
+        held_out_iou=0.3,
+        held_out_point_accuracy=0.55,
+    )
+    assert affordance_head_trained(checkpoint) is True
+
+
+def test_warm_start_is_recorded_as_its_own_stage(tmp_path):
+    manifest = _make_manifest(tmp_path, count=24)
+    base = _write_cortex(tmp_path / "base.pt")
+    trainer = AffordanceTrainer(
+        base, epochs=2, seed=3, warm_start_samples=24, warm_start_epochs=1
+    )
+    result = trainer.train(manifest, tmp_path / "affordance.pt", work_dir=tmp_path)
+    assert result.trained is True
+    payload = read_affordance_provenance(tmp_path / "affordance.pt")
+    stages = payload["stages"]
+    assert [s["stage"] for s in stages] == ["synthetic_warm_start"]
+    assert stages[0]["domain"] == DOMAIN_SYNTHETIC
+    # The provenance domain stays real-click: the warm start did not confer
+    # readiness, it only shaped the weights.
+    assert payload["domain"] == DOMAIN_LIVE_CLICKS
+
+
+def test_warm_start_still_only_touches_the_dorsal_head(tmp_path):
+    manifest = _make_manifest(tmp_path, count=24)
+    base = _write_cortex(tmp_path / "base.pt")
+    before = torch.load(base, map_location="cpu")
+    trainer = AffordanceTrainer(
+        base, epochs=2, seed=3, warm_start_samples=24, warm_start_epochs=1
+    )
+    trainer.train(manifest, tmp_path / "affordance.pt", work_dir=tmp_path)
+    after = torch.load(tmp_path / "affordance.pt", map_location="cpu")
+    changed = [k for k in before if not torch.equal(before[k], after[k])]
+    assert changed
+    assert all(k.startswith("dorsal.") for k in changed), changed

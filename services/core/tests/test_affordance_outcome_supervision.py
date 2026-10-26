@@ -233,3 +233,124 @@ class _StubCortex:
             query_relevance_map=None,
             inference_ms=1.0,
         )
+
+
+# -- shared loop (one store for frames, clicks and training) -----------------
+
+
+def test_shared_loop_is_none_when_apprenticeship_is_disabled(monkeypatch):
+    from sonic.computer_use import apprenticeship as app
+
+    monkeypatch.delenv("SONIC_AVCS_APPRENTICESHIP", raising=False)
+    app.reset_shared_apprenticeship_loop()
+    try:
+        assert app.get_shared_apprenticeship_loop() is None
+    finally:
+        app.reset_shared_apprenticeship_loop()
+
+
+def test_shared_loop_returns_the_same_instance_to_every_caller(monkeypatch, tmp_path):
+    from sonic.computer_use import apprenticeship as app
+
+    monkeypatch.setenv("SONIC_AVCS_APPRENTICESHIP", "1")
+    monkeypatch.setenv("SONIC_AVCS_APPRENTICESHIP_DIR", str(tmp_path))
+    app.reset_shared_apprenticeship_loop()
+    try:
+        first = app.get_shared_apprenticeship_loop()
+        second = app.get_shared_apprenticeship_loop()
+        assert first is not None
+        assert first is second
+    finally:
+        app.reset_shared_apprenticeship_loop()
+
+
+def test_shared_loop_keeps_its_first_provider_binding(monkeypatch, tmp_path):
+    """A later caller must not silently re-point the store or its labeler."""
+    from sonic.computer_use import apprenticeship as app
+
+    monkeypatch.setenv("SONIC_AVCS_APPRENTICESHIP", "1")
+    monkeypatch.setenv("SONIC_AVCS_APPRENTICESHIP_DIR", str(tmp_path))
+    app.reset_shared_apprenticeship_loop()
+    try:
+        first = app.get_shared_apprenticeship_loop(_Provider("alpha"))
+        labeler_before = first.labeler
+        second = app.get_shared_apprenticeship_loop(_Provider("beta"))
+        assert second is first
+        assert second.labeler is labeler_before
+    finally:
+        app.reset_shared_apprenticeship_loop()
+
+
+def test_agent_clicks_and_awareness_frames_share_one_store(monkeypatch, tmp_path):
+    """The whole point: a click recorded by the agent lands in the store that
+    the apprenticeship loop trains from."""
+    from sonic.computer_use import apprenticeship as app
+
+    monkeypatch.setenv("SONIC_AVCS_APPRENTICESHIP", "1")
+    monkeypatch.setenv("SONIC_AVCS_APPRENTICESHIP_DIR", str(tmp_path))
+    app.reset_shared_apprenticeship_loop()
+    try:
+        loop = app.get_shared_apprenticeship_loop()
+        agent = _agent_with(loop)
+        action = GUIAction(action=GUIActionType.CLICK, x=320, y=180)
+        agent._record_click_outcome(action, _StubScreen(), True)
+        # The same store the loop exposes now holds the outcome sample.
+        assert loop.affordance_sample_counts()["total"] == 1
+    finally:
+        app.reset_shared_apprenticeship_loop()
+
+
+class _Provider:
+    """Minimal provider double for labeler binding."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+
+def test_monitor_auto_trains_the_affordance_head_when_clicks_accrue(monkeypatch):
+    """The loop must close itself: enough measured clicks trigger a fine-tune
+    without an operator calling the API."""
+    import asyncio
+
+    from sonic.computer_use.awareness import AwarenessMonitor
+
+    calls = {"n": 0}
+
+    class _Loop:
+        def affordance_sample_counts(self):
+            return {"total": 50, "positive": 30, "negative": 20}
+
+        async def learn_affordance(self):
+            calls["n"] += 1
+            return {"trained": True, "held_out_point_accuracy": 0.5, "samples": 50}
+
+    monitor = AwarenessMonitor.__new__(AwarenessMonitor)
+    monitor._last_affordance_trained_count = 0
+    monkeypatch.setenv("SONIC_AVCS_AFFORDANCE_LEARN_EVERY", "40")
+    asyncio.run(monitor._maybe_learn_affordance(_Loop()))
+    assert calls["n"] == 1
+    # A second pass with no new clicks must not retrain.
+    asyncio.run(monitor._maybe_learn_affordance(_Loop()))
+    assert calls["n"] == 1
+
+
+def test_monitor_does_not_auto_train_below_the_threshold(monkeypatch):
+    import asyncio
+
+    from sonic.computer_use.awareness import AwarenessMonitor
+
+    calls = {"n": 0}
+
+    class _Loop:
+        def affordance_sample_counts(self):
+            return {"total": 5, "positive": 3, "negative": 2}
+
+        async def learn_affordance(self):
+            calls["n"] += 1
+            return {"trained": True}
+
+    monitor = AwarenessMonitor.__new__(AwarenessMonitor)
+    monitor._last_affordance_trained_count = 0
+    monkeypatch.setenv("SONIC_AVCS_AFFORDANCE_LEARN_EVERY", "40")
+    asyncio.run(monitor._maybe_learn_affordance(_Loop()))
+    assert calls["n"] == 0
