@@ -3890,12 +3890,17 @@ async def _run_prompt_reasoning(
                                 )
                                 image_escalation_count = getattr(trace, "image_escalation_count", 0)
 
-                                sub_agent_id = ""
-                                sub_agent_name = ""
-                                sub_agent_uid = ""
-                                sub_mission_id = ""
-                                worker_role = ""
-                                execution_plane = ""
+                                # Preserve worker identity when the trace
+                                # object carries it. Hardcoding these to ""
+                                # silently dropped a worker's identity and made
+                                # its steps unattributable on the operator
+                                # board, so a card could never be drilled into.
+                                sub_agent_id = str(getattr(trace, "sub_agent_id", "") or "")
+                                sub_agent_name = str(getattr(trace, "sub_agent_name", "") or "")
+                                sub_agent_uid = str(getattr(trace, "sub_agent_uid", "") or "")
+                                sub_mission_id = str(getattr(trace, "sub_mission_id", "") or "")
+                                worker_role = str(getattr(trace, "worker_role", "") or "")
+                                execution_plane = str(getattr(trace, "execution_plane", "") or "")
                             worker_metadata = (
                                 {
                                     "sub_agent_id": sub_agent_id,

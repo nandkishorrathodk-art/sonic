@@ -4807,3 +4807,73 @@ class. A constant "settings_panel" predictor would score 0.721, so the headline
 number is dominated by one class and must not be read as general scene
 understanding. Report per-class accuracy (or balanced accuracy) before quoting
 cortex quality.
+
+## Boss worker visibility + raw-frame log-flood audit (2026-10-26)
+
+Operator complaint: "Boss launches agents but clicking the agent's id/name shows
+nothing about what it is doing." Investigated the full seam end to end
+(manual, single-agent — no parallel subagents) and separated real defects from
+fail-closed-by-design behavior.
+
+### Verified working (evidence-backed, not assumed)
+- **Worker identity is minted correctly.** A live `BossAgent.run()` against the
+  real `sonic-desktop-workstation` emitted `sub_dispatch` with
+  `agent_id="sub-agent-1"`, run-unique `agent_uid="worker-1-<hex>"`,
+  `agent_name` (e.g. "File Manager Explorer"), `role`, `plane="gui"`,
+  `sub_mission_id="sub-1"`. Each launched agent does get an ID and a name.
+- **The route → worklog → projection seam works.** Replaying the *real* captured
+  Boss events through the route's exact translation produced a worker record
+  with `step_count=3`, `latest_action="gui hotkey · Thunar location bar"`, and a
+  resolvable `find_worker(uid)` drill-down listing every step
+  (`GUI_SCREENSHOT [COMPLETED]`, `GUI_HOTKEY [UNVERIFIED]`, `GUI_HOTKEY [RECOVERED]`).
+- **The dashboard click-to-view pipeline is complete and wired.** `WorklogFeed`
+  renders a `WorkerBoard` of clickable cards (uid badge, role, plane, status,
+  latest action); expanding a card fetches `/workstation/agents/{uid}` and shows
+  the full step list; `app/agents/page.tsx` polls `/workstation/agents` and has a
+  `toggleWorker` drill-down. `Workstation.tsx` passes `workers` and
+  `mission_task_alive` through.
+- **The motor is real.** Provider-level `gui_action` MOVE/CLICK glided the X11
+  cursor on the live desktop (sampled out-of-band via `xdotool`:
+  `640,[]` → `300,[]`), so the mouse genuinely moves.
+
+### REAL BUG 1 — raw frame bytes flooded the logs (fixed)
+`ScreenObservation.raw_rgb` holds a full 1920x1080 RGB frame (~6 MB) and was
+rendered by `repr()`. A single run that interpolated the observation produced an
+**81 MB log file** of `\xf6\xf5\xf4…` pixel data — drowning the real telemetry
+and leaking workstation pixels into the log stream. Fixed with
+`Field(default=b"", exclude=True, repr=False)` on `raw_rgb`
+(`sonic/computer/models.py`); `model_dump()` still excludes it and callers still
+read the frame normally. `repr()` of a full frame is now < 1 KB.
+
+### REAL BUG 2 — object-branch traces silently lost worker identity (fixed)
+`_record_step_trace` in `sonic/api/routes/workstation.py` hardcoded
+`sub_agent_id/name/uid`, `sub_mission_id`, `worker_role`, `execution_plane` to
+`""` on the `ComputerDecisionTrace`-object branch (only the dict branch carried
+them). Any step arriving as an object became unattributable and its card could
+never be drilled into. Now read via `getattr(trace, ..., "")`, so identity is
+preserved when present and stays safely empty when absent (a plain
+`ComputerDecisionTrace` has no such fields).
+
+### Fail-closed by design (NOT bugs — do not "fix" by attaching pixels)
+- Semantic GUI clicks ("click the Save button") remain blocked because no
+  evaluated `SONIC_AVCS_GROUNDING_CHECKPOINT` exists in the repo. A worker that
+  proposes one gets `avcs_target_grounding_failed_closed` and the mission stops
+  with `gui_mission_stopped_for_unavailable_avcs_capability`.
+- Text entry stays blocked without an evaluated `SONIC_AVCS_FOCUS_CHECKPOINT`.
+- The affordance (clickable-hotspot) path is unavailable because
+  `affordance_head_trained=False` for the shipped `cortex_real.pt`.
+- `image_attached=False` is **correct** under the current AVCS-only perception
+  contract: workstation pixels are processed locally and are NOT sent to the
+  workstation reasoning model; only the AVCS text summary reaches System 2. Do
+  not re-introduce screenshot transfer to "fix" grounding — train/configure the
+  local AVCS heads instead.
+- Net effect: a GUI worker can launch apps and use keyboard/pointer at explicit
+  coordinates, but cannot click a *described* control, so such Boss objectives
+  end INCOMPLETE honestly rather than fabricating success.
+
+### Tests
+`services/core/tests/test_worker_board_visibility_fixes.py` (7) pins both fixes:
+repr/model_dump no longer expose raw pixels, a worker-aware trace keeps its
+identity through the route's reads, and a plain trace stays safely empty.
+Regression: 164 passed across the Boss/worker suites, 212 passed across the
+computer-use/perception suites, ruff clean on all changed files.
