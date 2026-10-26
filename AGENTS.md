@@ -4741,3 +4741,69 @@ threshold. Recorded, not assumed.
   provenance + held-out point accuracy + calibrated query confidence). The
   outcome store already captures `query → click point` pairs, so the training
   data for it now accumulates as the being works.
+
+## Docker VNC live test — AVCS was blind to its own cursor (2026-10-26)
+
+Ran SONIC against the real Docker workstation (`sonic-desktop-workstation`:
+Xvfb `:99` 1920x1080, XFCE, x11vnc `5900`, noVNC `6080`) after starting the
+daemon (`sudo dockerd`; socket is root-only, `chmod 666 /var/run/docker.sock`)
+and building `sonic-workstation:latest` (2.24 GB, ~6 min).
+
+### What worked on the live desktop
+- AVCS perception: real frames, `avcs_raw_frame_processed` at the configured
+  10 FPS, ~21-38 ms/frame, `desktop_state=INTERACTIVE`, active window reported.
+- Real GUI actions through `ComputerUseAgent`: `APP_LAUNCH` opened Thunar and
+  Mousepad (confirmed out-of-band with `wmctrl -l` / `pgrep`), `GUI_MOVE`
+  reached the exact target via the visual servo, `GUI_CLICK`/`GUI_DOUBLE_CLICK`
+  dispatched and honestly returned `UNVERIFIED` when the screen did not change.
+- Honest fail-closed: a semantic click ("the Firefox window") returned
+  `BLOCKED` (no grounder) without touching the provider; `GUI_TYPE` returned
+  `BLOCKED` (no focus head). No blind click, no fabricated success.
+- VNC itself is genuinely live: noVNC `HTTP 200` and a real `RFB 003.008`
+  handshake on `5900`.
+
+### REAL BUG FOUND — the eye could not see the pointer
+`mss` captures the root window, and the X server composites the hardware cursor
+separately, so the pointer is absent from every AVCS frame. Measured: moved the
+cursor to `(400,300)`, captured, moved to `(1500,850)`, captured again —
+`cursor_position` reported both positions correctly but the two frames differed
+by **0 pixels**. Consequences: AVCS could never confirm where a click landed,
+and a human watching noVNC saw no cursor at all.
+
+Fix (`docker/avcs_frame_stream.py`): read the sprite via XFixes
+(`XFixesGetCursorImage`) and alpha-blend it into each frame; `--no-cursor` opts
+out, and the compositor disables itself softly when XFixes is unavailable so a
+missing cursor can never break perception entirely. Requires an image rebuild
+(the script is `COPY`-ed to `/opt/sonic/avcs_frame_stream.py`).
+
+Measured after the fix (live): frames at `(400,300)` vs `(1500,850)` differ in
+**219 px**, changed bbox `x[403..1514] y[302..870]` — exactly the two cursor
+positions — and the composited sprite renders as a recognisable arrow. A/B at
+the same position (`--no-cursor` vs cursor-on) differs only inside the 24x24
+sprite box at the cursor, so nothing else in the frame is perturbed.
+
+Note: XFixes stores each CARD32 ARGB sprite pixel in a C ``long`` (8-byte)
+slot; reading only the low 4 bytes is required on x86-64.
+
+Tests: `services/core/tests/test_avcs_cursor_compositing.py` (9) pin the blend,
+alpha handling, edge clipping (no wrap), 64-bit slot parsing, soft failure, and
+the `--no-cursor` escape hatch. Full core suite: **2516 passed, 40 skipped, 0
+failures**; ruff clean.
+
+### Still fail-closed (capability genuinely absent, not a bug)
+- Semantic targeting (`SONIC_AVCS_GROUNDING_CHECKPOINT`) — no evaluated local
+  grounder checkpoint in the repo.
+- Text entry (`SONIC_AVCS_FOCUS_CHECKPOINT`) — no evaluated local focus head.
+- `avcs_capability_state()` correctly reports
+  `semantic_grounding=false, focus_verification=false, gui_actions_ready=false`
+  while `learned_cortex_ready=true`.
+
+### Honesty note on the learned cortex metric
+The promoted `cortex_learned.eval.json` reports `category_accuracy=0.998`, but
+the class distribution is heavily imbalanced (`settings_panel` 663/920 =
+0.721 majority; `editor_code` 193; `browser_webpage` 23; `form_input` 22;
+`terminal_shell` 19) and the held-out split scored 560/560 on the majority
+class. A constant "settings_panel" predictor would score 0.721, so the headline
+number is dominated by one class and must not be read as general scene
+understanding. Report per-class accuracy (or balanced accuracy) before quoting
+cortex quality.
