@@ -74,6 +74,9 @@ class AVCSCloudTrainer:
             cat_target = batch["category_idx"].to(self.device)
             coord_target = batch["target_coord"].to(self.device)
             query_embed = batch["query_embed"].to(self.device)
+            grounding_valid = batch.get("grounding_valid")
+            if grounding_valid is not None:
+                grounding_valid = grounding_valid.to(self.device)
 
             self.optimizer.zero_grad()
 
@@ -98,7 +101,12 @@ class AVCSCloudTrainer:
 
                 # 5. Compute Multi-Task Loss
                 loss_dict = self.loss_fn(
-                    out_t, latent_next, afford_target, cat_target, coord_target
+                    out_t,
+                    latent_next,
+                    afford_target,
+                    cat_target,
+                    coord_target,
+                    grounding_valid=grounding_valid,
                 )
                 loss = loss_dict["loss"]
 

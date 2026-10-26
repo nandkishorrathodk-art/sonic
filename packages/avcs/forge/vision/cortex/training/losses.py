@@ -31,6 +31,7 @@ class AVCSMultiTaskLoss(nn.Module):
         affordance_targets: torch.Tensor,
         category_targets: torch.Tensor,
         coord_targets: torch.Tensor,
+        grounding_valid: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute all task losses.
 
@@ -41,6 +42,11 @@ class AVCSMultiTaskLoss(nn.Module):
         affordance_targets: (B, H, W) ground-truth affordance class indices
         category_targets: (B,) ground-truth UI category class indices
         coord_targets: (B, 2) ground-truth target coordinates
+        grounding_valid: (B,) bool mask. True where ``coord_targets`` is a real
+            observed target. Samples whose coordinate is a neutral prior (no
+            observed click target) MUST be False, otherwise the grounding head
+            would be trained on fabricated supervision. ``None`` means every
+            sample is treated as valid (backwards compatible).
         """
         # 1. Self-Supervised Predictive World-Model Loss
         # Encourages temporal_memory to predict next frame's latent
@@ -77,9 +83,21 @@ class AVCSMultiTaskLoss(nn.Module):
             loss_category = torch.zeros((), device=cat_logits.device, dtype=cat_logits.dtype)
 
         # 4. Language Grounding Coordinate Regression Loss
+        # Only samples with a real observed target contribute. Training on a
+        # neutral (0.5, 0.5) prior for unlabeled frames would teach the head to
+        # predict screen centre regardless of the query -- fabricated
+        # supervision. When no sample is valid the term is honestly zero.
         query_coords = model_outputs_t["query_coords"]
-        if query_coords is not None:
-            loss_grounding = self.coord_loss(query_coords, coord_targets)
+        if query_coords is not None and (
+            grounding_valid is None or bool(grounding_valid.any())
+        ):
+            if grounding_valid is not None:
+                valid = grounding_valid.to(query_coords.device).bool()
+                loss_grounding = self.coord_loss(
+                    query_coords[valid], coord_targets[valid]
+                )
+            else:
+                loss_grounding = self.coord_loss(query_coords, coord_targets)
         else:
             loss_grounding = torch.tensor(0.0, device=affordance_logits.device)
 

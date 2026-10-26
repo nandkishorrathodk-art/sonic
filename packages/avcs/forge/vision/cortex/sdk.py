@@ -110,14 +110,19 @@ class ScreenEye:
         return False
 
     def look_at(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
-        """Directs the foveal gaze to lock onto the target element."""
-        import hashlib
-        # Deterministic text query embedding via SHA256 seed for reproducible visual attention
-        seed = int(hashlib.sha256(query.encode("utf-8")).hexdigest()[:8], 16)
-        rng = torch.Generator(device=self.device)
-        rng.manual_seed(seed)
-        text_emb = torch.randn(1, self.cortex.cfg.latent_dim, device=self.device, generator=rng)
-        text_emb = torch.nn.functional.normalize(text_emb, dim=-1)
+        """Directs the foveal gaze to lock onto the target element.
+
+        The query is encoded by the same real character n-gram encoder the
+        training pipeline uses, so the gaze is steered by the actual words of the
+        query. (Previously this seeded ``torch.randn`` from a SHA-256 hash of the
+        query, producing a random vector unrelated to the text -- the grounding
+        was driven by noise.)
+        """
+        from forge.vision.cortex.core.modulation import encode_text_query
+
+        text_emb = encode_text_query(
+            query, out_dim=self.cortex.cfg.latent_dim, device=self.device
+        )
 
         with self.engine._lock:
             if frame is None:
