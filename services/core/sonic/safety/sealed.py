@@ -117,15 +117,25 @@ class SealedActionPolicy(ActionPolicy):
         # Snapshot the egress blocked-networks so a runtime mutation of the
         # module-level list cannot widen what this policy permits.
         self._blocked_networks_snapshot: tuple = tuple(egress.BLOCKED_NETWORKS)
-        # Capture scope_checker rules and methods for tamper evidence
+        # Capture scope_checker rules and methods for tamper evidence.
+        # A failure here must be visible: silently sealing with empty captures
+        # would leave the policy claiming tamper-evidence it never recorded.
         self._scope_checker_rules = []
         self._scope_checker_methods = []
         if self.scope_checker is not None:
             try:
-                self._scope_checker_rules = getattr(self.scope_checker, "_INTRUSIVE_PATTERNS", [])
-                self._scope_checker_methods = [id(getattr(self.scope_checker, "classify_command_risk", None))]
-            except Exception:
-                pass
+                self._scope_checker_rules = list(
+                    getattr(self.scope_checker, "_INTRUSIVE_PATTERNS", []) or []
+                )
+                self._scope_checker_methods = [
+                    id(getattr(self.scope_checker, "classify_command_risk", None))
+                ]
+            except Exception as exc:
+                logger.warning(
+                    "safety_policy_scope_checker_capture_failed",
+                    error=str(exc),
+                    scope_checker=type(self.scope_checker).__name__,
+                )
         self._seal_secret: str = _seal_secret or os.environ.get("SONIC_SEAL_SECRET", os.urandom(32).hex())
         self._seal_hash: str = ""
         self._sealed: bool = False

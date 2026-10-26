@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from forge.vision.servo import locate_cursor
 
 try:  # imageio-ffmpeg ships a bundled ffmpeg binary; prefer it when present.
     import imageio_ffmpeg
@@ -232,63 +233,15 @@ def detect_cursor_point(
 ) -> Optional[tuple[float, float, float]]:  # noqa: UP045
     """Locate the mouse cursor as the most salient small high-contrast blob.
 
-    The cursor is a tiny, bright shape over a locally-flat desktop. We estimate
-    the local background with a box mean, take the residual ``pixel - background``,
-    and return the *centroid* of the brightest residual region.
-
-    Using the centroid of the residual region (rather than the centre of the
-    best window) matters: a window-maximum score is biased toward wherever the
-    blob is clipped by the window edge, which would systematically offset the
-    reported point by roughly half a window. The centroid is unbiased for a
-    compact blob.
-
-    This is deliberately a *heuristic sensor*, not a learned detector: it can be
-    fooled by icons and text. Downstream code treats it as a weak label, which
-    is why ``cursor_confidence`` is returned and low-confidence points are
-    dropped rather than trusted. A flat frame returns ``None``.
+    Thin wrapper over :func:`forge.vision.servo.locate_cursor`, which owns the
+    implementation. It lives there (in the torch-free servo module) so the live
+    eye-hand loop and offline video ingestion share one detector instead of two
+    that could drift apart. The only difference here is the error type, kept for
+    backwards compatibility with this module's callers and tests.
     """
     if frame.ndim != 3 or frame.shape[2] != 3:
         raise VideoIngestionError("Expected an (H, W, 3) RGB frame")
-    gray = frame.astype(np.float64).mean(axis=2)
-    h, w = gray.shape
-    if h < 3 or w < 3:
-        return None
-
-    window = max(5, int(patch))
-    if window % 2 == 0:
-        window += 1
-    half = window // 2
-
-    # Integral image -> O(1) box mean for every pixel, vectorized.
-    integral = np.zeros((h + 1, w + 1), dtype=np.float64)
-    integral[1:, 1:] = np.cumsum(np.cumsum(gray, axis=0), axis=1)
-    ys = np.arange(h)
-    xs = np.arange(w)
-    y0 = np.clip(ys - half, 0, h)[:, None]
-    y1 = np.clip(ys + half + 1, 0, h)[:, None]
-    x0 = np.clip(xs - half, 0, w)[None, :]
-    x1 = np.clip(xs + half + 1, 0, w)[None, :]
-    area = (y1 - y0) * (x1 - x0)
-    total = (
-        integral[y1, x1] - integral[y0, x1] - integral[y1, x0] + integral[y0, x0]
-    )
-    background = total / np.maximum(area, 1)
-    residual = gray - background
-
-    max_res = float(residual.max())
-    dynamic_range = float(gray.max() - gray.min())
-    # A flat (or near-flat) frame has no distinguishable cursor: say so.
-    if max_res <= max(1.0, 0.02 * dynamic_range):
-        return None
-
-    mask = residual >= 0.75 * max_res
-    ys_hit, xs_hit = np.nonzero(mask)
-    if ys_hit.size == 0:
-        return None
-    cx = float(xs_hit.mean())
-    cy = float(ys_hit.mean())
-    confidence = max(0.0, min(1.0, max_res / max(dynamic_range, 1.0)))
-    return cx / max(w, 1), cy / max(h, 1), float(confidence)
+    return locate_cursor(frame, patch=patch)
 
 
 def _trajectory_click_events(

@@ -121,13 +121,18 @@ class VideoFrameDataset(Dataset):
         point = cur.get("cursor_point_norm")
         if point:
             coord = torch.tensor([float(point[0]), float(point[1])], dtype=torch.float32)
+            grounding_valid = True
         else:
             # Neutral prior: "no specific target in this frame".
             coord = torch.tensor([0.5, 0.5], dtype=torch.float32)
+            grounding_valid = False
 
         grid_h, grid_w = self.affordance_grid_size
         mask = torch.full((grid_h, grid_w), _STATIC_CLASS, dtype=torch.long)
         category_idx = torch.tensor(self.unlabeled_category, dtype=torch.long)
+        # Watched video has no language label; a zero query embedding is the
+        # honest "no query" signal, and the grounding term is masked so the head
+        # is never trained on an invented coordinate.
         query_embed = torch.zeros(self.latent_dim, dtype=torch.float32)
         return {
             "frame_t": frame_t,
@@ -136,6 +141,7 @@ class VideoFrameDataset(Dataset):
             "category_idx": category_idx,
             "target_coord": coord,
             "query_embed": query_embed,
+            "grounding_valid": torch.tensor(grounding_valid, dtype=torch.bool),
         }
 
 

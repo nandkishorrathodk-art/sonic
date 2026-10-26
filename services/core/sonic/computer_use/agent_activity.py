@@ -97,20 +97,52 @@ def _step_summary(item: dict[str, Any]) -> str:
     return f"{label} · {target}" if target else label
 
 
+def _items_since_latest_objective(
+    worklog: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return only the entries belonging to the most recent operator objective.
+
+    The dashboard's timeline is filtered to the current run (everything from the
+    last ``Objective Received`` marker). If the worker projection kept older
+    runs, a fresh objective would show an empty timeline next to a worker board
+    full of finished workers from the previous run. Both views must agree, so
+    the projection is scoped the same way.
+
+    When no objective marker exists (older persisted sessions, direct seeding),
+    the whole worklog is used unchanged so nothing is silently dropped.
+    """
+    last_index = -1
+    for index, item in enumerate(worklog):
+        if isinstance(item, dict) and item.get("title") == "Objective Received":
+            last_index = index
+    if last_index < 0:
+        return worklog
+    return worklog[last_index:]
+
+
 def collect_worker_activity(
     worklog: list[dict[str, Any]] | None,
     *,
     mission_task_alive: bool = False,
+    current_run_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Project the worklog into an ordered list of per-worker activity records.
 
     ``mission_task_alive`` is the authoritative answer to "is a background
     task still driving this session?". It gates the ``RUNNING`` verdict so a
     dead task can never leave a worker displayed as running forever.
+
+    ``current_run_only`` restricts the projection to the most recent objective,
+    matching the dashboard timeline. Callers that must enumerate every worker a
+    session ever launched can leave it off.
     """
+    entries = list(worklog or [])
+    if current_run_only:
+        entries = _items_since_latest_objective(entries)
+
     workers: dict[str, dict[str, Any]] = {}
 
-    for item in worklog or []:
+    for item in entries:
         if not isinstance(item, dict):
             continue
         event = item.get("orchestration_event")
@@ -270,6 +302,7 @@ def find_worker(
     worker_id: str,
     *,
     mission_task_alive: bool = False,
+    current_run_only: bool = False,
 ) -> dict[str, Any] | None:
     """Resolve a single worker by uid, agent id, sub-mission id, or number."""
     target = str(worker_id or "").strip()
@@ -278,6 +311,7 @@ def find_worker(
     workers = collect_worker_activity(
         worklog,
         mission_task_alive=mission_task_alive,
+        current_run_only=current_run_only,
     )
     for worker in workers:
         if target in {

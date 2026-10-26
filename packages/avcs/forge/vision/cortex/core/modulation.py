@@ -141,3 +141,49 @@ class CharNGramEncoder(nn.Module):
         out = self.proj(emb)
         return F.normalize(out, dim=-1)
 
+
+# Cache of shared encoders keyed by output dimension. The encoder is a real,
+# deterministic function of the query text (character n-grams -> hashed
+# embedding -> projection), so identical queries always produce identical
+# vectors and different queries produce genuinely different vectors.
+_SHARED_ENCODERS: dict[int, CharNGramEncoder] = {}
+
+
+def _shared_encoder(out_dim: int) -> CharNGramEncoder:
+    encoder = _SHARED_ENCODERS.get(out_dim)
+    if encoder is None:
+        torch.manual_seed(0xC0FFEE ^ out_dim)
+        encoder = CharNGramEncoder(out_dim=out_dim)
+        encoder.eval()
+        _SHARED_ENCODERS[out_dim] = encoder
+    return encoder
+
+
+def encode_text_query(
+    query: str,
+    out_dim: int,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Encode a text query into a normalized embedding of shape ``(1, out_dim)``.
+
+    This is the single honest entry point for turning operator language into the
+    vector the cortex's ``LanguageModulation`` consumes. It replaces the previous
+    practice of seeding ``torch.randn`` from a SHA-256 hash of the query, which
+    produced a *different random vector per query with no relation to the words*
+    -- the language path was effectively trained on and driven by noise.
+
+    The returned vector is a deterministic function of the query's characters, so
+    'Submit' and 'Cancel' are close in n-gram space while 'Submit' and 'Logout'
+    are not. It is not a semantic language model; it is an honest local
+    character-level embedding with no cloud dependency.
+    """
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("encode_text_query requires a non-empty query string")
+    if out_dim <= 0:
+        raise ValueError("encode_text_query requires a positive out_dim")
+    encoder = _shared_encoder(out_dim)
+    dev = device or torch.device("cpu")
+    encoder = encoder.to(dev)
+    with torch.no_grad():
+        return encoder(query.strip(), device=dev)
+

@@ -85,13 +85,21 @@ class LabeledFrameDataset(Dataset):
         frame_next_t = torch.from_numpy(frame_next).permute(2, 0, 1).float() / 255.0
         # Real frames carry no hand-labeled affordance mask or click target.
         affordance = torch.full(_AFFORDANCE_GRID, _MASKED_AFFORDANCE, dtype=torch.long)
+        # The category label is a real operator observation and names the query.
+        # The click coordinate, however, is NOT observed here, so the grounding
+        # term is masked out for this sample instead of training on (0.5, 0.5).
+        from forge.vision.cortex.core.modulation import encode_text_query
+
+        query_text = rec["label"] or "screen"
+        query_embed = encode_text_query(query_text, self.latent_dim)[0]
         return {
             "frame_t": frame_t,
             "frame_next": frame_next_t,
             "affordance_mask": affordance,
             "category_idx": torch.tensor(rec["category_idx"], dtype=torch.long),
             "target_coord": torch.tensor([0.5, 0.5], dtype=torch.float32),
-            "query_embed": torch.randn(self.latent_dim, dtype=torch.float32),
+            "query_embed": query_embed,
+            "grounding_valid": torch.tensor(False, dtype=torch.bool),
         }
 
 

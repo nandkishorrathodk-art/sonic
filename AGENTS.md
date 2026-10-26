@@ -4459,3 +4459,156 @@ sustained promotion until that is measured over many cycles.
 Tests: evolution + self-coder suites green (169 passed); full `services/core`
 **2436 passed, 40 skipped, 0 failures**; ruff clean. Regression tests added for
 `_select_signal`, store dedup, hunk-count repair, and CLI `status`.
+
+## Boss -> subagent visibility audit (2026-10-26)
+
+Operator report: "Boss launches agents, but the launched agent has no id, and
+clicking the agent name/id does not show what it is doing." The dispatch
+pipeline was audited end-to-end with the **real** `BossAgent.run()` loop (only
+model calls stubbed) plus real `ComputerUseAgent` workers; the route's
+event->worklog translation and the worker projection were exercised together.
+
+### Verified working (no change needed)
+- Each delegated worker gets a stable, run-unique id (`worker-<n>-<hex>`), and
+  the positional `agent_id` (`sub-agent-<n>`) is preserved alongside it.
+- One board card per worker (no merged card); `sub_dispatch` ->
+  `sub_step`/`sub_heartbeat` -> `sub_report` all key to the same uid.
+- Click-to-expand drill-down resolves the specific worker and shows goal,
+  current activity, latest thinking, steps, discoveries and Judge verdict.
+- Mid-flight, workers show `RUNNING`; after the run they show `COMPLETED`.
+- Headless phases fan out in parallel; GUI-capable phases correctly serialize
+  on the single shared desktop (workers still all run).
+
+### Real bugs found and fixed
+1. **Run scoping mismatch (worker board vs timeline).**
+   `collect_worker_activity` projected the *entire session* worklog, while the
+   dashboard timeline is filtered to the current objective. After a second
+   objective the board showed finished workers from the previous run next to an
+   empty timeline. Added `current_run_only` (scopes to the latest
+   `Objective Received` marker, falling back to the whole log when no marker
+   exists) and wired it into `/workstation/state`, `/workstation/agents`,
+   `/workstation/agents/{uid}` and `/workstation/agents/{uid}/message` so the
+   board, the drill-down and steering all agree with the timeline.
+2. **Heartbeat clobbered real thinking (frontend).** In
+   `buildWorkerActivities` a `sub_heartbeat` fell through to the generic branch
+   and overwrote `latestThought` with "still reasoning". Heartbeats now populate
+   the dedicated `heartbeat` field, matching the server contract.
+3. **Silent event drop.** `BossAgent._emit` swallowed every callback exception
+   at `logger.debug`. A route handler that raised while recording
+   `sub_dispatch`/`sub_step`/`sub_report` silently removed that worker from the
+   board with no diagnostic. Worker-lifecycle events now log at WARNING with
+   `operator_visible=True`; cosmetic events stay at debug.
+4. **Defensive key resolution (frontend).** The live step/heartbeat branch
+   guarded on `sub_agent_uid`/`sub_agent_id` only; it now resolves the worker key
+   through the same helper as dispatch, so an `agent_uid`-keyed step can never be
+   dropped.
+
+### Tests
+`services/core/tests/test_boss_worker_visibility_audit.py` (11) covers the emit
+resilience, the real-Boss worker-id/visibility contract, drill-down contents,
+run scoping (including the no-marker fallback) and board/timeline agreement.
+Broad regression: 441 passed, 8 skipped (`-k "boss or worker or workstation or
+agent_activity or computer_use"`). Dashboard `tsc --noEmit` and `next build`
+clean.
+
+### Honest scope
+This validates the orchestration/observability seam with stubbed models. No live
+end-to-end GUI task was run in this pass, and Boss completion is still bounded by
+the AVCS grounding/focus checkpoints (semantic clicks and text entry remain
+fail-closed until those are trained). SONIC is not a finished AGI; this pass
+fixed the worker-visibility defects only.
+
+## Eye-hand servo: closed-loop, self-correcting pointer (2026-10-26)
+
+Operator goal: make AVCS a human-like real-time closed loop — "eyes + hand +
+brain" — where the hand reaches, the eye watches, and the residual error is
+driven to zero (perceive -> error -> correct -> re-perceive), instead of the
+open-loop "compute a coordinate, teleport the cursor, hope" behaviour.
+
+### What existed (and why it was not the loop)
+- `VisualServoingEngine` (`forge/vision/cortex/core/servoing.py`) is torch-based
+  and **imported by no production caller** — dead code. The agent had no closed
+  loop at all; every GUI move/click was a single open-loop dispatch.
+
+### New: a torch-free servo model (`packages/avcs/forge/vision/servo.py`)
+- `HumanReachModel` — Woodworth's two-component reach: an **opening ballistic
+  throw** that covers the whole distance in one motion, then damped,
+  decelerating corrective submovements. Pure NumPy, no torch (a ~1.2 s import
+  and a checkpoint buy nothing at this stage). Verified: importing
+  `forge.vision.servo` does not load torch; lazy `forge.vision` package export
+  invariant preserved (`test_lazy_package_import.py` still green).
+- `locate_cursor` — a fallback pixel sensor (local-background box mean via an
+  integral image, residual centroid). It is an honest heuristic, not a learned
+  detector: a flat frame returns `None`; the confidence is surfaced so callers
+  can drop weak reads. The old `detect_cursor_point` in
+  `avcs/training/video_apprenticeship.py` is now a thin import of this function
+  (one detector, not two).
+- Cost measured honestly: `locate_cursor` is **~100 ms at 1080p**, so it is the
+  *fallback*. The live loop prefers the provider's exact pointer readback.
+
+### New: the async closed loop (`sonic/computer_use/visual_servo.py`)
+- `VisualServo.reach()` reads the real pointer, commands a step, **re-reads**,
+  and iterates until the residual is inside `tolerance_px` or the deadline
+  (6 s) / iteration backstop (12) is hit. Returns a `ServoReceipt` with the
+  measured `converged` flag, iteration count, final residual, latency, start /
+  target / path, and `cursor_source` (`provider` | `vision`).
+- Fail-closed: no pointer reading -> `ServoUnavailable` ("refusing to move
+  blind"); a target outside the screen -> `ServoUnavailable` and **no move**; a
+  pointer that never responds -> `converged=False` with a reason (never a
+  fabricated success); an operator interrupt stops before the next move.
+
+### New: provider proprioception (`DockerComputerProvider.cursor_position`)
+- `xdotool getmouselocation --shell` on the workstation display; returns an
+  integer point, or `None` on a failed/unparseable query (fail-closed).
+
+### Wiring (`ComputerUseAgent`)
+- `_get_visual_servo()` builds the loop only when the provider exposes a real
+  integer-point `cursor_position`; a test double that merely *has* the attribute
+  is rejected, so existing open-loop paths are untouched.
+- `_servo_to_pixel_target()` runs one already-authorized reach and stores the
+  measured receipt; **every corrective move re-evaluates the safety envelope**,
+  so the loop cannot become a side channel that skips the policy.
+- Wired into **GUI_MOVE** and **GUI_CLICK**. The final dispatch still goes
+  through the normal path, so the pre-dispatch freshness revalidation is
+  preserved (the reach leaves only a sub-tolerance precision correction).
+- The receipt is surfaced in the action observation string
+  (`[servo: converged=... residual=...px latency=...ms]`), so the operator and
+  the model can see the measured result instead of a bare "Moved mouse".
+
+### Measured evidence
+- `locate_cursor` @1080p: ~100 ms/frame (fallback sensor only).
+- Reach loop CPU: **~0.1 ms** for the whole reach (the cost is the desktop I/O,
+  not the model).
+- Against a lagging pointer (30% loss): converged in 5 iterations, 3.6 px
+  residual; (50% loss): converged in 9 iterations, 3.6 px residual.
+- A pointer with 100% loss: `converged=False`, honest reason, no fabricated
+  success.
+
+### Tests
+- `services/core/tests/test_visual_servo_closed_loop.py` (16): model
+  convergence, ballistic-then-corrective profile, no overshoot, contact basin;
+  loop convergence despite lag, honest non-convergence, fail-closed without a
+  pointer, out-of-screen target (no move), interrupt; the vision fallback
+  actually drives the loop; agent wiring converges and records a receipt;
+  servo disabled without a sensor; every servo move is refused by a denying
+  safety policy.
+- `packages/avcs/tests/test_servo_model.py` (7): determinism, ballistic throw,
+  deceleration, contact radius, flat-frame rejection, **torch is not imported**,
+  invalid-parameter rejection.
+- `services/core/tests/test_docker_computer_provider.py` (+3): `cursor_position`
+  parses the display query, fails closed on a failed query and on garbage.
+
+### Regression
+- Core computer-use/safety subset: **384 passed, 2 skipped**.
+- Full `packages/avcs/tests` (minus tkinter): **594 passed, 20 skipped, 1
+  pre-existing load-flake** (`test_soak_runner_short_run`, which passes in
+  isolation and is unrelated to this change). Ruff clean on every changed file.
+
+### Honest scope
+This is a real, measured, self-correcting pointer loop. It does **not** prove
+semantic GUI capability: the servo converges on a *pixel target*; deciding
+*which* pixel corresponds to a described control still requires an evaluated
+AVCS grounding checkpoint, and text entry still requires the focus-verification
+head. Both remain fail-closed until trained. No live end-to-end GUI task was run
+in this pass (no workstation/credentials here); the loop was validated with real
+code paths against fake laggy desktops. SONIC remains unfinished.

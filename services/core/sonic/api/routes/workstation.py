@@ -1259,6 +1259,10 @@ def _attach_worker_activity(
     response["workers"] = collect_worker_activity(
         state.get("worklog"),
         mission_task_alive=task_alive,
+        # Match the dashboard timeline, which is filtered to the current
+        # objective. Without this, a new objective would show an empty
+        # timeline beside finished workers from the previous run.
+        current_run_only=True,
     )
     return response
 
@@ -1408,6 +1412,7 @@ async def list_workstation_agents(
     workers = collect_worker_activity(
         state.get("worklog"),
         mission_task_alive=task_alive,
+        current_run_only=True,
     )
     return {
         "session_id": session_id,
@@ -1433,6 +1438,9 @@ async def get_workstation_agent(
         state.get("worklog"),
         agent_uid,
         mission_task_alive=task_alive,
+        # The board lists only the current run, so a drill-down must resolve the
+        # same scope; otherwise a stale uid could open a previous run's worker.
+        current_run_only=True,
     )
     if worker is None:
         raise HTTPException(
@@ -1466,6 +1474,9 @@ async def message_workstation_agent(
         state.get("worklog"),
         agent_uid,
         mission_task_alive=task_alive,
+        # Steering targets a worker the board is showing, and the board is
+        # scoped to the current run; keep the lookup in the same scope.
+        current_run_only=True,
     )
     if worker is None:
         raise HTTPException(

@@ -167,6 +167,11 @@ class RealUIDataset(Dataset):
             target_coord = torch.tensor([center_x, center_y], dtype=torch.float32)
 
             cat_idx = UI_CATEGORIES.index(sample.category) if sample.category in UI_CATEGORIES else 0
+            # Real instruction text (ScreenSpot/WebUI) names the target, so the
+            # grounding head learns from genuine language. The click coordinate is
+            # the real bbox centre, so this sample IS valid supervision.
+            query_text = sample.instruction or "click element"
+            grounding_valid = True
         else:
             # Synthetic fallback with realistic GUI components
             data = self.synthetic_generator.generate(seed=idx)
@@ -176,8 +181,12 @@ class RealUIDataset(Dataset):
             if data.interactive_points:
                 pt = data.interactive_points[0]
                 target_coord = torch.tensor([pt[0], pt[1]], dtype=torch.float32)
+                query_text = pt[2]
+                grounding_valid = True
             else:
                 target_coord = torch.tensor([0.5, 0.5], dtype=torch.float32)
+                query_text = data.category
+                grounding_valid = False
 
         # PyTorch normalization
         frame_t = torch.from_numpy(frame_np).permute(2, 0, 1).float() / 255.0
@@ -186,9 +195,11 @@ class RealUIDataset(Dataset):
         mask_t = torch.from_numpy(mask_np).unsqueeze(0).unsqueeze(0).float()
         mask_down = F.interpolate(mask_t, size=self.affordance_grid_size, mode="nearest").squeeze().long()
 
-        # Simulated or lightweight text query embedding for top-down cross-attention
-        # In full multimodal training, this can be encoded using a frozen CLIP or MiniLM text tower
-        query_embed = torch.randn(self.latent_dim, dtype=torch.float32)
+        # Real text query embedding for top-down cross-attention. The instruction
+        # genuinely names the target, replacing the previous random-noise vector.
+        from forge.vision.cortex.core.modulation import encode_text_query
+
+        query_embed = encode_text_query(query_text, self.latent_dim)[0]
 
         return {
             "frame_t": frame_t,
@@ -197,6 +208,7 @@ class RealUIDataset(Dataset):
             "category_idx": torch.tensor(cat_idx, dtype=torch.long),
             "target_coord": target_coord,
             "query_embed": query_embed,
+            "grounding_valid": torch.tensor(grounding_valid, dtype=torch.bool),
         }
 
 

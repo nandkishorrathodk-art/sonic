@@ -52,8 +52,14 @@ class ScreenDataset(Dataset):
         else:
             target_coord = torch.tensor([0.5, 0.5], dtype=torch.float32)
 
-        # Simulated query text embedding
-        query_embed = torch.randn(self.latent_dim, dtype=torch.float32)
+        # Real query embedding derived from the sample's target class name. The
+        # grounding head must learn from language that actually names the target;
+        # random noise here would train it on nothing.
+        from forge.vision.cortex.core.modulation import encode_text_query
+
+        has_target = bool(data.interactive_points)
+        query_text = data.interactive_points[0][2] if has_target else data.category
+        query_embed = encode_text_query(query_text, self.latent_dim)[0]
 
         return {
             "frame_t": frame_t,
@@ -62,6 +68,7 @@ class ScreenDataset(Dataset):
             "category_idx": torch.tensor(data.category_idx, dtype=torch.long),
             "target_coord": target_coord,
             "query_embed": query_embed,
+            "grounding_valid": torch.tensor(has_target, dtype=torch.bool),
         }
 
 
