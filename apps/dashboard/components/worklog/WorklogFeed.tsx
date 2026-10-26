@@ -198,9 +198,21 @@ function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
       continue;
     }
 
-    if (!(item.sub_agent_uid || item.sub_agent_id)) continue;
-    const worker = workers.get(workerKey(item) || "");
+    // A step/heartbeat belongs to whichever worker key it carries. The route
+    // records `agent_uid`/`agent_id` on some events and `sub_agent_uid`/
+    // `sub_agent_id` on others; guarding on only the `sub_agent_*` pair dropped
+    // every `agent_uid`-keyed step, so the operator's drill-down showed a worker
+    // with no live activity. Reuse the same key resolution as the dispatch path.
+    const stepKey = workerKey(item);
+    if (!stepKey) continue;
+    const worker = workers.get(stepKey);
     if (!worker) continue;
+    if (item.orchestration_event === "sub_heartbeat") {
+      // Liveness only. The server projection keeps this separate from the real
+      // thinking so a "still reasoning" ping cannot hide what the worker thought.
+      worker.heartbeat = item.content || worker.heartbeat;
+      continue;
+    }
     if (item.type === "thought") {
       worker.latestThought = item.content || worker.latestThought;
       continue;

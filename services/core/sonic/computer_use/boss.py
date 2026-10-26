@@ -2560,6 +2560,21 @@ If the objective is complete or no more work is needed, return:
         from datetime import datetime
         return datetime.now(UTC).isoformat()
 
+    # Lifecycle events the operator board depends on. If the route handler
+    # fails to record one of these, the corresponding worker card silently
+    # disappears from the dashboard. That must be visible in logs, not a
+    # debug-only whisper, so the drop can be diagnosed.
+    _OPERATOR_CRITICAL_EVENTS = frozenset(
+        {
+            "sub_dispatch",
+            "sub_step",
+            "sub_heartbeat",
+            "sub_report",
+            "phase_complete",
+            "boss_report",
+        }
+    )
+
     @staticmethod
     async def _emit(
         callback: Callable | None, event_type: str, data: dict
@@ -2573,4 +2588,14 @@ If the objective is complete or no more work is needed, return:
             if asyncio.iscoroutine(result):
                 await result
         except Exception as e:
-            logger.debug("boss_emit_callback_failed", event=event_type, error=str(e))
+            # A failed worker-lifecycle callback means the operator UI will not
+            # show that worker. Surface it loudly; keep cosmetic events quiet.
+            if event_type in BossAgent._OPERATOR_CRITICAL_EVENTS:
+                logger.warning(
+                    "boss_emit_callback_failed",
+                    event=event_type,
+                    error=str(e),
+                    operator_visible=True,
+                )
+            else:
+                logger.debug("boss_emit_callback_failed", event=event_type, error=str(e))
