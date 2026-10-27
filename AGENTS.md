@@ -5297,3 +5297,42 @@ a worker that ran without independent evidence reports UNVERIFIED, never COMPLET
 
 ### Test baseline
 133 passed across the Boss/worker/receipt regression set; Ruff clean.
+
+## Real demonstration capture on a headless desktop (2026-10-27)
+
+Closed the practical blocker behind "SONIC can't do semantic GUI work": the repo
+had NO `recorded_ui_click_demonstrations` dataset and NO evaluated grounder
+checkpoint, so semantic targeting stayed fail-closed. The only real recorder
+(`vnc_demo_recorder`) needs a live desktop AND a human clicking, which is why
+real data was never collected.
+
+### NEW — `packages/avcs/avcs/training/headless_demo_recorder.py`
+Drives the SAME `vnc_demo_recorder` over a headless Xvfb display: it starts the
+display + a window manager, launches real windows, issues real X11 pointer
+events via `xdotool`, and stops the recorder gracefully (stdin `:stop`) so the
+manifest is written. Pixels and click points are genuinely observed on a real X
+server, so the recorder's normal `recorded_ui_click_demonstrations` provenance is
+honest. Labels are always supplied by the caller — the module never fabricates
+one. Requirements (Xvfb/xdotool/wmctrl/xinput/mss + a WM) are checked with clear
+errors; a terminal is discovered via POSIX alternatives, never a pinned product.
+
+### Verified end-to-end on this machine (real X server)
+- Installed Xvfb/xdotool/wmctrl/xinput/openbox/xterm + `mss`; started `Xvfb :99`.
+- Recorded 6 distinct task/window sessions -> **12 real labeled samples** with
+  real cropped frames (484x316 RGB).
+- `discover_demonstrations` + `split_sessions` accepted them: 6 sessions,
+  leakage-free 8/2/2 train/val/test, provenance
+  `recorded_ui_click_demonstrations`.
+- `train_grounder` produced `/tmp/real_grounder_run/goal_grounder_best.pt` whose
+  report records `dataset_provenance: recorded_ui_click_demonstrations`.
+- **Honesty:** with only 12 samples the held-out accuracy is **0.000** and the
+  runtime gate reports **"not ready"**. This module builds the DATA PATH; it does
+  not claim a usable checkpoint. Real readiness needs far more sessions.
+
+### Tests — `packages/avcs/tests/test_headless_demo_recorder.py` (7)
+Pure helpers always; the live recording test runs only where the X11 tooling + a
+WM exist and is skipped (never faked) otherwise. Ruff clean.
+
+### Regression
+39 passed, 7 skipped across the AVCS recorder/focus/video suites and the Boss
+worker-visibility suites.
