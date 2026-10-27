@@ -5081,3 +5081,30 @@ Tests (`services/core/tests/test_visual_servo_closed_loop.py`, +5): a parametriz
 case proves each of the four actions dispatches at least one closed-loop MOVE
 before its own provider action, and the no-sensor case proves the previous
 open-loop behaviour is preserved. Focused GUI regression: 174 passed. Ruff clean.
+
+## Apprenticeship promotion gate now resists majority-class collapse (2026-10-27)
+
+The AVCS self-learning loop (`computer_use/apprenticeship.py`) promoted a
+candidate whenever its raw held-out accuracy beat 1/8. Raw accuracy is dominated
+by the majority class, so a model that always predicts the most common category
+could be promoted while ignoring every other class -- and the committed
+`cortex_learned.eval.json` shows exactly that shape: 0.998 accuracy with 560 of
+589 held-out samples in one class (`settings_panel`), and the better-balanced
+`cortex_real_all.eval.json` at 0.654 with two classes at zero.
+
+Fixed: the gate now keys on **macro-F1** (unweighted mean F1 across the held-out
+classes present), with a raw-accuracy floor of chance. `_evaluate_on_manifest`
+also returns per-predicted-label counts so precision/recall can be computed; the
+sidecar and `LearnResult` now record `macro_f1`, `balanced_accuracy`,
+`deployed_macro_f1`, and `heldout_classes` alongside the existing accuracy and
+per-class table. A candidate whose macro-F1 does not beat the deployed model's is
+rejected, so a collapsed model can no longer overwrite a balanced one; at
+bootstrap (no deployed model) a better-than-chance candidate is still promoted,
+and the sidecar records its weakness honestly. The awareness log line now carries
+`candidate_macro_f1` too.
+
+Tests (`services/core/tests/test_avcs_apprenticeship.py`, +5): macro-F1 punishes a
+majority-class collapse and rewards a balanced model; empty input yields zero; a
+collapsed candidate with *higher* raw accuracy cannot displace a balanced
+deployed checkpoint; a balanced candidate is promoted. Full apprenticeship suite:
+35 passed. Ruff clean.

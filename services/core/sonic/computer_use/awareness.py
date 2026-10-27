@@ -343,6 +343,7 @@ class AwarenessMonitor:
                 promoted=result.promoted,
                 reason=result.reason,
                 candidate_accuracy=result.candidate_accuracy,
+                candidate_macro_f1=result.macro_f1,
             )
         await self._maybe_learn_affordance(loop)
 
