@@ -4877,3 +4877,55 @@ repr/model_dump no longer expose raw pixels, a worker-aware trace keeps its
 identity through the route's reads, and a plain trace stays safely empty.
 Regression: 164 passed across the Boss/worker suites, 212 passed across the
 computer-use/perception suites, ruff clean on all changed files.
+
+## Worklog bounding + worker-visibility chain audit (2026-10-26)
+
+Follow-up to the worker-board visibility fix. Two more real defects were found
+and closed, and the full operator drill-down chain was verified end to end.
+
+### Fixed: unbounded worklog (memory growth + O(n^2) disk writes)
+`_append_worklog` appended without limit, and `_persist_workstation_state`
+re-serialized the whole tenant/session store on every append. A long Boss
+mission therefore grew without bound and paid a quadratic write cost. Measured
+on the live store: 5 tenants, sessions with real worklogs already present.
+
+Bound it with an identity-preserving cap (`_trim_worklog`):
+- `sub_dispatch` / `sub_report` markers and the `Objective Received` marker are
+  **pinned** -- the worker projection rebuilds each operator card from that
+  pair, so evicting them would make an active worker silently vanish.
+- Only step/heartbeat/command noise is trimmed, newest items kept.
+- Configurable: `SONIC_WORKLOG_MAX_ITEMS` (default 600),
+  `SONIC_WORKLOG_MAX_PINNED` (default 200).
+- Verified: 2600+ appends -> 600 items, and the worker still projects with its
+  uid, name, RUNNING status and 150 steps; `find_worker` still resolves it.
+
+### Verified working (no bug -- do not "fix" these)
+- Worker identity is minted at dispatch and carried on `sub_dispatch`,
+  `sub_step`, `sub_heartbeat`, `sub_report` (`agent_uid` = run-unique handle,
+  `agent_id` = `sub-agent-N`, `agent_name`, `role`, `plane`).
+- `_worker_key` resolves consistently in both the backend projection and the
+  frontend (`agent_uid` preferred, then `sub_agent_uid`).
+- `/workstation/state` returns a server-side `workers` projection and
+  `/workstation/agents/{uid}` serves the drill-down via `find_worker`.
+- The frontend `WorklogFeed` rebuilds cards client-side from the same worklog,
+  and `WorkerDetail` re-fetches the authoritative record on expand (with the
+  worklog view as fallback), so a truncated/lagging worklog degrades instead of
+  showing an empty panel.
+- Liveness: `_mission_task_alive` gates the `RUNNING` verdict on a live
+  background task, so a dead mission reports `INTERRUPTED`, not a stale RUNNING.
+
+### Known seam (recorded, not changed)
+`workstation.py` records `agent_success = not has_unjudged_gui_actions and ...`
+via `mind.record_mission_outcome(success=...)`. Because the independent Judge
+runs inside Boss, not in the direct workstation path, any mission containing a
+GUI action is recorded as a non-success. `record_mission_outcome` only counts a
+success when a `verification_receipt_id` is supplied, so this is fail-closed
+rather than false -- but the being's affect/memory does not currently credit
+Judge-confirmed GUI work. Wiring the Judge receipt through is future work.
+
+### Tests
+`test_worker_board_visibility_fixes.py` extended to 12 tests (worklog capped
+under sustained appends; dispatch/report markers survive; the objective marker
+survives so the timeline stays scoped; chronological order preserved; short
+logs untouched). Boss/worker regression: 77 passed; workstation/worker/boss
+subset: 346 passed, 8 skipped. Ruff clean.
