@@ -36,7 +36,7 @@ class SubMission(BaseModel):
     max_steps: int = 5
     priority: int = 1  # Higher = execute first within a phase
     depends_on: list[str] = Field(default_factory=list)
-    plane: str = "gui"  # "gui" (visible desktop actions) | "headless" (terminal/file actions)
+    plane: str = "dual"  # "gui" | "headless" | "dual" (full agency: desktop + operator toolkit)
     process_mode: str = "deep"
     evidence_context: dict[str, Any] = Field(default_factory=dict)
     status: str = "PENDING"  # PENDING -> RUNNING -> COMPLETED -> FAILED
@@ -45,13 +45,15 @@ class SubMission(BaseModel):
     @model_validator(mode="after")
     def _infer_plane_from_goal(self) -> SubMission:
         # Accept previously serialized plane values while routing all visual work
-        # to the ordinary shared-desktop worker.
+        # to the ordinary shared-desktop worker. "dual" is preserved so a worker
+        # keeps full agency (visible desktop AND the operator toolkit) when the
+        # objective genuinely spans both planes.
         if "plane" in self.model_fields_set and self.plane:
             plane_lower = str(self.plane).lower().strip()
             if plane_lower == "browser":
                 self.plane = "gui"
                 return self
-            if plane_lower in ("gui", "headless"):
+            if plane_lower in ("gui", "headless", "dual"):
                 self.plane = plane_lower
                 return self
 
@@ -59,9 +61,9 @@ class SubMission(BaseModel):
             from sonic.llm.laya_engine import get_laya_engine
 
             chosen_plane, prob = get_laya_engine().decide_execution_plane(self.goal or "")
-            self.plane = chosen_plane if prob > 0.50 and chosen_plane in ("gui", "headless") else "gui"
+            self.plane = chosen_plane if prob > 0.50 and chosen_plane in ("gui", "headless") else "dual"
         except Exception:
-            self.plane = "gui"
+            self.plane = "dual"
         return self
 
 

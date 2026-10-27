@@ -39,7 +39,7 @@ class Workstream:
     """A declared unit of work the Boss is considering dispatching."""
 
     id: str
-    plane: str = "gui"
+    plane: str = "dual"
     owned_paths: tuple[str, ...] = ()
     depends_on: tuple[str, ...] = ()
 
@@ -206,7 +206,7 @@ def workstreams_from_sub_missions(sub_missions: Sequence[object]) -> list[Workst
         streams.append(
             Workstream(
                 id=str(getattr(sm, "id", "") or f"sub-{len(streams)}"),
-                plane=str(getattr(sm, "plane", "gui") or "gui"),
+                plane=str(getattr(sm, "plane", "dual") or "dual"),
                 owned_paths=tuple(str(p) for p in paths),
                 depends_on=tuple(str(d) for d in depends),
             )

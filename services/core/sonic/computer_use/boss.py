@@ -204,7 +204,7 @@ class BossAgent:
             if requested_plane
             else ("gui" if gui_only else None)
         )
-        self.requested_plane = requested if requested in {"gui", "headless"} else None
+        self.requested_plane = requested if requested in {"gui", "headless", "dual"} else None
         self._explicit_requested_plane = self.requested_plane
         self.max_phases = max_phases
         self.sub_agent_steps = sub_agent_steps
@@ -418,7 +418,10 @@ class BossAgent:
         interrupt_check : callable, optional
             Returns True if the user wants to stop.
         requested_plane : str, optional
-            Execution plane constraint ("gui" | "headless" | None).
+            Execution plane constraint ("gui" | "headless" | "dual" | None).
+            "gui" and "headless" are hard per-worker restrictions; "dual" only
+            declares that either plane is allowed, so the planner's explicit
+            per-worker plane is still honoured.
 
         Returns
         -------
@@ -433,14 +436,20 @@ class BossAgent:
             )
 
         if requested_plane:
-            self.requested_plane = str(requested_plane).lower().strip()
-            self._explicit_requested_plane = str(requested_plane).lower().strip()
+            normalized = str(requested_plane).lower().strip()
+            if normalized in ("gui", "headless", "dual"):
+                self.requested_plane = normalized
+                self._explicit_requested_plane = normalized
         elif hasattr(objective, "requested_plane") and objective.requested_plane:
-            self.requested_plane = str(objective.requested_plane).lower().strip()
-            self._explicit_requested_plane = self.requested_plane
+            normalized = str(objective.requested_plane).lower().strip()
+            if normalized in ("gui", "headless", "dual"):
+                self.requested_plane = normalized
+                self._explicit_requested_plane = normalized
         elif isinstance(objective, dict) and objective.get("requested_plane"):
-            self.requested_plane = str(objective["requested_plane"]).lower().strip()
-            self._explicit_requested_plane = self.requested_plane
+            normalized = str(objective["requested_plane"]).lower().strip()
+            if normalized in ("gui", "headless", "dual"):
+                self.requested_plane = normalized
+                self._explicit_requested_plane = normalized
 
         if hasattr(objective, "goal"):
             objective = objective.goal
@@ -1022,7 +1031,7 @@ Apply target-agnostic first-principles reasoning:
 1. METHODOLOGY:
    - Do not force an application, scanner, protocol, or interaction modality before observing the environment.
    - Boss owns planning, worker selection, task coordination, evidence review, and replanning.
-   - Delegate to general computer-use workers. The selected execution plane is a binding per-worker contract: GUI workers use live perception and visible GUI controls; headless workers use terminal and file tools.
+   - Delegate to general computer-use workers. The selected execution plane is a binding per-worker contract: "dual" workers use the visible desktop AND the operator toolkit and choose per step; "gui" workers use live perception and visible GUI controls only; "headless" workers use terminal and file tools only.
    - Each worker receives a clear operational outcome and relevant context, not a scripted action sequence.
    - Never invent a product, application, or executable name from the objective. When the requested application is unspecified, have the GUI worker discover available applications from live desktop observations and use only controls actually visible there.
 
@@ -1038,7 +1047,7 @@ Respond with EXACTLY this JSON format (no extra text):
       "role": "Specific responsibility such as desktop operator, software builder, or verifier",
       "goal": "Clear, focused goal for this worker agent with concrete inputs and expected observations.",
       "owned_paths": ["repo/relative/path/or/dir this worker alone may modify"],
-      "plane": "gui",
+      "plane": "dual",
       "max_steps": 15,
       "priority": 1,
       "depends_on": []
@@ -1051,8 +1060,8 @@ Rules:
 - Give each sub_mission a short, distinct human-readable name.
 - Assign a concise role that describes the worker's responsibility; use different roles when the tasks need different expertise.
 - owned_paths: repository-relative file or directory paths this worker is allowed to MODIFY. Two workers dispatched in the same phase MUST NOT list the same path; split work by file/directory so parallel workers cannot collide. Leave empty for read-only or GUI workers. Never claim a path you did not intend to change.
-- plane: "gui" for tasks requiring visible desktop interaction; "headless" ONLY for strictly non-visual CLI-only tasks
-- GUI workers must stay within visible desktop applications and controls. Do not substitute shell, file, or backend actions when a GUI operation fails; report the limitation or replan through another observed GUI path.
+- plane: the per-worker execution plane. "headless" = terminal/file/git only (no desktop); use it for purely non-visual work so several such workers can run in parallel. "gui" = visible desktop applications and controls only. "dual" = full agency (desktop AND operator toolkit), the worker chooses per step; use it only when the objective genuinely needs both modalities in one continuous task. Prefer the narrowest plane that fits the work; do not restrict by keyword.
+- A "gui" worker must stay within visible desktop applications and controls. Do not substitute shell, file, or backend actions when a GUI operation fails; report the limitation or replan through another observed GUI path.
 - Keep multi-application desktop GUI tasks (launching, focusing, and switching between 1, 2, or more desktop GUI windows) inside a SINGLE unified sub_mission with plane="gui" and max_steps=30 so window state and visual grounding remain continuous
 - depends_on: list of sub_mission IDs that must complete before this worker starts
 - max_steps should be 10-30 depending on task complexity
@@ -1115,13 +1124,20 @@ Rules:
 
             sub_id = str(sm.get("id") or "").strip()
             depends_on = [str(d).strip() for d in sm.get("depends_on", []) if str(d).strip()] if isinstance(sm.get("depends_on"), list) else []
+            # "gui"/"headless" are hard operator restrictions and override the
+            # planner's per-worker choice. "dual" is NOT a restriction -- it
+            # means "this mission may use either plane", so the planner's
+            # explicit per-worker plane still wins and only an unspecified
+            # worker falls back to full dual agency. Treating "dual" as a hard
+            # override would force every worker onto the shared desktop and
+            # destroy headless parallelism.
             plane = (
                 self.requested_plane
-                if self.requested_plane
-                else str(sm.get("plane") or "gui").strip().lower()
+                if self.requested_plane in ("headless", "gui")
+                else str(sm.get("plane") or "dual").strip().lower()
             )
-            if plane not in ("headless", "gui"):
-                plane = self.requested_plane if self.requested_plane in ("headless", "gui") else "gui"
+            if plane not in ("headless", "gui", "dual"):
+                plane = "dual"
 
             role = " ".join(str(sm.get("role") or "").split())[:60] or "subagent"
 
@@ -1213,7 +1229,7 @@ Rules:
                     "boss_fallback_plane_decision_failed",
                     error=str(exc),
                 )
-        fallback_plane = fallback_plane or "gui"
+        fallback_plane = fallback_plane or "dual"
         sub_missions = [
             SubMission(
                 id="adaptive-investigator",
@@ -1298,7 +1314,7 @@ Rules:
             )
 
             sub_agent_id = f"sub-agent-{sub_agent_num}"
-            execution_plane = getattr(sub_mission, "plane", "gui") or "gui"
+            execution_plane = getattr(sub_mission, "plane", "dual") or "dual"
             scoped_context = dict(self.initial_context)
             scoped_context.update(sub_mission.evidence_context)
             scoped_context["delegated_process_mode"] = sub_mission.process_mode
@@ -1349,7 +1365,7 @@ Rules:
                 evolution_engine=self.evolution_engine,
                 multi_context_sources=self.multi_context_sources,
                 gui_only=False,
-                observe_desktop=(execution_plane == "gui"),
+                observe_desktop=(execution_plane in ("gui", "dual")),
                 execution_plane=execution_plane,
                 initial_context=scoped_context,
                 agent_uid=agent_uid,
@@ -2211,7 +2227,7 @@ Rules:
                 if planes:
                     effective_plane = planes[0]
                     break
-        effective_plane = effective_plane or "gui"
+        effective_plane = effective_plane or "dual"
 
         try:
             from sonic.llm.schemas import LLMRequest, Message, MessageRole
@@ -2230,7 +2246,7 @@ FINDINGS SO FAR:
 {all_findings[:2000]}
 
 EXECUTION PLANE INVARIANT: The active mission execution plane is '{effective_plane}'.
-All worker sub_missions must default to plane: "{effective_plane}" unless cross-plane handoff is required.
+When it is 'gui' or 'headless' every worker sub_mission must use that plane unless a cross-plane handoff is explicitly required. When it is 'dual' the mission may use either plane: give each worker the narrowest plane that fits its task ('headless' for pure terminal/file work so those workers can run in parallel, 'gui' for visible desktop work, 'dual' only when one worker genuinely needs both).
 
 Based on these findings, what should the NEXT phase focus on? Create focused sub-tasks for worker agents.
 
@@ -2294,16 +2310,21 @@ If the objective is complete or no more work is needed, return:
                 priority = max(0, int(sm.get("priority", 1) or 1))
             except (TypeError, ValueError):
                 priority = 1
+            # Only "gui"/"headless" are hard operator restrictions. A "dual"
+            # request means "either plane is allowed", so an explicit per-worker
+            # plane from the planner is preserved instead of being overridden.
             explicit_plane = (
                 str(requested_plane).lower().strip()
                 if requested_plane
                 else getattr(self, "_explicit_requested_plane", None)
             )
+            if explicit_plane not in ("headless", "gui"):
+                explicit_plane = None
             raw_plane = sm.get("plane")
             clean_raw_plane = str(raw_plane).lower().strip() if raw_plane else ""
-            if explicit_plane and explicit_plane in ("headless", "gui"):
+            if explicit_plane:
                 plane = explicit_plane
-            elif clean_raw_plane in ("headless", "gui"):
+            elif clean_raw_plane in ("headless", "gui", "dual"):
                 plane = clean_raw_plane
             else:
                 plane = effective_plane

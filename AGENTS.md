@@ -4877,3 +4877,123 @@ repr/model_dump no longer expose raw pixels, a worker-aware trace keeps its
 identity through the route's reads, and a plain trace stays safely empty.
 Regression: 164 passed across the Boss/worker suites, 212 passed across the
 computer-use/perception suites, ruff clean on all changed files.
+
+## Worklog bounding + worker-visibility chain audit (2026-10-26)
+
+Follow-up to the worker-board visibility fix. Two more real defects were found
+and closed, and the full operator drill-down chain was verified end to end.
+
+### Fixed: unbounded worklog (memory growth + O(n^2) disk writes)
+`_append_worklog` appended without limit, and `_persist_workstation_state`
+re-serialized the whole tenant/session store on every append. A long Boss
+mission therefore grew without bound and paid a quadratic write cost. Measured
+on the live store: 5 tenants, sessions with real worklogs already present.
+
+Bound it with an identity-preserving cap (`_trim_worklog`):
+- `sub_dispatch` / `sub_report` markers and the `Objective Received` marker are
+  **pinned** -- the worker projection rebuilds each operator card from that
+  pair, so evicting them would make an active worker silently vanish.
+- Only step/heartbeat/command noise is trimmed, newest items kept.
+- Configurable: `SONIC_WORKLOG_MAX_ITEMS` (default 600),
+  `SONIC_WORKLOG_MAX_PINNED` (default 200).
+- Verified: 2600+ appends -> 600 items, and the worker still projects with its
+  uid, name, RUNNING status and 150 steps; `find_worker` still resolves it.
+
+### Verified working (no bug -- do not "fix" these)
+- Worker identity is minted at dispatch and carried on `sub_dispatch`,
+  `sub_step`, `sub_heartbeat`, `sub_report` (`agent_uid` = run-unique handle,
+  `agent_id` = `sub-agent-N`, `agent_name`, `role`, `plane`).
+- `_worker_key` resolves consistently in both the backend projection and the
+  frontend (`agent_uid` preferred, then `sub_agent_uid`).
+- `/workstation/state` returns a server-side `workers` projection and
+  `/workstation/agents/{uid}` serves the drill-down via `find_worker`.
+- The frontend `WorklogFeed` rebuilds cards client-side from the same worklog,
+  and `WorkerDetail` re-fetches the authoritative record on expand (with the
+  worklog view as fallback), so a truncated/lagging worklog degrades instead of
+  showing an empty panel.
+- Liveness: `_mission_task_alive` gates the `RUNNING` verdict on a live
+  background task, so a dead mission reports `INTERRUPTED`, not a stale RUNNING.
+
+### Known seam (recorded, not changed)
+`workstation.py` records `agent_success = not has_unjudged_gui_actions and ...`
+via `mind.record_mission_outcome(success=...)`. Because the independent Judge
+runs inside Boss, not in the direct workstation path, any mission containing a
+GUI action is recorded as a non-success. `record_mission_outcome` only counts a
+success when a `verification_receipt_id` is supplied, so this is fail-closed
+rather than false -- but the being's affect/memory does not currently credit
+Judge-confirmed GUI work. Wiring the Judge receipt through is future work.
+
+### Tests
+`test_worker_board_visibility_fixes.py` extended to 12 tests (worklog capped
+under sustained appends; dispatch/report markers survive; the objective marker
+survives so the timeline stays scoped; chronological order preserved; short
+logs untouched). Boss/worker regression: 77 passed; workstation/worker/boss
+subset: 346 passed, 8 skipped. Ruff clean.
+
+## Dual execution plane is first-class (2026-10-27)
+
+Fixed a real defect that hard-blocked mixed desktop/terminal objectives. The
+`ComputerUseAgent` already fully supported a third execution plane `dual` (GUI
+reasoning, coordinate validation, and `teamwork.observe_desktop in
+("gui","dual")`), but the Boss schema and route layer only ever recognised
+`{"gui","headless"}`. A desktop objective was pinned to `gui`, and a GUI-only
+worker that needed the operator toolkit hit `Blocked by headless execution plane
+contract` / could not fall back to the terminal.
+
+### Plane model (now consistent everywhere)
+- `gui` / `headless` remain **hard per-worker operator restrictions**.
+- `dual` means "either plane is allowed": it is **not** a restriction, so the
+  planner's explicit per-worker plane is still honoured and only an unspecified
+  worker falls back to full dual agency. This preserves headless parallelism
+  (treating `dual` as a hard override would force every worker onto the shared
+  desktop and serialize the whole mission).
+
+### Sites updated (`{"gui","headless"}` -> `+ "dual"`; default `gui` -> `dual`)
+- `models_boss.py`: `SubMission.plane` default; validator preserves `dual` and
+  falls back to `dual`.
+- `boss.py`: constructor plane whitelist; `run()` normalizes and **validates**
+  `requested_plane` (a bogus value is ignored, never latched as a restriction);
+  phase-1 per-worker plane normalization; `_plan_next_phase` normalization and
+  the plane-invariant prompt; `fallback_plane`; `execution_plane` default;
+  `observe_desktop` for `dual`; `effective_plane` fallback; prompt guidance.
+- `dispatch_policy.py`: `Workstream.plane` default and projection.
+- `workstation.py`: request `Literal` accepts `dual`; desktop objectives dispatch
+  `dual`; worklog `execution_plane` defaults for `sub_dispatch`/`sub_heartbeat`/
+  `sub_report`.
+- `agent_activity.py`: worker projection plane default.
+- Dashboard `WorklogFeed.tsx`: the worker card renders a distinct
+  "Desktop + Terminal" badge for `dual` (previously mislabelled as GUI).
+
+### Honesty gate is now action-based, not plane-based
+`ComputerUseAgent._mission_used_desktop_actions()` inspects real traces for
+`GUI_`/`APP_`/`WINDOW_`/`BROWSER_` actions. The independent-Judge requirement at
+the `GOAL_COMPLETE` handoff and at final verification now triggers on **actual
+desktop usage**, so a `dual` worker that used the desktop gets the same Judge
+gate as a `gui` worker. Plane alone was the wrong signal: it would have let a
+`dual` worker's changed screen count as self-verified success.
+
+### Worker identity + drill-down (verified, unchanged)
+`boss.py` mints a run-unique `agent_uid` (`worker-<n>-<hex>`) per sub-agent and
+emits it on `sub_dispatch`/`sub_step`/`sub_report`; the route records it on the
+worklog; `GET /workstation/agents/{agent_uid}` returns the live worker record;
+the dashboard worker card shows the uid and expands (click) into `WorkerDetail`,
+which fetches the authoritative live record so the operator sees what the worker
+is doing now. Background execution is a tracked `asyncio.Task`
+(`_track_background_task`), and `_mission_task_alive` gates the RUNNING verdict.
+
+### Tests
+`test_dual_plane_e2e.py` gained 7 dual-plane cases (F12-F18): `dual` is
+first-class and not coerced; `dual` is not a hard restriction; a `dual` worker
+that used the desktop still needs the Judge while a headless-only one does not;
+`gui`/`headless` remain hard restrictions; a `dual` worker counts as GUI-capable
+for shared-desktop serialization; the dispatch default plane is `dual`; a bogus
+`requested_plane` is ignored. Two legacy tests that pinned the old `gui` default
+(`test_laya_end_to_end.py`, `test_workstation_boss_integration.py`) were updated
+to the new `dual` contract.
+
+Full `services/core/tests`: **2535 passed, 40 skipped, 0 failures**. Ruff clean
+on all changed files; dashboard `next build` and `tsc --noEmit` clean. One
+load-induced timing flake (`test_continuous_avcs_awareness::
+test_capture_error_does_not_kill_the_loop`, which needs >=2 frames in a 0.4s
+window and does not import the changed modules) passes in isolation; it is not
+caused by this work.

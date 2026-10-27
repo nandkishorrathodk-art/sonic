@@ -123,7 +123,7 @@ class WorkstationPromptRequest(BaseModel):
     target_repo: str | None = "nandkishorrathodk-art/sonic"
     mode: str | None = "autonomous_engineer"
     session_id: str | None = "default"
-    requested_plane: Literal["gui", "headless"] | None = None
+    requested_plane: Literal["gui", "headless", "dual"] | None = None
 
 
 class ExecuteCommandRequest(BaseModel):
@@ -213,6 +213,51 @@ _pending_operator_approvals: dict[tuple[str, str, str], asyncio.Future[bool]] = 
 # (worker, step) per window. Keyed by "<agent_uid>:<step>" -> monotonic time.
 _boss_heartbeat_emitted_at: dict[str, float] = {}
 _BOSS_HEARTBEAT_MIN_INTERVAL_SECONDS = 15.0
+
+# A long Boss mission appends one worklog item per worker step (plus thoughts,
+# heartbeats, commands, reads and writes). The worklog was unbounded, so a
+# session grew without limit and every append re-serialized the whole
+# tenant/session store to disk (O(n^2) over a mission). Bound it -- but the
+# worker projection in ``agent_activity.collect_worker_activity`` reconstructs
+# each worker card from its ``sub_dispatch``/``sub_report`` pair, so those
+# markers must survive trimming or an active worker would silently vanish from
+# the operator's board. Pinned markers are kept as a set (newest first) and the
+# remaining budget goes to the newest step/heartbeat items.
+_WORKLOG_MAX_ITEMS = max(50, int(os.environ.get("SONIC_WORKLOG_MAX_ITEMS", "600")))
+_WORKLOG_MAX_PINNED = max(20, int(os.environ.get("SONIC_WORKLOG_MAX_PINNED", "200")))
+_WORKLOG_PINNED_EVENTS = frozenset({"sub_dispatch", "sub_report"})
+_WORKLOG_PINNED_TITLES = frozenset({"Objective Received"})
+
+
+def _is_pinned_worklog_item(item: Any) -> bool:
+    """True for the markers a worker/timeline projection cannot be rebuilt without."""
+    if not isinstance(item, dict):
+        return False
+    if item.get("orchestration_event") in _WORKLOG_PINNED_EVENTS:
+        return True
+    return item.get("title") in _WORKLOG_PINNED_TITLES
+
+
+def _trim_worklog(state: dict[str, Any]) -> None:
+    """Bound the worklog without dropping worker identity markers.
+
+    Keeps the newest pinned markers (bounded by ``_WORKLOG_MAX_PINNED``) plus the
+    newest remaining items up to ``_WORKLOG_MAX_ITEMS``, preserving the original
+    chronological order. Idempotent and safe on short logs.
+    """
+    worklog = state.get("worklog")
+    if not isinstance(worklog, list) or len(worklog) <= _WORKLOG_MAX_ITEMS:
+        return
+    pinned_positions = [i for i, item in enumerate(worklog) if _is_pinned_worklog_item(item)]
+    # Newest pinned markers win when there are more than the pinned budget.
+    if len(pinned_positions) > _WORKLOG_MAX_PINNED:
+        pinned_positions = pinned_positions[-_WORKLOG_MAX_PINNED:]
+    pinned_set = set(pinned_positions)
+    remaining_budget = max(0, _WORKLOG_MAX_ITEMS - len(pinned_set))
+    normal_positions = [i for i in range(len(worklog)) if i not in pinned_set]
+    kept_normal = set(normal_positions[-remaining_budget:]) if remaining_budget else set()
+    keep = sorted(pinned_set | kept_normal)
+    state["worklog"] = [worklog[i] for i in keep]
 
 
 def _resolve_tenant_id(user: Any) -> str:
@@ -790,6 +835,7 @@ def _append_worklog(state: dict[str, Any], item_type: str, title: str, content: 
         **extra,
     }
     state.setdefault("worklog", []).append(item)
+    _trim_worklog(state)
     return item
 
 
@@ -3640,7 +3686,7 @@ async def _run_prompt_reasoning(
     )
     state["last_objective"] = prompt
     state["last_requested_plane"] = requested_plane or (
-        "gui" if desktop_prompt else None
+        "dual" if desktop_prompt else None
     )
     pipeline_failed = False
     program_profile = _infer_program_profile(prompt, state)
@@ -4200,7 +4246,7 @@ async def _run_prompt_reasoning(
                                         status=data.get("status", "RUNNING"),
                                         goal=data.get("goal"),
                                         worker_role=data.get("role", "subagent"),
-                                        execution_plane=data.get("plane", "gui"),
+                                        execution_plane=data.get("plane", "dual"),
                                         max_steps=data.get("max_steps"),
                                     )
                                 elif event_type == "sub_step":
@@ -4247,7 +4293,7 @@ async def _run_prompt_reasoning(
                                             sub_agent_uid=data.get("agent_uid"),
                                             agent_name=data.get("agent_name"),
                                             worker_role=data.get("role", "subagent"),
-                                            execution_plane=data.get("plane", "gui"),
+                                            execution_plane=data.get("plane", "dual"),
                                             elapsed_seconds=elapsed,
                                             step=data.get("step"),
                                         )
@@ -4278,7 +4324,7 @@ async def _run_prompt_reasoning(
                                         status=worker_status,
                                         goal=data.get("goal"),
                                         worker_role=data.get("role", "subagent"),
-                                        execution_plane=data.get("plane", "gui"),
+                                        execution_plane=data.get("plane", "dual"),
                                         success=data.get("success"),
                                         findings_summary=data.get("findings_summary"),
                                         judge_verdict=data.get("judge_verdict"),
@@ -4347,7 +4393,7 @@ async def _run_prompt_reasoning(
                                 phase_callback=_on_boss_event,
                                 interrupt_check=lambda: bool(state.get("interrupted")),
                                 requested_plane=requested_plane or (
-                                    "gui" if desktop_prompt else None
+                                    "dual" if desktop_prompt else None
                                 ),
                             )
                             report = boss_report

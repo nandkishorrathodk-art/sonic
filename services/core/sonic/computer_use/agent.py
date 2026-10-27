@@ -880,6 +880,27 @@ class ComputerUseAgent:
             or str(getattr(self, "execution_plane", "") or "").lower().strip() == "gui"
         )
 
+    def _mission_used_desktop_actions(self) -> bool:
+        """True when this mission actually dispatched a visible-desktop action.
+
+        Completion of GUI work must be confirmed by the independent Judge no
+        matter which plane the worker was assigned. Plane alone is the wrong
+        signal: a "dual" worker that used the desktop needs the same Judge gate
+        as a "gui" worker, otherwise a changed screen would be accepted as proof
+        of the outcome.
+        """
+        for trace in getattr(self, "traces", None) or []:
+            action = str(
+                getattr(
+                    getattr(trace, "action_type", ""),
+                    "value",
+                    getattr(trace, "action_type", ""),
+                )
+            ).upper()
+            if action.startswith(("GUI_", "APP_", "WINDOW_", "BROWSER_")):
+                return True
+        return False
+
     @staticmethod
     def _rank_apps_for_goal(apps: list, goal: str) -> list:
         """Order installed applications so goal-relevant ones appear first.
@@ -10034,7 +10055,7 @@ class ComputerUseAgent:
             # Goal-complete sentinel: the LLM JUDGED the goal achieved — but we
             # do not stop on self-declaration alone. We independently verify.
             if expected == _GOAL_COMPLETE_SENTINEL:
-                if requires_external_gui_judge:
+                if requires_external_gui_judge or self._mission_used_desktop_actions():
                     self.history.append({
                         "action": "GOAL_COMPLETE (awaiting independent Judge)",
                         "result": (
@@ -10505,6 +10526,7 @@ class ComputerUseAgent:
         if (
             not goal_reached
             and not requires_external_gui_judge
+            and not self._mission_used_desktop_actions()
             and self.metrics.actions_successful > 0
             and self.metrics.actions_failed == 0
         ):
