@@ -327,3 +327,189 @@ def test_agent_servo_moves_are_rejected_by_the_safety_envelope():
     # and the servo reports non-convergence rather than pretending success.
     assert provider.moves == []
     assert receipt is None or receipt["converged"] is False
+
+
+# --------------------------------------------- every pointer action is closed-loop
+
+
+def _frame_base64(color: int = 0, width: int = 1280, height: int = 800) -> str:
+    import base64
+    import binascii
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(
+            ">I", binascii.crc32(body) & 0xFFFFFFFF
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    rows = (
+        b"\x00" + bytes([color if y >= height // 2 else 0]) * (width * 3)
+        for y in range(height)
+    )
+    image = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + chunk(b"IEND", b"")
+    )
+    return base64.b64encode(image).decode("ascii")
+
+
+class _PointerProvider:
+    """Provider stub with a pointer sensor, status, and a lagging move.
+
+    ``cursor_position`` makes the closed loop available; ``gui_action`` records
+    every dispatch and models a pointer that only travels part of the way, so a
+    servo-corrected action is visibly distinguished from an open-loop one by the
+    MOVE dispatches it makes.
+    """
+
+    def __init__(self, start: tuple[int, int] = (100, 100), lag: float = 0.5) -> None:
+        self.x, self.y = start
+        self.lag = lag
+        self.moves: list[tuple[int, int]] = []
+        self.actions: list[str] = []
+        self._frame = _frame_base64()
+        self._after = _frame_base64(200)
+
+    async def cursor_position(self, _workspace_id: str) -> tuple[int, int]:
+        return self.x, self.y
+
+    async def status(self, _workspace_id: str) -> object:
+        from unittest.mock import MagicMock
+
+        return MagicMock(
+            active_application="Desktop",
+            active_window="Desktop",
+            open_applications=["Desktop"],
+            running_processes=[],
+        )
+
+    async def screenshot(self, _workspace_id: str) -> object:
+        from sonic.computer.models import ScreenObservation
+
+        return ScreenObservation(
+            width=1280,
+            height=800,
+            screenshot_base64=self._frame,
+            capture_age_ms=0,
+            controls_age_ms=0,
+            active_window="Desktop",
+        )
+
+    async def gui_action(self, _workspace_id: str, action) -> object:
+        from sonic.computer.models import ScreenObservation
+
+        name = str(getattr(action.action, "value", action.action))
+        self.actions.append(name)
+        x = int(action.x or 0)
+        y = int(action.y or 0)
+        if name == "MOVE":
+            self.moves.append((x, y))
+        self.x = int(round(self.x + (x - self.x) * (1.0 - self.lag)))
+        self.y = int(round(self.y + (y - self.y) * (1.0 - self.lag)))
+        return ScreenObservation(
+            width=1280,
+            height=800,
+            screenshot_base64=self._after,
+            capture_age_ms=0,
+            controls_age_ms=0,
+            active_window="Desktop",
+        )
+
+
+def _closed_loop_agent(provider):
+    import time
+
+    from sonic.computer.models import ScreenObservation
+    from sonic.computer_use.agent import ComputerUseAgent
+    from sonic.computer_use.models import ComputerWorldObservation
+    from sonic.safety.action_policy import ActionPolicy
+
+    agent = ComputerUseAgent(
+        computer_provider=provider,
+        execution_plane="gui",
+        safety=ActionPolicy(),
+    )
+    screen = ScreenObservation(
+        width=1280,
+        height=800,
+        screenshot_base64=provider._frame,
+        capture_age_ms=0,
+        controls_age_ms=0,
+        active_window="Desktop",
+    )
+    screen = agent._ensure_avcs_state(screen)
+    agent._last_world_observation = ComputerWorldObservation(
+        screen=screen,
+        active_application="Desktop",
+        perception_version=screen.perception_version,
+        observation_age_ms=0,
+    )
+    agent._last_gui_state_observation = screen
+    agent._last_screen_observation_received_at = time.monotonic()
+    agent._last_screenshot_b64 = screen.screenshot_base64
+    agent._screen_width = 1280
+    agent._screen_height = 800
+    return agent
+
+
+@pytest.mark.parametrize(
+    ("action_type", "payload", "expected_actions"),
+    [
+        ("GUI_DOUBLE_CLICK", {"x": 900, "y": 700}, {"DOUBLE_CLICK"}),
+        ("GUI_RIGHT_CLICK", {"x": 900, "y": 700}, {"RIGHT_CLICK"}),
+        ("GUI_DRAG", {"x": 900, "y": 700, "x2": 1200, "y2": 300}, {"DRAG"}),
+        ("GUI_SCROLL", {"x": 900, "y": 700, "delta": -3}, {"SCROLL"}),
+    ],
+)
+def test_pointer_actions_reach_before_acting(action_type, payload, expected_actions):
+    """Every pointer action must converge the hand before it acts.
+
+    The reach is what makes a click land where it was aimed; a double-click,
+    right-click, drag or scroll that skips it is exactly as open-loop as a raw
+    coordinate jump. Each action must therefore dispatch at least one MOVE
+    (the closed-loop reach) before its own provider action.
+    """
+    from sonic.computer_use.models import ComputerActionType
+
+    provider = _PointerProvider(start=(100, 100), lag=0.5)
+    agent = _closed_loop_agent(provider)
+
+    asyncio.run(
+        agent.execute_action(
+            "ws",
+            getattr(ComputerActionType, action_type),
+            f"{payload['x']},{payload['y']}",
+            payload,
+            "reach then act",
+        )
+    )
+
+    assert expected_actions.issubset(set(provider.actions)), provider.actions
+    assert provider.moves, f"{action_type} did not run a closed-loop reach"
+
+
+def test_double_click_does_not_reach_when_the_provider_has_no_pointer_sensor():
+    """No cursor readback -> the action keeps its previous open-loop behaviour."""
+    from sonic.computer_use.models import ComputerActionType
+
+    provider = _PointerProvider()
+    provider.cursor_position = None  # type: ignore[assignment]
+    agent = _closed_loop_agent(provider)
+
+    asyncio.run(
+        agent.execute_action(
+            "ws",
+            ComputerActionType.GUI_DOUBLE_CLICK,
+            "900,700",
+            {"x": 900, "y": 700},
+            "double-click",
+        )
+    )
+
+    assert provider.moves == []
+    assert "DOUBLE_CLICK" in provider.actions

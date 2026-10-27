@@ -7237,6 +7237,11 @@ class ComputerUseAgent:
                     y = int(payload.get("y", 0))
                     pre_screen_b64 = getattr(self, "_last_screenshot_b64", "")
                     pre_screen_state = getattr(self, "_last_observed_screen", None)
+                    # Reach before clicking, like a hand: converge the pointer onto
+                    # the target so the double-click lands where it was aimed even
+                    # if the coordinate estimate was slightly off. The click itself
+                    # still goes through the normal dispatch path.
+                    servo_receipt = await self._servo_to_pixel_target(workspace_id, x, y)
                     if self._last_screenshot_b64:
                         self._last_screenshot_b64 = draw_action_marker(
                             self._last_screenshot_b64, (x, y), label="DOUBLE_CLICK", color="#ffaa00"
@@ -7257,10 +7262,17 @@ class ComputerUseAgent:
                         self._last_screenshot_b64 = post_screen_b64
                         self._update_screen_dims(obs_after)
                     scene_changed = self._screen_pixels_changed(pre_screen_state, obs_after)
+                    servo_note = ""
+                    if isinstance(servo_receipt, dict):
+                        servo_note = (
+                            f" [servo: converged={servo_receipt.get('converged')}"
+                            f" residual={servo_receipt.get('final_residual_px')}px"
+                            f" latency={servo_receipt.get('latency_ms')}ms]"
+                        )
                     if resolved_via_grounding:
-                        actual_obs_str = f"Visual grounding resolved '{target_resource}' to ({x}, {y}) and double-clicked"
+                        actual_obs_str = f"Visual grounding resolved '{target_resource}' to ({x}, {y}) and double-clicked{servo_note}"
                     else:
-                        actual_obs_str = f"Double-clicked at ({x}, {y})"
+                        actual_obs_str = f"Double-clicked at ({x}, {y}){servo_note}"
                     if (
                         scene_changed is False
                         or (
@@ -7293,6 +7305,11 @@ class ComputerUseAgent:
                     y = int(payload.get("y", 0))
                     pre_screen_b64 = getattr(self, "_last_screenshot_b64", "")
                     pre_screen_state = getattr(self, "_last_observed_screen", None)
+                    # Reach before clicking, like a hand: converge the pointer onto
+                    # the target so the right-click lands where it was aimed even
+                    # if the coordinate estimate was slightly off. The click itself
+                    # still goes through the normal dispatch path.
+                    servo_receipt = await self._servo_to_pixel_target(workspace_id, x, y)
                     if self._last_screenshot_b64:
                         self._last_screenshot_b64 = draw_action_marker(
                             self._last_screenshot_b64, (x, y), label="RIGHT_CLICK", color="#ff3366"
@@ -7313,10 +7330,17 @@ class ComputerUseAgent:
                         self._last_screenshot_b64 = post_screen_b64
                         self._update_screen_dims(obs_after)
                     scene_changed = self._screen_pixels_changed(pre_screen_state, obs_after)
+                    servo_note = ""
+                    if isinstance(servo_receipt, dict):
+                        servo_note = (
+                            f" [servo: converged={servo_receipt.get('converged')}"
+                            f" residual={servo_receipt.get('final_residual_px')}px"
+                            f" latency={servo_receipt.get('latency_ms')}ms]"
+                        )
                     if resolved_via_grounding:
-                        actual_obs_str = f"Visual grounding resolved '{target_resource}' to ({x}, {y}) and right-clicked"
+                        actual_obs_str = f"Visual grounding resolved '{target_resource}' to ({x}, {y}) and right-clicked{servo_note}"
                     else:
-                        actual_obs_str = f"Right-clicked at ({x}, {y})"
+                        actual_obs_str = f"Right-clicked at ({x}, {y}){servo_note}"
                     if scene_changed is False or (
                         scene_changed is None
                         and pre_screen_b64
@@ -7398,6 +7422,12 @@ class ComputerUseAgent:
                         status = ActionExecutionStatus.BLOCKED
                         action_exit_code = 126
                     else:
+                        # Reach before focusing, like a hand: converge the pointer
+                        # onto the field so the focus click lands on it before any
+                        # text is typed.
+                        await self._servo_to_pixel_target(
+                            workspace_id, int(focus_x), int(focus_y)
+                        )
                         await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(
@@ -7686,6 +7716,11 @@ class ComputerUseAgent:
                     y = int(raw_y)
                     x2 = int(raw_end_x)
                     y2 = int(raw_end_y)
+                    # Reach before pressing, like a hand: converge the pointer onto
+                    # the drag origin so the press lands where it was aimed. The
+                    # destination is a path endpoint, not a fixated target, so it is
+                    # not servo-corrected.
+                    servo_receipt = await self._servo_to_pixel_target(workspace_id, x, y)
                     obs_drag = await self._dispatch_gui_action(
                         workspace_id,
                         GUIAction(action=GUIActionType.DRAG, x=x, y=y, x2=x2, y2=y2),
@@ -7695,7 +7730,14 @@ class ComputerUseAgent:
                         self._last_screenshot_b64 = drag_b64
                         self._prev_screenshot_hash = hashlib.md5(drag_b64.encode()).hexdigest()
                         self._update_screen_dims(obs_drag)
-                    actual_obs_str = f"Dragged from ({x},{y}) to ({x2},{y2})"
+                    servo_note = ""
+                    if isinstance(servo_receipt, dict):
+                        servo_note = (
+                            f" [servo: converged={servo_receipt.get('converged')}"
+                            f" residual={servo_receipt.get('final_residual_px')}px"
+                            f" latency={servo_receipt.get('latency_ms')}ms]"
+                        )
+                    actual_obs_str = f"Dragged from ({x},{y}) to ({x2},{y2}){servo_note}"
 
             elif action_type == ComputerActionType.GUI_SCROLL:
                 coord_err = self._validate_coordinates(action_type, payload)
@@ -7716,6 +7758,10 @@ class ComputerUseAgent:
                         action_exit_code = 126
                     else:
                         delta = raw_delta
+                        # Scroll events land on whatever is under the pointer, so
+                        # converge the pointer onto the target point first; the
+                        # scroll then affects the intended pane.
+                        servo_receipt = await self._servo_to_pixel_target(workspace_id, x, y)
                         obs_scroll = await self._dispatch_gui_action(
                             workspace_id,
                             GUIAction(action=GUIActionType.SCROLL, x=x, y=y, scroll_delta=delta),
@@ -7724,7 +7770,13 @@ class ComputerUseAgent:
                         if scroll_b64:
                             self._last_screenshot_b64 = scroll_b64
                             self._prev_screenshot_hash = hashlib.md5(scroll_b64.encode()).hexdigest()
-                        actual_obs_str = f"Scrolled at ({x}, {y}) delta={delta}"
+                        servo_note = ""
+                        if isinstance(servo_receipt, dict):
+                            servo_note = (
+                                f" [servo: converged={servo_receipt.get('converged')}"
+                                f" residual={servo_receipt.get('final_residual_px')}px]"
+                            )
+                        actual_obs_str = f"Scrolled at ({x}, {y}) delta={delta}{servo_note}"
 
             elif action_type == ComputerActionType.GUI_SCREENSHOT:
                 screen = await self.computer.screenshot(workspace_id)

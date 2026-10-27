@@ -72,6 +72,7 @@ avcs-pilot = "avcs_pilot.runner:main"
 avcs-m7-validate = "avcs_m7_validation.runner:main"
 avcs-audit-evidence = "avcs_m7_validation.evidence_auditor:main"
 avcs-record-demo = "avcs.training.demo_recorder:main"
+avcs-record-focus = "avcs.training.focus_demo_recorder:main"
 avcs-train-grounder = "avcs.training.train_grounder:main"
 avcs-ingest-video = "avcs.training.video_apprenticeship:main"
 

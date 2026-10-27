@@ -74,12 +74,32 @@ Text entry needs a separate local focus head that answers "is this point a
 focused text-entry control?" from the current frame alone. It is trained the same
 way as the grounder, from recorded demonstrations:
 
-- Record focus demonstrations: each session directory holds a `manifest.json`
-  (`status: "complete"`, `task`, `target_window_title`) and a `records.jsonl`
-  whose entries carry `schema_version: 1`, `target_label`, `frame`, a
-  `point_px` pixel coordinate, and a boolean `focused` label. Group each
+- Record focus demonstrations: run the dedicated recorder inside the Docker VNC
+  desktop (`avcs-record-focus`, or
+  `python -m avcs.training.focus_demo_recorder`). It reuses the click recorder's
+  isolation guarantees (exact foreground window, cropped frames, no keystroke
+  capture) and adds the human `focused` ground truth:
+
+  ```bash
+  python -m avcs.training.focus_demo_recorder \
+    --window-title "AVCS_DEMO_WINDOW" \
+    --task "Label focused vs unfocused controls" \
+    --output-dir "runs/focus_demos/session-01" \
+    --target "search field:focused" \
+    --target "Cancel:not-focused" \
+    --confirm-isolated-window
+  ```
+
+  Each session directory it writes holds a `manifest.json` (`status: "complete"`,
+  `task`, `target_window_title`) and a `records.jsonl` whose entries carry
+  `schema_version: 1`, `target_label`, `frame`, a `point_px` pixel coordinate in
+  the cropped window frame, and a boolean `focused` label. The `focused` value is
+  a human ground-truth label -- it is never inferred from the OS or a model,
+  because a classifier cannot be trained against its own guess. Group each
   app/task into its own session so training and held-out evaluation stay
-  leakage-resistant.
+  leakage-resistant. Use `--target "<label>:<focused>"` to pre-arm a sequence of
+  clicks, or run without `--target` to type the label and answer the focused y/n
+  prompt before each click.
 - Train: `python -m avcs.training.train_focus_verifier --data-dir <root>
   --output-dir runs/focus_verifier`. The trainer writes
   `focus_verifier_best.pt` and a `training_report.json`.

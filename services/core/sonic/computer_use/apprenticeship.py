@@ -538,6 +538,48 @@ def _grouped_split(
     return train, held
 
 
+def _macro_f1(
+    per_class: dict[str, dict[str, int]],
+    pred_counts: dict[str, int],
+) -> float:
+    """Unweighted mean F1 across the classes present in the held-out set.
+
+    Raw accuracy is dominated by the majority class, so a model that always
+    predicts the most common category can score high while ignoring every other
+    class. Macro-F1 weights each class equally, so such a model scores near zero
+    on the classes it never predicts and cannot pass the promotion gate. Classes
+    with no held-out support are excluded (they carry no signal).
+    """
+    f1s: list[float] = []
+    for label, counts in per_class.items():
+        support = int(counts.get("total", 0))
+        if support <= 0:
+            continue
+        tp = int(counts.get("correct", 0))
+        predicted = int(pred_counts.get(label, 0))
+        precision = tp / predicted if predicted > 0 else 0.0
+        recall = tp / support
+        if precision + recall == 0.0:
+            f1s.append(0.0)
+        else:
+            f1s.append(2 * precision * recall / (precision + recall))
+    if not f1s:
+        return 0.0
+    return sum(f1s) / len(f1s)
+
+
+def _balanced_accuracy(per_class: dict[str, dict[str, int]]) -> float:
+    """Mean per-class recall over the classes present in the held-out set."""
+    recalls = [
+        int(counts.get("correct", 0)) / int(counts["total"])
+        for counts in per_class.values()
+        if int(counts.get("total", 0)) > 0
+    ]
+    if not recalls:
+        return 0.0
+    return sum(recalls) / len(recalls)
+
+
 @dataclass
 class LearnResult:
     promoted: bool
@@ -548,6 +590,10 @@ class LearnResult:
     heldout_frames: int = 0
     checkpoint: str = ""
     per_class: dict[str, dict[str, int]] = field(default_factory=dict)
+    macro_f1: float = 0.0
+    deployed_macro_f1: Optional[float] = None
+    balanced_accuracy: float = 0.0
+    heldout_classes: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -555,6 +601,14 @@ class LearnResult:
             "reason": self.reason,
             "candidate_accuracy": self.candidate_accuracy,
             "deployed_accuracy": self.deployed_accuracy,
+            "macro_f1": round(self.macro_f1, 4),
+            "deployed_macro_f1": (
+                round(self.deployed_macro_f1, 4)
+                if self.deployed_macro_f1 is not None
+                else None
+            ),
+            "balanced_accuracy": round(self.balanced_accuracy, 4),
+            "heldout_classes": self.heldout_classes,
             "train_frames": self.train_frames,
             "heldout_frames": self.heldout_frames,
             "checkpoint": self.checkpoint,
@@ -732,7 +786,7 @@ class AVCSApprenticeshipLoop:
 
         candidate_path = self.store.root / "runs" / "candidate.pt"
         try:
-            candidate_accuracy, per_class = self._evaluate_on_manifest(
+            candidate_accuracy, per_class, pred_counts = self._evaluate_on_manifest(
                 candidate_path, held_manifest
             )
         except Exception as exc:
@@ -745,17 +799,29 @@ class AVCSApprenticeshipLoop:
             self.status.last_result = result.reason
             return result
 
+        candidate_macro_f1 = _macro_f1(per_class, pred_counts)
+        candidate_balanced = _balanced_accuracy(per_class)
+        heldout_classes = sum(1 for c in per_class.values() if int(c.get("total", 0)) > 0)
+
         deployed_accuracy: Optional[float] = None
+        deployed_macro_f1: Optional[float] = None
         if self.checkpoint_path.is_file():
             try:
-                deployed_accuracy, _ = self._evaluate_on_manifest(
-                    self.checkpoint_path, held_manifest
+                deployed_accuracy, deployed_per_class, deployed_pred = (
+                    self._evaluate_on_manifest(self.checkpoint_path, held_manifest)
                 )
+                deployed_macro_f1 = _macro_f1(deployed_per_class, deployed_pred)
             except Exception:
                 deployed_accuracy = None
+                deployed_macro_f1 = None
 
-        gate = candidate_accuracy > _CHANCE_ACCURACY and (
-            deployed_accuracy is None or candidate_accuracy >= deployed_accuracy
+        # Promote only on a real per-class gain. Raw accuracy alone would let a
+        # majority-class collapse through; macro-F1 weights every held-out class
+        # equally, so a model that ignores a class cannot pass.
+        gate = (
+            candidate_macro_f1 > _CHANCE_ACCURACY
+            and candidate_accuracy >= _CHANCE_ACCURACY
+            and (deployed_macro_f1 is None or candidate_macro_f1 >= deployed_macro_f1)
         )
         self.status.rounds += 1
         self.status.deployed_accuracy = (
@@ -763,14 +829,19 @@ class AVCSApprenticeshipLoop:
         )
         if not gate:
             reason = (
-                f"candidate {candidate_accuracy:.3f} did not beat deployed "
-                f"{deployed_accuracy if deployed_accuracy is None else round(deployed_accuracy, 3)}"
+                f"candidate macro-F1 {candidate_macro_f1:.3f} (accuracy "
+                f"{candidate_accuracy:.3f}) did not beat deployed macro-F1 "
+                f"{'none' if deployed_macro_f1 is None else round(deployed_macro_f1, 3)}"
             )
             result = LearnResult(
                 promoted=False,
                 reason=reason,
                 candidate_accuracy=candidate_accuracy,
                 deployed_accuracy=deployed_accuracy,
+                macro_f1=candidate_macro_f1,
+                deployed_macro_f1=deployed_macro_f1,
+                balanced_accuracy=candidate_balanced,
+                heldout_classes=heldout_classes,
                 train_frames=len(train),
                 heldout_frames=len(held),
                 per_class=per_class,
@@ -780,15 +851,27 @@ class AVCSApprenticeshipLoop:
 
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(candidate_path, self.checkpoint_path)
-        self._write_sidecar(candidate_accuracy, per_class, len(held))
+        self._write_sidecar(
+            candidate_accuracy,
+            per_class,
+            len(held),
+            macro_f1=candidate_macro_f1,
+            balanced_accuracy=candidate_balanced,
+            deployed_macro_f1=deployed_macro_f1,
+            heldout_classes=heldout_classes,
+        )
         self._reload_engine()
         self.status.promoted += 1
-        reason = f"promoted candidate {candidate_accuracy:.3f} (deployed {deployed_accuracy})"
+        reason = (
+            f"promoted candidate macro-F1 {candidate_macro_f1:.3f} "
+            f"(accuracy {candidate_accuracy:.3f}, deployed macro-F1 {deployed_macro_f1})"
+        )
         self.status.last_result = reason
         logger.info(
             "avcs_apprenticeship_promoted",
             accuracy=candidate_accuracy,
-            deployed=deployed_accuracy,
+            macro_f1=candidate_macro_f1,
+            deployed_macro_f1=deployed_macro_f1,
             checkpoint=str(self.checkpoint_path),
         )
         return LearnResult(
@@ -796,6 +879,10 @@ class AVCSApprenticeshipLoop:
             reason=reason,
             candidate_accuracy=candidate_accuracy,
             deployed_accuracy=deployed_accuracy,
+            macro_f1=candidate_macro_f1,
+            deployed_macro_f1=deployed_macro_f1,
+            balanced_accuracy=candidate_balanced,
+            heldout_classes=heldout_classes,
             train_frames=len(train),
             heldout_frames=len(held),
             checkpoint=str(self.checkpoint_path),
@@ -921,8 +1008,14 @@ class AVCSApprenticeshipLoop:
 
     def _evaluate_on_manifest(
         self, checkpoint: Path, manifest: Path
-    ) -> tuple[float, dict[str, dict[str, int]]]:
-        """Real held-out category accuracy of ``checkpoint`` on real frames."""
+    ) -> tuple[float, dict[str, dict[str, int]], dict[str, int]]:
+        """Real held-out category accuracy of ``checkpoint`` on real frames.
+
+        Returns ``(accuracy, per_class, pred_counts)``. ``per_class`` maps each
+        true label to its correct/total counts; ``pred_counts`` maps each label
+        to how often the model predicted it. Together they yield macro-F1, which
+        exposes a majority-class collapse that raw accuracy hides.
+        """
         import torch
         from PIL import Image
 
@@ -944,6 +1037,7 @@ class AVCSApprenticeshipLoop:
         correct = 0
         total = 0
         per_class: dict[str, dict[str, int]] = {}
+        pred_counts: dict[str, int] = {}
         with torch.no_grad():
             for item in frames:
                 label = str(item.get("label", ""))
@@ -961,6 +1055,9 @@ class AVCSApprenticeshipLoop:
                 view = model.retina.extract_views(frame)
                 out = model.forward(view.peripheral, view.foveal)
                 pred = int(out["category_logits"].argmax(dim=-1).item())
+                if 0 <= pred < len(UI_CATEGORIES):
+                    pred_label = UI_CATEGORIES[pred]
+                    pred_counts[pred_label] = pred_counts.get(pred_label, 0) + 1
                 total += 1
                 bucket = per_class.setdefault(label, {"correct": 0, "total": 0})
                 bucket["total"] += 1
@@ -969,10 +1066,18 @@ class AVCSApprenticeshipLoop:
                     bucket["correct"] += 1
         if total == 0:
             raise ValueError("held-out manifest produced no evaluable frames")
-        return correct / total, per_class
+        return correct / total, per_class, pred_counts
 
     def _write_sidecar(
-        self, accuracy: float, per_class: dict[str, dict[str, int]], samples: int
+        self,
+        accuracy: float,
+        per_class: dict[str, dict[str, int]],
+        samples: int,
+        *,
+        macro_f1: float = 0.0,
+        balanced_accuracy: float = 0.0,
+        deployed_macro_f1: Optional[float] = None,
+        heldout_classes: int = 0,
     ) -> None:
         sidecar = self.checkpoint_path.with_suffix(".eval.json")
         sidecar.write_text(
@@ -983,6 +1088,17 @@ class AVCSApprenticeshipLoop:
                     "samples": samples,
                     "category_accuracy": accuracy,
                     "chance_accuracy": round(_CHANCE_ACCURACY, 4),
+                    # macro_f1 is the promotion criterion: it weights every
+                    # held-out class equally, so a majority-class collapse is
+                    # visible here even when category_accuracy looks high.
+                    "macro_f1": round(macro_f1, 4),
+                    "balanced_accuracy": round(balanced_accuracy, 4),
+                    "deployed_macro_f1": (
+                        round(deployed_macro_f1, 4)
+                        if deployed_macro_f1 is not None
+                        else None
+                    ),
+                    "heldout_classes": heldout_classes,
                     "per_class": per_class,
                     "promoted_at": time.time(),
                 },

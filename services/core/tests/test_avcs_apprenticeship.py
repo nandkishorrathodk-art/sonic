@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -26,7 +27,9 @@ from sonic.computer_use.apprenticeship import (
     ApprenticeshipStore,
     AVCSApprenticeshipLoop,
     DesktopSceneLabeler,
+    _balanced_accuracy,
     _grouped_split,
+    _macro_f1,
     freedesktop_categories_to_ui,
     parse_desktop_categories,
 )
@@ -308,6 +311,138 @@ class TestLearnGate:
         data = json.loads(sidecar.read_text())
         assert data["samples"] == result.heldout_frames
         assert "apprenticeship" in data["dataset_provenance"]
+        # The sidecar must record the promotion criterion, not just accuracy.
+        assert "macro_f1" in data
+        assert "balanced_accuracy" in data
+        assert "heldout_classes" in data
+
+
+class TestMajorityClassGate:
+    """The promotion gate must not be fooled by a majority-class collapse.
+
+    Raw accuracy is dominated by the most common class, so a model that always
+    predicts one category can look accurate while ignoring every other class.
+    The gate keys on macro-F1, which weights each class equally, so such a
+    model cannot be promoted.
+    """
+
+    def test_macro_f1_punishes_a_majority_class_collapse(self):
+        # 90 held-out samples of class A, 10 of class B. A model that always
+        # predicts A scores 0.90 accuracy but ~0.47 macro-F1 -- the collapse the
+        # raw number hides. Class A F1 = 2*0.9*1.0/1.9 = 0.947; class B F1 = 0.
+        per_class = {
+            "settings_panel": {"correct": 90, "total": 90},
+            "form_input": {"correct": 0, "total": 10},
+        }
+        pred_counts = {"settings_panel": 100}
+        assert _macro_f1(per_class, pred_counts) == pytest.approx(0.473684, abs=1e-5)
+        assert _balanced_accuracy(per_class) == pytest.approx(0.5)
+
+    def test_macro_f1_rewards_a_balanced_model(self):
+        per_class = {
+            "settings_panel": {"correct": 10, "total": 10},
+            "form_input": {"correct": 10, "total": 10},
+        }
+        pred_counts = {"settings_panel": 10, "form_input": 10}
+        assert _macro_f1(per_class, pred_counts) == pytest.approx(1.0)
+        assert _balanced_accuracy(per_class) == pytest.approx(1.0)
+
+    def test_empty_per_class_yields_zero(self):
+        assert _macro_f1({}, {}) == 0.0
+        assert _balanced_accuracy({}) == 0.0
+
+    def test_collapsed_candidate_cannot_displace_a_balanced_deployed_model(
+        self, tmp_path, monkeypatch
+    ):
+        """A majority-class collapse must not overwrite a balanced checkpoint.
+
+        This is the real regression the gate exists to stop: a candidate with
+        higher raw accuracy but worse per-class performance must be rejected so
+        the balanced deployed eye is preserved.
+        """
+        store = ApprenticeshipStore(root=tmp_path)
+        _seed_real_frames(store)
+        loop = AVCSApprenticeshipLoop(store=store, epochs=2)
+
+        def _write_candidate(manifest):
+            import torch
+
+            from forge.vision.cortex.config import ModelConfig
+            from forge.vision.cortex.model import ArtificialVisualCortex
+
+            out = loop.store.root / "runs" / "candidate.pt"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(ArtificialVisualCortex(ModelConfig()).state_dict(), out)
+
+        monkeypatch.setattr(loop, "_train_candidate", _write_candidate)
+
+        # First deploy a genuinely balanced model (macro-F1 1.0).
+        monkeypatch.setattr(
+            loop,
+            "_evaluate_on_manifest",
+            lambda *_: (
+                0.95,
+                {"settings_panel": {"correct": 95, "total": 100}, "form_input": {"correct": 90, "total": 100}},
+                {"settings_panel": 100, "form_input": 90},
+            ),
+        )
+        first = asyncio.run(loop.learn())
+        assert first.promoted is True
+        deployed = loop.checkpoint_path
+        assert deployed.is_file()
+
+        # The evaluator must score the two checkpoints differently: the deployed
+        # eye stays balanced, the candidate collapses onto one class with higher
+        # raw accuracy. The gate must keep the balanced checkpoint.
+        def _split_eval(checkpoint, _manifest):
+            if Path(checkpoint).name == "candidate.pt":
+                return (
+                    0.97,
+                    {"settings_panel": {"correct": 970, "total": 970}, "form_input": {"correct": 0, "total": 30}},
+                    {"settings_panel": 1000},
+                )
+            return (
+                0.95,
+                {"settings_panel": {"correct": 95, "total": 100}, "form_input": {"correct": 90, "total": 100}},
+                {"settings_panel": 100, "form_input": 90},
+            )
+
+        monkeypatch.setattr(loop, "_evaluate_on_manifest", _split_eval)
+        second = asyncio.run(loop.learn())
+        assert second.promoted is False
+        assert second.macro_f1 < second.deployed_macro_f1
+        assert deployed.is_file()
+
+    def test_balanced_candidate_is_promoted(self, tmp_path, monkeypatch):
+        store = ApprenticeshipStore(root=tmp_path)
+        _seed_real_frames(store)
+        loop = AVCSApprenticeshipLoop(store=store, epochs=2)
+
+        def _write_candidate(manifest):
+            import torch
+
+            from forge.vision.cortex.config import ModelConfig
+            from forge.vision.cortex.model import ArtificialVisualCortex
+
+            out = loop.store.root / "runs" / "candidate.pt"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(ArtificialVisualCortex(ModelConfig()).state_dict(), out)
+
+        monkeypatch.setattr(loop, "_train_candidate", _write_candidate)
+        monkeypatch.setattr(
+            loop,
+            "_evaluate_on_manifest",
+            lambda *_: (
+                0.95,
+                {"settings_panel": {"correct": 95, "total": 100}, "form_input": {"correct": 90, "total": 100}},
+                {"settings_panel": 100, "form_input": 90},
+            ),
+        )
+
+        result = asyncio.run(loop.learn())
+        assert result.promoted is True
+        assert result.macro_f1 > 0.5
+        assert loop.checkpoint_path.is_file()
 
 
 class TestStatusSurface:

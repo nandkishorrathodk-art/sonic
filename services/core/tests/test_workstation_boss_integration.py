@@ -525,7 +525,7 @@ async def test_reasoning_pipeline_exception_remains_visible_as_error(monkeypatch
         lambda _prompt: (_ for _ in ()).throw(RuntimeError("controlled reasoning failure")),
     )
 
-    await _run_prompt_reasoning(tenant_id, session_id, "hello")
+    await _run_prompt_reasoning(tenant_id, session_id, "describe the desktop")
 
     assert state["status"] == "ERROR"
     assert "Reasoning failed" in state["current_action"]
@@ -549,7 +549,7 @@ async def test_cancelled_replaced_prompt_cannot_overwrite_new_session_state(monk
     replacement = asyncio.create_task(asyncio.sleep(10))
     workstation._background_tasks[(tenant_id, session_id)] = replacement
     try:
-        await _run_prompt_reasoning(tenant_id, session_id, "hello")
+        await _run_prompt_reasoning(tenant_id, session_id, "describe the desktop")
         assert state["status"] == "RUNNING"
     finally:
         workstation._background_tasks.pop((tenant_id, session_id), None)

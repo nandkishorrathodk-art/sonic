@@ -4997,3 +4997,147 @@ load-induced timing flake (`test_continuous_avcs_awareness::
 test_capture_error_does_not_kill_the_loop`, which needs >=2 frames in a 0.4s
 window and does not import the changed modules) passes in isolation; it is not
 caused by this work.
+
+## Focus-demo recorder + Judge receipts -> memory (2026-10-27)
+
+Two real gaps closed while continuing AVCS training work.
+
+### 1. The focus-verification head had no recorder (`focus_demo_recorder.py`)
+`avcs.training.focus_dataset` and `train_focus_verifier` consume a
+`records.jsonl` layout (manifest `status: "complete"`, per-record
+`target_label`/`frame`/`point_px`/`focused`), but **no recorder ever produced
+it** -- the trainer was reachable only from hand-written test fixtures. With no
+way to record real focus demonstrations the focus checkpoint could never be
+trained, so `GUI_TYPE`/text entry stayed permanently blocked.
+
+Added `packages/avcs/avcs/training/focus_demo_recorder.py`
+(`VNCFocusDemoRecorder`, console script `avcs-record-focus`), which reuses the
+VNC click recorder's isolation guarantees (exact foreground window, cropped
+frames, stale-frame rejection, no keystroke capture) and adds the one thing a
+focus demonstration needs that a click demonstration does not: the human
+`focused` ground-truth label for the clicked point. The label is **never**
+inferred from the OS or a model -- inferring it would train the classifier
+against its own guess. `parse_focus_target("<label>:<focused>")` rejects an
+unrecognised focus token rather than guessing; `--target` pre-arms a sequence of
+clicks, otherwise the operator types the label and answers a focused y/n prompt
+before each click. Sessions are written with manifest `status: "complete"`.
+
+Tests (`packages/avcs/tests/test_focus_demo_recorder.py`, 19): token parsing
+(accepted/rejected), cropped-point mapping, schema/no-text record shape,
+isolation-confirmation + pre-armed-label gates, rejected/stale clicks do not
+consume a label, and a **round trip** proving the written session is consumable
+by the real `discover_focus_demonstrations` (the defect this closes) and that an
+incomplete session is rejected. Verified the recorder->loader->trainer chain
+end-to-end: a synthetic recorded session trains a checkpoint and the
+`runtime_ready` gate stays honest (`False` when accepted held-out samples are
+below the 30-sample floor).
+
+### 2. Judge receipts now reach the being's memory (requirement #3)
+The workstation route credited a mission to `BeingMind` as a *verified success*
+whenever the Boss reported `status == COMPLETE`, but never passed a
+`verification_receipt_id`, so `record_mission_outcome` computed
+`verified_success = False` and Judge-confirmed work earned **no** satiety /
+curiosity credit. The receipt seam was open.
+
+- `BossReport.judge_receipt` (new field): `_build_judge_receipt()` derives a
+  SHA-256 `judge-<hex>` id from only the sub-missions the independent Judge
+  returned `CONFIRMED` **and** marked `evidence_verified`. No confirmed verdict
+  -> empty `receipt_id` (the run is not a verified success).
+- `api/routes/workstation.py` passes that `receipt_id` into
+  `record_mission_outcome` on the Boss path; the single-agent path derives its
+  own receipt from real `VERIFIED` action traces (independent sandbox probe +
+  System-1 receipt check) and passes it likewise. No receipt -> the outcome is
+  recorded as *attempted*, not *completed*.
+- Tests (`services/core/tests/test_judge_receipt_memory.py`, 6): receipt minted
+  only from CONFIRMED+verified verdicts; empty without one; ignores a CONFIRMED
+  string lacking `evidence_verified`; deterministic for the same work; and
+  `record_mission_outcome` credits `goals_completed`/satiety only when a receipt
+  is supplied.
+
+Honesty: still no real held-out AVCS checkpoint in-repo and no live GUI
+acceptance run -- the recorder makes training *possible* from real
+demonstrations, it does not by itself produce a passing checkpoint. AVCS suites:
+634 passed, 20 skipped, 1 known load-flake (soak) that passes in isolation.
+
+## Closed-loop reach now covers every pointer action (2026-10-27)
+
+The eye-hand servo (`computer_use/visual_servo.py`) was wired into `GUI_CLICK`
+and `GUI_MOVE` only, so a double-click, right-click, drag, scroll, or the focus
+click before typing were still **open-loop**: the agent committed the model's
+coordinate in one jump and never corrected it against the real pointer. That is
+precisely the "perceive -> error -> correct -> re-perceive" property the product
+goal calls for, and it was missing on four of the six pointer actions.
+
+Fixed in `computer_use/agent.py`: `GUI_DOUBLE_CLICK`, `GUI_RIGHT_CLICK`,
+`GUI_DRAG` (reach to the press origin; the destination is a path endpoint, not a
+fixated target), `GUI_SCROLL` (scroll lands under the pointer), and the
+`GUI_TYPE` focus click now converge the pointer onto the target through the same
+`_servo_to_pixel_target` path before acting, and carry the measured receipt in
+the observation. The reach stays best-effort and non-fatal -- when the provider
+has no pointer sensor the action keeps its previous open-loop behaviour, and the
+safety envelope is still re-evaluated on every corrective move.
+
+Tests (`services/core/tests/test_visual_servo_closed_loop.py`, +5): a parametrized
+case proves each of the four actions dispatches at least one closed-loop MOVE
+before its own provider action, and the no-sensor case proves the previous
+open-loop behaviour is preserved. Focused GUI regression: 174 passed. Ruff clean.
+
+## Apprenticeship promotion gate now resists majority-class collapse (2026-10-27)
+
+The AVCS self-learning loop (`computer_use/apprenticeship.py`) promoted a
+candidate whenever its raw held-out accuracy beat 1/8. Raw accuracy is dominated
+by the majority class, so a model that always predicts the most common category
+could be promoted while ignoring every other class -- and the committed
+`cortex_learned.eval.json` shows exactly that shape: 0.998 accuracy with 560 of
+589 held-out samples in one class (`settings_panel`), and the better-balanced
+`cortex_real_all.eval.json` at 0.654 with two classes at zero.
+
+Fixed: the gate now keys on **macro-F1** (unweighted mean F1 across the held-out
+classes present), with a raw-accuracy floor of chance. `_evaluate_on_manifest`
+also returns per-predicted-label counts so precision/recall can be computed; the
+sidecar and `LearnResult` now record `macro_f1`, `balanced_accuracy`,
+`deployed_macro_f1`, and `heldout_classes` alongside the existing accuracy and
+per-class table. A candidate whose macro-F1 does not beat the deployed model's is
+rejected, so a collapsed model can no longer overwrite a balanced one; at
+bootstrap (no deployed model) a better-than-chance candidate is still promoted,
+and the sidecar records its weakness honestly. The awareness log line now carries
+`candidate_macro_f1` too.
+
+Tests (`services/core/tests/test_avcs_apprenticeship.py`, +5): macro-F1 punishes a
+majority-class collapse and rewards a balanced model; empty input yields zero; a
+collapsed candidate with *higher* raw accuracy cannot displace a balanced
+deployed checkpoint; a balanced candidate is promoted. Full apprenticeship suite:
+35 passed. Ruff clean.
+
+## Workstation chat: greetings no longer fail, stray tokens no longer launch missions (2026-10-27)
+
+Reported symptom: sending "hi" to the dashboard returned "LLM Response
+Unavailable" plus a raw workstation status dump, and a typo like "geeh"
+returned "no provisioned workstation". Both were routing bugs in
+`api/routes/workstation.py`, not an LLM outage.
+
+1. **Greeting fast path.** A bare greeting was routed through the reasoning
+   model. When that provider round-trip failed (unready/absent provider, or a
+   transient error) the operator saw a provider failure and a status snapshot
+   for what was really just "hi". `_is_bare_greeting()` + `_greeting_reply()`
+   now answer a salutation directly, before the workstation check and before any
+   pixel capture or provider call. Identity/capability/status questions ("who are
+   you", "what can you do", "status") are deliberately NOT treated as greetings:
+   they still get a real model answer.
+2. **Stray-token guard.** `_is_action_prompt` treated any non-greeting text as an
+   actionable desktop objective, so a single mistyped token started a mission and
+   hit the "no provisioned workstation" block. A single token is now actionable
+   only when it names something real (path/URL/filename/host or an installed
+   binary); multi-word sentences remain tasks.
+
+The greeting sets (`_GREETING_WORDS`, `_BARE_GREETING_PHRASES`,
+`_CONVERSATIONAL_PHRASES`) are hoisted to module scope so the classifier and the
+fast path share one definition. Verified against the real router: "who are you"
+answers from the model; "hi" answers from the fast path with no provider call.
+
+Tests (`test_workstation_chat_and_observation.py`, +4): greeting recognition vs
+identity questions; stray single token is not an action but `python`/`/etc/passwd`
+still are; greeting reply is honest; a greeting makes zero provider calls. Two
+existing pipeline-error tests in `test_workstation_boss_integration.py` were
+retargeted from "hello" to a non-greeting prompt so they still exercise the
+error path. Workstation regression: 122 passed; ruff clean.

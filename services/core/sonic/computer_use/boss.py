@@ -2520,6 +2520,7 @@ If the objective is complete or no more work is needed, return:
                 if self.last_dispatch_decision is not None
                 else {}
             ),
+            judge_receipt=self._build_judge_receipt(),
             waiting_for_human=any_waiting_for_human,
             waiting_for_human_reason=waiting_reason_str,
         )
@@ -2580,6 +2581,48 @@ If the objective is complete or no more work is needed, return:
     def _now() -> str:
         from datetime import datetime
         return datetime.now(UTC).isoformat()
+
+    def _build_judge_receipt(self) -> dict[str, Any]:
+        """Derive an honest verification receipt from the independent Judge verdicts.
+
+        Only sub-missions the Judge CONFIRMED (``evidence_verified``) count as
+        independently verified work. The receipt id is a SHA-256 over the
+        confirmed worker verdicts, so it is reproducible from the report and
+        cannot be minted without a real Judge CONFIRMED verdict. When nothing was
+        confirmed the id is empty and the caller must not treat the run as a
+        verified success.
+        """
+        import hashlib
+
+        confirmed: list[dict[str, Any]] = []
+        for phase in self.phases:
+            for result in getattr(phase, "results", []):
+                verdict = str(getattr(result, "judge_verdict", "UNVERIFIED")).upper()
+                if verdict == "CONFIRMED" and bool(getattr(result, "evidence_verified", False)):
+                    confirmed.append(
+                        {
+                            "sub_mission_id": str(getattr(result, "sub_mission_id", "")),
+                            "agent_uid": str(getattr(result, "agent_uid", "")),
+                            "verdict": verdict,
+                            "goal": str(getattr(result, "goal", ""))[:200],
+                        }
+                    )
+        if not confirmed:
+            return {
+                "receipt_id": "",
+                "confirmed_sub_missions": 0,
+                "verdicts": [],
+                "source": "independent_judge",
+            }
+        digest = hashlib.sha256(
+            json.dumps(confirmed, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return {
+            "receipt_id": f"judge-{digest[:32]}",
+            "confirmed_sub_missions": len(confirmed),
+            "verdicts": confirmed,
+            "source": "independent_judge",
+        }
 
     # Lifecycle events the operator board depends on. If the route handler
     # fails to record one of these, the corresponding worker card silently
