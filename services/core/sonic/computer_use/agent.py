@@ -1341,6 +1341,45 @@ class ComputerUseAgent:
         perception = getattr(self, "_avcs_perception", None)
         if perception is None:
             raise RuntimeError("local AVCS pixel processor is unavailable")
+
+        # Optional cloud vision bridge. Only used when the operator explicitly
+        # opts in AND no evaluated local AVCS grounder checkpoint exists. The
+        # local checkpoint always wins when configured: the default path keeps
+        # workstation pixels inside the workstation.
+        if (
+            not getattr(perception, "goal_grounder_configured", False)
+            and os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "0") == "1"
+        ):
+            bridge_b64 = frame_b64
+            if not bridge_b64 and raw_rgb:
+                from io import BytesIO
+
+                from PIL import Image
+
+                buffer = BytesIO()
+                Image.fromarray(
+                    np.frombuffer(raw_rgb, dtype=np.uint8).reshape(height, width, 3)
+                ).save(buffer, format="PNG")
+                bridge_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+            if bridge_b64:
+                from sonic.computer_use.grounding import _resolve_vlm_target
+
+                point = await _resolve_vlm_target(
+                    query.strip(),
+                    bridge_b64,
+                    width,
+                    height,
+                    router=getattr(self, "llm_router", None),
+                )
+                if point is not None:
+                    logger.info(
+                        "vlm_grounding_target_resolved",
+                        query=query,
+                        resolved_x=point[0],
+                        resolved_y=point[1],
+                    )
+                    return {"x": point[0], "y": point[1], "engine": "vlm_grounder"}
+
         if raw_rgb:
             result = await asyncio.to_thread(
                 perception.ground_target_rgb_bytes,
