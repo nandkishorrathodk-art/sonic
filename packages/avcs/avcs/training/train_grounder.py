@@ -36,6 +36,34 @@ from avcs.training.demonstrations import (
     split_sessions,
 )
 
+_MIN_SHM_FOR_WORKERS_BYTES = 512 * 1024 * 1024
+
+
+def _resolve_loader_workers() -> int:
+    """Pick a DataLoader worker count that cannot exhaust shared memory.
+
+    ``num_workers=2`` crashes with "unable to allocate shared memory" inside a
+    container whose ``/dev/shm`` is the Docker default of 64 MB, which is the
+    common case -- so training silently failed to start in exactly the
+    environment it is meant to run in. Fall back to in-process loading unless
+    ``/dev/shm`` is comfortably large (or the caller overrides via
+    ``SONIC_AVCS_DATALOADER_WORKERS``).
+    """
+    override = os.environ.get("SONIC_AVCS_DATALOADER_WORKERS", "").strip()
+    if override:
+        try:
+            return max(0, int(override))
+        except ValueError:
+            pass
+    if os.name == "nt":
+        return 0
+    try:
+        stats = os.statvfs("/dev/shm")
+        available = stats.f_bavail * stats.f_frsize
+    except (OSError, AttributeError):
+        return 0
+    return 2 if available >= _MIN_SHM_FOR_WORKERS_BYTES else 0
+
 
 def _resolve_dataset_provenance(records: list[Any]) -> str:
     """Return the single provenance shared by every record, or ``"mixed"``."""
@@ -224,24 +252,25 @@ def train_grounder(
     train_records, validation_records, test_records = split_sessions(sessions, seed=seed)
     train_data = DemonstrationClickDataset(train_records, input_size=input_size)
     validation_data = DemonstrationClickDataset(validation_records, input_size=input_size)
+    loader_workers = _resolve_loader_workers()
     train_loader = DataLoader(
         train_data,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0 if os.name == "nt" else 2,
+        num_workers=loader_workers,
     )
     validation_loader = DataLoader(
         validation_data,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0 if os.name == "nt" else 2,
+        num_workers=loader_workers,
     )
     test_data = DemonstrationClickDataset(test_records, input_size=input_size)
     test_loader = DataLoader(
         test_data,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0 if os.name == "nt" else 2,
+        num_workers=loader_workers,
     )
 
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
