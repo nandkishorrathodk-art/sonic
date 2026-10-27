@@ -3003,6 +3003,76 @@ _TASK_IMPERATIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Bare salutations. Hoisted to module scope so the action classifier and the
+# LLM-free greeting fast path share one definition. Identity, capability, and
+# status questions are deliberately NOT here: they deserve a real answer.
+_GREETING_WORDS = {
+    "hi", "hello", "hey", "thanks", "thank you", "ping", "sup", "yo", "buddy",
+    "friend", "ok", "okay", "hm", "hmm",
+}
+_BARE_GREETING_PHRASES = {
+    "hi sonic", "hello sonic", "hey sonic", "thanks sonic", "thank you sonic",
+    "hi sonic desktop", "how are you", "hello how are you", "hi how are you",
+    "hey how are you", "how do you do", "kya haal hai", "kya hal hai",
+    "kya kar rahe ho", "kaise ho", "namaste", "namaskar",
+}
+
+# Identity/status/capability questions stay conversational (they get a real
+# model answer) but must not be misread as a desktop objective.
+_CONVERSATIONAL_PHRASES = {
+    "status", "who are you", "what can you do", "what is sonic", "who is sonic",
+    "tell me about yourself", "kya chal raha hai", "kaun ho tum", "tum kaun ho",
+    "aap kaun ho",
+}
+
+
+def _is_bare_greeting(prompt: str) -> bool:
+    """True for a salutation with no actionable or informational content.
+
+    These are answered conversationally without a provider round-trip: a
+    greeting is not a desktop objective, and routing it through the reasoning
+    model made a missing provider surface as "LLM Response Unavailable" plus a
+    workstation status dump for what was really just "hi".
+    """
+    lower = prompt.strip().lower()
+    if not lower:
+        return False
+    cleaned = re.sub(r"[\s?!.,;]+$", "", lower).strip()
+    if re.fullmatch(
+        r"(?:hi|hello|hey|thanks|thank you|yo|buddy|friend|sup|ping)(?:\s+\w+)?",
+        cleaned,
+    ):
+        return True
+    if re.fullmatch(
+        r"(?:hi|hello|hey|thanks|thank you|yo|buddy|friend)(?:\s+sonic)?(?:\s+desktop)?",
+        cleaned,
+    ):
+        return True
+    return (
+        lower in _GREETING_WORDS
+        or cleaned in _GREETING_WORDS
+        or cleaned in _BARE_GREETING_PHRASES
+    )
+
+
+def _greeting_reply(prompt: str, being_brief: str) -> str:
+    """A short, honest, provider-free reply to a bare greeting."""
+    lower = prompt.strip().lower()
+    hindi = bool(re.search(r"[अ-ह]", prompt)) or bool(
+        re.search(r"\b(?:namaste|kaise|kaisa|hal|haal|kya|tum|aap)\b", lower)
+    )
+    if hindi:
+        return (
+            "Namaste. Main SONIC hoon — live workstation par kaam kar sakta hoon. "
+            f"{being_brief} "
+            "Kaam batao (jaise 'browser kholo' ya 'port scan karo'), toh main abhi shuru karta hoon."
+        )
+    return (
+        "Hi. I'm SONIC — I work on the live workstation. "
+        f"{being_brief} "
+        "Give me a task (for example 'open the browser' or 'scan these ports') and I'll start."
+    )
+
 _CONVERSATIONAL_UNDERSTANDING_RE = re.compile(
     r"(?:"
     r"\bh[ao]w\s+many\s+tools?\b"
@@ -3135,17 +3205,7 @@ def _is_action_prompt(prompt: str) -> bool:
     if not lower:
         return False
 
-    # Filter out bare greetings and conversational queries
-    _GREETINGS = {
-        "hi", "hello", "hey", "thanks", "thank you", "ping", "sup", "yo", "buddy", "friend", "ok", "okay", "hm", "hmm", "status",
-    }
-    _GREETING_PHRASES = {
-        "hello how are you", "hi how are you", "hey how are you", "how are you", "how do you do",
-        "hi sonic", "hi sonic ?", "hello sonic", "hey sonic", "thanks sonic", "thank you sonic",
-        "who are you", "what can you do", "status", "kya kar rahe ho", "kaun ho tum",
-        "tum kaun ho", "aap kaun ho", "kya chal raha hai", "kya hal hai", "kya haal hai",
-        "what is sonic", "who is sonic", "tell me about yourself",
-    }
+    # Filter out bare greetings and conversational queries (shared definitions).
     cleaned = re.sub(r"[\s?!.,;]+$", "", lower).strip()
     if re.fullmatch(r"(?:hi|hello|hey|thanks|thank you|yo|buddy|friend)(?:\s+\w+)?", cleaned):
         return False
@@ -3174,10 +3234,11 @@ def _is_action_prompt(prompt: str) -> bool:
     ):
         return False
     if (
-        lower in _GREETINGS
-        or lower in _GREETING_PHRASES
-        or cleaned in _GREETINGS
-        or cleaned in _GREETING_PHRASES
+        lower in _GREETING_WORDS
+        or lower in _CONVERSATIONAL_PHRASES
+        or cleaned in _GREETING_WORDS
+        or cleaned in _CONVERSATIONAL_PHRASES
+        or cleaned in _BARE_GREETING_PHRASES
     ):
         return False
 
@@ -3186,9 +3247,37 @@ def _is_action_prompt(prompt: str) -> bool:
     if _is_conversational_understanding(cleaned) and not _has_task_imperative(cleaned):
         return False
 
+    # A single unrecognized token ("geeh", "asdkjh") is not an objective. A real
+    # task names something to act on or uses an imperative; treating a stray
+    # token as an action made a typo try to launch a desktop mission and report
+    # "no provisioned workstation" for what was really a mistyped greeting.
+    if not _has_task_imperative(cleaned) and not _looks_like_a_task(cleaned):
+        return False
+
     # All non-greeting, non-meta-query prompts (task/action/engineering/GUI/web objectives)
     # route directly to ComputerUseAgent / BossAgent.
     return True
+
+
+def _looks_like_a_task(cleaned: str) -> bool:
+    """Heuristic: does the text read like an instruction rather than a stray token?
+
+    Multi-word sentences are treated as tasks (the agent may still need to
+    clarify). A single token is a task only when it names something actionable —
+    a path, a URL, a filename, a host, or an installed binary — so a bare typo
+    does not start a desktop mission.
+    """
+    tokens = cleaned.split()
+    if len(tokens) >= 2:
+        return True
+    if not tokens:
+        return False
+    token = tokens[0]
+    if "/" in token or "." in token or ":" in token:
+        return True
+    import shutil as _shutil
+
+    return _shutil.which(token) is not None
 
 
 def _requires_desktop_observation(prompt: str) -> bool:
@@ -3692,6 +3781,18 @@ async def _run_prompt_reasoning(
     program_profile = _infer_program_profile(prompt, state)
     state["program_profile"] = program_profile
     try:
+        if _is_bare_greeting(prompt):
+            # A greeting is not a task and needs no workstation or provider.
+            # Answering it here avoids surfacing a missing provider as
+            # "LLM Response Unavailable" plus a status dump for "hi".
+            greeting = _greeting_reply(prompt, _being_conversation_brief(tenant_id))
+            state["status"] = "IDLE"
+            state["current_action"] = "Greeting acknowledged. Waiting for a task."
+            state["thought_summary"] = greeting
+            _append_worklog(state, "response", "SONIC Response", greeting)
+            _persist_workstation_state()
+            return
+
         if _looks_like_dashboard_dump(prompt):
             message = _dashboard_dump_reply()
             state["status"] = "IDLE"

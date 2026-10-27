@@ -5108,3 +5108,36 @@ majority-class collapse and rewards a balanced model; empty input yields zero; a
 collapsed candidate with *higher* raw accuracy cannot displace a balanced
 deployed checkpoint; a balanced candidate is promoted. Full apprenticeship suite:
 35 passed. Ruff clean.
+
+## Workstation chat: greetings no longer fail, stray tokens no longer launch missions (2026-10-27)
+
+Reported symptom: sending "hi" to the dashboard returned "LLM Response
+Unavailable" plus a raw workstation status dump, and a typo like "geeh"
+returned "no provisioned workstation". Both were routing bugs in
+`api/routes/workstation.py`, not an LLM outage.
+
+1. **Greeting fast path.** A bare greeting was routed through the reasoning
+   model. When that provider round-trip failed (unready/absent provider, or a
+   transient error) the operator saw a provider failure and a status snapshot
+   for what was really just "hi". `_is_bare_greeting()` + `_greeting_reply()`
+   now answer a salutation directly, before the workstation check and before any
+   pixel capture or provider call. Identity/capability/status questions ("who are
+   you", "what can you do", "status") are deliberately NOT treated as greetings:
+   they still get a real model answer.
+2. **Stray-token guard.** `_is_action_prompt` treated any non-greeting text as an
+   actionable desktop objective, so a single mistyped token started a mission and
+   hit the "no provisioned workstation" block. A single token is now actionable
+   only when it names something real (path/URL/filename/host or an installed
+   binary); multi-word sentences remain tasks.
+
+The greeting sets (`_GREETING_WORDS`, `_BARE_GREETING_PHRASES`,
+`_CONVERSATIONAL_PHRASES`) are hoisted to module scope so the classifier and the
+fast path share one definition. Verified against the real router: "who are you"
+answers from the model; "hi" answers from the fast path with no provider call.
+
+Tests (`test_workstation_chat_and_observation.py`, +4): greeting recognition vs
+identity questions; stray single token is not an action but `python`/`/etc/passwd`
+still are; greeting reply is honest; a greeting makes zero provider calls. Two
+existing pipeline-error tests in `test_workstation_boss_integration.py` were
+retargeted from "hello" to a non-greeting prompt so they still exercise the
+error path. Workstation regression: 122 passed; ruff clean.

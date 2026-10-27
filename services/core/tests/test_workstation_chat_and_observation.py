@@ -21,7 +21,9 @@ from sonic.api.routes.workstation import (
     _fresh_avcs_pixel_evidence,
     _extract_recent_conversation_messages,
     _get_or_create_session,
+    _greeting_reply,
     _is_action_prompt,
+    _is_bare_greeting,
     _is_observation_only_prompt,
     _run_prompt_reasoning,
     dispatch_workstation_gui_action,
@@ -100,7 +102,7 @@ def test_user_prompt_is_stored_as_visible_conversation_turn():
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("prompt", "needs_desktop_observation"),
-    [("hi sonic", False), ("describe the current screen", True)],
+    [("who are you", False), ("describe the current screen", True)],
 )
 async def test_reasoning_receives_only_fresh_avcs_text_not_screenshot_pixels(
     monkeypatch, prompt, needs_desktop_observation
@@ -366,3 +368,74 @@ def test_desktop_status_surfaces_avcs_capability():
     assert capability["reflex_perception"] is True
     assert capability["gui_actions_ready"] is False
 
+
+
+# --------------------------------------------------------------------------
+# Greeting fast path + stray-token routing (no provider round-trip for "hi")
+# --------------------------------------------------------------------------
+
+def test_bare_greetings_are_recognized_and_identity_questions_are_not():
+    """A salutation is a greeting; an identity/capability question is not."""
+    for greeting in ("hi", "hello", "hey", "hi sonic", "hi bro", "ok", "hmm",
+                     "hello how are you", "kya haal hai", "namaste"):
+        assert _is_bare_greeting(greeting), greeting
+    for not_greeting in ("who are you", "status", "what can you do",
+                         "open browser", "geeh", "asdkjh", ""):
+        assert not _is_bare_greeting(not_greeting), not_greeting
+
+
+def test_stray_single_token_is_not_an_action_prompt():
+    """A mistyped single token must not launch a desktop mission."""
+    assert _is_action_prompt("geeh") is False
+    assert _is_action_prompt("asdkjh") is False
+    # A single token that names something actionable is still a task.
+    assert _is_action_prompt("python") is True
+    assert _is_action_prompt("/etc/passwd") is True
+
+
+def test_greeting_reply_is_provider_free_and_honest():
+    english = _greeting_reply("hi", "Name SONIC.")
+    assert "SONIC" in english
+    hindi = _greeting_reply("kya haal hai", "Name SONIC.")
+    assert "SONIC" in hindi
+
+
+@pytest.mark.asyncio
+async def test_greeting_does_not_call_the_provider(monkeypatch):
+    """A greeting is answered directly, even when a provider is available.
+
+    Regression: "hi" previously made a provider round-trip and surfaced a
+    missing/unready provider as "LLM Response Unavailable" plus a status dump.
+    """
+    tenant_id = "test-tenant-greeting-fastpath"
+    session_id = "greeting-fastpath"
+    state = _get_or_create_session(tenant_id, session_id)
+    state["worklog"] = []
+    monkeypatch.setattr("sonic.api.routes.workstation._persist_workstation_state", lambda: None)
+    monkeypatch.setattr(
+        "sonic.api.routes.workstation._being_conversation_brief", lambda _tenant: "SONIC"
+    )
+
+    requests = []
+
+    class ReadyRouter:
+        providers = {"nvidia": object()}
+
+        @staticmethod
+        def _is_provider_ready(_provider):
+            return True
+
+        async def complete(self, request):
+            requests.append(request)
+            return LLMResponse(content="should not be called for a greeting")
+
+    monkeypatch.setattr(
+        "sonic.llm.router.ModelRouter.from_config",
+        lambda _config_path: ReadyRouter(),
+    )
+
+    await _run_prompt_reasoning(tenant_id, session_id, "hi")
+
+    assert requests == []
+    assert state["status"] == "IDLE"
+    assert "SONIC" in state["thought_summary"]
