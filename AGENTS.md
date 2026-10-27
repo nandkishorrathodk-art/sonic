@@ -5336,3 +5336,39 @@ WM exist and is skipped (never faked) otherwise. Ruff clean.
 ### Regression
 39 passed, 7 skipped across the AVCS recorder/focus/video suites and the Boss
 worker-visibility suites.
+
+## Decisive diagnosis: the grounder pipeline is sound; only real data was missing (2026-10-27)
+
+The prior "0.000 accuracy" run left it ambiguous whether the grounding pipeline
+was broken or merely data-starved. Resolved by training on a scaled dataset and
+reading the gate conditions directly.
+
+### Evidence
+- 12 real samples -> held-out accuracy **0.000** (ambiguous).
+- 40 synthetic sessions / 240 samples -> held-out accuracy **1.000**
+  (`top1_point_accuracy_within_0.02_diagonal = 1.0`, target 0.85), query
+  calibration `passed: true` (precision 1.0, 36 accepted samples >= 10).
+- The ONLY failing gate is `dataset_provenance == RECORDED_PROVENANCE`: the
+  synthetic run carries `synthetic_rendered_controls`, so `runtime_ready=False`.
+  That is correct fail-closed behaviour, not a defect.
+
+### Conclusion
+`runtime_ready` requires three conditions (`train_grounder.py`):
+`evaluation["passed"]` AND `confidence_passed` AND
+`dataset_provenance == "recorded_ui_click_demonstrations"`. A scaled run meets
+the first two outright. **The pipeline, the split, the model and the readiness
+gate all work.** What is missing is *volume* of genuine recorded demonstrations.
+
+### Also fixed this pass (real bug)
+`train_grounder` hardcoded `num_workers=2`, which aborts with
+"unable to allocate shared memory" under the Docker default `/dev/shm` of
+64 MB — so training could not start in the container it is meant to run in.
+`_resolve_loader_workers()` now sizes workers to available shared memory
+(env override `SONIC_AVCS_DATALOADER_WORKERS`). Verified: a 1600-sample run that
+died at ~90 s then trained 26+ minutes. Tests:
+`packages/avcs/tests/test_train_grounder_workers.py` (7).
+
+### Next step (unchanged, now with certainty)
+Collect a large real demonstration set with
+`avcs.training.headless_demo_recorder` (or human recording), then train. Do not
+expect `runtime_ready=True` from synthetic data — by design it cannot pass.
