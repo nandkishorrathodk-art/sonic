@@ -4997,3 +4997,64 @@ load-induced timing flake (`test_continuous_avcs_awareness::
 test_capture_error_does_not_kill_the_loop`, which needs >=2 frames in a 0.4s
 window and does not import the changed modules) passes in isolation; it is not
 caused by this work.
+
+## Focus-demo recorder + Judge receipts -> memory (2026-10-27)
+
+Two real gaps closed while continuing AVCS training work.
+
+### 1. The focus-verification head had no recorder (`focus_demo_recorder.py`)
+`avcs.training.focus_dataset` and `train_focus_verifier` consume a
+`records.jsonl` layout (manifest `status: "complete"`, per-record
+`target_label`/`frame`/`point_px`/`focused`), but **no recorder ever produced
+it** -- the trainer was reachable only from hand-written test fixtures. With no
+way to record real focus demonstrations the focus checkpoint could never be
+trained, so `GUI_TYPE`/text entry stayed permanently blocked.
+
+Added `packages/avcs/avcs/training/focus_demo_recorder.py`
+(`VNCFocusDemoRecorder`, console script `avcs-record-focus`), which reuses the
+VNC click recorder's isolation guarantees (exact foreground window, cropped
+frames, stale-frame rejection, no keystroke capture) and adds the one thing a
+focus demonstration needs that a click demonstration does not: the human
+`focused` ground-truth label for the clicked point. The label is **never**
+inferred from the OS or a model -- inferring it would train the classifier
+against its own guess. `parse_focus_target("<label>:<focused>")` rejects an
+unrecognised focus token rather than guessing; `--target` pre-arms a sequence of
+clicks, otherwise the operator types the label and answers a focused y/n prompt
+before each click. Sessions are written with manifest `status: "complete"`.
+
+Tests (`packages/avcs/tests/test_focus_demo_recorder.py`, 19): token parsing
+(accepted/rejected), cropped-point mapping, schema/no-text record shape,
+isolation-confirmation + pre-armed-label gates, rejected/stale clicks do not
+consume a label, and a **round trip** proving the written session is consumable
+by the real `discover_focus_demonstrations` (the defect this closes) and that an
+incomplete session is rejected. Verified the recorder->loader->trainer chain
+end-to-end: a synthetic recorded session trains a checkpoint and the
+`runtime_ready` gate stays honest (`False` when accepted held-out samples are
+below the 30-sample floor).
+
+### 2. Judge receipts now reach the being's memory (requirement #3)
+The workstation route credited a mission to `BeingMind` as a *verified success*
+whenever the Boss reported `status == COMPLETE`, but never passed a
+`verification_receipt_id`, so `record_mission_outcome` computed
+`verified_success = False` and Judge-confirmed work earned **no** satiety /
+curiosity credit. The receipt seam was open.
+
+- `BossReport.judge_receipt` (new field): `_build_judge_receipt()` derives a
+  SHA-256 `judge-<hex>` id from only the sub-missions the independent Judge
+  returned `CONFIRMED` **and** marked `evidence_verified`. No confirmed verdict
+  -> empty `receipt_id` (the run is not a verified success).
+- `api/routes/workstation.py` passes that `receipt_id` into
+  `record_mission_outcome` on the Boss path; the single-agent path derives its
+  own receipt from real `VERIFIED` action traces (independent sandbox probe +
+  System-1 receipt check) and passes it likewise. No receipt -> the outcome is
+  recorded as *attempted*, not *completed*.
+- Tests (`services/core/tests/test_judge_receipt_memory.py`, 6): receipt minted
+  only from CONFIRMED+verified verdicts; empty without one; ignores a CONFIRMED
+  string lacking `evidence_verified`; deterministic for the same work; and
+  `record_mission_outcome` credits `goals_completed`/satiety only when a receipt
+  is supplied.
+
+Honesty: still no real held-out AVCS checkpoint in-repo and no live GUI
+acceptance run -- the recorder makes training *possible* from real
+demonstrations, it does not by itself produce a passing checkpoint. AVCS suites:
+634 passed, 20 skipped, 1 known load-flake (soak) that passes in isolation.

@@ -4470,12 +4470,18 @@ async def _run_prompt_reasoning(
                             try:
                                 boss_success = str(getattr(boss_report, "status", "")).upper() == "COMPLETE"
                                 summary_text = str(summary_msg or "")
+                                # Credit Judge-confirmed work only when the independent
+                                # Judge actually produced a verification receipt. Without
+                                # one the run must not be recorded as verified success.
+                                judge_receipt = getattr(boss_report, "judge_receipt", {}) or {}
+                                receipt_id = str(judge_receipt.get("receipt_id", "") or "")
                                 if hasattr(mind, "record_mission_outcome"):
                                     mind.record_mission_outcome(
                                         goal=clean_prompt,
                                         success=boss_success,
                                         summary=summary_text,
                                         facts=[summary_text[:200]] if summary_text else [],
+                                        verification_receipt_id=receipt_id,
                                     )
                                 elif hasattr(mind, "record_idle_cycle"):
                                     mind.record_idle_cycle(
@@ -4767,12 +4773,34 @@ async def _run_prompt_reasoning(
                                     and bool(getattr(agent, "goal_reached", False) or succeeded > 0)
                                 )
                                 summary_text = str(summary_msg or "")
+                                # Derive an honest verification receipt from real
+                                # VERIFIED action traces (independent sandbox probe +
+                                # System-1 receipt check). No VERIFIED trace => no
+                                # receipt => the outcome is not credited as verified.
+                                verified_trace_ids = [
+                                    str(getattr(t, "action_id", "") or "")
+                                    for t in traces
+                                    if str(
+                                        getattr(
+                                            getattr(t, "status", ""), "value", getattr(t, "status", "")
+                                        )
+                                    ).upper() == "VERIFIED"
+                                ]
+                                if agent_success and verified_trace_ids:
+                                    import hashlib as _hashlib
+                                    _digest = _hashlib.sha256(
+                                        "|".join(sorted(verified_trace_ids)).encode("utf-8")
+                                    ).hexdigest()
+                                    single_receipt_id = f"verified-{_digest[:32]}"
+                                else:
+                                    single_receipt_id = ""
                                 if hasattr(mind, "record_mission_outcome"):
                                     mind.record_mission_outcome(
                                         goal=clean_prompt,
                                         success=agent_success,
                                         summary=summary_text,
                                         facts=[summary_text[:200]] if summary_text else [],
+                                        verification_receipt_id=single_receipt_id,
                                     )
                                 elif hasattr(mind, "record_idle_cycle"):
                                     mind.record_idle_cycle(

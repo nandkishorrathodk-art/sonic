@@ -148,5 +148,10 @@ class BossReport(BaseModel):
     replay_metrics: dict[str, Any] = Field(default_factory=dict)
     replay_quality_gate_passed: bool = False
     dispatch_decision: dict[str, Any] = Field(default_factory=dict)
+    # Independent-Judge verification receipts. Only sub-missions the Judge
+    # CONFIRMED contribute; ``receipt_id`` is a SHA-256 over the confirmed
+    # worker verdicts. An empty ``receipt_id`` means nothing was independently
+    # verified, so a completion claim must not be treated as verified success.
+    judge_receipt: dict[str, Any] = Field(default_factory=dict)
     waiting_for_human: bool = False
     waiting_for_human_reason: str = ""
