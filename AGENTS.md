@@ -5141,3 +5141,55 @@ still are; greeting reply is honest; a greeting makes zero provider calls. Two
 existing pipeline-error tests in `test_workstation_boss_integration.py` were
 retargeted from "hello" to a non-greeting prompt so they still exercise the
 error path. Workstation regression: 122 passed; ruff clean.
+
+## Cloud VLM grounding bridge + live vision-model reality (2026-10-27)
+
+Built and live-tested the missing bridge that lets SONIC answer "where is X?"
+through a configured vision model when no evaluated local AVCS grounder
+checkpoint exists. Committed `44133e3` (bridge) and `1991743` (operation model
+doc).
+
+### What was added
+- `grounding.py::_parse_vlm_grounding_reply()` — parses a VLM reply in
+  normalized `[0,1000]` space (JSON `{"x","y"}`, `{"point":[x,y]}`, bare
+  `[x,y]`, UI-TARS `<|box_start|>(x1,y1,x2,y2)<|box_end|>`) into screen pixels.
+  Fails closed on prose, `NOT_FOUND`, non-finite/non-numeric values, and
+  out-of-range points (rejected, never clamped).
+- `grounding.py::_resolve_vlm_target()` — sends the live frame + target phrase
+  to the `vision` route; returns a point or `None` on any failure. Takes the
+  router explicitly (there is no global `get_router()`; the agent holds
+  `self.llm_router`).
+- `agent.py::_ground_target_with_avcs()` — uses the bridge ONLY when
+  `SONIC_ENABLE_VLM_GROUNDING=1` AND no local AVCS grounder checkpoint is
+  configured. The local checkpoint always wins; default path keeps workstation
+  pixels inside the workstation.
+- Tests: `services/core/tests/test_vlm_grounding_bridge.py` (14) — parsing,
+  fail-closed behavior, vision-route selection, image attachment.
+
+### LIVE finding — the NVIDIA vision models available here do NOT ground
+Ran the real bridge against the real NVIDIA NIM endpoint with a synthetic
+1280x800 UI of known ground truth (SEARCH button, Clone button, address bar):
+
+- `meta/llama-3.2-11b-vision-instruct` — responds in PROSE, never emits a
+  coordinate JSON; latency 32-119 s per call. It is a caption model, not a
+  grounder. Useless for `resolve_ui_target`.
+- `nvidia/nemotron-3.5-super-vl-120b-a12b` — resolves server-side to
+  `private/nvidia/nemotron-3.5-super-120b-a12b`, a TEXT/reasoning model. It
+  spends the whole budget on `reasoning_content` and returns empty `content`
+  (`finish_reason=length`). Also NOT a grounder.
+- The router's budget guard additionally rejects models with no configured
+  pricing ("Cannot enforce LLM budget..."), so only the priced
+  `meta/llama-3.2-11b-vision-instruct` can even be called today.
+
+**Conclusion:** a generic cloud VLM is not a drop-in grounder. Real grounding
+needs either (a) a purpose-trained grounder (UI-TARS / OS-Atlas style, or the
+local AVCS checkpoint), or (b) a much stronger general VLM with explicit
+coordinate post-processing. The bridge is correct and ready; the model is the
+missing piece. Do not claim semantic grounding works until a real grounder
+model is wired and measured.
+
+### Capability picture after this pass (honest)
+- Works: AVCS reflex perception, LLM reasoning, app launch, pixel-coordinate
+  GUI actions, the new grounding bridge plumbing.
+- Still blocked (fail-closed, capability genuinely absent): semantic GUI
+  targeting (no real grounder model) and text entry (no focus checkpoint).
