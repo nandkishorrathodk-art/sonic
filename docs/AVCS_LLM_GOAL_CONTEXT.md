@@ -18,73 +18,127 @@ claim here as a target, not a capability.
 7. The **reflex layer and the button/affordance detector are removed from the
    active path.** AVCS must understand the screen, not count pixel changes.
 
+The operator supplied this architecture directly:
+
+```
+[USER] "file.txt banao aur openhands sdk clone karo"
+   │
+   ▼
+[BRAIN LLM] (Pure Text Strategist — Fast Text Model)
+   │  Out: {"instruction": "Click the address bar and type github.com", "expect": "GitHub loads"}
+   ▼
+[AVCS DAEMON] (Cloud Vision Stream + Local Mouse/Keyboard Controller)
+   ├── 1. Eyes (Stream): Reads latest 1080p frame from live ring buffer
+   ├── 2. Grounding: Finds Address Bar at normalized [240, 82] -> real [460, 88]
+   ├── 3. Hands (Actuator): Moves mouse -> Clicks -> Types "github.com" -> Hits Enter
+   ├── 4. Stream Watch: Watches frames until page load finishes (or timeout)
+   └── 5. Report: Generates text observation of new screen state
+   │
+   │  Out: {"action_taken": "click_and_type", "point": [460, 88], "observation": "GitHub home page is loaded with a search bar in the top right", "confidence": 0.95}
+   ▼
+[BRAIN LLM] -> plans the next step -> ... -> task done -> report to user
+```
+
 ---
 
 ## 1. The two-model contract
 
-There are exactly two reasoning models. Their split is strict.
+There are exactly two components. Their split is strict.
 
-| Role | Model | Input | Output |
+| Role | Component | Input | Output |
 |---|---|---|---|
-| **Brain** | text reasoning LLM | text only: the goal, AVCS's description, the app list, action history | **one instruction, in words** |
-| **AVCS** | cloud vision LLM | the **live screenshot** + the instruction | **the action + what it observed** |
+| **Brain** | Pure Text Strategist — a **fast text model** | text only: the goal, AVCS's observation, the app list, action history | **one instruction, in words** |
+| **AVCS** | **daemon**: cloud vision LLM + local mouse/keyboard actuator | the **live frame** from the ring buffer + the instruction | **the action it took + what it observed** |
 
 Hard rules:
 
 - The brain **never** receives an image. If a code path would attach a
   screenshot to the brain's request, that path is wrong and must fail closed.
 - AVCS **always** looks at pixels. It is the only component allowed to.
-- The brain speaks in intent ("click the Clone button"), never in coordinates.
-- AVCS speaks in observations ("a dropdown appeared with HTTPS and SSH clone
-  URLs"), never in raw pixel statistics.
+- The brain speaks in intent ("click the address bar and type github.com"),
+  never in coordinates.
+- AVCS speaks in observations ("GitHub home page is loaded with a search bar in
+  the top right"), never in raw pixel statistics.
+- AVCS is a **daemon**, not a per-call helper: it owns the frame stream, the
+  grounding model, and the mouse/keyboard actuator, and it keeps running between
+  instructions.
 
-## 2. The loop
+## 2. The AVCS daemon internals
+
+The daemon is one long-lived service with five internal stages. A single
+instruction drives one pass through them.
 
 ```
-        USER task
-            │
-            ▼
-    ┌───────────────┐
-    │  Brain (LLM)  │  text only — never sees pixels
-    │  decides WHAT │
-    └───────┬───────┘
-            │  instruction (words)
-            ▼
-    ┌───────────────┐
-    │  AVCS (cloud  │  sees the live screen
-    │  vision LLM)  │  understands it
-    │  decides WHERE│  finds the target
-    │  and ACTS     │  performs the action
-    └───────┬───────┘
-            │  observation (words)
-            ▼
-    ┌───────────────┐
-    │  Brain        │  replan
-    └───────┬───────┘
-            │  next instruction
-            └──────────► back to AVCS
-                         ...
-                         task done → report to user
+[AVCS DAEMON]  (Cloud Vision Stream + Local Mouse/Keyboard Controller)
+   ├── 1. Eyes (Stream)     : read the latest 1080p frame from the live ring buffer
+   ├── 2. Grounding         : find the target, normalized [240, 82] -> real [460, 88]
+   ├── 3. Hands (Actuator)  : move mouse -> click -> type -> press Enter
+   ├── 4. Stream Watch      : watch frames until the page/state settles (or timeout)
+   └── 5. Report            : turn the new screen state into a text observation
 ```
 
-## 3. The wire format
+| Stage | Owns | Never does |
+|---|---|---|
+| Eyes | a live ring buffer of recent frames, always current | interpret pixels |
+| Grounding | the cloud vision LLM call; intent -> pixel point | dispatch input |
+| Hands | the local mouse/keyboard actuator on `DISPLAY` | decide what to do |
+| Stream Watch | settling detection after an action (frame stability / timeout) | claim success from a single frame |
+| Report | the text observation the brain replans from | send pixels anywhere |
+
+Stage 3 is why typing is AVCS's job: the daemon owns the actuator, so a compound
+action such as `click_and_type` (focus the field, type, press Enter) happens
+inside AVCS, not in the brain.
+
+## 3. The loop
+
+```
+[USER] "file.txt banao aur openhands sdk clone karo"
+   │
+   ▼
+[BRAIN LLM]  (Pure Text Strategist — fast text model)
+   │  Out: {"instruction": "Click the address bar and type github.com",
+   │        "expect": "GitHub loads"}
+   ▼
+[AVCS DAEMON]  (Cloud Vision Stream + Local Mouse/Keyboard Controller)
+   ├── 1. Eyes (Stream)   : latest 1080p frame from the live ring buffer
+   ├── 2. Grounding       : address bar at normalized [240, 82] -> real [460, 88]
+   ├── 3. Hands (Actuator): move mouse -> click -> type "github.com" -> Enter
+   ├── 4. Stream Watch    : watch frames until the page load settles (or timeout)
+   └── 5. Report          : text observation of the new screen state
+   │
+   │  Out: {"action_taken": "click_and_type", "point": [460, 88],
+   │        "observation": "GitHub home page is loaded with a search bar in
+   │                        the top right", "confidence": 0.95}
+   ▼
+[BRAIN LLM] -> plans the next step -> ... -> task done -> report to user
+```
+
+The brain never sees a frame. It reads AVCS's observation as text and replies
+with the next instruction as text. AVCS is the only component that touches
+pixels, the mouse, or the keyboard.
+
+## 4. The wire format
 
 Brain to AVCS:
 
 ```json
-{ "instruction": "click the Clone button", "expect": "a clone dialog opens" }
+{ "instruction": "Click the address bar and type github.com", "expect": "GitHub loads" }
 ```
 
 AVCS to Brain:
 
 ```json
 {
-  "action_taken": "click",
-  "point": [1512, 640],
-  "observation": "A dropdown appeared with HTTPS and SSH clone URLs",
-  "confidence": 0.91
+  "action_taken": "click_and_type",
+  "point": [460, 88],
+  "observation": "GitHub home page is loaded with a search bar in the top right",
+  "confidence": 0.95
 }
 ```
+
+`action_taken` is one of `click`, `double_click`, `right_click`, `click_and_type`,
+`type`, `key`, `scroll`, `drag`, or `none`. A compound action such as
+`click_and_type` is performed entirely inside the daemon (focus, type, Enter).
 
 When AVCS cannot find the target it must say so, not guess:
 
@@ -92,36 +146,39 @@ When AVCS cannot find the target it must say so, not guess:
 { "action_taken": "none", "observation": "No element matching 'Clone button' is visible" }
 ```
 
-## 4. Real-time streaming
+## 5. Real-time streaming
 
-- **Frames stream continuously.** AVCS always holds a current view of the
-  screen, so when an instruction arrives it acts on what is on screen now.
-- **AVCS-LLM runs per step** — on each instruction, and after each action to
-  check the result.
-- "Real-time" applies to *watching*. *Acting* is per-step.
+- **Frames stream continuously** into the daemon's ring buffer. AVCS always
+  holds a current view of the screen, so when an instruction arrives it acts on
+  what is on screen *now*, not on a stale frame.
+- **AVCS runs one pass per instruction**, and again after the action to watch
+  the result settle (stage 4, Stream Watch).
+- "Real-time" applies to *watching* (the ring buffer stays current). *Acting*
+  is per-step.
 
 Honest latency on this machine (CPU-only, no GPU, cloud vision model):
 
 | Operation | Time |
 |---|---|
 | Capture a frame | ~100 ms |
-| AVCS cloud call (see + act) | ~3-6 s |
+| AVCS cloud call (ground + decide) | ~3-6 s |
 | Brain call (decide) | ~1-2 s |
 | **Per step** | **~4-8 s** |
 
 A cloud VLM cannot stream at 10-30 fps. That is a physical limit, not an
-engineering gap. Genuine 30 fps vision needs a GPU.
+engineering gap. Genuine 30 fps vision needs a GPU. The ring buffer makes the
+*frame* real-time; the *vision model* is per-step.
 
-## 5. Concrete trace — the operator's example
+## 6. Concrete trace — the operator's example
 
-Task: *"open the file manager, create file.txt, then open Firefox, search
-GitHub for a repo, and clone it."*
+Task: *"file.txt banao aur openhands sdk clone karo"* — create file.txt and
+clone the openhands sdk.
 
 **Step 0 — first look**
-- AVCS captures a frame and describes it: *"Desktop, no windows open. Icons
-  visible: Files, Firefox, Terminal."*
-- Brain reads that text: **"Launch the file manager."** (a typed app-launch
-  action, no pixels involved)
+- AVCS (Eyes + Report): *"Desktop, no windows open. Icons visible: Files,
+  Firefox, Terminal."*
+- Brain reads that text: **"Launch the file manager."** (typed app-launch, no
+  pixels involved)
 
 **Step 1 — create the file**
 - AVCS: *"A file manager window is open, showing the Home folder."*
@@ -131,13 +188,13 @@ GitHub for a repo, and clone it."*
 - Brain: *"Choose Create Document, then Empty File."*
 - AVCS (clicks): *"A name field appeared with 'untitled' selected."*
 - Brain: *"Type file.txt and press Enter."*
-- AVCS (types, presses Enter): *"A new file named file.txt now exists."*
-- Brain: *"file.txt created. Next: open Firefox."*
+- AVCS (`click_and_type`): *"A new file named file.txt now exists."*
+- Brain: *"file.txt created. Next: clone openhands sdk."*
 
 **Step 2 — Firefox and GitHub**
 - Brain: *"Launch Firefox."* → AVCS: *"Firefox window open, homepage showing."*
-- Brain: *"Click the address bar and go to github.com."* → AVCS clicks, types,
-  Enter: *"GitHub homepage loaded."*
+- Brain: *"Click the address bar and type github.com."* → AVCS
+  (`click_and_type`): *"GitHub homepage loaded."*
 - Brain: *"Search for 'openhands sdk'."* → AVCS: *"Search results page showing
   repositories."*
 - Brain: *"Click the first repository result."* → AVCS: *"Repository page:
@@ -152,11 +209,11 @@ GitHub for a repo, and clone it."*
 - Brain: *"Task complete."*
 
 **Report to user**
-> "Opened the file manager and created file.txt. Opened Firefox, searched
-> GitHub for 'openhands sdk', opened openhands/software-agent-sdk, and cloned
-> it into ~/software-agent-sdk."
+> "Created file.txt in the home folder. Opened Firefox, searched GitHub for
+> 'openhands sdk', opened openhands/software-agent-sdk, and cloned it into
+> ~/software-agent-sdk."
 
-## 6. What is removed from the active path
+## 7. What is removed from the active path
 
 The operator asked for these to go:
 
@@ -169,21 +226,25 @@ The operator asked for these to go:
 Removal means: not consulted for perception or grounding. Any surviving code
 must not be presented as the perception path.
 
-## 7. What replaces them
+## 8. What replaces them
 
-**AVCS cloud adapter** — one module with one contract:
+**AVCS daemon** — one long-lived service with one contract:
 
 ```
-input:  screenshot (RGB/PNG) + instruction (text)
-output: action (click | type | key | scroll | none)
-        + point/text (when applicable)
+input:  live frame (from the ring buffer) + instruction (text)
+output: action_taken (click | double_click | right_click | click_and_type
+                      | type | key | scroll | drag | none)
+        + point (pixels) and/or text (for typing)
         + observation (text)
         + confidence
 ```
 
-Backed by a cloud vision LLM. The operator chose cloud over a local trained
-model, accepting the tradeoff: it works sooner, but it is a cloud service, not
-a model we own, and every step needs the network and an API key.
+Internally the daemon runs the five stages of section 2: Eyes, Grounding,
+Hands, Stream Watch, Report. Grounding is backed by a cloud vision LLM.
+
+The operator chose cloud over a local trained model, accepting the tradeoff: it
+works sooner, but it is a cloud service, not a model we own, and every step
+needs the network and an API key.
 
 Verified on this machine before approval (so the choice is evidence-based):
 
@@ -193,11 +254,16 @@ Verified on this machine before approval (so the choice is evidence-based):
 | llama-3.2-11b-vision | No — returns JSON but wrong coordinates |
 | **nemotron-3.5-super-vl-120b** | **Yes — ~1.3-1.9% error on a test UI** |
 
-## 8. Honest limits — do not hide these
+The local **actuator** (mouse/keyboard on `DISPLAY`) is not a cloud call: it is
+the existing computer provider, driven by the daemon after grounding.
 
-1. **Typing is the risk.** Creating "file.txt" and typing "github" require a
-   *type* action, not a click. A cloud VLM can emit it, but it is less reliable
-   than clicking and may need retries.
+## 9. Honest limits — do not hide these
+
+1. **Typing is the hardest part.** Creating "file.txt" and typing "github"
+   require a *type* action, not a click. AVCS owns typing (the daemon has the
+   actuator), but a cloud VLM is less reliable at emitting exact text than at
+   locating a control, and it may need retries. Grounding and typing are
+   different capabilities; do not assume one implies the other.
 2. **Real-desktop accuracy is unproven.** The ~1.5% figure is from a clean
    640x400 test UI. A real 1920x1080 desktop with dense UI is unmeasured. It
    must be measured before any accuracy claim.
@@ -206,27 +272,32 @@ Verified on this machine before approval (so the choice is evidence-based):
 4. **Not our own model.** This is a cloud service, not a trained AVCS model.
 5. **Per-step latency is seconds**, not milliseconds.
 
-## 9. Build plan
+## 10. Build plan
 
-1. **AVCS cloud adapter** — screenshot + instruction → cloud VLM → action +
-   observation, with strict output parsing and fail-closed on unparseable or
-   not-found responses.
-2. **Wire it into the agent** — semantic click/type targets route through the
-   AVCS adapter; the brain still receives text only.
-3. **Continuous frame stream** — keep the live capture so AVCS always acts on
-   the current screen.
-4. **Remove the reflex / affordance path** from the active perception loop.
-5. **Observation feedback** — AVCS's observation goes back to the brain each
+1. **AVCS daemon skeleton** — a long-lived service holding the frame ring
+   buffer (Eyes), the cloud grounding call (Grounding), the local actuator
+   (Hands), settling detection (Stream Watch), and the text reporter (Report).
+2. **Grounding** — instruction → cloud vision LLM → pixel point, with strict
+   output parsing and fail-closed on unparseable or not-found responses.
+3. **Actuator** — click / type / key / scroll / drag / `click_and_type` on the
+   live `DISPLAY`, using the existing computer provider.
+4. **Wire it into the agent** — semantic click/type targets route through the
+   daemon; the brain still receives text only (never a frame).
+5. **Continuous frame stream** — keep the ring buffer current so AVCS always
+   acts on the current screen.
+6. **Remove the reflex / affordance path** from the active perception loop.
+7. **Observation feedback** — AVCS's observation goes back to the brain each
    step for replanning.
-6. **Honest capability surface** — the operator sees whether AVCS is ready and
+8. **Honest capability surface** — the operator sees whether AVCS is ready and
    the measured accuracy.
 
-## 10. Definition of done
+## 11. Definition of done
 
 The design is met only when:
 
 - A GUI action on a described control resolves to real pixels via AVCS.
-- AVCS reports an observation the brain can replan from.
+- AVCS performs a compound `click_and_type` (focus, type, Enter) and reports an
+  observation the brain can replan from.
 - **No screenshot reaches the brain** — proven by a test, not asserted.
 - Reflex and the affordance head are not consulted for perception.
 - Accuracy is measured on a real desktop and reported honestly, including
