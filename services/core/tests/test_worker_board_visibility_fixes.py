@@ -109,3 +109,87 @@ class TestObjectTraceKeepsWorkerIdentity:
         assert 'getattr(trace, "sub_agent_name", "")' in source
         assert 'getattr(trace, "worker_role", "")' in source
         assert 'getattr(trace, "execution_plane", "")' in source
+
+
+class TestWorklogIsBoundedWithoutLosingWorkerIdentity:
+    """A long mission must not grow the worklog without limit.
+
+    Before the cap, every worker step appended an item and every append
+    re-serialized the entire tenant/session store to disk (O(n^2) over a
+    mission). The cap must trim *step* noise while keeping the
+    ``sub_dispatch``/``sub_report`` markers, because the worker projection
+    reconstructs each operator card from that pair -- dropping them would make
+    an active worker vanish from the board.
+    """
+
+    def test_worklog_is_capped_under_sustained_appends(self):
+        from sonic.api.routes import workstation
+
+        state: dict = {"worklog": []}
+        for i in range(workstation._WORKLOG_MAX_ITEMS * 3):
+            workstation._append_worklog(state, "event", f"step {i}", "noise")
+        assert len(state["worklog"]) <= workstation._WORKLOG_MAX_ITEMS
+
+    def test_dispatch_and_report_markers_survive_trimming(self):
+        from sonic.api.routes import workstation
+
+        state: dict = {"worklog": []}
+        workstation._append_worklog(
+            state,
+            "event",
+            "SubAgent dispatched",
+            "worker A",
+            orchestration_event="sub_dispatch",
+            agent_uid="worker-1-abcdef",
+            agent_id="sub-agent-1",
+            agent_name="File Manager Observer",
+            sub_mission_id="sub-1",
+            execution_plane="gui",
+        )
+        workstation._append_worklog(
+            state,
+            "event",
+            "SubAgent finished",
+            "worker A done",
+            orchestration_event="sub_report",
+            agent_uid="worker-1-abcdef",
+            status="COMPLETED",
+            success=True,
+        )
+        for i in range(workstation._WORKLOG_MAX_ITEMS * 3):
+            workstation._append_worklog(state, "event", f"step {i}", "noise")
+
+        events = [
+            item.get("orchestration_event")
+            for item in state["worklog"]
+            if item.get("orchestration_event")
+        ]
+        assert "sub_dispatch" in events
+        assert "sub_report" in events
+
+    def test_objective_marker_survives_so_timeline_stays_scoped(self):
+        from sonic.api.routes import workstation
+
+        state: dict = {"worklog": []}
+        workstation._append_worklog(state, "response", "Objective Received", "do the thing")
+        for i in range(workstation._WORKLOG_MAX_ITEMS * 3):
+            workstation._append_worklog(state, "event", f"step {i}", "noise")
+        titles = [item.get("title") for item in state["worklog"]]
+        assert "Objective Received" in titles
+
+    def test_trim_preserves_chronological_order(self):
+        from sonic.api.routes import workstation
+
+        state: dict = {"worklog": []}
+        for i in range(workstation._WORKLOG_MAX_ITEMS * 2):
+            workstation._append_worklog(state, "event", f"step {i}", "noise")
+        timestamps = [item["timestamp"] for item in state["worklog"]]
+        assert timestamps == sorted(timestamps)
+
+    def test_short_worklog_is_untouched(self):
+        from sonic.api.routes import workstation
+
+        state: dict = {"worklog": []}
+        for i in range(5):
+            workstation._append_worklog(state, "event", f"step {i}", "noise")
+        assert len(state["worklog"]) == 5
