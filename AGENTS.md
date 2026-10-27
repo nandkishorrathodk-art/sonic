@@ -5058,3 +5058,26 @@ Honesty: still no real held-out AVCS checkpoint in-repo and no live GUI
 acceptance run -- the recorder makes training *possible* from real
 demonstrations, it does not by itself produce a passing checkpoint. AVCS suites:
 634 passed, 20 skipped, 1 known load-flake (soak) that passes in isolation.
+
+## Closed-loop reach now covers every pointer action (2026-10-27)
+
+The eye-hand servo (`computer_use/visual_servo.py`) was wired into `GUI_CLICK`
+and `GUI_MOVE` only, so a double-click, right-click, drag, scroll, or the focus
+click before typing were still **open-loop**: the agent committed the model's
+coordinate in one jump and never corrected it against the real pointer. That is
+precisely the "perceive -> error -> correct -> re-perceive" property the product
+goal calls for, and it was missing on four of the six pointer actions.
+
+Fixed in `computer_use/agent.py`: `GUI_DOUBLE_CLICK`, `GUI_RIGHT_CLICK`,
+`GUI_DRAG` (reach to the press origin; the destination is a path endpoint, not a
+fixated target), `GUI_SCROLL` (scroll lands under the pointer), and the
+`GUI_TYPE` focus click now converge the pointer onto the target through the same
+`_servo_to_pixel_target` path before acting, and carry the measured receipt in
+the observation. The reach stays best-effort and non-fatal -- when the provider
+has no pointer sensor the action keeps its previous open-loop behaviour, and the
+safety envelope is still re-evaluated on every corrective move.
+
+Tests (`services/core/tests/test_visual_servo_closed_loop.py`, +5): a parametrized
+case proves each of the four actions dispatches at least one closed-loop MOVE
+before its own provider action, and the no-sensor case proves the previous
+open-loop behaviour is preserved. Focused GUI regression: 174 passed. Ruff clean.
