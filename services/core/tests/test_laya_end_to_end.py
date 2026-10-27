@@ -240,7 +240,7 @@ def test_submission_plane_explicit_override_preservation():
 
     # Default fallback on empty goal
     sub_empty = SubMission(goal="")
-    assert sub_empty.plane in ("gui", "headless")
+    assert sub_empty.plane in ("gui", "headless", "dual")
 
 
 # ============================================================================

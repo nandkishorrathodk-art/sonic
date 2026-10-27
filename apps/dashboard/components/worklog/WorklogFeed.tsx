@@ -604,7 +604,11 @@ function WorkerBoard({
                     )}
                     {worker.plane && (
                       <span className="rounded border border-ink-700 bg-ink-850 px-1.5 py-0.5 text-[9px] uppercase text-muted-dim">
-                        {worker.plane === "headless" ? "Terminal / Code" : "Computer / GUI"}
+                        {worker.plane === "headless"
+                          ? "Terminal / Code"
+                          : worker.plane === "dual"
+                            ? "Desktop + Terminal"
+                            : "Computer / GUI"}
                       </span>
                     )}
                     <span className={`ml-auto rounded border px-1.5 py-0.5 text-[9px] font-medium ${statusClass}`}>

@@ -123,7 +123,7 @@ class WorkstationPromptRequest(BaseModel):
     target_repo: str | None = "nandkishorrathodk-art/sonic"
     mode: str | None = "autonomous_engineer"
     session_id: str | None = "default"
-    requested_plane: Literal["gui", "headless"] | None = None
+    requested_plane: Literal["gui", "headless", "dual"] | None = None
 
 
 class ExecuteCommandRequest(BaseModel):
@@ -3686,7 +3686,7 @@ async def _run_prompt_reasoning(
     )
     state["last_objective"] = prompt
     state["last_requested_plane"] = requested_plane or (
-        "gui" if desktop_prompt else None
+        "dual" if desktop_prompt else None
     )
     pipeline_failed = False
     program_profile = _infer_program_profile(prompt, state)
@@ -4246,7 +4246,7 @@ async def _run_prompt_reasoning(
                                         status=data.get("status", "RUNNING"),
                                         goal=data.get("goal"),
                                         worker_role=data.get("role", "subagent"),
-                                        execution_plane=data.get("plane", "gui"),
+                                        execution_plane=data.get("plane", "dual"),
                                         max_steps=data.get("max_steps"),
                                     )
                                 elif event_type == "sub_step":
@@ -4293,7 +4293,7 @@ async def _run_prompt_reasoning(
                                             sub_agent_uid=data.get("agent_uid"),
                                             agent_name=data.get("agent_name"),
                                             worker_role=data.get("role", "subagent"),
-                                            execution_plane=data.get("plane", "gui"),
+                                            execution_plane=data.get("plane", "dual"),
                                             elapsed_seconds=elapsed,
                                             step=data.get("step"),
                                         )
@@ -4324,7 +4324,7 @@ async def _run_prompt_reasoning(
                                         status=worker_status,
                                         goal=data.get("goal"),
                                         worker_role=data.get("role", "subagent"),
-                                        execution_plane=data.get("plane", "gui"),
+                                        execution_plane=data.get("plane", "dual"),
                                         success=data.get("success"),
                                         findings_summary=data.get("findings_summary"),
                                         judge_verdict=data.get("judge_verdict"),
@@ -4393,7 +4393,7 @@ async def _run_prompt_reasoning(
                                 phase_callback=_on_boss_event,
                                 interrupt_check=lambda: bool(state.get("interrupted")),
                                 requested_plane=requested_plane or (
-                                    "gui" if desktop_prompt else None
+                                    "dual" if desktop_prompt else None
                                 ),
                             )
                             report = boss_report

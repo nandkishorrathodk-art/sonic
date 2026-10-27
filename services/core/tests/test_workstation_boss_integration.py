@@ -277,7 +277,10 @@ async def test_workstation_routes_concise_computer_task_to_boss_agent(monkeypatc
 
     mock_boss_cls.assert_called_once()
     mock_boss_inst.run.assert_awaited_once()
-    assert mock_boss_inst.run.await_args.kwargs["requested_plane"] == "gui"
+    # A desktop objective now gets the "dual" plane: the worker keeps visible
+    # desktop access AND the operator toolkit, so a GUI operation that fails can
+    # hand off to the terminal without the worker being hard-blocked.
+    assert mock_boss_inst.run.await_args.kwargs["requested_plane"] == "dual"
     assert state["status"] == "IDLE"
 
 

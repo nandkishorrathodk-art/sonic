@@ -4929,3 +4929,71 @@ under sustained appends; dispatch/report markers survive; the objective marker
 survives so the timeline stays scoped; chronological order preserved; short
 logs untouched). Boss/worker regression: 77 passed; workstation/worker/boss
 subset: 346 passed, 8 skipped. Ruff clean.
+
+## Dual execution plane is first-class (2026-10-27)
+
+Fixed a real defect that hard-blocked mixed desktop/terminal objectives. The
+`ComputerUseAgent` already fully supported a third execution plane `dual` (GUI
+reasoning, coordinate validation, and `teamwork.observe_desktop in
+("gui","dual")`), but the Boss schema and route layer only ever recognised
+`{"gui","headless"}`. A desktop objective was pinned to `gui`, and a GUI-only
+worker that needed the operator toolkit hit `Blocked by headless execution plane
+contract` / could not fall back to the terminal.
+
+### Plane model (now consistent everywhere)
+- `gui` / `headless` remain **hard per-worker operator restrictions**.
+- `dual` means "either plane is allowed": it is **not** a restriction, so the
+  planner's explicit per-worker plane is still honoured and only an unspecified
+  worker falls back to full dual agency. This preserves headless parallelism
+  (treating `dual` as a hard override would force every worker onto the shared
+  desktop and serialize the whole mission).
+
+### Sites updated (`{"gui","headless"}` -> `+ "dual"`; default `gui` -> `dual`)
+- `models_boss.py`: `SubMission.plane` default; validator preserves `dual` and
+  falls back to `dual`.
+- `boss.py`: constructor plane whitelist; `run()` normalizes and **validates**
+  `requested_plane` (a bogus value is ignored, never latched as a restriction);
+  phase-1 per-worker plane normalization; `_plan_next_phase` normalization and
+  the plane-invariant prompt; `fallback_plane`; `execution_plane` default;
+  `observe_desktop` for `dual`; `effective_plane` fallback; prompt guidance.
+- `dispatch_policy.py`: `Workstream.plane` default and projection.
+- `workstation.py`: request `Literal` accepts `dual`; desktop objectives dispatch
+  `dual`; worklog `execution_plane` defaults for `sub_dispatch`/`sub_heartbeat`/
+  `sub_report`.
+- `agent_activity.py`: worker projection plane default.
+- Dashboard `WorklogFeed.tsx`: the worker card renders a distinct
+  "Desktop + Terminal" badge for `dual` (previously mislabelled as GUI).
+
+### Honesty gate is now action-based, not plane-based
+`ComputerUseAgent._mission_used_desktop_actions()` inspects real traces for
+`GUI_`/`APP_`/`WINDOW_`/`BROWSER_` actions. The independent-Judge requirement at
+the `GOAL_COMPLETE` handoff and at final verification now triggers on **actual
+desktop usage**, so a `dual` worker that used the desktop gets the same Judge
+gate as a `gui` worker. Plane alone was the wrong signal: it would have let a
+`dual` worker's changed screen count as self-verified success.
+
+### Worker identity + drill-down (verified, unchanged)
+`boss.py` mints a run-unique `agent_uid` (`worker-<n>-<hex>`) per sub-agent and
+emits it on `sub_dispatch`/`sub_step`/`sub_report`; the route records it on the
+worklog; `GET /workstation/agents/{agent_uid}` returns the live worker record;
+the dashboard worker card shows the uid and expands (click) into `WorkerDetail`,
+which fetches the authoritative live record so the operator sees what the worker
+is doing now. Background execution is a tracked `asyncio.Task`
+(`_track_background_task`), and `_mission_task_alive` gates the RUNNING verdict.
+
+### Tests
+`test_dual_plane_e2e.py` gained 7 dual-plane cases (F12-F18): `dual` is
+first-class and not coerced; `dual` is not a hard restriction; a `dual` worker
+that used the desktop still needs the Judge while a headless-only one does not;
+`gui`/`headless` remain hard restrictions; a `dual` worker counts as GUI-capable
+for shared-desktop serialization; the dispatch default plane is `dual`; a bogus
+`requested_plane` is ignored. Two legacy tests that pinned the old `gui` default
+(`test_laya_end_to_end.py`, `test_workstation_boss_integration.py`) were updated
+to the new `dual` contract.
+
+Full `services/core/tests`: **2535 passed, 40 skipped, 0 failures**. Ruff clean
+on all changed files; dashboard `next build` and `tsc --noEmit` clean. One
+load-induced timing flake (`test_continuous_avcs_awareness::
+test_capture_error_does_not_kill_the_loop`, which needs >=2 frames in a 0.4s
+window and does not import the changed modules) passes in isolation; it is not
+caused by this work.

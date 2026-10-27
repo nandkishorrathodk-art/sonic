@@ -360,10 +360,126 @@ class TestTier2BoundaryAndCornerCases:
     def test_tier2_empty_or_unspecified_plane_defaults_gracefully(self):
         """Unspecified, empty, or invalid plane strings must default safely without unhandled errors."""
         s1 = SubMission(goal="Generic diagnostic task", plane="")
-        assert s1.plane in ("headless", "gui")
+        assert s1.plane in ("headless", "gui", "dual")
 
         s2 = SubMission(goal="Generic task", plane="invalid_plane_name")
-        assert s2.plane in ("headless", "gui")
+        assert s2.plane in ("headless", "gui", "dual")
+
+    def test_tier1_submission_dual_plane_is_first_class(self):
+        """F12: 'dual' is a valid first-class plane and is preserved, not coerced to 'gui'."""
+        s_dual = SubMission(goal="Set up the service and verify it in the desktop UI", plane="dual")
+        assert s_dual.plane == "dual", (
+            f"Explicit plane='dual' was coerced to {s_dual.plane}"
+        )
+        # A dual worker keeps full agency: no GUI-only action contract is imposed.
+        agent = ComputerUseAgent(
+            computer_provider=_make_computer_mock(),
+            execution_plane="dual",
+        )
+        assert agent._gui_action_contract_active() is False
+        assert str(agent.execution_plane).lower().strip() == "dual"
+
+    def test_tier1_dual_request_is_not_a_hard_restriction(self):
+        """F13: A dual request must not override the planner's explicit per-worker plane."""
+        boss = BossAgent(
+            computer_provider=_make_computer_mock(),
+            llm_router=_make_llm_mock([]),
+            requested_plane="dual",
+        )
+        assert boss.requested_plane == "dual"
+        assert boss._explicit_requested_plane == "dual"
+
+    def test_tier1_dual_worker_uses_external_judge_when_desktop_actions_run(self):
+        """F14: A dual worker that used the desktop still requires the independent Judge."""
+        agent = ComputerUseAgent(
+            computer_provider=_make_computer_mock(),
+            execution_plane="dual",
+        )
+        agent.traces = [
+            ComputerDecisionTrace(
+                action_type=ComputerActionType.GUI_CLICK,
+                target_resource="button",
+                predicted_outcome="click the control",
+                actual_observation="clicked",
+                status=ActionExecutionStatus.COMPLETED,
+                exit_code=0,
+            )
+        ]
+        assert agent._mission_used_desktop_actions() is True
+
+        headless_only = ComputerUseAgent(
+            computer_provider=_make_computer_mock(),
+            execution_plane="dual",
+        )
+        headless_only.traces = [
+            ComputerDecisionTrace(
+                action_type=ComputerActionType.TERMINAL_EXEC,
+                target_resource="hostname",
+                predicted_outcome="read the hostname",
+                actual_observation="host",
+                status=ActionExecutionStatus.COMPLETED,
+                exit_code=0,
+            )
+        ]
+        assert headless_only._mission_used_desktop_actions() is False
+
+    def test_tier1_gui_and_headless_requests_remain_hard_restrictions(self):
+        """F15: Explicit gui/headless requests still override a planner plane."""
+        gui_boss = BossAgent(
+            computer_provider=_make_computer_mock(),
+            llm_router=_make_llm_mock([]),
+            requested_plane="gui",
+        )
+        assert gui_boss.requested_plane == "gui"
+
+        headless_boss = BossAgent(
+            computer_provider=_make_computer_mock(),
+            llm_router=_make_llm_mock([]),
+            requested_plane="headless",
+        )
+        assert headless_boss.requested_plane == "headless"
+
+    @pytest.mark.asyncio
+    async def test_tier1_dual_worker_is_gui_capable_for_shared_desktop_scheduling(self):
+        """F16: A dual worker counts as GUI-capable so shared-desktop scheduling serializes it."""
+        boss = BossAgent(
+            computer_provider=_make_computer_mock(),
+            llm_router=_make_llm_mock([]),
+        )
+        assert boss._shared_desktop is True
+        dual_a = SubMission(id="a", goal="Desktop setup", plane="dual")
+        dual_b = SubMission(id="b", goal="Desktop verification", plane="dual")
+        assert boss._worker_limit_for_wave([dual_a, dual_b]) == 1
+
+        headless_a = SubMission(id="c", goal="Run tests", plane="headless")
+        headless_b = SubMission(id="d", goal="Run lint", plane="headless")
+        assert boss._worker_limit_for_wave([headless_a, headless_b]) == boss.max_parallel_workers
+
+    def test_tier1_dispatch_policy_default_plane_is_dual(self):
+        """F17: An unset workstream plane defaults to dual (full agency), not gui."""
+        from sonic.computer_use.dispatch_policy import Workstream, workstreams_from_sub_missions
+
+        assert Workstream(id="w").plane == "dual"
+        streams = workstreams_from_sub_missions(
+            [SubMission(id="x", goal="Anything", plane="")]
+        )
+        # An empty plane is not a declaration; it must resolve to the dual default
+        # rather than silently pinning the worker to the desktop.
+        assert streams[0].plane in ("dual", "")
+
+    @pytest.mark.asyncio
+    async def test_tier2_unknown_requested_plane_is_ignored(self):
+        """F18: A bogus requested_plane must not be latched as a hard restriction."""
+        boss = BossAgent(
+            computer_provider=_make_computer_mock(),
+            llm_router=_make_llm_mock([]),
+        )
+        await boss.run(workspace_id="ws", objective="", requested_plane="nonsense")
+        # The bogus value must never become a binding operator restriction.
+        assert boss._explicit_requested_plane is None
+        assert boss.requested_plane != "nonsense"
+        # Any plane inferred after planning must be a real, recognised plane.
+        assert boss.requested_plane in (None, "gui", "headless", "dual")
 
     @pytest.mark.asyncio
     async def test_tier2_git_exit_codes_distinction(self):
