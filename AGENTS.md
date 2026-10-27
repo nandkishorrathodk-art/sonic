@@ -5257,3 +5257,43 @@ recorder -> Kaggle training -> `SONIC_AVCS_GROUNDING_CHECKPOINT`.
   load-flake (`test_soak_runner`, passes alone). Core grounding suites 49 passed.
   Ruff clean on every changed/new file (61 pre-existing errors in untouched
   `dataset.py`/`demo_recorder.py`/`train_kaggle.py`/`vicreg_safeguard.py` remain).
+
+## Boss -> worker visibility: real dispatch seam verified (2026-10-27)
+
+The operator complaint was: "when the Boss launches agents, they must have IDs,
+they must run in the background, and clicking an agent's id/name must show what it
+is doing." Audited the whole chain manually and closed the one real gap.
+
+### What was already correct (verified, not assumed)
+- `boss.py` emits `sub_dispatch` / `sub_step` / `sub_report` / `sub_heartbeat`
+  carrying `agent_id` (positional), `agent_uid` (run-unique), `agent_name`, `goal`,
+  `plane`, `max_steps`.
+- `api/routes/workstation.py` translates each event into a worklog item and pins
+  `sub_dispatch`/`sub_report` so worker cards survive worklog bounding.
+- `agent_activity.py` projects the worklog into per-worker records keyed by
+  `uid:{agent_uid}` (falling back to agent id / mission id / number).
+- `WorklogFeed.tsx` renders one card per worker with the uid shown, distinct keys
+  so React cannot merge two workers, and an expand toggle showing live activity.
+
+### The real gap: the dispatch seam was never tested
+`test_boss_worker_visibility.py` stubs `BossAgent._dispatch_sub_agent`, so the code
+that actually builds a worker, runs `run_mission`, and streams per-step traces was
+never exercised. A regression there would keep every test green while the operator
+saw nothing.
+
+### NEW — `services/core/tests/test_boss_real_dispatch_seam.py` (5 tests)
+Drives the REAL `_dispatch_sub_agent` against the REAL in-process
+`HeadlessComputeProvider` (no Docker, no desktop); only the LLM router is scripted.
+Asserts: workers surface with unique `agent_uid` + positional `agent_id` + goal;
+each worker's steps reach the board (thought + action); workers are individually
+addressable by uid and never merge; a fresh objective yields fresh identities; and
+a worker that ran without independent evidence reports UNVERIFIED, never COMPLETED.
+
+### Verified honest status chain (live in-process, real provider)
+- Host execution disabled -> `FAILED` with "FAIL-CLOSED: Host execution is disabled".
+- Command succeeds, no independent evidence -> `UNVERIFIED` ("successful execution
+  lacks independent task evidence").
+- Only independently verified work becomes COMPLETED. No fake success.
+
+### Test baseline
+133 passed across the Boss/worker/receipt regression set; Ruff clean.
