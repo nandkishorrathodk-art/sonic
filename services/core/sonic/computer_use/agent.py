@@ -617,6 +617,10 @@ class ComputerUseAgent:
             data = dict(item)
             postcondition = data.pop("postcondition", None)
             raw_kind = data.pop("action", data.pop("type", ""))
+            # Accept the same short `axis` alias the single-action path uses so a
+            # horizontal scroll inside a burst is not silently treated as vertical.
+            if "axis" in data and "scroll_axis" not in data:
+                data["scroll_axis"] = data.pop("axis")
             try:
                 kind = GUIActionType(str(raw_kind).upper())
             except ValueError as exc:
@@ -980,6 +984,9 @@ class ComputerUseAgent:
             "include a structured observable `postcondition` (for example "
             '{"screen_changed": true}). '
             "Do not treat the free-text `expected` field as a substitute.\n"
+            "GUI_SCROLL PAYLOAD needs integer `x`, `y`, `delta` (negative scrolls "
+            "up/left, positive down/right) and optional `axis`: \"vertical\" "
+            "(default) or \"horizontal\" for left/right. "
             f"Only these ACTION values are valid: {actions}. Never invent "
             "an action name or synonym.\n"
             f"Choose one immediate action from {grounding_source}. AVCS provides "
@@ -3797,7 +3804,9 @@ class ComputerUseAgent:
                 "The language model receives no screenshot pixels or OCR/accessibility "
                 "control list; never invent pixel coordinates or claim a target is grounded. "
                 "If AVCS cannot resolve the target, the action will be blocked. PAYLOAD "
-                "must be a JSON object. GUI_TYPE is unavailable until a tested local "
+                "must be a JSON object. GUI_SCROLL also accepts `axis` "
+                "(\"vertical\" default, or \"horizontal\" for left/right) with an integer "
+                "`delta`. GUI_TYPE is unavailable until a tested local "
                 "AVCS focus-verification capability exists, so do not propose it. GUI_HOTKEY "
                 "requires {\"key\": \"Ctrl+L\"}. Do not include shell commands.\n"
                 "3. COMPLETION: use GOAL_COMPLETE only when the current visual evidence already "
@@ -6037,6 +6046,15 @@ class ComputerUseAgent:
             delta_y = payload.get("delta_y", payload.get("delta"))
             if delta_y is not None:
                 payload = {**payload, "delta": -3 if int(delta_y) > 0 else 3}
+            delta_x = payload.get("delta_x")
+            if delta_x is not None:
+                # A horizontal browser scroll is a horizontal GUI scroll; keep the
+                # axis so it does not silently degrade to a vertical wheel event.
+                payload = {
+                    **payload,
+                    "delta": -3 if int(delta_x) > 0 else 3,
+                    "axis": "horizontal",
+                }
         if action_type in (ComputerActionType.BROWSER_CLICK, ComputerActionType.BROWSER_TYPE):
             target_resource = str(
                 payload.get("selector") or payload.get("target") or target_resource
@@ -7797,13 +7815,23 @@ class ComputerUseAgent:
                         action_exit_code = 126
                     else:
                         delta = raw_delta
+                        # Accept an explicit axis so left/right scrolling is
+                        # reachable; anything unrecognised stays vertical.
+                        raw_axis = str(payload.get("axis", "vertical")).strip().lower()
+                        axis = "horizontal" if raw_axis in ("horizontal", "x", "left", "right") else "vertical"
                         # Scroll events land on whatever is under the pointer, so
                         # converge the pointer onto the target point first; the
                         # scroll then affects the intended pane.
                         servo_receipt = await self._servo_to_pixel_target(workspace_id, x, y)
                         obs_scroll = await self._dispatch_gui_action(
                             workspace_id,
-                            GUIAction(action=GUIActionType.SCROLL, x=x, y=y, scroll_delta=delta),
+                            GUIAction(
+                                action=GUIActionType.SCROLL,
+                                x=x,
+                                y=y,
+                                scroll_delta=delta,
+                                scroll_axis=axis,
+                            ),
                         )
                         scroll_b64 = getattr(obs_scroll, "screenshot_base64", "") if obs_scroll else ""
                         if scroll_b64:
@@ -7815,7 +7843,7 @@ class ComputerUseAgent:
                                 f" [servo: converged={servo_receipt.get('converged')}"
                                 f" residual={servo_receipt.get('final_residual_px')}px]"
                             )
-                        actual_obs_str = f"Scrolled at ({x}, {y}) delta={delta}{servo_note}"
+                        actual_obs_str = f"Scrolled at ({x}, {y}) axis={axis} delta={delta}{servo_note}"
 
             elif action_type == ComputerActionType.GUI_SCREENSHOT:
                 screen = await self.computer.screenshot(workspace_id)

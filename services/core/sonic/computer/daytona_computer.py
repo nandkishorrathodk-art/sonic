@@ -1125,7 +1125,12 @@ class DaytonaComputerProvider(ComputerProvider):
             disp = self._get_display(workspace_id)
             if action_type == GUIActionType.SCROLL:
                 delta = getattr(action, 'scroll_delta', -3)
-                button = 4 if delta > 0 else 5
+                # X11 wheel buttons: 4/5 vertical, 6/7 horizontal.
+                horizontal = getattr(action, "scroll_axis", "vertical") == "horizontal"
+                if horizontal:
+                    button = 7 if delta < 0 else 6
+                else:
+                    button = 4 if delta > 0 else 5
                 clicks = abs(delta)
                 cmd_parts = []
                 if getattr(action, "x", None) is not None and getattr(action, "y", None) is not None:

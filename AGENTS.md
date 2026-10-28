@@ -5372,3 +5372,37 @@ died at ~90 s then trained 26+ minutes. Tests:
 Collect a large real demonstration set with
 `avcs.training.headless_demo_recorder` (or human recording), then train. Do not
 expect `runtime_ready=True` from synthetic data — by design it cannot pass.
+
+## Horizontal (left/right) scrolling added to the GUI action surface (2026-10-23)
+
+The operator asked whether SONIC could scroll "like down, left, right". Audit
+found a real capability gap: only **vertical** scrolling existed. X11 delivers
+wheel events on buttons **4/5** (up/down) and **6/7** (left/right), but every
+dispatch site hardcoded 4/5, so content off to the side (wide tables,
+spreadsheets, code, timelines, horizontal carousels) was unreachable.
+
+### Change
+- `computer/models.py`: `GUIAction` gains `scroll_axis` ("vertical" default,
+  "horizontal"), normalized from `horizontal`/`x`/`left`/`right` aliases.
+- `computer/docker_computer.py` + `computer/daytona_computer.py`: SCROLL maps to
+  buttons 6/7 when the axis is horizontal, 4/5 otherwise.
+- `computer_use/agent.py`: `GUI_SCROLL` accepts `payload["axis"]`
+  (`horizontal`/`x`/`left`/`right` -> horizontal, anything else -> vertical);
+  `BROWSER_SCROLL` honours `delta_x` and preserves the axis; burst actions accept
+  the `axis` alias so a horizontal scroll inside a chunk is not silently
+  vertical. The prompt documents `axis` and the delta sign convention
+  (negative = up/left, positive = down/right).
+- The scroll observation string now reports `axis=<vertical|horizontal>`.
+
+### Tests (5 new agent-level, 2 new provider-level)
+- `test_phase8_visual_computer_use.py`: default axis vertical; horizontal axis
+  forwarded to the provider; `left`/`x` aliases normalize; unknown axis degrades
+  safely to vertical.
+- `test_docker_computer_provider.py`: vertical uses buttons 4/5 and never 6/7;
+  horizontal uses 6 for right and 7 for left. Verified the horizontal test FAILS
+  against the pre-fix mapping (emitted button 4), so it genuinely guards the fix.
+
+### Baseline
+- 152 passed / 2 skipped across the two touched suites; 785 passed / 14 skipped
+  on the broad gui/scroll/motor/action/computer/vision/grounding selection.
+- Ruff clean on every changed file.

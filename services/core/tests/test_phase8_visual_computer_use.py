@@ -1071,6 +1071,61 @@ class TestGUIActionDispatch:
         provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_gui_scroll_defaults_to_vertical_axis(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1", ComputerActionType.GUI_SCROLL, "640,400",
+            {"x": 640, "y": 400, "delta": -3}, "Scroll up"
+        )
+        assert trace.status == "SUCCESS"
+        assert "axis=vertical" in trace.actual_observation
+        gui_action = provider.gui_action.call_args[0][1]
+        assert gui_action.scroll_axis == "vertical"
+
+    @pytest.mark.asyncio
+    async def test_gui_scroll_horizontal_axis_is_forwarded(self):
+        """Left/right scrolling must reach the provider, not degrade to vertical."""
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1", ComputerActionType.GUI_SCROLL, "640,400",
+            {"x": 640, "y": 400, "delta": 5, "axis": "horizontal"}, "Scroll right"
+        )
+        assert trace.status == "SUCCESS"
+        assert "axis=horizontal" in trace.actual_observation
+        gui_action = provider.gui_action.call_args[0][1]
+        assert gui_action.scroll_axis == "horizontal"
+
+    @pytest.mark.asyncio
+    async def test_gui_scroll_axis_aliases_normalize(self):
+        """`x`/`left`/`right` aliases must resolve to a horizontal scroll."""
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1", ComputerActionType.GUI_SCROLL, "640,400",
+            {"x": 640, "y": 400, "delta": -2, "axis": "left"}, "Scroll left"
+        )
+        assert trace.status == "SUCCESS"
+        assert provider.gui_action.call_args[0][1].scroll_axis == "horizontal"
+
+    @pytest.mark.asyncio
+    async def test_gui_scroll_unknown_axis_falls_back_to_vertical(self):
+        """An unrecognised axis must not crash; it degrades safely to vertical."""
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1", ComputerActionType.GUI_SCROLL, "640,400",
+            {"x": 640, "y": 400, "delta": 3, "axis": "diagonal"}, "Scroll"
+        )
+        assert trace.status == "SUCCESS"
+        assert provider.gui_action.call_args[0][1].scroll_axis == "vertical"
+
+    @pytest.mark.asyncio
     async def test_gui_screenshot_dispatches(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider)
