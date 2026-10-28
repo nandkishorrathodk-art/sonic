@@ -5406,3 +5406,38 @@ spreadsheets, code, timelines, horizontal carousels) was unreachable.
 - 152 passed / 2 skipped across the two touched suites; 785 passed / 14 skipped
   on the broad gui/scroll/motor/action/computer/vision/grounding selection.
 - Ruff clean on every changed file.
+
+## Verifiable AVCS model bundles (2026-10-23)
+
+A trained `.pt` checkpoint is not shippable on its own: nothing recorded what
+data it was measured on, whether it still loads, or whether the bytes an
+operator received are the bytes that were evaluated. Added
+`packages/avcs/avcs/model_bundle.py` (+ `docs/MODEL_BUNDLE.md`,
+`tests/test_model_bundle.py`) to close that gap.
+
+- `pack_model(checkpoint, output_dir, archive=...)` refuses to bundle a
+  checkpoint that does not exist, does not strict-load into
+  `ArtificialVisualCortex`, has no `.eval.json` sidecar, or has a sidecar with no
+  named `dataset_provenance`. It writes `<name>-bundle/{checkpoint, sidecar,
+  manifest.json}` with a SHA-256 + size for every file, the resolved evaluation,
+  the runtime (python/torch/avcs), and `strict_load_verified: true`.
+- `verify_bundle(dir)` re-checks the manifest and every checksum; returns
+  `(ok, problems)` with specific reasons (checksum mismatch, missing file,
+  absent provenance).
+- `load_bundle(dir)` verifies first and raises `ValueError` instead of loading
+  weights from a bundle whose bytes do not match its manifest.
+- CLI: `python -m avcs.model_bundle pack|verify`.
+
+Packed the two real production checkpoints (both verified OK, archives written):
+- `sonic_data/model_bundles/cortex_real-bundle` (`.env`'s
+  `SONIC_AVCS_CORTEX_CHECKPOINT`; held-out category accuracy 0.833, provenance
+  "real desktop capture: sonic_data/avcs/real_desktop/split/heldout.json").
+- `sonic_data/model_bundles/cortex_learned-bundle` (apprenticeship-promoted;
+  0.998 on 589 samples, provenance "live desktop apprenticeship").
+Bundles live under `sonic_data/` (gitignored) — the repo convention is that
+model binaries are not tracked in git.
+
+Tests: `packages/avcs/tests/test_model_bundle.py` (12) cover checksum/provenance
+emission and the refusal cases (no sidecar, no provenance, unloadable
+checkpoint), tamper detection, and load-verification. 16 passed with the lazy
+import regression; ruff clean on the new files.
