@@ -1027,11 +1027,11 @@ class ComputerUseAgent:
                 "This does NOT prevent the mouse: you are shown the live desktop "
                 "screenshot, so drive the pointer with an explicit integer screen-pixel "
                 'point in PAYLOAD ({"x":<int>,"y":<int>}) read from what you can actually '
-                "see, and give a short TARGET label for the control at that point. Pixel "
-                "clicks do not need the grounder and are the preferred way to interact "
-                "visibly. Only fall back to APP_LAUNCH (an observed installed application "
-                "name) plus keyboard actions (GUI_HOTKEY/GUI_KEYPRESS) when no visible "
-                "control can be located in the screenshot. "
+                "see, and give a short TARGET label for the control at that point. "
+                "Pixel clicks do not need the grounder and are the preferred way to "
+                "interact visibly. Only fall back to APP_LAUNCH (an observed installed "
+                "application name) plus keyboard actions (GUI_HOTKEY/GUI_KEYPRESS) when "
+                "no visible control can be located in the screenshot. "
             )
         return (
             "You are SONIC, a general-purpose AI-human colleague operating a live "
@@ -2042,6 +2042,75 @@ class ComputerUseAgent:
             self._last_screen_frame_id = None
 
     @staticmethod
+    def _grid_overlay_png_base64(
+        frame_b64: str,
+        width: int,
+        height: int,
+    ) -> str:
+        """Stamp a labeled coordinate grid onto a frame for the vision model.
+
+        A vision model asked to click an explicit pixel point has no ruler to
+        read against, so it estimates coordinates from scratch and the click
+        lands off-target. Drawing a light grid with axis labels every 100 px
+        (heavier lines every 500 px) gives the model a fixed reference frame
+        and markedly improves estimated-click accuracy. This overlay is applied
+        ONLY to the image attached to a reasoning request; the raw frame kept in
+        ``_last_screenshot_b64`` is never modified, so scene signatures and
+        post-action verification still compare real pixels.
+        """
+        if not frame_b64:
+            return ""
+        if width <= 0 or height <= 0:
+            return frame_b64
+        try:
+            import base64 as _base64
+            import io
+
+            from PIL import Image, ImageDraw
+
+            encoded = frame_b64.split(",", 1)[-1]
+            raw = _base64.b64decode(encoded, validate=True)
+            image = Image.open(io.BytesIO(raw)).convert("RGB")
+            draw = ImageDraw.Draw(image)
+            # Keep the grid light so it does not obscure window edges: thin
+            # dashed lines every 100 px, slightly stronger lines every 500 px,
+            # and labels only at the heavy intersections.
+            minor, major = 100, 500
+            dash = 8
+            for x in range(0, width + 1, minor):
+                is_major = x % major == 0
+                color = (255, 60, 60) if is_major else (210, 190, 190)
+                if is_major:
+                    draw.line([(x, 0), (x, height)], fill=color, width=2)
+                else:
+                    for yy in range(0, height, dash * 2):
+                        draw.line([(x, yy), (x, min(yy + dash, height))], fill=color)
+            for y in range(0, height + 1, minor):
+                is_major = y % major == 0
+                color = (255, 60, 60) if is_major else (210, 190, 190)
+                if is_major:
+                    draw.line([(0, y), (width, y)], fill=color, width=2)
+                else:
+                    for xx in range(0, width, dash * 2):
+                        draw.line([(xx, y), (min(xx + dash, width), y)], fill=color)
+            for x in range(0, width + 1, major):
+                for y in range(0, height + 1, major):
+                    label = f"{x},{y}"
+                    tx = min(x + 4, max(0, width - 60))
+                    ty = min(y + 4, max(0, height - 14))
+                    draw.rectangle(
+                        [(tx - 2, ty - 2), (tx + 7 * len(label) + 2, ty + 12)],
+                        fill=(0, 0, 0),
+                    )
+                    draw.text((tx, ty), label, fill=(255, 255, 0))
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return _base64.b64encode(buffer.getvalue()).decode("ascii")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("grid_overlay_failed", error=str(exc))
+            return frame_b64
+
+    @staticmethod
     def _frame_to_png_base64(screen: Any) -> str:
         """Return a PNG base64 frame from either an encoded frame or raw RGB.
 
@@ -2104,6 +2173,20 @@ class ComputerUseAgent:
             base64.b64decode(encoded, validate=True)
         except Exception:
             return []
+        # Optional coordinate-grid overlay on the model-facing image only.
+        # Default OFF: measured against the currently available vision model
+        # (meta/llama-3.2-11b-vision-instruct) the grid did NOT improve pixel
+        # localization (no-grid 4/4 within 20px @ 6.0px avg; grid 3/4 @ 36.8px),
+        # so shipping it on by default would degrade clicks. It is retained as an
+        # opt-in experiment for a stronger vision route: SONIC_GRID_OVERLAY=1.
+        if os.environ.get("SONIC_GRID_OVERLAY", "0").strip() in ("1", "true", "True"):
+            overlay = self._grid_overlay_png_base64(
+                frame_b64,
+                int(getattr(self, "_screen_width", 0) or 0),
+                int(getattr(self, "_screen_height", 0) or 0),
+            )
+            if overlay:
+                encoded = overlay
         return [ImageContent(base64=encoded, media_type="image/png")]
 
     @staticmethod

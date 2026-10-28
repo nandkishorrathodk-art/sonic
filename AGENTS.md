@@ -5550,3 +5550,39 @@ Tests: `test_gui_capability_aware_prompt.py::test_prompt_without_grounder_blocks
 `test_phase8_visual_computer_use.py::test_gui_worker_maps_near_miss_action_aliases`
 and `::test_gui_worker_takes_first_action_of_a_multi_step_plan`. Broad regression:
 346 passed, 0 failures.
+
+## Track 2 (coordinate grid overlay): implemented, measured, default OFF (2026-10-23)
+
+Goal: improve explicit-pixel click accuracy for GUI workers that have no trained
+AVCS grounding checkpoint. Idea: stamp a labeled coordinate grid onto the image
+attached to the vision model, so an estimated pixel point has a readable
+reference frame. The overlay is applied ONLY to the model-facing image in
+`_reasoning_screenshot_images()`; the stored `_last_screenshot_b64` used for
+scene signatures and post-action verification is never modified.
+
+Implementation: `ComputerUseAgent._grid_overlay_png_base64(frame_b64, w, h)` —
+thin dashed lines every 100 px, heavier red lines every 500 px, x,y labels at
+the heavy intersections. Honest on bad input (returns the frame unchanged /
+empty, never raises). Gated by `SONIC_GRID_OVERLAY`.
+
+MEASURED RESULT (this is why it is OFF by default): against the vision model
+actually available in this environment (`meta/llama-3.2-11b-vision-instruct` —
+only `NVIDIA_API_KEY` is set, so the configured primary `openai/gpt-4o` falls
+back), the grid did NOT improve pixel localization:
+
+- corner target (XFCE menu button, ground truth ~(10,10)):
+  - no-grid: 4/4 within 20 px, avg 6.0 px
+  - grid:    3/4 within 20 px, avg 36.8 px
+- mid-screen target (center of a placed editor window, ground truth (970,648)):
+  - both variants were very noisy (hundreds of px) on the 11B model.
+
+Conclusion: an 11B vision model cannot localize reliably with or without a grid,
+so the grid is not a fix at this tier. It is retained as an opt-in experiment
+(`SONIC_GRID_OVERLAY=1`) for a stronger vision route, and defaults OFF so we do
+not ship a change that degrades clicks. The real fix remains Track 1: train and
+configure an evaluated AVCS grounding checkpoint.
+
+Tests: `test_boss_worker_live_regressions.py` — overlay adds a coordinate
+reference; honest on empty/degenerate/broken input; opt-in and off by default
+(unset attaches the raw frame, `SONIC_GRID_OVERLAY=1` attaches the gridded
+frame). Focused regression: 208 passed, ruff clean.
