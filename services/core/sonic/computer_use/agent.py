@@ -61,6 +61,27 @@ from sonic.logger import get_logger
 from sonic.research.failure_budget import FailureBudgetTracker
 from sonic.research.failure_classifier import classify_failure
 
+
+def _gui_reasoning_timeout_seconds() -> float:
+    """Wall-clock budget for one GUI reasoning call.
+
+    A vision model attached to a full screenshot can take tens of seconds,
+    especially the larger fallback models, so the budget is configurable via
+    ``SONIC_GUI_REASONING_TIMEOUT_SECONDS`` (bounded to a sane range). When the
+    variable is unset or invalid the module default is used, which keeps the
+    historical 60s and lets tests monkeypatch the constant.
+    """
+    raw = os.environ.get("SONIC_GUI_REASONING_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if 10.0 <= value <= 600.0:
+            return value
+    return _GUI_REASONING_TIMEOUT_SECONDS
+
+
 _GUI_REASONING_TIMEOUT_SECONDS = 60.0
 _MAX_GUI_BURST_ACTIONS = 4
 _POSTCONDITION_REQUIRED_GUI_ACTIONS = frozenset({
@@ -982,8 +1003,12 @@ class ComputerUseAgent:
             "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, "
             "GUI_KEYPRESS, GUI_HOTKEY, GUI_SCROLL, and GUI_DRAG, PAYLOAD must "
             "include a structured observable `postcondition` (for example "
-            '{"screen_changed": true}). '
-            "Do not treat the free-text `expected` field as a substitute.\n"
+            '{"screen_changed": true}). This key is mandatory: an action without '
+            "it is rejected before dispatch and wastes the step. Do not treat the "
+            "free-text `expected` field as a substitute. Worked example for a "
+            'pointer click: {"action":"GUI_CLICK","target":"<observed control>",'
+            '"payload":{"x":<int>,"y":<int>,"postcondition":{"screen_changed":true}},'
+            '"expected":"<observable result>"}.\n'
             "GUI_SCROLL PAYLOAD needs integer `x`, `y`, `delta` (negative scrolls "
             "up/left, positive down/right) and optional `axis`: \"vertical\" "
             "(default) or \"horizontal\" for left/right. "
@@ -2139,11 +2164,14 @@ class ComputerUseAgent:
                         for other_start, other_end, _ in candidates
                     )
                 ]
-                envelope = (
-                    outer_candidates[0][2]
-                    if len(outer_candidates) == 1
-                    else None
-                )
+                # A vision model frequently answers with an ordered multi-step
+                # plan (several action objects in sequence) instead of a single
+                # action. The agent executes one action per step by design, so
+                # the first envelope in reading order is the unambiguous next
+                # action; rejecting the whole response stalls the worker. A lone
+                # malformed/extended envelope still yields no candidate and is
+                # rejected below.
+                envelope = outer_candidates[0][2] if outer_candidates else None
             if isinstance(envelope, dict):
                 if set(envelope) == direct_keys:
                     fields["ACTION"] = envelope["action"]
@@ -3209,6 +3237,8 @@ class ComputerUseAgent:
                 "ASSIGNED PLANE: visible desktop GUI only.\n"
                 f"OBJECTIVE: {goal}\n"
                 f"CURRENT SCREEN DIMENSIONS: {screen_w}x{screen_h} pixels.\n"
+                f"Active Application / Window: {active_app}\n"
+                f"Open Windows (currently running X11 windows): {windows_str}\n"
                 f"Available Installed Desktop Applications: {installed_str}\n"
                 "CURRENT AVCS PIXEL STATE SUMMARY "
                 "(fresh local frame; coarse scene/change/motion signals only; "
@@ -3219,7 +3249,15 @@ class ComputerUseAgent:
                 "GROUNDING RULE: AVCS reflex state describes pixel changes and scene "
                 "motion; it does not provide OCR or semantic controls. Semantic targets "
                 "must be resolved locally by the configured, evaluated AVCS grounder. "
-                "Never invent coordinates. Earlier actions are history, not current evidence.\n"
+                "Never invent coordinates.\n"
+                "PROGRESS RULE: 'Open Windows' and 'Active Application / Window' above "
+                "are the CURRENT desktop state after your previous actions, not history. "
+                "If the application you were asked to open already appears in 'Open "
+                "Windows', it is open — do not launch it again. A repeated APP_LAUNCH for "
+                "an already-open application is a wasted step. If the objective's "
+                "postcondition already holds in the current desktop state, respond with "
+                "ACTION GOAL_COMPLETE instead of acting again.\n"
+                f"Actions taken so far:\n{history_text or '(none — this is the first action)'}\n"
                 "Choose one immediate visible GUI action; do not provide a multi-step plan."
             )
 
@@ -3889,12 +3927,16 @@ class ComputerUseAgent:
         if self._gui_action_contract_active():
             action_instructions = (
                 "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and GUI_SCROLL, "
-                "provide a concise target description for the local AVCS grounder. "
+                "either (a) give an explicit integer screen-pixel point in PAYLOAD "
+                '({"x":<int>,"y":<int>}) read from the attached screenshot, or (b) give a '
+                "concise semantic target in TARGET for the local AVCS grounder. "
                 "You are shown the current desktop screenshot when a vision route is "
-                "configured, so base targets on what is actually visible; a semantic "
-                "target still has to be resolved by the AVCS grounder before dispatch, "
-                "so never invent pixel coordinates or claim a target is grounded. "
-                "If AVCS cannot resolve the target, the action will be blocked. PAYLOAD "
+                "configured, so base targets on what is actually visible. A semantic "
+                "target is resolved locally by the AVCS grounder before dispatch; if no "
+                "grounder is configured the semantic form fails closed, so prefer the "
+                "explicit pixel form when you can see the control. Never invent pixel "
+                "coordinates that do not correspond to something visible, and never "
+                "claim a semantic target is already grounded. PAYLOAD "
                 "must be a JSON object. GUI_SCROLL also accepts `axis` "
                 "(\"vertical\" default, or \"horizontal\" for left/right) with an integer "
                 "`delta`. GUI_TYPE is unavailable until a tested local "
@@ -4056,7 +4098,7 @@ class ComputerUseAgent:
             heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
             reasoning_timeout = (
-                _GUI_REASONING_TIMEOUT_SECONDS
+                _gui_reasoning_timeout_seconds()
                 if self._gui_action_contract_active()
                 else 120.0
             )
@@ -4068,15 +4110,15 @@ class ComputerUseAgent:
             content_str = getattr(response, "content", "") or ""
             tool_calls = list(getattr(response, "tool_calls", []) or [])
 
-            refusal_phrases = (
-                "can't help with that",
-                "cannot help with that",
-                "cannot assist",
-                "can't assist",
-                "unethical",
+            from sonic.llm.router import REFUSAL_PHRASES
+
+            # Reuse the router's single source of truth so agent-level and
+            # router-level refusal handling cannot drift apart. Extra phrases
+            # cover the "not able to assist" family seen from vision models.
+            refusal_phrases = REFUSAL_PHRASES + (
+                "i'm sorry, but i can",
+                "i am sorry, but i can",
                 "illegal",
-                "against safety policies",
-                "against safety policy",
                 "violates our policies",
                 "cannot fulfill this request",
                 "generating malware",
@@ -4153,6 +4195,7 @@ class ComputerUseAgent:
                         ),
                         parser_reason=" ".join(expected.split())[:160],
                         response_chars=len(parse_target_str),
+                        response_preview=" ".join(parse_target_str.split())[:280],
                         action_marker_present=bool(
                             re.search(
                                 r'(?:^|\n)\s*(?:[-*+]\s*)?(?:\*\*)?ACTION(?:\*\*)?\s*:'
@@ -4239,7 +4282,7 @@ class ComputerUseAgent:
             ):
                 reason = (
                     f"GUI reasoning timed out after "
-                    f"{_GUI_REASONING_TIMEOUT_SECONDS:g} seconds; no action was dispatched."
+                    f"{_gui_reasoning_timeout_seconds():g} seconds; no action was dispatched."
                     if isinstance(e, TimeoutError)
                     else f"GUI reasoning failed: {e}"
                 )
@@ -4265,6 +4308,16 @@ class ComputerUseAgent:
         s = s.splitlines()[0].strip(" *_\n\r\t`\"'")
         # Strip leading conversational articles: "the", "a", "an"
         s = re.sub(r'^(?:the|a|an)\s+', '', s, flags=re.IGNORECASE).strip()
+        # Strip a leading role/scheme qualifier such as "application:mousepad",
+        # "app: mousepad", or "binary=foo" that models sometimes prepend. The
+        # qualifier is metadata about the name, not part of the executable, so
+        # resolving it literally would fail to find an installed program.
+        s = re.sub(
+            r'^(?:application|app|binary|program|executable)\s*[:=]\s*',
+            '',
+            s,
+            flags=re.IGNORECASE,
+        ).strip()
         # Strip trailing punctuation/quotes
         s = s.strip(" *_\n\r\t`\"'.,:;")
         return s.lower()
@@ -7968,6 +8021,12 @@ class ComputerUseAgent:
                 else:
                     if "\n" in app_name:
                         app_name = app_name.split("\n")[0].strip(" *_\n\r\t`\"'")
+                    # Sanitize a role/scheme qualifier the model may have
+                    # prepended (e.g. "application:mousepad") so resolution
+                    # matches the real executable instead of failing literally.
+                    normalized_app = self._normalize_app_name(app_name)
+                    if normalized_app:
+                        app_name = normalized_app
                     extra_arg = payload.get("url") or payload.get("args") or payload.get("arguments") or payload.get("path") or payload.get("file") or ""
                     app_request = app_name
                     if extra_arg:

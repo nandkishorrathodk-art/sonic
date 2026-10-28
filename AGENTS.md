@@ -5441,3 +5441,57 @@ Tests: `packages/avcs/tests/test_model_bundle.py` (12) cover checksum/provenance
 emission and the refusal cases (no sidecar, no provenance, unloadable
 checkpoint), tamper detection, and load-verification. 16 passed with the lazy
 import regression; ruff clean on the new files.
+
+## Boss worker live-run: four real defects fixed (2026-10-23)
+
+Reproduced end-to-end against the live `sonic-desktop-workstation`: Boss launched
+a GUI worker with a stable `agent_uid` that showed RUNNING on the dashboard but
+did almost no real work, then stalled. Root causes were all in the GUI worker's
+reasoning/parse loop, not in dispatch or the dashboard:
+
+1. **Multi-step plan response rejected** (the dominant stall). The vision model
+   answered with an ordered plan of several JSON action envelopes in sequence
+   (e.g. `APP_LAUNCH` + `GUI_CLICK` + `GUI_KEYPRESS`). `_parse_gui_action_response`
+   took an envelope only when exactly ONE candidate was present, so every
+   multi-action reply was discarded and the worker burned steps until it died.
+   The agent executes one action per step by design, so the first envelope in
+   reading order is the unambiguous next action; it is now taken. A single
+   malformed/extended envelope (extra keys) is still rejected.
+2. **Vision-model refusal misread as a parse error.** The fallback vision model
+   intermittently returns "I'm not able to assist with that." The agent's local
+   refusal list missed the "not able to assist" family, so a refusal surfaced as
+   a confusing `gui_action_response_invalid` instead of a recorded refusal that
+   triggers replanning. The agent now reuses `sonic.llm.router.REFUSAL_PHRASES`
+   (single source of truth) plus a few extras; the router already triggers
+   provider/model fallback on a detected refusal.
+3. **Hardcoded 60s GUI reasoning timeout.** A slow-but-working vision route
+   (large fallback model + full screenshot) exceeded it and the worker died with
+   `reasoning-unavailable`. Now `SONIC_GUI_REASONING_TIMEOUT_SECONDS` (bounded
+   10-600, default 60) via `_gui_reasoning_timeout_seconds()`; the module
+   constant remains the default so existing tests can monkeypatch it.
+4. **`application:mousepad` role-prefix not stripped.** The model prefixed the
+   app role; resolution ran the string literally and failed for an installed
+   app. `_normalize_app_name` now strips a leading
+   `application|app|binary|program|executable[:=]` qualifier, and the APP_LAUNCH
+   dispatch site normalizes `payload.app_name` before calling the provider.
+
+Also improved GUI-worker prompts: the mandatory `postcondition` now has a
+concrete worked example (was prose only), the GUI-only observation surfaces
+`Active Application / Window` + `Open Windows` + actions-so-far with a PROGRESS
+RULE (do not relaunch an app already open; emit GOAL_COMPLETE if the
+postcondition already holds), and the action instructions now permit the
+explicit integer pixel form (the old text forbade the very pixel target the
+prompt also asked for). The invalid-response warning logs a bounded
+`response_preview` for operator diagnosis.
+
+Live result after the fixes: the worker took 8 real steps, launched Mousepad
+(`Untitled 1 - Mousepad` window confirmed via `wmctrl`), and the independent
+Judge returned `INCONCLUSIVE` — the documented fail-closed contract, because no
+evaluated local AVCS task-verification head exists. This is honest: the being
+can now drive the GUI and open applications, but semantic task confirmation
+still requires a trained AVCS head.
+
+Tests: `services/core/tests/test_boss_worker_live_regressions.py` (8) plus the
+updated `test_phase8_visual_computer_use.py` parser contract and
+`test_app_launch_no_silent_substitution.py`. Broad Boss/worker/GUI regression:
+346 passed, 0 failures.

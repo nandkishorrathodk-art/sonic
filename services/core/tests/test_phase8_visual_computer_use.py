@@ -1245,22 +1245,42 @@ class TestActionParsing:
         assert payload == {"key": "Ctrl+L"}
         assert expected == "Focus the location field"
 
-    def test_gui_worker_rejects_ambiguous_or_extended_json_envelopes(self):
+    def test_gui_worker_takes_first_action_of_a_multi_step_plan(self):
+        """A vision model may answer with an ordered plan of several actions.
+
+        The agent executes one action per step, so the first envelope in
+        reading order is the next action. Rejecting the whole response stalled
+        live workers (observed: a 3-object APP_LAUNCH/GUI_CLICK/GUI_KEYPRESS
+        plan) even though the first action was unambiguous.
+        """
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        first = (
+            '{"action":"APP_LAUNCH","target":"Terminal Emulator","payload":{},'
+            '"expected":"Terminal Emulator launched"}'
+        )
+        second = (
+            '{"action":"GUI_CLICK","target":"Terminal Emulator",'
+            '"payload":{"x":119,"y":85},"expected":"Terminal Emulator focused"}'
+        )
+        action_type, target, _, _ = agent._parse_gui_action_response(
+            f"{first} {second}",
+            "",
+        )
+        assert action_type == ComputerActionType.APP_LAUNCH
+        assert target == "terminal emulator"
+
+    def test_gui_worker_rejects_extended_json_envelope(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
         envelope = (
             '{"action":"GUI_HOTKEY","target":"keyboard",'
             '"payload":{"key":"Ctrl+L"},"expected":"Focus the location field"}'
         )
-        for response in (
-            f"{envelope} {envelope}",
+        action_type, target, _, _ = agent._parse_gui_action_response(
             envelope[:-1] + ',"commentary":"extra"}',
-        ):
-            action_type, target, _, _ = agent._parse_gui_action_response(
-                response,
-                "",
-            )
-            assert action_type == ActionExecutionStatus.BLOCKED
-            assert target == "gui-invalid-response"
+            "",
+        )
+        assert action_type == ActionExecutionStatus.BLOCKED
+        assert target == "gui-invalid-response"
 
     def test_gui_worker_accepts_markdown_wrapped_action_fields(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
