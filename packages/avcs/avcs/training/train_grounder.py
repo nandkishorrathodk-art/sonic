@@ -30,10 +30,49 @@ from avcs.goal_grounder import (
     GoalConditionedGrounder,
 )
 from avcs.training.demonstrations import (
+    RECORDED_PROVENANCE,
     DemonstrationClickDataset,
     discover_demonstrations,
     split_sessions,
 )
+
+_MIN_SHM_FOR_WORKERS_BYTES = 512 * 1024 * 1024
+
+
+def _resolve_loader_workers() -> int:
+    """Pick a DataLoader worker count that cannot exhaust shared memory.
+
+    ``num_workers=2`` crashes with "unable to allocate shared memory" inside a
+    container whose ``/dev/shm`` is the Docker default of 64 MB, which is the
+    common case -- so training silently failed to start in exactly the
+    environment it is meant to run in. Fall back to in-process loading unless
+    ``/dev/shm`` is comfortably large (or the caller overrides via
+    ``SONIC_AVCS_DATALOADER_WORKERS``).
+    """
+    override = os.environ.get("SONIC_AVCS_DATALOADER_WORKERS", "").strip()
+    if override:
+        try:
+            return max(0, int(override))
+        except ValueError:
+            pass
+    if os.name == "nt":
+        return 0
+    try:
+        stats = os.statvfs("/dev/shm")
+        available = stats.f_bavail * stats.f_frsize
+    except (OSError, AttributeError):
+        return 0
+    return 2 if available >= _MIN_SHM_FOR_WORKERS_BYTES else 0
+
+
+def _resolve_dataset_provenance(records: list[Any]) -> str:
+    """Return the single provenance shared by every record, or ``"mixed"``."""
+    provenances = {
+        getattr(record, "provenance", RECORDED_PROVENANCE) for record in records
+    }
+    if len(provenances) == 1:
+        return next(iter(provenances))
+    return "mixed"
 
 
 def _seed_everything(seed: int) -> None:
@@ -213,29 +252,44 @@ def train_grounder(
     train_records, validation_records, test_records = split_sessions(sessions, seed=seed)
     train_data = DemonstrationClickDataset(train_records, input_size=input_size)
     validation_data = DemonstrationClickDataset(validation_records, input_size=input_size)
+    loader_workers = _resolve_loader_workers()
     train_loader = DataLoader(
         train_data,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0 if os.name == "nt" else 2,
+        num_workers=loader_workers,
     )
     validation_loader = DataLoader(
         validation_data,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0 if os.name == "nt" else 2,
+        num_workers=loader_workers,
     )
     test_data = DemonstrationClickDataset(test_records, input_size=input_size)
     test_loader = DataLoader(
         test_data,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0 if os.name == "nt" else 2,
+        num_workers=loader_workers,
     )
 
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
+
+    # Provenance is derived from the data, never assumed. A checkpoint trained on
+    # anything other than the real recorder's sessions must not claim the
+    # real-demonstration provenance, because the loader gates on that string.
+    dataset_provenance = _resolve_dataset_provenance(
+        train_records + validation_records + test_records
+    )
+    if dataset_provenance != RECORDED_PROVENANCE:
+        print(
+            f"WARNING: training on non-recorder data (provenance="
+            f"{dataset_provenance!r}). The resulting checkpoint will carry that "
+            "provenance and is not a real-demonstration grounder."
+        )
+
     _seed_everything(seed)
     model = GoalConditionedGrounder(input_size=input_size).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
@@ -288,7 +342,7 @@ def train_grounder(
             checkpoint = {
                 "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
                 "model_type": GROUNDING_MODEL_TYPE,
-                "dataset_provenance": "recorded_ui_click_demonstrations",
+                "dataset_provenance": dataset_provenance,
                 "training_samples": len(train_records),
                 "validation_samples": len(validation_records),
                 "held_out_test_samples": len(test_records),
@@ -367,7 +421,7 @@ def train_grounder(
     report = {
         "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
         "model_type": GROUNDING_MODEL_TYPE,
-        "dataset_provenance": "recorded_ui_click_demonstrations",
+        "dataset_provenance": dataset_provenance,
         "session_split": "task_and_window_disjoint",
         "recording_sessions": len(sessions),
         "task_window_groups": len(task_window_groups),
@@ -381,7 +435,11 @@ def train_grounder(
         "validation_metric": "loss and Top-1 point localization accuracy",
         "held_out_test_metrics": held_out_test_metrics,
         "query_confidence_calibration": confidence_calibration,
-        "runtime_ready": bool(evaluation["passed"] and confidence_passed),
+        "runtime_ready": bool(
+            evaluation["passed"]
+            and confidence_passed
+            and dataset_provenance == RECORDED_PROVENANCE
+        ),
         "held_out_test_point_samples": int(test_metrics["samples"]),
         "point_accuracy_definition": (
             "Top-1 argmax distance from the human-labeled click point, normalized "

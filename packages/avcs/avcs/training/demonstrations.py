@@ -19,6 +19,10 @@ from avcs.goal_grounder import (
 from PIL import Image
 from torch.utils.data import Dataset
 
+# The recorder's own provenance value. A checkpoint trained on anything else is
+# not a real-demonstration checkpoint and must not claim to be one.
+RECORDED_PROVENANCE = "recorded_ui_click_demonstrations"
+
 
 @dataclass(frozen=True)
 class DemoRecord:
@@ -28,6 +32,7 @@ class DemoRecord:
     point_norm: tuple[float, float]
     task: str
     target_window_title: str
+    provenance: str = RECORDED_PROVENANCE
 
 
 def _load_record(
@@ -36,6 +41,7 @@ def _load_record(
     *,
     task: str,
     target_window_title: str,
+    provenance: str,
 ) -> DemoRecord:
     if raw.get("schema_version") != 1:
         raise ValueError(f"Unsupported demonstration schema in {session_dir}")
@@ -74,6 +80,7 @@ def _load_record(
         (x, y),
         task,
         target_window_title,
+        provenance,
     )
 
 
@@ -108,6 +115,12 @@ def discover_demonstrations(
         ):
             raise ValueError(f"Recorder manifest does not meet dataset requirements: {manifest_path}")
         records: list[DemoRecord] = []
+        manifest_provenance = manifest.get("provenance", RECORDED_PROVENANCE)
+        if not isinstance(manifest_provenance, str) or not manifest_provenance.strip():
+            raise ValueError(
+                f"Recorder manifest has an invalid provenance: {manifest_path}"
+            )
+        manifest_provenance = manifest_provenance.strip()
         with samples_path.open(encoding="utf-8") as samples_file:
             for line_number, line in enumerate(samples_file, start=1):
                 if not line.strip():
@@ -122,6 +135,7 @@ def discover_demonstrations(
                             raw,
                             task=manifest["task"].strip(),
                             target_window_title=manifest["target_window_title"].strip(),
+                            provenance=manifest_provenance,
                         )
                     )
                 except (json.JSONDecodeError, ValueError, TypeError, FileNotFoundError) as exc:
