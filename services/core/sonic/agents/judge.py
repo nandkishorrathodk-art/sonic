@@ -322,8 +322,9 @@ class JudgeAgent:
                 notes=(
                     "Fresh desktop pixels were processed locally by AVCS, but its "
                     "reflex state cannot establish this task's semantic postcondition. "
-                    "No screenshot was sent to a model; GUI completion remains "
-                    "unconfirmed until a validated local task-verification head exists."
+                    "GUI completion remains unconfirmed until a validated local "
+                    "task-verification head exists; a worker's own claim is not "
+                    "independent proof."
                 ),
                 self_attestation_rejected=True,
                 evidence_items=[avcs_evidence],

@@ -1579,9 +1579,11 @@ class ComputerUseAgent:
                     perception_version=getattr(screen_obs, "perception_version", 0),
                 )
             self._pending_gui_action_observation = None
-        # Store screenshot for vision-in-the-loop (VLM image input)
+        # Store screenshot for vision-in-the-loop (VLM image input). The AVCS
+        # path delivers raw RGB and leaves screenshot_base64 empty, so encode
+        # on demand; otherwise GUI workers would never receive pixels.
         self._last_screenshot_b64 = (
-            getattr(screen_obs, "screenshot_base64", "")
+            self._frame_to_png_base64(screen_obs)
             if perception_source == "avcs_pixels"
             else ""
         )
@@ -1961,13 +1963,81 @@ class ComputerUseAgent:
     def _adopt_reasoning_pixels(self, screen: Any, is_fresh: bool) -> None:
         """Adopt (or clear) the frame used to ground the next GUI decision."""
         if is_fresh:
-            self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
-            self._last_screen_has_pixels = True
+            self._last_screenshot_b64 = self._frame_to_png_base64(screen)
+            self._last_screen_has_pixels = bool(self._last_screenshot_b64) or bool(
+                getattr(screen, "raw_rgb", b"")
+                or getattr(screen, "screenshot_base64", "")
+            )
             self._last_screen_frame_id = getattr(screen, "frame_id", None)
         else:
             self._last_screenshot_b64 = ""
             self._last_screen_has_pixels = False
             self._last_screen_frame_id = None
+
+    @staticmethod
+    def _frame_to_png_base64(screen: Any) -> str:
+        """Return a PNG base64 frame from either an encoded frame or raw RGB.
+
+        The AVCS path delivers raw RGB bytes and leaves ``screenshot_base64``
+        empty, so a vision attachment must encode those pixels on demand.
+        Returns "" when no usable frame is present or encoding fails; callers
+        then record an honest "no pixels" state rather than sending a bad image.
+        """
+        encoded = getattr(screen, "screenshot_base64", "") or ""
+        if encoded:
+            return encoded
+        raw_rgb = getattr(screen, "raw_rgb", b"") or b""
+        width = int(getattr(screen, "width", 0) or 0)
+        height = int(getattr(screen, "height", 0) or 0)
+        if not raw_rgb or width <= 0 or height <= 0:
+            return ""
+        if len(raw_rgb) < width * height * 3:
+            return ""
+        try:
+            import io
+
+            from PIL import Image
+
+            image = Image.frombytes(
+                "RGB", (width, height), bytes(raw_rgb[: width * height * 3])
+            )
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return base64.b64encode(buffer.getvalue()).decode("ascii")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("frame_png_encode_failed", error=str(exc))
+            return ""
+
+    def _reasoning_screenshot_images(self) -> list[Any]:
+        """Build the vision attachment for a GUI reasoning request.
+
+        Returns an empty list (no pixels attached) when no frame is available,
+        the frame is not valid base64, or no vision-capable route is
+        configured. Failing to attach is honest: the caller records
+        ``vision_route_unavailable`` rather than pretending the model saw the
+        screen. Pixels are only ever sent to a route the router reports as
+        image-capable.
+        """
+        frame_b64 = str(getattr(self, "_last_screenshot_b64", "") or "")
+        if not frame_b64:
+            return []
+        router = getattr(self, "llm_router", None)
+        if router is None or not callable(getattr(router, "vision_route_ready", None)):
+            return []
+        try:
+            if not router.vision_route_ready():
+                return []
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("vision_route_readiness_check_failed", error=str(exc))
+            return []
+        encoded = frame_b64.split(",", 1)[-1]
+        try:
+            from sonic.llm.schemas import ImageContent
+
+            base64.b64decode(encoded, validate=True)
+        except Exception:
+            return []
+        return [ImageContent(base64=encoded, media_type="image/png")]
 
     @staticmethod
     def _gui_only_recovery_action(
@@ -3142,8 +3212,8 @@ class ComputerUseAgent:
                 f"Available Installed Desktop Applications: {installed_str}\n"
                 "CURRENT AVCS PIXEL STATE SUMMARY "
                 "(fresh local frame; coarse scene/change/motion signals only; "
-                "not semantic certainty or task proof; no screenshot is sent; "
-                f"no pixels are sent): {avcs_summary}\n"
+                "not semantic certainty or task proof; "
+                f"the desktop screenshot is attached separately when a vision route is ready): {avcs_summary}\n"
                 f"{narration_line}"
                 f"{ambient_line}"
                 "GROUNDING RULE: AVCS reflex state describes pixel changes and scene "
@@ -3674,7 +3744,9 @@ class ComputerUseAgent:
                 and visual_true_age <= 2_000
             ):
                 visual_observation = self._ensure_avcs_state(visual_observation)
-                self._last_screenshot_b64 = visual_observation.screenshot_base64
+                self._last_screenshot_b64 = self._frame_to_png_base64(
+                    visual_observation
+                )
                 self._last_screen_has_pixels = True
                 self._last_screen_frame_id = getattr(
                     visual_observation, "frame_id", None
@@ -3721,10 +3793,27 @@ class ComputerUseAgent:
             goal, observation, step_index, primary_file, test_file
         )
         user_text = obs_summary
+        # A GUI worker must reason from the visible interface, not from a
+        # hand-built text summary alone. When a fresh frame is available and a
+        # vision-capable route is configured, attach the pixels to the
+        # reasoning request so the model can actually see the screen. This is
+        # the documented "visual-first GUI" contract; the earlier AVCS
+        # migration hardcoded this to False and silently reduced GUI workers to
+        # blind text reasoning.
+        reasoning_images: list[Any] = []
         image_attached = False
-        escalation_reason = (
-            "avcs_pixel_state_only" if gui_reasoning else "non_gui_reasoning"
-        )
+        if gui_reasoning and self._last_screen_has_pixels:
+            reasoning_images = self._reasoning_screenshot_images()
+            image_attached = bool(reasoning_images)
+        if gui_reasoning:
+            if image_attached:
+                escalation_reason = "visual_reasoning_requested"
+            elif self._last_screen_has_pixels:
+                escalation_reason = "vision_route_unavailable"
+            else:
+                escalation_reason = "visual_frame_unavailable"
+        else:
+            escalation_reason = "non_gui_reasoning"
 
         observation.accessible_scene_fresh = structured_scene_available
         observation.image_attached = image_attached
@@ -3801,8 +3890,10 @@ class ComputerUseAgent:
             action_instructions = (
                 "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and GUI_SCROLL, "
                 "provide a concise target description for the local AVCS grounder. "
-                "The language model receives no screenshot pixels or OCR/accessibility "
-                "control list; never invent pixel coordinates or claim a target is grounded. "
+                "You are shown the current desktop screenshot when a vision route is "
+                "configured, so base targets on what is actually visible; a semantic "
+                "target still has to be resolved by the AVCS grounder before dispatch, "
+                "so never invent pixel coordinates or claim a target is grounded. "
                 "If AVCS cannot resolve the target, the action will be blocked. PAYLOAD "
                 "must be a JSON object. GUI_SCROLL also accepts `axis` "
                 "(\"vertical\" default, or \"horizontal\" for left/right) with an integer "
@@ -3893,7 +3984,11 @@ class ComputerUseAgent:
         request = LLMRequest(
             messages=[
                 Message(role=MessageRole.SYSTEM, content=system_prompt),
-                Message(role=MessageRole.USER, content=user_text),
+                Message(
+                    role=MessageRole.USER,
+                    content=user_text,
+                    images=reasoning_images,
+                ),
             ],
             task_type="reasoning",
             max_tokens=2048,
@@ -5377,7 +5472,7 @@ class ComputerUseAgent:
             self._last_screen_observation_received_at,
         )
         self._last_gui_state_observation = None
-        self._last_screenshot_b64 = fresh_screen.screenshot_base64
+        self._last_screenshot_b64 = self._frame_to_png_base64(fresh_screen)
         snapshot = self.perception_bus.publish(
             screenshot_base64=fresh_screen.screenshot_base64,
             width=fresh_screen.width,
@@ -5474,7 +5569,7 @@ class ComputerUseAgent:
             else None
         )
         self._last_gui_state_observation = None
-        self._last_screenshot_b64 = screen.screenshot_base64
+        self._last_screenshot_b64 = self._frame_to_png_base64(screen)
         self._screen_width = screen.width
         self._screen_height = screen.height
         return renewed
@@ -5616,9 +5711,7 @@ class ComputerUseAgent:
                 if self._last_screen_has_pixels
                 else None
             )
-            self._last_screenshot_b64 = str(
-                getattr(result, "screenshot_base64", "") or ""
-            )
+            self._last_screenshot_b64 = self._frame_to_png_base64(result)
             if before_screen is not None:
                 before_signature = self._screen_state_signature(before_screen)
                 after_signature = self._screen_state_signature(result)
@@ -7547,8 +7640,8 @@ class ComputerUseAgent:
                                     focused_snapshot.version
                                 )
                                 focused_observation.observation_age_ms = focused_age
-                                self._last_screenshot_b64 = (
-                                    focused_screen.screenshot_base64
+                                self._last_screenshot_b64 = self._frame_to_png_base64(
+                                    focused_screen
                                 )
                                 self._update_screen_dims(focused_screen)
                                 focus_confirmed, focus_evidence = (
@@ -7847,7 +7940,7 @@ class ComputerUseAgent:
 
             elif action_type == ComputerActionType.GUI_SCREENSHOT:
                 screen = await self.computer.screenshot(workspace_id)
-                self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
+                self._last_screenshot_b64 = self._frame_to_png_base64(screen)
                 self._last_active_window_geometry = getattr(screen, "active_window_geometry", None)
                 self._update_screen_dims(screen)
                 actual_obs_str = f"Screenshot captured ({screen.width}x{screen.height})"
@@ -7861,7 +7954,7 @@ class ComputerUseAgent:
                 seconds = max(0, min(int(payload.get("seconds", 2)), 30))
                 await _asyncio.sleep(seconds)
                 screen = await self.computer.screenshot(workspace_id)
-                self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
+                self._last_screenshot_b64 = self._frame_to_png_base64(screen)
                 self._update_screen_dims(screen)
                 actual_obs_str = f"Waited {seconds}s; screen refreshed"
 
@@ -8427,7 +8520,7 @@ class ComputerUseAgent:
                     raise RuntimeError(
                         "visible application navigation could not be verified from a live screen"
                     )
-                self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "") or ""
+                self._last_screenshot_b64 = self._frame_to_png_base64(screen)
                 self._last_gui_navigation_target = url
                 actual_obs_str = "Entered the requested destination through the visible desktop and captured its screen"
 

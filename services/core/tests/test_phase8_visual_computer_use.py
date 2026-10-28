@@ -1467,7 +1467,7 @@ class TestReasoningPrompt:
         assert "AUTONOMOUS TOOL AUTHORING" not in user_prompt
         assert "Never describe a desktop shortcut as an already-open window" in system_prompt
         assert "CURRENT AVCS PIXEL STATE" in user_prompt
-        assert "no screenshot is sent" in user_prompt
+        assert _FRESH_FRAME not in user_prompt
         assert "Last Command Output" not in user_prompt
         assert '"command": "..."' not in user_prompt
 
@@ -1731,7 +1731,7 @@ class TestReasoningPrompt:
         assert '"label":"File"' not in user_prompt
         assert "File Edit View" not in user_prompt
         assert "CURRENT AVCS PIXEL STATE" in user_prompt
-        assert "no screenshot is sent" in user_prompt
+        assert _FRESH_FRAME not in user_prompt
 
     @pytest.mark.asyncio
     async def test_gui_reasoning_uses_local_avcs_state_without_exposing_controls(self):
@@ -1777,7 +1777,9 @@ class TestReasoningPrompt:
         await agent._llm_choose_action("Open the File menu", observation, 1, "", "")
 
         request = agent.llm_router.complete.await_args.args[0]
-        assert not getattr(request.messages[1], "images", [])
+        # Pixels travel as a structured image attachment, never inlined text,
+        # and the OCR/accessibility control inventory is never exposed.
+        assert _FRESH_FRAME not in request.messages[1].content
         assert request.task_type == "reasoning"
         assert "CURRENT AVCS PIXEL STATE" in request.messages[1].content
         assert "Grounded visible controls" not in request.messages[1].content
@@ -1817,7 +1819,7 @@ class TestReasoningPrompt:
         await agent._llm_choose_action("Inspect the desktop", observation, 1, "", "")
 
         request = agent.llm_router.complete.await_args.args[0]
-        assert not getattr(request.messages[1], "images", [])
+        assert _FRESH_FRAME not in request.messages[1].content
         assert "CURRENT AVCS PIXEL STATE" in request.messages[1].content
         assert request.task_type == "reasoning"
 
@@ -1866,7 +1868,8 @@ async def test_next_gui_reasoning_context_uses_refreshed_bounded_avcs_summary():
     assert "motion=" in user_prompt
     assert "stale-frame-marker" not in user_prompt
     assert "events=none" in user_prompt
-    assert not request.messages[1].images
+    # The refreshed frame is attached as pixels, never inlined as text.
+    assert _AFTER_FRAME not in user_prompt
 
 
 @pytest.mark.asyncio
