@@ -84,6 +84,41 @@ def _gui_reasoning_timeout_seconds() -> float:
 
 _GUI_REASONING_TIMEOUT_SECONDS = 60.0
 _MAX_GUI_BURST_ACTIONS = 4
+# Canonical spelling for near-miss action names a vision model may emit. These
+# are pure synonyms for a real action, never a substitute for an unsupported
+# capability, so mapping them cannot invent behavior that does not exist.
+_GUI_ACTION_ALIASES = {
+    "GUI_LAUNCH": "APP_LAUNCH",
+    "APP_OPEN": "APP_LAUNCH",
+    "OPEN_APP": "APP_LAUNCH",
+    "LAUNCH_APP": "APP_LAUNCH",
+    "LAUNCH_APPLICATION": "APP_LAUNCH",
+    "GUI_OPEN": "APP_LAUNCH",
+    "GUI_FOCUS": "APP_FOCUS",
+    "FOCUS_APP": "APP_FOCUS",
+    "FOCUS_APPLICATION": "APP_FOCUS",
+    "ACTIVATE_WINDOW": "APP_FOCUS",
+    "GUI_CLOSE": "APP_CLOSE",
+    "CLOSE_APP": "APP_CLOSE",
+    "GUI_INSTALL": "APP_INSTALL",
+    "INSTALL_APP": "APP_INSTALL",
+    "GUI_CLICK_AT": "GUI_CLICK",
+    "CLICK": "GUI_CLICK",
+    "MOUSE_CLICK": "GUI_CLICK",
+    "TYPE_TEXT": "GUI_TYPE",
+    "GUI_TYPING": "GUI_TYPE",
+    "KEYPRESS": "GUI_KEYPRESS",
+    "PRESS_KEY": "GUI_KEYPRESS",
+    "KEYSTROKE": "GUI_KEYPRESS",
+    "HOTKEY": "GUI_HOTKEY",
+    "MOUSE_MOVE": "GUI_MOVE",
+    "SCROLL": "GUI_SCROLL",
+    "DRAG_AND_DROP": "GUI_DRAG",
+    "TAKE_SCREENSHOT": "GUI_SCREENSHOT",
+    "SCREENSHOT": "GUI_SCREENSHOT",
+    "WAIT": "GUI_WAIT",
+    "SLEEP": "GUI_WAIT",
+}
 _POSTCONDITION_REQUIRED_GUI_ACTIONS = frozenset({
     ComputerActionType.GUI_CLICK,
     ComputerActionType.GUI_DOUBLE_CLICK,
@@ -987,12 +1022,16 @@ class ComputerUseAgent:
             )
         else:
             grounding_clause = (
-                "No AVCS grounding checkpoint is configured, so semantic GUI_CLICK "
-                "targets cannot be resolved and will fail closed. Do not propose "
-                "GUI_CLICK/GUI_DOUBLE_CLICK/GUI_RIGHT_CLICK/GUI_MOVE/GUI_SCROLL on a "
-                "described control. Instead open an observed installed application with "
-                "APP_LAUNCH (its name only, never a path or destination), then use "
-                "keyboard actions such as GUI_HOTKEY and GUI_KEYPRESS. "
+                "No AVCS grounding checkpoint is configured, so a *semantic* GUI_CLICK "
+                "target (a described control resolved by the grounder) will fail closed. "
+                "This does NOT prevent the mouse: you are shown the live desktop "
+                "screenshot, so drive the pointer with an explicit integer screen-pixel "
+                'point in PAYLOAD ({"x":<int>,"y":<int>}) read from what you can actually '
+                "see, and give a short TARGET label for the control at that point. Pixel "
+                "clicks do not need the grounder and are the preferred way to interact "
+                "visibly. Only fall back to APP_LAUNCH (an observed installed application "
+                "name) plus keyboard actions (GUI_HOTKEY/GUI_KEYPRESS) when no visible "
+                "control can be located in the screenshot. "
             )
         return (
             "You are SONIC, a general-purpose AI-human colleague operating a live "
@@ -1006,9 +1045,12 @@ class ComputerUseAgent:
             '{"screen_changed": true}). This key is mandatory: an action without '
             "it is rejected before dispatch and wastes the step. Do not treat the "
             "free-text `expected` field as a substitute. Worked example for a "
-            'pointer click: {"action":"GUI_CLICK","target":"<observed control>",'
-            '"payload":{"x":<int>,"y":<int>,"postcondition":{"screen_changed":true}},'
-            '"expected":"<observable result>"}.\n'
+            "pointer click on, say, a visible menu button: "
+            '{"action":"GUI_CLICK","target":"File menu",'
+            '"payload":{"x":18,"y":14,"postcondition":{"screen_changed":true}},'
+            '"expected":"File menu opens"}. Use the real pixel point and a short '
+            "real label for the control you can actually see; never copy this "
+            "example's numbers or label verbatim.\n"
             "GUI_SCROLL PAYLOAD needs integer `x`, `y`, `delta` (negative scrolls "
             "up/left, positive down/right) and optional `axis`: \"vertical\" "
             "(default) or \"horizontal\" for left/right. "
@@ -2235,6 +2277,12 @@ class ComputerUseAgent:
                 {"command": "true"},
                 _GOAL_COMPLETE_SENTINEL,
             )
+
+        # Models routinely propose a near-miss spelling of a real action
+        # ("GUI_LAUNCH" for APP_LAUNCH, "GUI_FOCUS" for APP_FOCUS). Rejecting
+        # the whole response stalls the worker on a cosmetic mismatch, so map
+        # the common synonyms onto the canonical action before validation.
+        action_name = _GUI_ACTION_ALIASES.get(action_name, action_name)
 
         try:
             action_type = ComputerActionType(action_name)
@@ -4665,6 +4713,11 @@ class ComputerUseAgent:
                     target = line.strip(" *_\n\r\t`\"'")
                     break
         if target.lower() in ("target", "target_resource", "command", "cmd", "none", "null", "n/a", "empty"):
+            target = ""
+        # Models sometimes echo a documentation placeholder verbatim
+        # (e.g. "<observed control>"). It is not a real label, so treat it as
+        # absent and let the payload pixel point carry the click.
+        if target and re.fullmatch(r"<[^<>]{0,60}>", target.strip()):
             target = ""
 
         if action_type in (ComputerActionType.APP_LAUNCH, ComputerActionType.APP_CLOSE, ComputerActionType.APP_FOCUS, ComputerActionType.APP_INSTALL):

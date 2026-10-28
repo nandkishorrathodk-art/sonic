@@ -1282,6 +1282,38 @@ class TestActionParsing:
         assert action_type == ActionExecutionStatus.BLOCKED
         assert target == "gui-invalid-response"
 
+    def test_gui_worker_maps_near_miss_action_aliases(self):
+        """A cosmetic action-name mismatch must not stall the worker.
+
+        Live regression: the vision model emitted ``GUI_LAUNCH`` (not
+        ``APP_LAUNCH``) for an installed app and the whole response was
+        rejected as an unsupported action type.
+        """
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        for alias, canonical in (
+            ("GUI_LAUNCH", ComputerActionType.APP_LAUNCH),
+            ("OPEN_APP", ComputerActionType.APP_LAUNCH),
+            ("FOCUS_APP", ComputerActionType.APP_FOCUS),
+            ("SCREENSHOT", ComputerActionType.GUI_SCREENSHOT),
+            ("CLICK", ComputerActionType.GUI_CLICK),
+        ):
+            response = (
+                f'{{"action":"{alias}","target":"mousepad","payload":{{}},'
+                '"expected":"do the thing"}'
+            )
+            action_type, _, _, _ = agent._parse_gui_action_response(response, "")
+            assert action_type == canonical, alias
+
+    def test_gui_worker_still_rejects_truly_unknown_action(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        response = (
+            '{"action":"GUI_TELEPORT","target":"mousepad","payload":{},'
+            '"expected":"do the thing"}'
+        )
+        action_type, target, _, _ = agent._parse_gui_action_response(response, "")
+        assert action_type == ActionExecutionStatus.BLOCKED
+        assert target == "gui-invalid-response"
+
     def test_gui_worker_accepts_markdown_wrapped_action_fields(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
         action_type, target, payload, expected = agent._parse_gui_action_response(

@@ -5495,3 +5495,58 @@ Tests: `services/core/tests/test_boss_worker_live_regressions.py` (8) plus the
 updated `test_phase8_visual_computer_use.py` parser contract and
 `test_app_launch_no_silent_substitution.py`. Broad Boss/worker/GUI regression:
 346 passed, 0 failures.
+
+## "Mouse ka use nahi" root cause: the prompt forbade the pointer (2026-10-23)
+
+Operator report: SONIC does automated work but the mouse is never used. Verified
+live by polling `xdotool getmouselocation` every 0.4s during a real mission — the
+cursor stayed at `0,0` for the whole run. Root cause was NOT the provider: the
+cursor motor (`sonic_cursor.py`), the visual servo, and `DockerComputerProvider.gui_action`
+all work (direct test moves the cursor and the servo logs
+`visual_servo_reach converged=True`).
+
+The real cause was the GUI-only system prompt. When no evaluated AVCS grounding
+checkpoint is configured (`_avcs_grounder_ready()` is False, which is the normal
+state — no checkpoint exists in-repo), the prompt told the model:
+
+    "No AVCS grounding checkpoint is configured, so semantic GUI_CLICK targets
+     cannot be resolved and will fail closed. Do not propose
+     GUI_CLICK/.../GUI_SCROLL on a described control. Instead open an observed
+     installed application with APP_LAUNCH, then use keyboard actions ..."
+
+That conflates two different things. A *semantic* target (a described control
+the grounder must resolve) does need the checkpoint. An *explicit pixel* click
+read from the attached screenshot does NOT — the screenshot is already attached
+(`image_attached=True`, vision route ready). By forbidding GUI_CLICK wholesale,
+the prompt pushed every worker onto silent `APP_LAUNCH`/keyboard routes, so the
+pointer never moved and the operator never saw the mouse used.
+
+Fix: the no-grounder clause now blocks only the *semantic* form and explicitly
+keeps the pointer available via explicit integer pixel coordinates, which is the
+preferred visible interaction; APP_LAUNCH/keyboard are demoted to fallback. Live
+re-run after the fix: the cursor moved and 3 of 4 worker steps were real
+`GUI_CLICK`s (2 VERIFIED by a real scene change).
+
+Supporting fixes in the same pass:
+- Multi-step plan responses are accepted (first envelope in reading order) —
+  the vision model returns an ordered plan, and rejecting it stalled workers.
+- Near-miss action names are canonicalized (`_GUI_ACTION_ALIASES`: `GUI_LAUNCH`
+  -> `APP_LAUNCH`, `FOCUS_APP` -> `APP_FOCUS`, `SCREENSHOT` -> `GUI_SCREENSHOT`,
+  etc.). Truly unknown names are still rejected.
+- Documentation placeholders echoed verbatim (`<observed control>`) are treated
+  as an absent label so the payload pixel point carries the click.
+- The worked postcondition example is now concrete ("File menu", 18,14) with an
+  explicit instruction not to copy it verbatim, because the model echoed the old
+  angle-bracket placeholders.
+
+Honest residual: without a trained AVCS grounder the model must *estimate* pixel
+points from the screenshot, so a click can miss its control (observed: a click
+at x=1920 was out of bounds and rejected, and a repeated miss tripped the action
+loop breaker, which stopped the worker rather than looping). Training and
+configuring the AVCS grounding checkpoint (packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md)
+is what turns estimated clicks into grounded ones.
+
+Tests: `test_gui_capability_aware_prompt.py::test_prompt_without_grounder_blocks_semantic_but_allows_pixel_clicks`,
+`test_phase8_visual_computer_use.py::test_gui_worker_maps_near_miss_action_aliases`
+and `::test_gui_worker_takes_first_action_of_a_multi_step_plan`. Broad regression:
+346 passed, 0 failures.
