@@ -9765,6 +9765,38 @@ class ComputerUseAgent:
                                 f"'{action_type.value} {cmd_desc}'. Do NOT repeat actions. If the goal is satisfied, respond with ACTION: GOAL_COMPLETE. Otherwise choose a different, necessary action."
                             )
 
+        # Alternating (A-B-A-B) loop detector.
+        # The consecutive check above only catches the SAME action three times in
+        # a row. An agent that oscillates between two actions — e.g. launching
+        # app A, then app B, then A again — never trips it and burns the whole
+        # step budget without state progression. Observed live: 18 consecutive
+        # APP_LAUNCH calls alternating thunar/mousepad while the goal was to
+        # ARRANGE the two windows. Detect a completed period-2 cycle over the
+        # last four executed signatures and refuse to continue it.
+        if action_type not in (
+            ComputerActionType.GUI_WAIT,
+            ComputerActionType.BROWSER_WAIT,
+        ):
+            recent4 = self._recent_action_signatures[-4:]
+            if len(recent4) == 4:
+                keys = [(s[0], s[1]) for s in recent4]
+                incoming = (action_type.value, str(target).strip().lower())
+                if (
+                    keys[0] == keys[2]
+                    and keys[1] == keys[3]
+                    and keys[0] != keys[1]
+                    and incoming == keys[0]
+                ):
+                    return (
+                        f"BLOCKED: alternating loop detected — you have cycled between "
+                        f"'{keys[0][0]} {keys[0][1]}' and '{keys[1][0]} {keys[1][1]}' twice "
+                        "without state progression. Do NOT repeat either action again. "
+                        "Advance the goal with a different action (e.g. arrange the open "
+                        "windows with WINDOW_TILE or APP_MAXIMIZE, focus a window with "
+                        "APP_FOCUS, or conclude with ACTION: GOAL_COMPLETE if the objective "
+                        "is already satisfied)."
+                    )
+
         return None
 
     def _verification_probe_for_goal(self, goal: str) -> VerificationProbe | None:

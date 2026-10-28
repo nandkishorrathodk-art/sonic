@@ -179,10 +179,60 @@ async def test_consecutive_action_loop_breaker():
 
 
 @pytest.mark.asyncio
+async def test_alternating_action_loop_is_blocked():
+    """An A-B-A-B oscillation must be blocked, not allowed to burn the budget.
+
+    Reproduces a live failure: the worker alternated APP_LAUNCH thunar /
+    APP_LAUNCH mousepad 18 times while the goal was to arrange the windows.
+    The consecutive (3x identical) breaker never fires for an alternating
+    pattern.
+    """
+    comp = _MockComputerProvider()
+    agent = ComputerUseAgent(computer_provider=comp)
+    await agent.observe(comp.workspace_id)
+
+    # Two executed signatures that form a completed period-2 cycle.
+    agent._recent_action_signatures = [
+        (ComputerActionType.APP_LAUNCH.value, "thunar", "{}"),
+        (ComputerActionType.APP_LAUNCH.value, "mousepad", "{}"),
+        (ComputerActionType.APP_LAUNCH.value, "thunar", "{}"),
+        (ComputerActionType.APP_LAUNCH.value, "mousepad", "{}"),
+    ]
+
+    rejection = agent._is_trivial_or_repeated_action(
+        ComputerActionType.APP_LAUNCH, "thunar", {}
+    )
+    assert rejection is not None
+    assert "alternating loop detected" in rejection.lower()
+
+
+@pytest.mark.asyncio
+async def test_alternating_loop_allows_a_different_action():
+    """Breaking the cycle with a new action must not be blocked."""
+    comp = _MockComputerProvider()
+    agent = ComputerUseAgent(computer_provider=comp)
+    await agent.observe(comp.workspace_id)
+
+    agent._recent_action_signatures = [
+        (ComputerActionType.APP_LAUNCH.value, "thunar", "{}"),
+        (ComputerActionType.APP_LAUNCH.value, "mousepad", "{}"),
+        (ComputerActionType.APP_LAUNCH.value, "thunar", "{}"),
+        (ComputerActionType.APP_LAUNCH.value, "mousepad", "{}"),
+    ]
+
+    # WINDOW_TILE advances the goal and is exempt from repetition blocking.
+    assert (
+        agent._is_trivial_or_repeated_action(
+            ComputerActionType.WINDOW_TILE, "", {}
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_reasoning_context_uses_general_desktop_state():
     comp = _MockComputerProvider()
     agent = ComputerUseAgent(computer_provider=comp)
-
     obs = await agent.observe(comp.workspace_id)
     sys_prompt, user_prompt = agent._build_reasoning_context("explore target", obs, 2, "main.py", "")
 
