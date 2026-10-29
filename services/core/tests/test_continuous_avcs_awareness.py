@@ -312,6 +312,9 @@ def test_capability_surface_reports_awareness_and_cortex_honestly(monkeypatch):
     monkeypatch.delenv("SONIC_AVCS_CORTEX_CHECKPOINT", raising=False)
     monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
     monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
+    # This test asserts the local-only fail-closed state; pin the vision bridge
+    # off so a ready live vision route cannot legitimately enable the actions.
+    monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
 
     from sonic.api.routes.workstation_perception import avcs_capability_state
 

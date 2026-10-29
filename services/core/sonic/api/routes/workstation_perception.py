@@ -316,6 +316,9 @@ def avcs_capability_state() -> dict[str, Any]:
         "apprenticeship_enabled": False,
         "apprenticeship_samples": 0,
         "apprenticeship_labels": {},
+        "vision_route_ready": False,
+        "grounding_source": "none",
+        "focus_verification_source": "none",
         "reason": "",
     }
     # Live narration runs on the same reflex frames, so it needs no checkpoint
@@ -333,8 +336,38 @@ def avcs_capability_state() -> dict[str, Any]:
         focus_configured = bool(perception.focus_verifier_configured)
         capability["grounding_checkpoint_configured"] = grounding_configured
         capability["focus_checkpoint_configured"] = focus_configured
-        capability["semantic_grounding"] = grounding_configured
-        capability["focus_verification"] = bool(perception.ensure_focus_verifier_ready())
+
+        # The LLM-vision route is a real grounding/focus path when no evaluated
+        # local head exists. Report it honestly rather than claiming AVCS heads
+        # that are not trained.
+        vlm_enabled = os.environ.get(
+            "SONIC_ENABLE_VLM_GROUNDING", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        vision_ready = False
+        if vlm_enabled:
+            try:
+                from sonic.llm.router import ModelRouter
+
+                vision_ready = bool(ModelRouter.from_config().vision_route_ready())
+            except Exception:
+                vision_ready = False
+        capability["vision_route_ready"] = vision_ready
+
+        if grounding_configured:
+            capability["semantic_grounding"] = True
+            capability["grounding_source"] = "local_avcs_checkpoint"
+        elif vision_ready:
+            capability["semantic_grounding"] = True
+            capability["grounding_source"] = "llm_vision_route"
+
+        local_focus_ready = bool(perception.ensure_focus_verifier_ready())
+        if local_focus_ready:
+            capability["focus_verification"] = True
+            capability["focus_verification_source"] = "local_avcs_checkpoint"
+        elif vision_ready:
+            capability["focus_verification"] = True
+            capability["focus_verification_source"] = "llm_vision_route"
+
         capability["gui_actions_ready"] = bool(
             capability["semantic_grounding"] and capability["focus_verification"]
         )
@@ -370,17 +403,26 @@ def avcs_capability_state() -> dict[str, Any]:
         capability["reason"] = f"AVCS capability probe failed: {exc}"
         return capability
 
-    if not capability["grounding_checkpoint_configured"]:
+    if not capability["semantic_grounding"]:
         capability["reason"] = (
             "No evaluated AVCS grounding checkpoint is configured "
-            "(SONIC_AVCS_GROUNDING_CHECKPOINT). Semantic GUI targets "
-            "(clicks on described controls) are blocked; only explicit "
+            "(SONIC_AVCS_GROUNDING_CHECKPOINT) and no vision route is ready "
+            "(SONIC_ENABLE_VLM_GROUNDING + provider credentials). Semantic GUI "
+            "targets (clicks on described controls) are blocked; only explicit "
             "pixel-coordinate actions can dispatch."
         )
     elif not capability["focus_verification"]:
         capability["reason"] = (
-            "No evaluated AVCS focus-verification head is configured "
-            "(SONIC_AVCS_FOCUS_CHECKPOINT). Text entry is blocked."
+            "Semantic targeting is available but no evaluated AVCS "
+            "focus-verification head and no vision route are configured "
+            "(SONIC_AVCS_FOCUS_CHECKPOINT / vision route). Text entry is blocked."
+        )
+    elif capability["grounding_source"] == "llm_vision_route":
+        capability["reason"] = (
+            "Semantic grounding and focus verification are served by the "
+            "configured LLM vision route (no local AVCS checkpoints trained). "
+            "GUI targeting and text entry are enabled; accuracy depends on the "
+            "vision model."
         )
     else:
         capability["reason"] = "AVCS semantic grounding and focus verification are ready."

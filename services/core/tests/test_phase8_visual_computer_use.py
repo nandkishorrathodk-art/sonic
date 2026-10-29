@@ -58,6 +58,18 @@ _AFTER_FRAME = _png_base64(255)
 _FOCUSED_FRAME = _png_base64(128)
 
 
+@pytest.fixture(autouse=True)
+def _disable_vision_bridge(monkeypatch):
+    """Keep this file on the local-AVCS contract.
+
+    These tests assert the behaviour when no evaluated local AVCS grounding or
+    focus head exists. The vision-route fallback is a separate path and is
+    covered in ``test_vlm_grounding_bridge.py``; disabling it here keeps the
+    local-head expectations deterministic and prevents live model calls.
+    """
+    monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
+
+
 def _mock_provider():
     """Build a mock ComputerProvider with async methods."""
     p = AsyncMock()

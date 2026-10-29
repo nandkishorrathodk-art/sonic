@@ -757,6 +757,31 @@ def grounding_user_prompt(query: str, width: int, height: int) -> str:
     )
 
 
+def focus_verification_user_prompt(
+    target: str, width: int, height: int, x: int, y: int
+) -> str:
+    """Ask the vision route whether a screen point sits on a focused text field.
+
+    Used only when no evaluated local focus-verification head exists. The model
+    answers a single yes/no question about the visible focus indicator; it does
+    not decide whether to type.
+    """
+    nx = int(round(x / width * 1000)) if width else 0
+    ny = int(round(y / height * 1000)) if height else 0
+    return (
+        f"Analyze this desktop screenshot ({width}x{height} resolution). "
+        f"A click was just sent at normalized point ({nx}, {ny}) of 1000 to focus "
+        f"the field '{target}'. "
+        "Is that point now inside a focused, editable text field? Look for a "
+        "visible focus indicator: a blinking caret, a highlighted/outlined input "
+        "border, a text cursor, or an active selection inside the field. "
+        'Return exactly one JSON object: {"focused": true, "evidence": "<what you see>"} '
+        'or {"focused": false, "evidence": "<why not>"}. '
+        "Answer false if the point is on a button, label, empty background, or the "
+        "field does not look editable or focused. Never guess."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Computer-use system prompt (behavior-critical)
 # ---------------------------------------------------------------------------

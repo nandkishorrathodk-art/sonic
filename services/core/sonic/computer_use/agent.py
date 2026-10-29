@@ -1008,17 +1008,42 @@ class ComputerUseAgent:
             and not action.name.startswith("BROWSER_")
         )
         grounding_source = "the current AVCS pixel-state summary"
-        # Semantic clicks need an evaluated local AVCS grounder. When none is
-        # configured the action fails closed, so tell the model up front and
-        # point it at routes that do not require semantic grounding (launching
-        # an observed installed application, keyboard navigation). This avoids
-        # burning the whole step budget on a target that cannot be resolved.
+        # Semantic clicks need a grounder. An evaluated local AVCS checkpoint is
+        # preferred; otherwise the configured LLM-vision route resolves the
+        # described control from the same screenshot the model sees. Only when
+        # neither is available does a semantic target fail closed, so tell the
+        # model up front and point it at routes that need no grounding.
+        vlm_grounding_available = False
+        if os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            _router = getattr(self, "llm_router", None)
+            if _router is not None and callable(
+                getattr(_router, "vision_route_ready", None)
+            ):
+                try:
+                    vlm_grounding_available = bool(_router.vision_route_ready())
+                except Exception:  # pragma: no cover - defensive
+                    vlm_grounding_available = False
         if self._avcs_grounder_ready():
             grounding_clause = (
                 "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and "
                 "GUI_SCROLL, provide an observed semantic target in TARGET; a configured "
                 "AVCS grounding checkpoint resolves it to pixels before dispatch. "
                 "Never guess coordinates. "
+            )
+        elif vlm_grounding_available:
+            grounding_clause = (
+                "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and "
+                "GUI_SCROLL, provide an observed semantic target in TARGET (a short, "
+                "unambiguous description of the control you can see). The configured "
+                "vision route resolves it to screen pixels before dispatch, so you do "
+                "not need to supply coordinates for a described control. You may also "
+                'give an explicit integer screen-pixel point in PAYLOAD '
+                '({"x":<int>,"y":<int>}) when you are certain of it. Never guess. '
             )
         else:
             grounding_clause = (
@@ -1416,13 +1441,18 @@ class ComputerUseAgent:
         if perception is None:
             raise RuntimeError("local AVCS pixel processor is unavailable")
 
-        # Optional cloud vision bridge. Only used when the operator explicitly
-        # opts in AND no evaluated local AVCS grounder checkpoint exists. The
-        # local checkpoint always wins when configured: the default path keeps
-        # workstation pixels inside the workstation.
+        # LLM-vision grounding bridge. This is the default target-resolution
+        # path when no evaluated local AVCS grounder checkpoint exists: the
+        # reasoning model already receives the frame, so the same vision route
+        # answers "where is X?" and the caller keeps ownership of the click.
+        # An evaluated local checkpoint always wins when configured. Set
+        # SONIC_ENABLE_VLM_GROUNDING=0 to forbid sending frames to a vision route.
+        vlm_enabled = os.environ.get(
+            "SONIC_ENABLE_VLM_GROUNDING", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
         if (
             not getattr(perception, "goal_grounder_configured", False)
-            and os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "0") == "1"
+            and vlm_enabled
         ):
             bridge_b64 = frame_b64
             if not bridge_b64 and raw_rgb:
@@ -1453,6 +1483,11 @@ class ComputerUseAgent:
                         resolved_y=point[1],
                     )
                     return {"x": point[0], "y": point[1], "engine": "vlm_grounder"}
+            # No local checkpoint exists, so the LLM-vision route is the only
+            # grounder. Report an honest "not found" instead of falling through
+            # to the unconfigured local grounder, which would raise.
+            logger.info("vlm_grounding_no_target_returned", query=query)
+            return None
 
         if raw_rgb:
             result = await asyncio.to_thread(
@@ -6177,6 +6212,77 @@ class ComputerUseAgent:
             logger.warning("avcs_focus_verification_failed", reason=str(exc))
             return False, "AVCS focus verification failed"
 
+    def _focus_verification_available(self) -> bool:
+        """True when text entry can be focus-verified by any real mechanism.
+
+        Prefers an evaluated local AVCS focus head; otherwise requires a
+        configured, ready vision route. When neither exists, GUI_TYPE stays
+        blocked rather than typing into an unconfirmed field.
+        """
+        if self._avcs_focus_head_ready():
+            return True
+        if os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "1").strip().lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            return False
+        router = getattr(self, "llm_router", None)
+        if router is None or not callable(getattr(router, "vision_route_ready", None)):
+            return False
+        try:
+            return bool(router.vision_route_ready())
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    async def _verify_gui_focus(self, screen: ScreenObservation, *, x: int, y: int, target: str) -> tuple[bool, str]:
+        """Confirm focus with the local AVCS head, else the vision route.
+
+        The evaluated local head always wins. When it is not configured, the
+        configured vision route answers a single yes/no question about the
+        visible focus indicator. Any error, ambiguity, or missing evidence
+        fails closed, so text is never typed on an unconfirmed field.
+        """
+        if self._avcs_focus_head_ready():
+            return await self._verify_gui_focus_with_avcs(
+                screen, x=x, y=y, target=target
+            )
+
+        vlm_enabled = os.environ.get(
+            "SONIC_ENABLE_VLM_GROUNDING", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        frame_b64 = str(
+            getattr(screen, "screenshot_base64", "")
+            or getattr(self, "_last_screenshot_b64", "")
+            or ""
+        )
+        router = getattr(self, "llm_router", None)
+        vision_ready = False
+        if router is not None and callable(getattr(router, "vision_route_ready", None)):
+            try:
+                vision_ready = bool(router.vision_route_ready())
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("vision_route_readiness_check_failed", error=str(exc))
+        if vlm_enabled and vision_ready and frame_b64:
+            from sonic.computer_use.grounding import _verify_focus_with_vlm
+
+            return await _verify_focus_with_vlm(
+                target,
+                frame_b64,
+                int(getattr(screen, "width", 0) or 0),
+                int(getattr(screen, "height", 0) or 0),
+                x,
+                y,
+                router=router,
+            )
+        if not vision_ready:
+            return False, (
+                "no evaluated local focus head and no vision route is configured "
+                "for focus verification"
+            )
+        return False, "AVCS has no evaluated local focus-verification head"
+
     async def execute_action(
         self,
         workspace_id: str,
@@ -6390,10 +6496,11 @@ class ComputerUseAgent:
         if action_type in (
             ComputerActionType.GUI_TYPE,
             ComputerActionType.BROWSER_NAVIGATE,
-        ) and not self._avcs_focus_head_ready():
+        ) and not self._focus_verification_available():
             actual_obs_str = (
                 f"{action_type.value} blocked: AVCS has no evaluated local "
-                "focus-verification head, so text will not be sent."
+                "focus-verification head and no ready vision route, so text "
+                "will not be sent."
             )
             trace = ComputerDecisionTrace(
                 step_index=self.action_counter,
@@ -7834,7 +7941,7 @@ class ComputerUseAgent:
                                 )
                                 self._update_screen_dims(focused_screen)
                                 focus_confirmed, focus_evidence = (
-                                    await self._verify_gui_focus_with_avcs(
+                                    await self._verify_gui_focus(
                                         focused_screen,
                                         x=int(focus_x),
                                         y=int(focus_y),
@@ -10753,7 +10860,9 @@ class ComputerUseAgent:
                     for marker in (
                         "sonic_avcs_grounding_checkpoint is not configured",
                         "local avcs pixel processor is unavailable",
+                        "no evaluated local focus-verification head and no ready vision route",
                         "avcs has no evaluated local focus-verification head",
+                        "no evaluated local focus head and no vision route is configured",
                     )
                 )
             )
