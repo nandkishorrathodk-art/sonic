@@ -5586,3 +5586,97 @@ Tests: `test_boss_worker_live_regressions.py` — overlay adds a coordinate
 reference; honest on empty/degenerate/broken input; opt-in and off by default
 (unset attaches the raw frame, `SONIC_GRID_OVERLAY=1` attaches the gridded
 frame). Focused regression: 208 passed, ruff clean.
+
+## Grounder training attempt on a public dataset: pipeline works, the model does not learn (2026-10-23)
+
+Operator asked to fine-tune the GUI grounder. No operator-recorded demonstration
+sessions exist in this environment, so the honest options were (a) record real
+demonstrations, or (b) train on a public dataset of real human click annotations.
+Option (b) was pursued as a measurable baseline, not as a substitute for (a).
+
+### Dataset bridge (`packages/avcs/avcs/training/screenspot_bridge.py`)
+ScreenSpot-v2 (OS-Copilot) provides 1272 rows of real screenshot + natural
+language instruction + human-annotated control box. The bridge converts those
+into recorder-format sessions so the **unmodified** trainer consumes them.
+Design points that matter:
+- One session per screenshot. The trainer splits by (task, window title) group;
+  a per-image session guarantees the same frame never lands on two sides of the
+  split, even when one screenshot carries several instructions.
+- Degenerate/out-of-bounds boxes and empty instructions are skipped, not
+  relabelled. Over-long instructions are truncated on a UTF-8 boundary to fit
+  the query encoder's 96-byte budget.
+- Provenance is recorded as `screenspot_v2_human_click_annotations` and is
+  deliberately NOT `recorded_ui_click_demonstrations`. Verified: the runtime
+  `load_grounding_checkpoint` still **rejects** the resulting checkpoint
+  ("invalid 'dataset_provenance'"), so the fail-closed production gate is intact
+  and no dataset-trained head can masquerade as an operator-recorded one.
+- Tests: `packages/avcs/tests/test_screenspot_bridge.py` (20) — loader
+  compatibility, split viability, provenance non-laundering, per-image
+  sessioning, malformed-row skipping. Full AVCS suite after the change:
+  **685 passed, 23 skipped, 0 failures**; ruff clean.
+
+### Training result (30 epochs, CPU only, ~99 min, 900/192/179 split)
+```
+epoch  train_loss   val_loss   val_acc@2%
+    1      8.9731     8.8039         0.016
+    5      6.1672     9.6408
+   10      4.3762    10.5403
+   20      3.9244    10.9854
+   30      3.7901    11.3161         0.036
+```
+Held-out test point accuracy @2% of diagonal: **0.039** (179 samples). Target is
+0.85. `runtime_ready: False`. Train loss falls while validation loss RISES — the
+textbook overfitting signature.
+
+### Diagnostic that separates "bug" from "limit" — the important part
+A memorisation test was run: train on only 8 samples with the trainer's own loss.
+```
+ep001 loss=9.8060 mean_dist=0.3416 acc@2%=0.000
+ep010 loss=3.8973 mean_dist=0.0031 acc@2%=1.000
+ep200 loss=3.6506 mean_dist=0.0028 acc@2%=1.000
+```
+The model **can** drive accuracy to 1.000 on a tiny set, so the data pipeline,
+loss, coordinate decoding and letterbox un-projection are all correct. The
+failure is genuine generalization, not a plumbing defect.
+
+Inspecting held-out predictions shows them clustering near screen centre
+regardless of target — the model learned the marginal click distribution. Root
+causes, honestly stated:
+1. **Model capacity for this task is small**: 1.35M params, byte-level query
+   encoder, no pretrained visual backbone. It cannot learn open-vocabulary
+   language-to-region alignment from 900 samples.
+2. **900 training samples is far too few** for instruction-conditioned grounding.
+   Published grounders for this task use orders of magnitude more data and a
+   pretrained vision-language trunk.
+3. **No warm start is available.** The trained cortex checkpoint was checked as
+   an initializer: only **6** of 144 visual-encoder keys match (the cortex
+   backbone has foveal branches and a different projection layout), so it cannot
+   legitimately warm-start this encoder.
+4. CPU-only (no GPU) capped the run at 30 epochs; that is a throughput limit,
+   not the cause — validation loss was already rising by epoch 5.
+
+### Honest bottom line
+Fine-tuning the grounder **did not** produce a usable model. The result is a
+correctly-measured negative: the training path is verified sound, the data is
+real, and the gap is capacity/data, not code. Semantic GUI grounding and text
+entry therefore remain fail-closed through the local head, and the LLM-vision
+route remains the working path for semantic clicks. A production grounder still
+requires real operator-recorded demonstrations, and a research-grade grounder
+would require a pretrained vision-language trunk plus a much larger corpus.
+
+Reproduce:
+```
+python -m avcs.training.screenspot_bridge --annotations-dir <ann> \
+  --images-dir <images> --output-dir sonic_data/avcs/screenspot
+python -m avcs.training.train_grounder --data-dir sonic_data/avcs/screenspot \
+  --output-dir runs/screenspot_grounder --epochs 30
+```
+Both `sonic_data/` and `runs/` are gitignored; the 732 MB dataset and the
+checkpoint are not committed.
+
+### Repository state
+- Commit `a216e08` (bridge + tests) is **local only** — the push failed because
+  the GitHub token supplied in chat was revoked (both it and the ambient
+  `GITHUB_TOKEN` now return 401). A refreshed token is needed to push.
+- Commit `4160f3d` (vision-route grounding default) was pushed successfully
+  earlier and is on the remote branch / PR #88.
