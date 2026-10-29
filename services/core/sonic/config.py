@@ -141,6 +141,22 @@ class Settings(BaseSettings):
     local_llm_url: str = "http://localhost:11434"
     default_llm_provider: str = "nvidia"
 
+    # -- Laya System-1 decision log --
+    # Off by default: recorded states can contain screen text, terminal output
+    # and file paths, so persistence is an explicit operator opt-in.
+    laya_decision_log: bool = Field(
+        default=False,
+        validation_alias="SONIC_LAYA_DECISION_LOG",
+    )
+    laya_decision_log_path: str = Field(
+        default="sonic_data/laya_decisions",
+        validation_alias="SONIC_LAYA_DECISION_LOG_PATH",
+    )
+    laya_decision_log_max_mb: float = Field(
+        default=256.0,
+        validation_alias="SONIC_LAYA_DECISION_LOG_MAX_MB",
+    )
+
     # -- Database --
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"

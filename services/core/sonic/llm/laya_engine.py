@@ -33,6 +33,7 @@ from typing import Any
 
 import httpx
 
+from sonic.llm.decision_log import get_decision_log
 from sonic.logger import get_logger
 
 logger = get_logger(__name__)
@@ -292,7 +293,7 @@ class LayaSystem1Engine:
                     )
                     if result is not None:
                         self._active_backend = "laya_remote"
-                        return result
+                        return self._record(state_text, questions, result, "laya_remote")
                     logger.warning("laya_remote_invalid_response")
                 else:
                     logger.warning(
@@ -315,7 +316,7 @@ class LayaSystem1Engine:
                 )
                 if result is not None:
                     self._active_backend = "laya_local"
-                    return result
+                    return self._record(state_text, questions, result, "laya_local")
                 logger.warning("laya_local_invalid_response")
             except Exception as exc:
                 logger.warning("laya_local_predict_failed", error=str(exc))
@@ -365,7 +366,7 @@ class LayaSystem1Engine:
                 }
 
         self._active_backend = "laya_vector_projection"
-        return LayaDecisionResult(
+        fallback_result = LayaDecisionResult(
             answers=answers,
             routing={
                 "model": chosen_model,
@@ -373,6 +374,36 @@ class LayaSystem1Engine:
                 "backend": "laya_vector_projection",
             },
         )
+        return self._record(state_text, questions, fallback_result, "laya_vector_projection")
+
+    def _record(
+        self,
+        state_text: str,
+        questions: dict[str, dict[str, Any]],
+        result: LayaDecisionResult,
+        backend: str,
+    ) -> LayaDecisionResult:
+        """Persist a decision when the log is enabled, then return it unchanged.
+
+        Recording is deliberately best-effort: a logging failure must never
+        change a decision or break a caller.
+        """
+        try:
+            log = get_decision_log()
+            if log.enabled:
+                record_id = log.log_decision(
+                    state=state_text,
+                    questions=questions,
+                    answers=result.answers,
+                    backend=backend,
+                    model=str(result.routing.get("model", "")),
+                    routing=result.routing,
+                )
+                if record_id:
+                    result.routing["record_id"] = record_id
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("laya_decision_record_failed", error=str(exc))
+        return result
 
     @staticmethod
     def _validate_backend_result(

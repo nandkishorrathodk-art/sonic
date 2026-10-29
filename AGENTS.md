@@ -5755,3 +5755,79 @@ Cloud GPU is available to the operator, which removes the CPU-only limit on
 fine-tuning. The remaining blocker is the training corpus: SONIC does not
 currently persist `(state, question, correct answer)` triples, so there is
 nothing to fine-tune on yet. Decision logging must come first.
+
+## System 1 decision log: the fine-tuning corpus (2026-10-29)
+
+Fine-tuning a decision head needs labelled `(state, question, correct answer)`
+triples. SONIC made thousands of typed decisions a day and persisted none of the
+ground truth, so there was nothing to train on. This adds the recorder that
+closes that gap.
+
+### `sonic/llm/decision_log.py`
+- **Two append-only JSONL files, not one.** `decisions.jsonl` records what the
+  engine saw and predicted; `outcomes.jsonl` records what actually happened,
+  keyed by `record_id`. The split is forced by timing: the label is not known
+  when the decision is made. A routing choice is only correct once the chosen
+  plane is seen to work, so a single-file design would need to rewrite records
+  and would corrupt the log on a crash. Annotating separately keeps the hot path
+  to one append.
+- **Off by default.** `SONIC_LAYA_DECISION_LOG=1` opts in. States can contain
+  screen text, terminal output and file paths, so persistence is an explicit
+  operator choice, not a default side effect.
+- **Every record is scrubbed** through `sonic.logger.scrub_secrets` (new public
+  wrapper over the existing private sanitizer), so the rules that protect log
+  output also protect stored records. States are also length-bounded
+  (`SONIC_LAYA_DECISION_LOG_MAX_STATE_CHARS`, default 8000).
+- **Disk use is bounded** (`SONIC_LAYA_DECISION_LOG_MAX_MB`, default 256) by
+  keeping one previous generation of each file.
+- **Recording never breaks a decision.** A failed append is logged and
+  swallowed. `log_decision` returns `""` when the write failed, so a caller
+  cannot annotate an outcome against a record that does not exist — a returned
+  id always means the row is really on disk.
+- `export_training_jsonl()` joins the two files into the `state` / `questions` /
+  `expected` rows `laya-train` consumes. **Rows without an observed outcome are
+  excluded by default**: an unlabelled decision has no ground truth, and
+  inventing one would train the head on fiction.
+
+### Wiring
+- `LayaSystem1Engine.predict()` is the single choke point every decision flows
+  through, so recording happens there via `_record()`, on all three backends
+  (remote, local, fallback). The `record_id` is surfaced on
+  `result.routing["record_id"]`.
+- `sonic/llm/decision_log_cli.py` (`python -m sonic.llm.decision_log_cli`)
+  provides `stats`, `export`, and `annotate`. Reads and writes work whether or
+  not recording is currently enabled, so an existing log can be inspected and
+  exported without turning recording back on.
+- `config.py` gains `laya_decision_log`, `laya_decision_log_path`,
+  `laya_decision_log_max_mb`. `sonic_data/` is already gitignored, so the corpus
+  is never committed.
+
+### Verified end to end
+The full loop was exercised against the real toolchain, not mocked:
+1. six decisions recorded through `LayaSystem1Engine.predict()`;
+2. each annotated with its ground-truth answer via the CLI;
+3. `export` produced six rows;
+4. **`laya-train --dry-run` consumed them**: `6 rows read, 6 valid items,
+   skipped: {}`.
+
+That last step is the one that matters: it proves the exported format is
+actually accepted by the trainer, rather than merely looking correct.
+
+### Tests
+`services/core/tests/test_laya_decision_log.py` (20 tests): off-by-default,
+round-trip recording, outcome attachment, labelled/unlabelled stats, secret
+redaction in state and question keys, non-string states, bounded state length,
+write-failure resilience (including a broken directory), rotation, malformed-line
+tolerance, labelled-only export, and singleton env re-read.
+
+Regression: 84 Laya + security tests pass. A broad run of
+`services/core/tests` (2559 passed, 34 skipped) shows 4 failures in
+`test_judge_agent.py` / `test_agent_action_receipts.py`; these were verified to
+fail identically on the unmodified commit `6be7e2d`, so they are pre-existing
+and unrelated to this work.
+
+### What still blocks fine-tuning
+The corpus starts empty, so the next step is to run SONIC with
+`SONIC_LAYA_DECISION_LOG=1` and annotate outcomes. Fine-tuning itself needs the
+cloud GPU. Note the shipped checkpoints are uncalibrated, so calibration is
+worth doing on the same data before a full fine-tune.

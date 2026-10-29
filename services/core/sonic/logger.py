@@ -41,6 +41,17 @@ def _sanitize_log_value(val: Any) -> Any:
     return val
 
 
+def scrub_secrets(value: Any) -> Any:
+    """Redact secrets from a value before it is persisted outside the process.
+
+    Public entry point for callers that write data to disk (for example the
+    Laya decision log), so the same scrubbing rules that protect log output
+    also protect stored records. Recurses through dicts and lists and redacts
+    both sensitive-looking keys and secret-shaped values.
+    """
+    return _sanitize_log_value(value)
+
+
 def _sanitize_structlog_event(logger: Any, method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
     """Structlog processor to redact sensitive keys and values."""
     for k in list(event_dict.keys()):
