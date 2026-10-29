@@ -61,8 +61,64 @@ from sonic.logger import get_logger
 from sonic.research.failure_budget import FailureBudgetTracker
 from sonic.research.failure_classifier import classify_failure
 
+
+def _gui_reasoning_timeout_seconds() -> float:
+    """Wall-clock budget for one GUI reasoning call.
+
+    A vision model attached to a full screenshot can take tens of seconds,
+    especially the larger fallback models, so the budget is configurable via
+    ``SONIC_GUI_REASONING_TIMEOUT_SECONDS`` (bounded to a sane range). When the
+    variable is unset or invalid the module default is used, which keeps the
+    historical 60s and lets tests monkeypatch the constant.
+    """
+    raw = os.environ.get("SONIC_GUI_REASONING_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if 10.0 <= value <= 600.0:
+            return value
+    return _GUI_REASONING_TIMEOUT_SECONDS
+
+
 _GUI_REASONING_TIMEOUT_SECONDS = 60.0
 _MAX_GUI_BURST_ACTIONS = 4
+# Canonical spelling for near-miss action names a vision model may emit. These
+# are pure synonyms for a real action, never a substitute for an unsupported
+# capability, so mapping them cannot invent behavior that does not exist.
+_GUI_ACTION_ALIASES = {
+    "GUI_LAUNCH": "APP_LAUNCH",
+    "APP_OPEN": "APP_LAUNCH",
+    "OPEN_APP": "APP_LAUNCH",
+    "LAUNCH_APP": "APP_LAUNCH",
+    "LAUNCH_APPLICATION": "APP_LAUNCH",
+    "GUI_OPEN": "APP_LAUNCH",
+    "GUI_FOCUS": "APP_FOCUS",
+    "FOCUS_APP": "APP_FOCUS",
+    "FOCUS_APPLICATION": "APP_FOCUS",
+    "ACTIVATE_WINDOW": "APP_FOCUS",
+    "GUI_CLOSE": "APP_CLOSE",
+    "CLOSE_APP": "APP_CLOSE",
+    "GUI_INSTALL": "APP_INSTALL",
+    "INSTALL_APP": "APP_INSTALL",
+    "GUI_CLICK_AT": "GUI_CLICK",
+    "CLICK": "GUI_CLICK",
+    "MOUSE_CLICK": "GUI_CLICK",
+    "TYPE_TEXT": "GUI_TYPE",
+    "GUI_TYPING": "GUI_TYPE",
+    "KEYPRESS": "GUI_KEYPRESS",
+    "PRESS_KEY": "GUI_KEYPRESS",
+    "KEYSTROKE": "GUI_KEYPRESS",
+    "HOTKEY": "GUI_HOTKEY",
+    "MOUSE_MOVE": "GUI_MOVE",
+    "SCROLL": "GUI_SCROLL",
+    "DRAG_AND_DROP": "GUI_DRAG",
+    "TAKE_SCREENSHOT": "GUI_SCREENSHOT",
+    "SCREENSHOT": "GUI_SCREENSHOT",
+    "WAIT": "GUI_WAIT",
+    "SLEEP": "GUI_WAIT",
+}
 _POSTCONDITION_REQUIRED_GUI_ACTIONS = frozenset({
     ComputerActionType.GUI_CLICK,
     ComputerActionType.GUI_DOUBLE_CLICK,
@@ -952,11 +1008,26 @@ class ComputerUseAgent:
             and not action.name.startswith("BROWSER_")
         )
         grounding_source = "the current AVCS pixel-state summary"
-        # Semantic clicks need an evaluated local AVCS grounder. When none is
-        # configured the action fails closed, so tell the model up front and
-        # point it at routes that do not require semantic grounding (launching
-        # an observed installed application, keyboard navigation). This avoids
-        # burning the whole step budget on a target that cannot be resolved.
+        # Semantic clicks need a grounder. An evaluated local AVCS checkpoint is
+        # preferred; otherwise the configured LLM-vision route resolves the
+        # described control from the same screenshot the model sees. Only when
+        # neither is available does a semantic target fail closed, so tell the
+        # model up front and point it at routes that need no grounding.
+        vlm_grounding_available = False
+        if os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            _router = getattr(self, "llm_router", None)
+            if _router is not None and callable(
+                getattr(_router, "vision_route_ready", None)
+            ):
+                try:
+                    vlm_grounding_available = bool(_router.vision_route_ready())
+                except Exception:  # pragma: no cover - defensive
+                    vlm_grounding_available = False
         if self._avcs_grounder_ready():
             grounding_clause = (
                 "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and "
@@ -964,14 +1035,28 @@ class ComputerUseAgent:
                 "AVCS grounding checkpoint resolves it to pixels before dispatch. "
                 "Never guess coordinates. "
             )
+        elif vlm_grounding_available:
+            grounding_clause = (
+                "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and "
+                "GUI_SCROLL, provide an observed semantic target in TARGET (a short, "
+                "unambiguous description of the control you can see). The configured "
+                "vision route resolves it to screen pixels before dispatch, so you do "
+                "not need to supply coordinates for a described control. You may also "
+                'give an explicit integer screen-pixel point in PAYLOAD '
+                '({"x":<int>,"y":<int>}) when you are certain of it. Never guess. '
+            )
         else:
             grounding_clause = (
-                "No AVCS grounding checkpoint is configured, so semantic GUI_CLICK "
-                "targets cannot be resolved and will fail closed. Do not propose "
-                "GUI_CLICK/GUI_DOUBLE_CLICK/GUI_RIGHT_CLICK/GUI_MOVE/GUI_SCROLL on a "
-                "described control. Instead open an observed installed application with "
-                "APP_LAUNCH (its name only, never a path or destination), then use "
-                "keyboard actions such as GUI_HOTKEY and GUI_KEYPRESS. "
+                "No AVCS grounding checkpoint is configured, so a *semantic* GUI_CLICK "
+                "target (a described control resolved by the grounder) will fail closed. "
+                "This does NOT prevent the mouse: you are shown the live desktop "
+                "screenshot, so drive the pointer with an explicit integer screen-pixel "
+                'point in PAYLOAD ({"x":<int>,"y":<int>}) read from what you can actually '
+                "see, and give a short TARGET label for the control at that point. "
+                "Pixel clicks do not need the grounder and are the preferred way to "
+                "interact visibly. Only fall back to APP_LAUNCH (an observed installed "
+                "application name) plus keyboard actions (GUI_HOTKEY/GUI_KEYPRESS) when "
+                "no visible control can be located in the screenshot. "
             )
         return (
             "You are SONIC, a general-purpose AI-human colleague operating a live "
@@ -982,8 +1067,15 @@ class ComputerUseAgent:
             "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, "
             "GUI_KEYPRESS, GUI_HOTKEY, GUI_SCROLL, and GUI_DRAG, PAYLOAD must "
             "include a structured observable `postcondition` (for example "
-            '{"screen_changed": true}). '
-            "Do not treat the free-text `expected` field as a substitute.\n"
+            '{"screen_changed": true}). This key is mandatory: an action without '
+            "it is rejected before dispatch and wastes the step. Do not treat the "
+            "free-text `expected` field as a substitute. Worked example for a "
+            "pointer click on, say, a visible menu button: "
+            '{"action":"GUI_CLICK","target":"File menu",'
+            '"payload":{"x":18,"y":14,"postcondition":{"screen_changed":true}},'
+            '"expected":"File menu opens"}. Use the real pixel point and a short '
+            "real label for the control you can actually see; never copy this "
+            "example's numbers or label verbatim.\n"
             "GUI_SCROLL PAYLOAD needs integer `x`, `y`, `delta` (negative scrolls "
             "up/left, positive down/right) and optional `axis`: \"vertical\" "
             "(default) or \"horizontal\" for left/right. "
@@ -1349,13 +1441,18 @@ class ComputerUseAgent:
         if perception is None:
             raise RuntimeError("local AVCS pixel processor is unavailable")
 
-        # Optional cloud vision bridge. Only used when the operator explicitly
-        # opts in AND no evaluated local AVCS grounder checkpoint exists. The
-        # local checkpoint always wins when configured: the default path keeps
-        # workstation pixels inside the workstation.
+        # LLM-vision grounding bridge. This is the default target-resolution
+        # path when no evaluated local AVCS grounder checkpoint exists: the
+        # reasoning model already receives the frame, so the same vision route
+        # answers "where is X?" and the caller keeps ownership of the click.
+        # An evaluated local checkpoint always wins when configured. Set
+        # SONIC_ENABLE_VLM_GROUNDING=0 to forbid sending frames to a vision route.
+        vlm_enabled = os.environ.get(
+            "SONIC_ENABLE_VLM_GROUNDING", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
         if (
             not getattr(perception, "goal_grounder_configured", False)
-            and os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "0") == "1"
+            and vlm_enabled
         ):
             bridge_b64 = frame_b64
             if not bridge_b64 and raw_rgb:
@@ -1386,6 +1483,11 @@ class ComputerUseAgent:
                         resolved_y=point[1],
                     )
                     return {"x": point[0], "y": point[1], "engine": "vlm_grounder"}
+            # No local checkpoint exists, so the LLM-vision route is the only
+            # grounder. Report an honest "not found" instead of falling through
+            # to the unconfigured local grounder, which would raise.
+            logger.info("vlm_grounding_no_target_returned", query=query)
+            return None
 
         if raw_rgb:
             result = await asyncio.to_thread(
@@ -1579,9 +1681,11 @@ class ComputerUseAgent:
                     perception_version=getattr(screen_obs, "perception_version", 0),
                 )
             self._pending_gui_action_observation = None
-        # Store screenshot for vision-in-the-loop (VLM image input)
+        # Store screenshot for vision-in-the-loop (VLM image input). The AVCS
+        # path delivers raw RGB and leaves screenshot_base64 empty, so encode
+        # on demand; otherwise GUI workers would never receive pixels.
         self._last_screenshot_b64 = (
-            getattr(screen_obs, "screenshot_base64", "")
+            self._frame_to_png_base64(screen_obs)
             if perception_source == "avcs_pixels"
             else ""
         )
@@ -1961,13 +2065,164 @@ class ComputerUseAgent:
     def _adopt_reasoning_pixels(self, screen: Any, is_fresh: bool) -> None:
         """Adopt (or clear) the frame used to ground the next GUI decision."""
         if is_fresh:
-            self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
-            self._last_screen_has_pixels = True
+            self._last_screenshot_b64 = self._frame_to_png_base64(screen)
+            self._last_screen_has_pixels = bool(self._last_screenshot_b64) or bool(
+                getattr(screen, "raw_rgb", b"")
+                or getattr(screen, "screenshot_base64", "")
+            )
             self._last_screen_frame_id = getattr(screen, "frame_id", None)
         else:
             self._last_screenshot_b64 = ""
             self._last_screen_has_pixels = False
             self._last_screen_frame_id = None
+
+    @staticmethod
+    def _grid_overlay_png_base64(
+        frame_b64: str,
+        width: int,
+        height: int,
+    ) -> str:
+        """Stamp a labeled coordinate grid onto a frame for the vision model.
+
+        A vision model asked to click an explicit pixel point has no ruler to
+        read against, so it estimates coordinates from scratch and the click
+        lands off-target. Drawing a light grid with axis labels every 100 px
+        (heavier lines every 500 px) gives the model a fixed reference frame
+        and markedly improves estimated-click accuracy. This overlay is applied
+        ONLY to the image attached to a reasoning request; the raw frame kept in
+        ``_last_screenshot_b64`` is never modified, so scene signatures and
+        post-action verification still compare real pixels.
+        """
+        if not frame_b64:
+            return ""
+        if width <= 0 or height <= 0:
+            return frame_b64
+        try:
+            import base64 as _base64
+            import io
+
+            from PIL import Image, ImageDraw
+
+            encoded = frame_b64.split(",", 1)[-1]
+            raw = _base64.b64decode(encoded, validate=True)
+            image = Image.open(io.BytesIO(raw)).convert("RGB")
+            draw = ImageDraw.Draw(image)
+            # Keep the grid light so it does not obscure window edges: thin
+            # dashed lines every 100 px, slightly stronger lines every 500 px,
+            # and labels only at the heavy intersections.
+            minor, major = 100, 500
+            dash = 8
+            for x in range(0, width + 1, minor):
+                is_major = x % major == 0
+                color = (255, 60, 60) if is_major else (210, 190, 190)
+                if is_major:
+                    draw.line([(x, 0), (x, height)], fill=color, width=2)
+                else:
+                    for yy in range(0, height, dash * 2):
+                        draw.line([(x, yy), (x, min(yy + dash, height))], fill=color)
+            for y in range(0, height + 1, minor):
+                is_major = y % major == 0
+                color = (255, 60, 60) if is_major else (210, 190, 190)
+                if is_major:
+                    draw.line([(0, y), (width, y)], fill=color, width=2)
+                else:
+                    for xx in range(0, width, dash * 2):
+                        draw.line([(xx, y), (min(xx + dash, width), y)], fill=color)
+            for x in range(0, width + 1, major):
+                for y in range(0, height + 1, major):
+                    label = f"{x},{y}"
+                    tx = min(x + 4, max(0, width - 60))
+                    ty = min(y + 4, max(0, height - 14))
+                    draw.rectangle(
+                        [(tx - 2, ty - 2), (tx + 7 * len(label) + 2, ty + 12)],
+                        fill=(0, 0, 0),
+                    )
+                    draw.text((tx, ty), label, fill=(255, 255, 0))
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return _base64.b64encode(buffer.getvalue()).decode("ascii")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("grid_overlay_failed", error=str(exc))
+            return frame_b64
+
+    @staticmethod
+    def _frame_to_png_base64(screen: Any) -> str:
+        """Return a PNG base64 frame from either an encoded frame or raw RGB.
+
+        The AVCS path delivers raw RGB bytes and leaves ``screenshot_base64``
+        empty, so a vision attachment must encode those pixels on demand.
+        Returns "" when no usable frame is present or encoding fails; callers
+        then record an honest "no pixels" state rather than sending a bad image.
+        """
+        encoded = getattr(screen, "screenshot_base64", "") or ""
+        if encoded:
+            return encoded
+        raw_rgb = getattr(screen, "raw_rgb", b"") or b""
+        width = int(getattr(screen, "width", 0) or 0)
+        height = int(getattr(screen, "height", 0) or 0)
+        if not raw_rgb or width <= 0 or height <= 0:
+            return ""
+        if len(raw_rgb) < width * height * 3:
+            return ""
+        try:
+            import io
+
+            from PIL import Image
+
+            image = Image.frombytes(
+                "RGB", (width, height), bytes(raw_rgb[: width * height * 3])
+            )
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return base64.b64encode(buffer.getvalue()).decode("ascii")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("frame_png_encode_failed", error=str(exc))
+            return ""
+
+    def _reasoning_screenshot_images(self) -> list[Any]:
+        """Build the vision attachment for a GUI reasoning request.
+
+        Returns an empty list (no pixels attached) when no frame is available,
+        the frame is not valid base64, or no vision-capable route is
+        configured. Failing to attach is honest: the caller records
+        ``vision_route_unavailable`` rather than pretending the model saw the
+        screen. Pixels are only ever sent to a route the router reports as
+        image-capable.
+        """
+        frame_b64 = str(getattr(self, "_last_screenshot_b64", "") or "")
+        if not frame_b64:
+            return []
+        router = getattr(self, "llm_router", None)
+        if router is None or not callable(getattr(router, "vision_route_ready", None)):
+            return []
+        try:
+            if not router.vision_route_ready():
+                return []
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("vision_route_readiness_check_failed", error=str(exc))
+            return []
+        encoded = frame_b64.split(",", 1)[-1]
+        try:
+            from sonic.llm.schemas import ImageContent
+
+            base64.b64decode(encoded, validate=True)
+        except Exception:
+            return []
+        # Optional coordinate-grid overlay on the model-facing image only.
+        # Default OFF: measured against the currently available vision model
+        # (meta/llama-3.2-11b-vision-instruct) the grid did NOT improve pixel
+        # localization (no-grid 4/4 within 20px @ 6.0px avg; grid 3/4 @ 36.8px),
+        # so shipping it on by default would degrade clicks. It is retained as an
+        # opt-in experiment for a stronger vision route: SONIC_GRID_OVERLAY=1.
+        if os.environ.get("SONIC_GRID_OVERLAY", "0").strip() in ("1", "true", "True"):
+            overlay = self._grid_overlay_png_base64(
+                frame_b64,
+                int(getattr(self, "_screen_width", 0) or 0),
+                int(getattr(self, "_screen_height", 0) or 0),
+            )
+            if overlay:
+                encoded = overlay
+        return [ImageContent(base64=encoded, media_type="image/png")]
 
     @staticmethod
     def _gui_only_recovery_action(
@@ -2069,11 +2324,14 @@ class ComputerUseAgent:
                         for other_start, other_end, _ in candidates
                     )
                 ]
-                envelope = (
-                    outer_candidates[0][2]
-                    if len(outer_candidates) == 1
-                    else None
-                )
+                # A vision model frequently answers with an ordered multi-step
+                # plan (several action objects in sequence) instead of a single
+                # action. The agent executes one action per step by design, so
+                # the first envelope in reading order is the unambiguous next
+                # action; rejecting the whole response stalls the worker. A lone
+                # malformed/extended envelope still yields no candidate and is
+                # rejected below.
+                envelope = outer_candidates[0][2] if outer_candidates else None
             if isinstance(envelope, dict):
                 if set(envelope) == direct_keys:
                     fields["ACTION"] = envelope["action"]
@@ -2137,6 +2395,12 @@ class ComputerUseAgent:
                 {"command": "true"},
                 _GOAL_COMPLETE_SENTINEL,
             )
+
+        # Models routinely propose a near-miss spelling of a real action
+        # ("GUI_LAUNCH" for APP_LAUNCH, "GUI_FOCUS" for APP_FOCUS). Rejecting
+        # the whole response stalls the worker on a cosmetic mismatch, so map
+        # the common synonyms onto the canonical action before validation.
+        action_name = _GUI_ACTION_ALIASES.get(action_name, action_name)
 
         try:
             action_type = ComputerActionType(action_name)
@@ -3139,17 +3403,27 @@ class ComputerUseAgent:
                 "ASSIGNED PLANE: visible desktop GUI only.\n"
                 f"OBJECTIVE: {goal}\n"
                 f"CURRENT SCREEN DIMENSIONS: {screen_w}x{screen_h} pixels.\n"
+                f"Active Application / Window: {active_app}\n"
+                f"Open Windows (currently running X11 windows): {windows_str}\n"
                 f"Available Installed Desktop Applications: {installed_str}\n"
                 "CURRENT AVCS PIXEL STATE SUMMARY "
                 "(fresh local frame; coarse scene/change/motion signals only; "
-                "not semantic certainty or task proof; no screenshot is sent; "
-                f"no pixels are sent): {avcs_summary}\n"
+                "not semantic certainty or task proof; "
+                f"the desktop screenshot is attached separately when a vision route is ready): {avcs_summary}\n"
                 f"{narration_line}"
                 f"{ambient_line}"
                 "GROUNDING RULE: AVCS reflex state describes pixel changes and scene "
                 "motion; it does not provide OCR or semantic controls. Semantic targets "
                 "must be resolved locally by the configured, evaluated AVCS grounder. "
-                "Never invent coordinates. Earlier actions are history, not current evidence.\n"
+                "Never invent coordinates.\n"
+                "PROGRESS RULE: 'Open Windows' and 'Active Application / Window' above "
+                "are the CURRENT desktop state after your previous actions, not history. "
+                "If the application you were asked to open already appears in 'Open "
+                "Windows', it is open — do not launch it again. A repeated APP_LAUNCH for "
+                "an already-open application is a wasted step. If the objective's "
+                "postcondition already holds in the current desktop state, respond with "
+                "ACTION GOAL_COMPLETE instead of acting again.\n"
+                f"Actions taken so far:\n{history_text or '(none — this is the first action)'}\n"
                 "Choose one immediate visible GUI action; do not provide a multi-step plan."
             )
 
@@ -3674,7 +3948,9 @@ class ComputerUseAgent:
                 and visual_true_age <= 2_000
             ):
                 visual_observation = self._ensure_avcs_state(visual_observation)
-                self._last_screenshot_b64 = visual_observation.screenshot_base64
+                self._last_screenshot_b64 = self._frame_to_png_base64(
+                    visual_observation
+                )
                 self._last_screen_has_pixels = True
                 self._last_screen_frame_id = getattr(
                     visual_observation, "frame_id", None
@@ -3721,10 +3997,27 @@ class ComputerUseAgent:
             goal, observation, step_index, primary_file, test_file
         )
         user_text = obs_summary
+        # A GUI worker must reason from the visible interface, not from a
+        # hand-built text summary alone. When a fresh frame is available and a
+        # vision-capable route is configured, attach the pixels to the
+        # reasoning request so the model can actually see the screen. This is
+        # the documented "visual-first GUI" contract; the earlier AVCS
+        # migration hardcoded this to False and silently reduced GUI workers to
+        # blind text reasoning.
+        reasoning_images: list[Any] = []
         image_attached = False
-        escalation_reason = (
-            "avcs_pixel_state_only" if gui_reasoning else "non_gui_reasoning"
-        )
+        if gui_reasoning and self._last_screen_has_pixels:
+            reasoning_images = self._reasoning_screenshot_images()
+            image_attached = bool(reasoning_images)
+        if gui_reasoning:
+            if image_attached:
+                escalation_reason = "visual_reasoning_requested"
+            elif self._last_screen_has_pixels:
+                escalation_reason = "vision_route_unavailable"
+            else:
+                escalation_reason = "visual_frame_unavailable"
+        else:
+            escalation_reason = "non_gui_reasoning"
 
         observation.accessible_scene_fresh = structured_scene_available
         observation.image_attached = image_attached
@@ -3800,10 +4093,16 @@ class ComputerUseAgent:
         if self._gui_action_contract_active():
             action_instructions = (
                 "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and GUI_SCROLL, "
-                "provide a concise target description for the local AVCS grounder. "
-                "The language model receives no screenshot pixels or OCR/accessibility "
-                "control list; never invent pixel coordinates or claim a target is grounded. "
-                "If AVCS cannot resolve the target, the action will be blocked. PAYLOAD "
+                "either (a) give an explicit integer screen-pixel point in PAYLOAD "
+                '({"x":<int>,"y":<int>}) read from the attached screenshot, or (b) give a '
+                "concise semantic target in TARGET for the local AVCS grounder. "
+                "You are shown the current desktop screenshot when a vision route is "
+                "configured, so base targets on what is actually visible. A semantic "
+                "target is resolved locally by the AVCS grounder before dispatch; if no "
+                "grounder is configured the semantic form fails closed, so prefer the "
+                "explicit pixel form when you can see the control. Never invent pixel "
+                "coordinates that do not correspond to something visible, and never "
+                "claim a semantic target is already grounded. PAYLOAD "
                 "must be a JSON object. GUI_SCROLL also accepts `axis` "
                 "(\"vertical\" default, or \"horizontal\" for left/right) with an integer "
                 "`delta`. GUI_TYPE is unavailable until a tested local "
@@ -3893,7 +4192,11 @@ class ComputerUseAgent:
         request = LLMRequest(
             messages=[
                 Message(role=MessageRole.SYSTEM, content=system_prompt),
-                Message(role=MessageRole.USER, content=user_text),
+                Message(
+                    role=MessageRole.USER,
+                    content=user_text,
+                    images=reasoning_images,
+                ),
             ],
             task_type="reasoning",
             max_tokens=2048,
@@ -3961,7 +4264,7 @@ class ComputerUseAgent:
             heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
             reasoning_timeout = (
-                _GUI_REASONING_TIMEOUT_SECONDS
+                _gui_reasoning_timeout_seconds()
                 if self._gui_action_contract_active()
                 else 120.0
             )
@@ -3973,15 +4276,15 @@ class ComputerUseAgent:
             content_str = getattr(response, "content", "") or ""
             tool_calls = list(getattr(response, "tool_calls", []) or [])
 
-            refusal_phrases = (
-                "can't help with that",
-                "cannot help with that",
-                "cannot assist",
-                "can't assist",
-                "unethical",
+            from sonic.llm.router import REFUSAL_PHRASES
+
+            # Reuse the router's single source of truth so agent-level and
+            # router-level refusal handling cannot drift apart. Extra phrases
+            # cover the "not able to assist" family seen from vision models.
+            refusal_phrases = REFUSAL_PHRASES + (
+                "i'm sorry, but i can",
+                "i am sorry, but i can",
                 "illegal",
-                "against safety policies",
-                "against safety policy",
                 "violates our policies",
                 "cannot fulfill this request",
                 "generating malware",
@@ -4058,6 +4361,7 @@ class ComputerUseAgent:
                         ),
                         parser_reason=" ".join(expected.split())[:160],
                         response_chars=len(parse_target_str),
+                        response_preview=" ".join(parse_target_str.split())[:280],
                         action_marker_present=bool(
                             re.search(
                                 r'(?:^|\n)\s*(?:[-*+]\s*)?(?:\*\*)?ACTION(?:\*\*)?\s*:'
@@ -4144,7 +4448,7 @@ class ComputerUseAgent:
             ):
                 reason = (
                     f"GUI reasoning timed out after "
-                    f"{_GUI_REASONING_TIMEOUT_SECONDS:g} seconds; no action was dispatched."
+                    f"{_gui_reasoning_timeout_seconds():g} seconds; no action was dispatched."
                     if isinstance(e, TimeoutError)
                     else f"GUI reasoning failed: {e}"
                 )
@@ -4170,6 +4474,16 @@ class ComputerUseAgent:
         s = s.splitlines()[0].strip(" *_\n\r\t`\"'")
         # Strip leading conversational articles: "the", "a", "an"
         s = re.sub(r'^(?:the|a|an)\s+', '', s, flags=re.IGNORECASE).strip()
+        # Strip a leading role/scheme qualifier such as "application:mousepad",
+        # "app: mousepad", or "binary=foo" that models sometimes prepend. The
+        # qualifier is metadata about the name, not part of the executable, so
+        # resolving it literally would fail to find an installed program.
+        s = re.sub(
+            r'^(?:application|app|binary|program|executable)\s*[:=]\s*',
+            '',
+            s,
+            flags=re.IGNORECASE,
+        ).strip()
         # Strip trailing punctuation/quotes
         s = s.strip(" *_\n\r\t`\"'.,:;")
         return s.lower()
@@ -4517,6 +4831,11 @@ class ComputerUseAgent:
                     target = line.strip(" *_\n\r\t`\"'")
                     break
         if target.lower() in ("target", "target_resource", "command", "cmd", "none", "null", "n/a", "empty"):
+            target = ""
+        # Models sometimes echo a documentation placeholder verbatim
+        # (e.g. "<observed control>"). It is not a real label, so treat it as
+        # absent and let the payload pixel point carry the click.
+        if target and re.fullmatch(r"<[^<>]{0,60}>", target.strip()):
             target = ""
 
         if action_type in (ComputerActionType.APP_LAUNCH, ComputerActionType.APP_CLOSE, ComputerActionType.APP_FOCUS, ComputerActionType.APP_INSTALL):
@@ -5377,7 +5696,7 @@ class ComputerUseAgent:
             self._last_screen_observation_received_at,
         )
         self._last_gui_state_observation = None
-        self._last_screenshot_b64 = fresh_screen.screenshot_base64
+        self._last_screenshot_b64 = self._frame_to_png_base64(fresh_screen)
         snapshot = self.perception_bus.publish(
             screenshot_base64=fresh_screen.screenshot_base64,
             width=fresh_screen.width,
@@ -5474,7 +5793,7 @@ class ComputerUseAgent:
             else None
         )
         self._last_gui_state_observation = None
-        self._last_screenshot_b64 = screen.screenshot_base64
+        self._last_screenshot_b64 = self._frame_to_png_base64(screen)
         self._screen_width = screen.width
         self._screen_height = screen.height
         return renewed
@@ -5616,9 +5935,7 @@ class ComputerUseAgent:
                 if self._last_screen_has_pixels
                 else None
             )
-            self._last_screenshot_b64 = str(
-                getattr(result, "screenshot_base64", "") or ""
-            )
+            self._last_screenshot_b64 = self._frame_to_png_base64(result)
             if before_screen is not None:
                 before_signature = self._screen_state_signature(before_screen)
                 after_signature = self._screen_state_signature(result)
@@ -5895,6 +6212,77 @@ class ComputerUseAgent:
             logger.warning("avcs_focus_verification_failed", reason=str(exc))
             return False, "AVCS focus verification failed"
 
+    def _focus_verification_available(self) -> bool:
+        """True when text entry can be focus-verified by any real mechanism.
+
+        Prefers an evaluated local AVCS focus head; otherwise requires a
+        configured, ready vision route. When neither exists, GUI_TYPE stays
+        blocked rather than typing into an unconfirmed field.
+        """
+        if self._avcs_focus_head_ready():
+            return True
+        if os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "1").strip().lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            return False
+        router = getattr(self, "llm_router", None)
+        if router is None or not callable(getattr(router, "vision_route_ready", None)):
+            return False
+        try:
+            return bool(router.vision_route_ready())
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    async def _verify_gui_focus(self, screen: ScreenObservation, *, x: int, y: int, target: str) -> tuple[bool, str]:
+        """Confirm focus with the local AVCS head, else the vision route.
+
+        The evaluated local head always wins. When it is not configured, the
+        configured vision route answers a single yes/no question about the
+        visible focus indicator. Any error, ambiguity, or missing evidence
+        fails closed, so text is never typed on an unconfirmed field.
+        """
+        if self._avcs_focus_head_ready():
+            return await self._verify_gui_focus_with_avcs(
+                screen, x=x, y=y, target=target
+            )
+
+        vlm_enabled = os.environ.get(
+            "SONIC_ENABLE_VLM_GROUNDING", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        frame_b64 = str(
+            getattr(screen, "screenshot_base64", "")
+            or getattr(self, "_last_screenshot_b64", "")
+            or ""
+        )
+        router = getattr(self, "llm_router", None)
+        vision_ready = False
+        if router is not None and callable(getattr(router, "vision_route_ready", None)):
+            try:
+                vision_ready = bool(router.vision_route_ready())
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("vision_route_readiness_check_failed", error=str(exc))
+        if vlm_enabled and vision_ready and frame_b64:
+            from sonic.computer_use.grounding import _verify_focus_with_vlm
+
+            return await _verify_focus_with_vlm(
+                target,
+                frame_b64,
+                int(getattr(screen, "width", 0) or 0),
+                int(getattr(screen, "height", 0) or 0),
+                x,
+                y,
+                router=router,
+            )
+        if not vision_ready:
+            return False, (
+                "no evaluated local focus head and no vision route is configured "
+                "for focus verification"
+            )
+        return False, "AVCS has no evaluated local focus-verification head"
+
     async def execute_action(
         self,
         workspace_id: str,
@@ -6108,10 +6496,11 @@ class ComputerUseAgent:
         if action_type in (
             ComputerActionType.GUI_TYPE,
             ComputerActionType.BROWSER_NAVIGATE,
-        ) and not self._avcs_focus_head_ready():
+        ) and not self._focus_verification_available():
             actual_obs_str = (
                 f"{action_type.value} blocked: AVCS has no evaluated local "
-                "focus-verification head, so text will not be sent."
+                "focus-verification head and no ready vision route, so text "
+                "will not be sent."
             )
             trace = ComputerDecisionTrace(
                 step_index=self.action_counter,
@@ -7547,12 +7936,12 @@ class ComputerUseAgent:
                                     focused_snapshot.version
                                 )
                                 focused_observation.observation_age_ms = focused_age
-                                self._last_screenshot_b64 = (
-                                    focused_screen.screenshot_base64
+                                self._last_screenshot_b64 = self._frame_to_png_base64(
+                                    focused_screen
                                 )
                                 self._update_screen_dims(focused_screen)
                                 focus_confirmed, focus_evidence = (
-                                    await self._verify_gui_focus_with_avcs(
+                                    await self._verify_gui_focus(
                                         focused_screen,
                                         x=int(focus_x),
                                         y=int(focus_y),
@@ -7847,7 +8236,7 @@ class ComputerUseAgent:
 
             elif action_type == ComputerActionType.GUI_SCREENSHOT:
                 screen = await self.computer.screenshot(workspace_id)
-                self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
+                self._last_screenshot_b64 = self._frame_to_png_base64(screen)
                 self._last_active_window_geometry = getattr(screen, "active_window_geometry", None)
                 self._update_screen_dims(screen)
                 actual_obs_str = f"Screenshot captured ({screen.width}x{screen.height})"
@@ -7861,7 +8250,7 @@ class ComputerUseAgent:
                 seconds = max(0, min(int(payload.get("seconds", 2)), 30))
                 await _asyncio.sleep(seconds)
                 screen = await self.computer.screenshot(workspace_id)
-                self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "")
+                self._last_screenshot_b64 = self._frame_to_png_base64(screen)
                 self._update_screen_dims(screen)
                 actual_obs_str = f"Waited {seconds}s; screen refreshed"
 
@@ -7875,6 +8264,12 @@ class ComputerUseAgent:
                 else:
                     if "\n" in app_name:
                         app_name = app_name.split("\n")[0].strip(" *_\n\r\t`\"'")
+                    # Sanitize a role/scheme qualifier the model may have
+                    # prepended (e.g. "application:mousepad") so resolution
+                    # matches the real executable instead of failing literally.
+                    normalized_app = self._normalize_app_name(app_name)
+                    if normalized_app:
+                        app_name = normalized_app
                     extra_arg = payload.get("url") or payload.get("args") or payload.get("arguments") or payload.get("path") or payload.get("file") or ""
                     app_request = app_name
                     if extra_arg:
@@ -8427,7 +8822,7 @@ class ComputerUseAgent:
                     raise RuntimeError(
                         "visible application navigation could not be verified from a live screen"
                     )
-                self._last_screenshot_b64 = getattr(screen, "screenshot_base64", "") or ""
+                self._last_screenshot_b64 = self._frame_to_png_base64(screen)
                 self._last_gui_navigation_target = url
                 actual_obs_str = "Entered the requested destination through the visible desktop and captured its screen"
 
@@ -9765,6 +10160,38 @@ class ComputerUseAgent:
                                 f"'{action_type.value} {cmd_desc}'. Do NOT repeat actions. If the goal is satisfied, respond with ACTION: GOAL_COMPLETE. Otherwise choose a different, necessary action."
                             )
 
+        # Alternating (A-B-A-B) loop detector.
+        # The consecutive check above only catches the SAME action three times in
+        # a row. An agent that oscillates between two actions — e.g. launching
+        # app A, then app B, then A again — never trips it and burns the whole
+        # step budget without state progression. Observed live: 18 consecutive
+        # APP_LAUNCH calls alternating thunar/mousepad while the goal was to
+        # ARRANGE the two windows. Detect a completed period-2 cycle over the
+        # last four executed signatures and refuse to continue it.
+        if action_type not in (
+            ComputerActionType.GUI_WAIT,
+            ComputerActionType.BROWSER_WAIT,
+        ):
+            recent4 = self._recent_action_signatures[-4:]
+            if len(recent4) == 4:
+                keys = [(s[0], s[1]) for s in recent4]
+                incoming = (action_type.value, str(target).strip().lower())
+                if (
+                    keys[0] == keys[2]
+                    and keys[1] == keys[3]
+                    and keys[0] != keys[1]
+                    and incoming == keys[0]
+                ):
+                    return (
+                        f"BLOCKED: alternating loop detected — you have cycled between "
+                        f"'{keys[0][0]} {keys[0][1]}' and '{keys[1][0]} {keys[1][1]}' twice "
+                        "without state progression. Do NOT repeat either action again. "
+                        "Advance the goal with a different action (e.g. arrange the open "
+                        "windows with WINDOW_TILE or APP_MAXIMIZE, focus a window with "
+                        "APP_FOCUS, or conclude with ACTION: GOAL_COMPLETE if the objective "
+                        "is already satisfied)."
+                    )
+
         return None
 
     def _verification_probe_for_goal(self, goal: str) -> VerificationProbe | None:
@@ -10433,7 +10860,9 @@ class ComputerUseAgent:
                     for marker in (
                         "sonic_avcs_grounding_checkpoint is not configured",
                         "local avcs pixel processor is unavailable",
+                        "no evaluated local focus-verification head and no ready vision route",
                         "avcs has no evaluated local focus-verification head",
+                        "no evaluated local focus head and no vision route is configured",
                     )
                 )
             )

@@ -5441,3 +5441,148 @@ Tests: `packages/avcs/tests/test_model_bundle.py` (12) cover checksum/provenance
 emission and the refusal cases (no sidecar, no provenance, unloadable
 checkpoint), tamper detection, and load-verification. 16 passed with the lazy
 import regression; ruff clean on the new files.
+
+## Boss worker live-run: four real defects fixed (2026-10-23)
+
+Reproduced end-to-end against the live `sonic-desktop-workstation`: Boss launched
+a GUI worker with a stable `agent_uid` that showed RUNNING on the dashboard but
+did almost no real work, then stalled. Root causes were all in the GUI worker's
+reasoning/parse loop, not in dispatch or the dashboard:
+
+1. **Multi-step plan response rejected** (the dominant stall). The vision model
+   answered with an ordered plan of several JSON action envelopes in sequence
+   (e.g. `APP_LAUNCH` + `GUI_CLICK` + `GUI_KEYPRESS`). `_parse_gui_action_response`
+   took an envelope only when exactly ONE candidate was present, so every
+   multi-action reply was discarded and the worker burned steps until it died.
+   The agent executes one action per step by design, so the first envelope in
+   reading order is the unambiguous next action; it is now taken. A single
+   malformed/extended envelope (extra keys) is still rejected.
+2. **Vision-model refusal misread as a parse error.** The fallback vision model
+   intermittently returns "I'm not able to assist with that." The agent's local
+   refusal list missed the "not able to assist" family, so a refusal surfaced as
+   a confusing `gui_action_response_invalid` instead of a recorded refusal that
+   triggers replanning. The agent now reuses `sonic.llm.router.REFUSAL_PHRASES`
+   (single source of truth) plus a few extras; the router already triggers
+   provider/model fallback on a detected refusal.
+3. **Hardcoded 60s GUI reasoning timeout.** A slow-but-working vision route
+   (large fallback model + full screenshot) exceeded it and the worker died with
+   `reasoning-unavailable`. Now `SONIC_GUI_REASONING_TIMEOUT_SECONDS` (bounded
+   10-600, default 60) via `_gui_reasoning_timeout_seconds()`; the module
+   constant remains the default so existing tests can monkeypatch it.
+4. **`application:mousepad` role-prefix not stripped.** The model prefixed the
+   app role; resolution ran the string literally and failed for an installed
+   app. `_normalize_app_name` now strips a leading
+   `application|app|binary|program|executable[:=]` qualifier, and the APP_LAUNCH
+   dispatch site normalizes `payload.app_name` before calling the provider.
+
+Also improved GUI-worker prompts: the mandatory `postcondition` now has a
+concrete worked example (was prose only), the GUI-only observation surfaces
+`Active Application / Window` + `Open Windows` + actions-so-far with a PROGRESS
+RULE (do not relaunch an app already open; emit GOAL_COMPLETE if the
+postcondition already holds), and the action instructions now permit the
+explicit integer pixel form (the old text forbade the very pixel target the
+prompt also asked for). The invalid-response warning logs a bounded
+`response_preview` for operator diagnosis.
+
+Live result after the fixes: the worker took 8 real steps, launched Mousepad
+(`Untitled 1 - Mousepad` window confirmed via `wmctrl`), and the independent
+Judge returned `INCONCLUSIVE` — the documented fail-closed contract, because no
+evaluated local AVCS task-verification head exists. This is honest: the being
+can now drive the GUI and open applications, but semantic task confirmation
+still requires a trained AVCS head.
+
+Tests: `services/core/tests/test_boss_worker_live_regressions.py` (8) plus the
+updated `test_phase8_visual_computer_use.py` parser contract and
+`test_app_launch_no_silent_substitution.py`. Broad Boss/worker/GUI regression:
+346 passed, 0 failures.
+
+## "Mouse ka use nahi" root cause: the prompt forbade the pointer (2026-10-23)
+
+Operator report: SONIC does automated work but the mouse is never used. Verified
+live by polling `xdotool getmouselocation` every 0.4s during a real mission — the
+cursor stayed at `0,0` for the whole run. Root cause was NOT the provider: the
+cursor motor (`sonic_cursor.py`), the visual servo, and `DockerComputerProvider.gui_action`
+all work (direct test moves the cursor and the servo logs
+`visual_servo_reach converged=True`).
+
+The real cause was the GUI-only system prompt. When no evaluated AVCS grounding
+checkpoint is configured (`_avcs_grounder_ready()` is False, which is the normal
+state — no checkpoint exists in-repo), the prompt told the model:
+
+    "No AVCS grounding checkpoint is configured, so semantic GUI_CLICK targets
+     cannot be resolved and will fail closed. Do not propose
+     GUI_CLICK/.../GUI_SCROLL on a described control. Instead open an observed
+     installed application with APP_LAUNCH, then use keyboard actions ..."
+
+That conflates two different things. A *semantic* target (a described control
+the grounder must resolve) does need the checkpoint. An *explicit pixel* click
+read from the attached screenshot does NOT — the screenshot is already attached
+(`image_attached=True`, vision route ready). By forbidding GUI_CLICK wholesale,
+the prompt pushed every worker onto silent `APP_LAUNCH`/keyboard routes, so the
+pointer never moved and the operator never saw the mouse used.
+
+Fix: the no-grounder clause now blocks only the *semantic* form and explicitly
+keeps the pointer available via explicit integer pixel coordinates, which is the
+preferred visible interaction; APP_LAUNCH/keyboard are demoted to fallback. Live
+re-run after the fix: the cursor moved and 3 of 4 worker steps were real
+`GUI_CLICK`s (2 VERIFIED by a real scene change).
+
+Supporting fixes in the same pass:
+- Multi-step plan responses are accepted (first envelope in reading order) —
+  the vision model returns an ordered plan, and rejecting it stalled workers.
+- Near-miss action names are canonicalized (`_GUI_ACTION_ALIASES`: `GUI_LAUNCH`
+  -> `APP_LAUNCH`, `FOCUS_APP` -> `APP_FOCUS`, `SCREENSHOT` -> `GUI_SCREENSHOT`,
+  etc.). Truly unknown names are still rejected.
+- Documentation placeholders echoed verbatim (`<observed control>`) are treated
+  as an absent label so the payload pixel point carries the click.
+- The worked postcondition example is now concrete ("File menu", 18,14) with an
+  explicit instruction not to copy it verbatim, because the model echoed the old
+  angle-bracket placeholders.
+
+Honest residual: without a trained AVCS grounder the model must *estimate* pixel
+points from the screenshot, so a click can miss its control (observed: a click
+at x=1920 was out of bounds and rejected, and a repeated miss tripped the action
+loop breaker, which stopped the worker rather than looping). Training and
+configuring the AVCS grounding checkpoint (packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md)
+is what turns estimated clicks into grounded ones.
+
+Tests: `test_gui_capability_aware_prompt.py::test_prompt_without_grounder_blocks_semantic_but_allows_pixel_clicks`,
+`test_phase8_visual_computer_use.py::test_gui_worker_maps_near_miss_action_aliases`
+and `::test_gui_worker_takes_first_action_of_a_multi_step_plan`. Broad regression:
+346 passed, 0 failures.
+
+## Track 2 (coordinate grid overlay): implemented, measured, default OFF (2026-10-23)
+
+Goal: improve explicit-pixel click accuracy for GUI workers that have no trained
+AVCS grounding checkpoint. Idea: stamp a labeled coordinate grid onto the image
+attached to the vision model, so an estimated pixel point has a readable
+reference frame. The overlay is applied ONLY to the model-facing image in
+`_reasoning_screenshot_images()`; the stored `_last_screenshot_b64` used for
+scene signatures and post-action verification is never modified.
+
+Implementation: `ComputerUseAgent._grid_overlay_png_base64(frame_b64, w, h)` —
+thin dashed lines every 100 px, heavier red lines every 500 px, x,y labels at
+the heavy intersections. Honest on bad input (returns the frame unchanged /
+empty, never raises). Gated by `SONIC_GRID_OVERLAY`.
+
+MEASURED RESULT (this is why it is OFF by default): against the vision model
+actually available in this environment (`meta/llama-3.2-11b-vision-instruct` —
+only `NVIDIA_API_KEY` is set, so the configured primary `openai/gpt-4o` falls
+back), the grid did NOT improve pixel localization:
+
+- corner target (XFCE menu button, ground truth ~(10,10)):
+  - no-grid: 4/4 within 20 px, avg 6.0 px
+  - grid:    3/4 within 20 px, avg 36.8 px
+- mid-screen target (center of a placed editor window, ground truth (970,648)):
+  - both variants were very noisy (hundreds of px) on the 11B model.
+
+Conclusion: an 11B vision model cannot localize reliably with or without a grid,
+so the grid is not a fix at this tier. It is retained as an opt-in experiment
+(`SONIC_GRID_OVERLAY=1`) for a stronger vision route, and defaults OFF so we do
+not ship a change that degrades clicks. The real fix remains Track 1: train and
+configure an evaluated AVCS grounding checkpoint.
+
+Tests: `test_boss_worker_live_regressions.py` — overlay adds a coordinate
+reference; honest on empty/degenerate/broken input; opt-in and off by default
+(unset attaches the raw frame, `SONIC_GRID_OVERLAY=1` attaches the gridded
+frame). Focused regression: 208 passed, ruff clean.

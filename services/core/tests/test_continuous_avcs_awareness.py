@@ -151,7 +151,13 @@ def test_unchanged_screen_publishes_no_change_event():
         bus = _RecordingBus()
         monitor = AwarenessMonitor(provider, "ws-3", bus=bus, fps=20.0)
         monitor.start()
-        await asyncio.sleep(0.4)
+        # Poll instead of a fixed sleep: under a loaded suite the sampler can
+        # publish fewer frames than the assertion needs even though it works.
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while monitor.stats()["frames_published"] < 3:
+            if asyncio.get_running_loop().time() > deadline:
+                break
+            await asyncio.sleep(0.02)
         await monitor.stop()
         return bus, monitor
 
@@ -306,6 +312,9 @@ def test_capability_surface_reports_awareness_and_cortex_honestly(monkeypatch):
     monkeypatch.delenv("SONIC_AVCS_CORTEX_CHECKPOINT", raising=False)
     monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
     monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
+    # This test asserts the local-only fail-closed state; pin the vision bridge
+    # off so a ready live vision route cannot legitimately enable the actions.
+    monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
 
     from sonic.api.routes.workstation_perception import avcs_capability_state
 

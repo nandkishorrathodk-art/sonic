@@ -237,9 +237,9 @@ def record_demonstrations(
     ``reuse_display`` keeps an already-running display (and any window manager)
     instead of starting its own, so repeated calls are cheap.
     """
-    _require_tooling()
     if not specs:
         raise ValueError("At least one session spec is required.")
+    _require_tooling()
 
     output_root = Path(output_root)
     if output_root.exists():

@@ -621,6 +621,93 @@ async def _resolve_vlm_target(
     return point
 
 
+def _parse_vlm_focus_reply(response: str) -> tuple[bool, str] | None:
+    """Parse a vision focus-verification reply into ``(focused, evidence)``.
+
+    Returns ``None`` when the reply is missing, ambiguous, or lacks evidence, so
+    the caller fails closed rather than treating a malformed answer as success.
+    """
+    if not response:
+        return None
+    match = re.search(r"\{.*\}", response.strip(), re.DOTALL)
+    if not match:
+        return None
+    try:
+        decoded = json.loads(match.group(0))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    focused = decoded.get("focused")
+    evidence = decoded.get("evidence")
+    if not isinstance(focused, bool):
+        return None
+    if not isinstance(evidence, str) or not evidence.strip():
+        return None
+    return focused, evidence.strip()
+
+
+async def _verify_focus_with_vlm(
+    target: str,
+    screenshot_b64: str,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    router: Any | None = None,
+) -> tuple[bool, str]:
+    """Confirm text-field focus with the configured vision model route.
+
+    Used only when no evaluated local AVCS focus head exists. This is a
+    model-mediated guard, not independent proof: it asks a single yes/no
+    question about a visible focus indicator and fails closed on any error,
+    ambiguity, or missing evidence. The caller still owns whether to type.
+    """
+    if router is None:
+        return False, "no vision route is configured for focus verification"
+
+    try:
+        from sonic.llm.prompts import focus_verification_user_prompt
+        from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning("vlm_focus_import_failed", error=str(exc))
+        return False, "vision focus verification is unavailable"
+
+    encoded = screenshot_b64.split(",", 1)[-1]
+    try:
+        base64.b64decode(encoded, validate=True)
+    except Exception:
+        return False, "focus verification requires a valid screenshot"
+
+    prompt = focus_verification_user_prompt(target, width, height, x, y)
+    request = LLMRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content=prompt,
+                images=[ImageContent(base64=encoded, media_type="image/png")],
+            )
+        ],
+        task_type="vision",
+        max_tokens=128,
+        temperature=0.0,
+    )
+    try:
+        response = await router.complete(request)
+    except Exception as exc:
+        logger.warning("vlm_focus_call_failed", error=str(exc))
+        return False, "vision focus verification request failed"
+
+    reply = getattr(response, "content", "") or ""
+    parsed = _parse_vlm_focus_reply(reply)
+    if parsed is None:
+        logger.info("vlm_focus_inconclusive", target=target, reply=reply[:200])
+        return False, "vision focus verification was inconclusive"
+    focused, evidence = parsed
+    logger.info("vlm_focus_result", target=target, focused=focused)
+    return focused, evidence
+
+
 def resolve_ui_target(
     query: str,
     screenshot_b64: str | None = None,

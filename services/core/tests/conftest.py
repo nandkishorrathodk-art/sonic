@@ -112,6 +112,11 @@ def isolate_all_sonic_test_state(tmp_path, monkeypatch):
     monkeypatch.setenv("SONIC_WORKSTATION_STATE_PATH", state_file)
     monkeypatch.setenv("SONIC_MEMORY_DB_PATH", db_file)
     monkeypatch.setenv("SONIC_BEING_DB_PATH", db_file)
+    # The LLM-vision grounding/focus bridge is on by default in production, but
+    # its readiness depends on live provider credentials. Pin it OFF for the
+    # deterministic unit suite; tests that specifically exercise the vision path
+    # set SONIC_ENABLE_VLM_GROUNDING=1 themselves.
+    monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
 
     def _reset_all_singletons():
         try:

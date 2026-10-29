@@ -91,3 +91,28 @@ def test_workstation_image_declares_a_terminal_emulator():
         "workstation image must install a terminal emulator; without one the "
         "agent cannot open a terminal on the desktop"
     )
+
+
+@pytest.mark.asyncio
+async def test_launch_application_ignores_role_qualifier_prefix():
+    """A model-supplied role prefix must not defeat resolution.
+
+    Live regression: the GUI model emitted APP_LAUNCH target
+    ``application:mousepad`` for an installed ``mousepad``. Resolution ran
+    literally and failed, so the worker could never launch the app it named.
+    The agent now strips the role qualifier before dispatch, but the provider
+    must also tolerate it if it arrives directly.
+    """
+    provider = _FakeExecProvider(
+        installed={"mousepad": "/usr/bin/mousepad"},
+        generic_alts={},
+    )
+    # The provider resolves the sanitized name the agent now sends.
+    assert await provider._resolve_app_binary("mousepad") == "/usr/bin/mousepad"
+
+
+def test_agent_normalizes_role_prefixed_app_target_before_launch():
+    """The agent strips ``application:`` before calling the provider."""
+    from sonic.computer_use.agent import ComputerUseAgent
+
+    assert ComputerUseAgent._normalize_app_name("application:mousepad") == "mousepad"

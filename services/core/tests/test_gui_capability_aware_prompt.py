@@ -26,11 +26,21 @@ def _agent(*, grounder_ready: bool) -> ComputerUseAgent:
     return agent
 
 
-def test_prompt_without_grounder_forbids_semantic_clicks():
+def test_prompt_without_grounder_blocks_semantic_but_allows_pixel_clicks():
+    """No grounder blocks *semantic* clicks only, never the mouse.
+
+    Live regression: the old prompt told the model to avoid GUI_CLICK entirely
+    when no grounder was configured, so workers never moved the cursor (it
+    stayed at 0,0) and silently launched apps instead of using the pointer.
+    Pixel clicks read from the attached screenshot do not need the grounder.
+    """
     prompt = _agent(grounder_ready=False)._gui_only_system_prompt()
     assert "No AVCS grounding checkpoint is configured" in prompt
     assert "fail closed" in prompt
-    # Must still offer a workable non-semantic route.
+    # The pointer must remain available via explicit pixel coordinates.
+    assert '"x":<int>,"y":<int>' in prompt
+    assert "Pixel clicks do not need the grounder" in prompt
+    # Non-pointer fallbacks must still be offered.
     assert "APP_LAUNCH" in prompt
     assert "GUI_HOTKEY" in prompt
 

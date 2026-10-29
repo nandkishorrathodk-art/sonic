@@ -130,3 +130,133 @@ class TestResolveVlmTarget:
         request = router.complete.call_args.args[0]
         assert request.task_type == "vision"
         assert request.messages[0].has_images is True
+
+
+# --------------------------------------------------------------------------
+# Focus verification via the vision route (added when the local AVCS focus
+# head is not configured). Answers a single yes/no question and fails closed.
+# --------------------------------------------------------------------------
+
+
+class TestParseVlmFocusReply:
+    def test_true_with_evidence(self):
+        from sonic.computer_use.grounding import _parse_vlm_focus_reply
+
+        assert _parse_vlm_focus_reply(
+            '{"focused": true, "evidence": "blinking caret visible"}'
+        ) == (True, "blinking caret visible")
+
+    def test_false_with_evidence(self):
+        from sonic.computer_use.grounding import _parse_vlm_focus_reply
+
+        assert _parse_vlm_focus_reply(
+            '{"focused": false, "evidence": "that is a button"}'
+        ) == (False, "that is a button")
+
+    def test_missing_evidence_is_inconclusive(self):
+        from sonic.computer_use.grounding import _parse_vlm_focus_reply
+
+        assert _parse_vlm_focus_reply('{"focused": true}') is None
+
+    def test_non_bool_focused_is_inconclusive(self):
+        from sonic.computer_use.grounding import _parse_vlm_focus_reply
+
+        assert _parse_vlm_focus_reply('{"focused": "yes", "evidence": "x"}') is None
+
+    def test_non_json_is_inconclusive(self):
+        from sonic.computer_use.grounding import _parse_vlm_focus_reply
+
+        assert _parse_vlm_focus_reply("I think it is focused") is None
+
+
+class TestVerifyFocusWithVlm:
+    def test_true_reply_returns_focused(self):
+        from sonic.computer_use.grounding import _verify_focus_with_vlm
+
+        router = MagicMock()
+        router.complete = AsyncMock(
+            return_value=SimpleNamespace(
+                content='{"focused": true, "evidence": "caret in the field"}'
+            )
+        )
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        focused, evidence = _run(
+            _verify_focus_with_vlm("Name field", png, 1920, 1080, 400, 300, router=router)
+        )
+        assert focused is True
+        assert "caret" in evidence
+
+    def test_no_router_fails_closed(self):
+        from sonic.computer_use.grounding import _verify_focus_with_vlm
+
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        focused, evidence = _run(
+            _verify_focus_with_vlm("Name", png, 1920, 1080, 1, 1, router=None)
+        )
+        assert focused is False
+        assert evidence
+
+    def test_provider_error_fails_closed(self):
+        from sonic.computer_use.grounding import _verify_focus_with_vlm
+
+        router = MagicMock()
+        router.complete = AsyncMock(side_effect=RuntimeError("provider down"))
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        focused, _ = _run(
+            _verify_focus_with_vlm("Name", png, 1920, 1080, 1, 1, router=router)
+        )
+        assert focused is False
+
+    def test_inconclusive_reply_fails_closed(self):
+        from sonic.computer_use.grounding import _verify_focus_with_vlm
+
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=SimpleNamespace(content="maybe"))
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        focused, _ = _run(
+            _verify_focus_with_vlm("Name", png, 1920, 1080, 1, 1, router=router)
+        )
+        assert focused is False
+
+    def test_request_uses_vision_route_with_image(self):
+        from sonic.computer_use.grounding import _verify_focus_with_vlm
+
+        router = MagicMock()
+        router.complete = AsyncMock(
+            return_value=SimpleNamespace(content='{"focused": true, "evidence": "ok"}')
+        )
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        _run(_verify_focus_with_vlm("Name", png, 1920, 1080, 5, 6, router=router))
+        request = router.complete.call_args.args[0]
+        assert request.task_type == "vision"
+        assert request.messages[0].has_images is True
+
+
+class TestVlmGroundingDefault:
+    """The bridge is the default grounder when no local checkpoint exists."""
+
+    def test_default_is_enabled(self, monkeypatch):
+        import sonic.computer_use.agent as agent_mod
+
+        monkeypatch.delenv("SONIC_ENABLE_VLM_GROUNDING", raising=False)
+        # The default must be "on" (not "0"), so the bridge runs without an
+        # explicit opt-in when no local checkpoint is configured.
+        assert agent_mod.os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "1") != "0"
+
+    def test_focus_availability_helper_blocks_without_any_path(self, monkeypatch):
+        from sonic.computer_use.agent import ComputerUseAgent
+
+        monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
+        monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
+        agent = ComputerUseAgent(computer_provider=MagicMock())
+        assert agent._focus_verification_available() is False
+
+    def test_focus_availability_true_with_ready_vision_route(self, monkeypatch):
+        from sonic.computer_use.agent import ComputerUseAgent
+
+        monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
+        monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "1")
+        router = MagicMock()
+        router.vision_route_ready = MagicMock(return_value=True)
+        agent = ComputerUseAgent(computer_provider=MagicMock(), llm_router=router)
+        assert agent._focus_verification_available() is True

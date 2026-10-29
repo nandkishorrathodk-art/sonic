@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import sys
 
 import pytest
@@ -59,9 +60,11 @@ class TestEgressMappedIPv6:
 
     def test_blocked_networks_include_v4_mapped_range(self):
         # The defense-in-depth v4-mapped range must be present so the check
-        # does not regress to v4-only blocks.
-        nets = {str(n) for n in BLOCKED_NETWORKS}
-        assert "::ffff:0.0.0.0/96" in nets
+        # does not regress to v4-only blocks. Compare network objects, not
+        # their string form: str() of a v4-mapped network differs between
+        # Python versions (3.12 renders "::ffff:0:0/96", 3.13 renders
+        # "::ffff:0.0.0.0/96") while the network itself is identical.
+        assert ipaddress.ip_network("::ffff:0:0/96") in BLOCKED_NETWORKS
 
 
 # =====================================================================

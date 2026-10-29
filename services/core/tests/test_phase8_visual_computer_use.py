@@ -58,6 +58,18 @@ _AFTER_FRAME = _png_base64(255)
 _FOCUSED_FRAME = _png_base64(128)
 
 
+@pytest.fixture(autouse=True)
+def _disable_vision_bridge(monkeypatch):
+    """Keep this file on the local-AVCS contract.
+
+    These tests assert the behaviour when no evaluated local AVCS grounding or
+    focus head exists. The vision-route fallback is a separate path and is
+    covered in ``test_vlm_grounding_bridge.py``; disabling it here keeps the
+    local-head expectations deterministic and prevents live model calls.
+    """
+    monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
+
+
 def _mock_provider():
     """Build a mock ComputerProvider with async methods."""
     p = AsyncMock()
@@ -1245,22 +1257,74 @@ class TestActionParsing:
         assert payload == {"key": "Ctrl+L"}
         assert expected == "Focus the location field"
 
-    def test_gui_worker_rejects_ambiguous_or_extended_json_envelopes(self):
+    def test_gui_worker_takes_first_action_of_a_multi_step_plan(self):
+        """A vision model may answer with an ordered plan of several actions.
+
+        The agent executes one action per step, so the first envelope in
+        reading order is the next action. Rejecting the whole response stalled
+        live workers (observed: a 3-object APP_LAUNCH/GUI_CLICK/GUI_KEYPRESS
+        plan) even though the first action was unambiguous.
+        """
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        first = (
+            '{"action":"APP_LAUNCH","target":"Terminal Emulator","payload":{},'
+            '"expected":"Terminal Emulator launched"}'
+        )
+        second = (
+            '{"action":"GUI_CLICK","target":"Terminal Emulator",'
+            '"payload":{"x":119,"y":85},"expected":"Terminal Emulator focused"}'
+        )
+        action_type, target, _, _ = agent._parse_gui_action_response(
+            f"{first} {second}",
+            "",
+        )
+        assert action_type == ComputerActionType.APP_LAUNCH
+        assert target == "terminal emulator"
+
+    def test_gui_worker_rejects_extended_json_envelope(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
         envelope = (
             '{"action":"GUI_HOTKEY","target":"keyboard",'
             '"payload":{"key":"Ctrl+L"},"expected":"Focus the location field"}'
         )
-        for response in (
-            f"{envelope} {envelope}",
+        action_type, target, _, _ = agent._parse_gui_action_response(
             envelope[:-1] + ',"commentary":"extra"}',
+            "",
+        )
+        assert action_type == ActionExecutionStatus.BLOCKED
+        assert target == "gui-invalid-response"
+
+    def test_gui_worker_maps_near_miss_action_aliases(self):
+        """A cosmetic action-name mismatch must not stall the worker.
+
+        Live regression: the vision model emitted ``GUI_LAUNCH`` (not
+        ``APP_LAUNCH``) for an installed app and the whole response was
+        rejected as an unsupported action type.
+        """
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        for alias, canonical in (
+            ("GUI_LAUNCH", ComputerActionType.APP_LAUNCH),
+            ("OPEN_APP", ComputerActionType.APP_LAUNCH),
+            ("FOCUS_APP", ComputerActionType.APP_FOCUS),
+            ("SCREENSHOT", ComputerActionType.GUI_SCREENSHOT),
+            ("CLICK", ComputerActionType.GUI_CLICK),
         ):
-            action_type, target, _, _ = agent._parse_gui_action_response(
-                response,
-                "",
+            response = (
+                f'{{"action":"{alias}","target":"mousepad","payload":{{}},'
+                '"expected":"do the thing"}'
             )
-            assert action_type == ActionExecutionStatus.BLOCKED
-            assert target == "gui-invalid-response"
+            action_type, _, _, _ = agent._parse_gui_action_response(response, "")
+            assert action_type == canonical, alias
+
+    def test_gui_worker_still_rejects_truly_unknown_action(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        response = (
+            '{"action":"GUI_TELEPORT","target":"mousepad","payload":{},'
+            '"expected":"do the thing"}'
+        )
+        action_type, target, _, _ = agent._parse_gui_action_response(response, "")
+        assert action_type == ActionExecutionStatus.BLOCKED
+        assert target == "gui-invalid-response"
 
     def test_gui_worker_accepts_markdown_wrapped_action_fields(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
@@ -1467,7 +1531,7 @@ class TestReasoningPrompt:
         assert "AUTONOMOUS TOOL AUTHORING" not in user_prompt
         assert "Never describe a desktop shortcut as an already-open window" in system_prompt
         assert "CURRENT AVCS PIXEL STATE" in user_prompt
-        assert "no screenshot is sent" in user_prompt
+        assert _FRESH_FRAME not in user_prompt
         assert "Last Command Output" not in user_prompt
         assert '"command": "..."' not in user_prompt
 
@@ -1731,7 +1795,7 @@ class TestReasoningPrompt:
         assert '"label":"File"' not in user_prompt
         assert "File Edit View" not in user_prompt
         assert "CURRENT AVCS PIXEL STATE" in user_prompt
-        assert "no screenshot is sent" in user_prompt
+        assert _FRESH_FRAME not in user_prompt
 
     @pytest.mark.asyncio
     async def test_gui_reasoning_uses_local_avcs_state_without_exposing_controls(self):
@@ -1777,7 +1841,9 @@ class TestReasoningPrompt:
         await agent._llm_choose_action("Open the File menu", observation, 1, "", "")
 
         request = agent.llm_router.complete.await_args.args[0]
-        assert not getattr(request.messages[1], "images", [])
+        # Pixels travel as a structured image attachment, never inlined text,
+        # and the OCR/accessibility control inventory is never exposed.
+        assert _FRESH_FRAME not in request.messages[1].content
         assert request.task_type == "reasoning"
         assert "CURRENT AVCS PIXEL STATE" in request.messages[1].content
         assert "Grounded visible controls" not in request.messages[1].content
@@ -1817,7 +1883,7 @@ class TestReasoningPrompt:
         await agent._llm_choose_action("Inspect the desktop", observation, 1, "", "")
 
         request = agent.llm_router.complete.await_args.args[0]
-        assert not getattr(request.messages[1], "images", [])
+        assert _FRESH_FRAME not in request.messages[1].content
         assert "CURRENT AVCS PIXEL STATE" in request.messages[1].content
         assert request.task_type == "reasoning"
 
@@ -1866,7 +1932,8 @@ async def test_next_gui_reasoning_context_uses_refreshed_bounded_avcs_summary():
     assert "motion=" in user_prompt
     assert "stale-frame-marker" not in user_prompt
     assert "events=none" in user_prompt
-    assert not request.messages[1].images
+    # The refreshed frame is attached as pixels, never inlined as text.
+    assert _AFTER_FRAME not in user_prompt
 
 
 @pytest.mark.asyncio
