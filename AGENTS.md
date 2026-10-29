@@ -5680,3 +5680,78 @@ checkpoint are not committed.
   `GITHUB_TOKEN` now return 401). A refreshed token is needed to push.
 - Commit `4160f3d` (vision-route grounding default) was pushed successfully
   earlier and is on the remote branch / PR #88.
+
+## System 1 (Laya) was silently dead: real model rejected by the response validator (2026-10-29)
+
+Operator reported System 1 was not fine-tuned and asked for it. Investigation
+found something worse than "untrained": **the real model was installed-able and
+working, but SONIC threw away every answer it produced.**
+
+### What was actually running
+`sonic/llm/laya_engine.py` documents three backends (remote `laya-serve`, local
+`laya` package, zero-RAM lexical fallback). The `laya` package was **not
+installed**, no `LAYA_API_URL` was set, and `SONIC_ENABLE_LOCAL_LAYA` was unset,
+so every decision came from the hand-written keyword scorer
+(`laya_vector_projection`). System 1 was a rule-based heuristic, not a model.
+
+### The real bug: a response-contract mismatch
+After installing `laya 0.4.17` (the repo already declares a `local-laya` extra,
+so no new dependency was invented) and loading `convaiinnovations/laya`, the
+model produced correct answers and SONIC logged `laya_local_invalid_response`
+and fell back to the keyword scorer. The validator demanded fields the real
+model does not emit:
+
+| question type | real Laya emits | old validator read | outcome |
+|---|---|---|---|
+| `choice` | `answer_confidence` + `probabilities` | `probability` | always rejected |
+| `score` | ordinal level, e.g. `1.1508` | must be within [0, 1] | rejected when above 1 |
+| `noul` | `noul` in [0, 1] | `noul` in [0, 1] | accepted |
+
+Because `choice` is the type every routing and safety decision uses, **the real
+model was rejected on essentially every call.** The failure was silent: the
+fallback produced a plausible-looking answer, so nothing surfaced as an error.
+
+### Fix
+- `_choice_probability()` reads the chosen option's probability from
+  `probabilities[choice]`, then `answer_confidence`, then `probability`, so a
+  valid answer is never discarded for using Laya's documented field name.
+- A `score` above 1.0 is normalised onto the ordinal level scale
+  (`value / (levels - 1)`, clamped to [0, 1]) instead of being rejected.
+- `_coerce_unit_interval()` now also rejects out-of-range values, so the
+  normalisation path cannot let a bad number through.
+- Every answer is rewritten into one canonical shape, so callers do not need to
+  know which backend replied.
+
+### Verified
+- `services/core/tests/test_laya_backend_contract.py` (8 tests) pins the exact
+  captured real-model payloads for all three question types, plus rejection
+  cases (choice outside criteria, missing probability, NaN, missing key).
+- Live end-to-end: `active_backend` moved from `laya_vector_projection` to
+  **`laya_local`**, returning the model's own probabilities.
+- Regression: 35 Laya tests, 109 routing/plane tests, ruff clean.
+
+### Consequence for fine-tuning
+The local Laya checkpoints ship **uncalibrated** for these questions — the
+loader warns that the checkpoint's temperatures are invalid and confidence must
+be treated as uncalibrated. So the installed model is a genuine System 1
+improvement, but its confidence values are not yet trustworthy, and
+`docs/finetune.md` in the Laya repo confirms zero-shot typed-decision accuracy is
+near chance while fine-tuning reaches ~0.77. Fine-tuning therefore remains the
+step that delivers most of the value; the difference from before is that the
+base model now actually runs, which makes both calibration and fine-tuning
+possible at all.
+
+Laya's own `docs/finetune_browser_agent.md` is the closest published analogue to
+SONIC's use case (next-action selection on a live desktop). Two of its findings
+transfer directly and are worth honouring when SONIC builds its corpus:
+- The **input format mattered more than the data**: moving candidates out of the
+  free-text state and into the option list was worth more than any data change.
+- Data-shape traps to avoid: templated "done" goals leak phrasing; if every
+  "done" sample has one prior action and every click sample none, the model
+  learns "any history implies done". Mid-task negatives are required.
+
+### Hardware
+Cloud GPU is available to the operator, which removes the CPU-only limit on
+fine-tuning. The remaining blocker is the training corpus: SONIC does not
+currently persist `(state, question, correct answer)` triples, so there is
+nothing to fine-tune on yet. Decision logging must come first.

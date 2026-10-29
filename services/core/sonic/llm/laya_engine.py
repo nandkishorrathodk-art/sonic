@@ -96,6 +96,35 @@ def _has_explicit_failure(text: str) -> bool:
     )
 
 
+def _coerce_unit_interval(value: Any) -> float | None:
+    """Return ``value`` as a float in [0, 1], or None when it is not usable."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        return None
+    return float(value)
+
+
+def _choice_probability(answer: dict[str, Any], choice: str) -> float | None:
+    """Read the chosen option's probability from a backend ``choice`` answer.
+
+    Laya names this field differently per surface: the local/remote model
+    returns ``answer_confidence`` (plus a full ``probabilities`` map), while the
+    zero-RAM fallback emits ``probability``. Accept any of them so a valid model
+    answer is never discarded for using the documented Laya field name.
+    """
+    probabilities = answer.get("probabilities")
+    if isinstance(probabilities, dict):
+        value = _coerce_unit_interval(probabilities.get(choice))
+        if value is not None:
+            return value
+    for field_name in ("answer_confidence", "probability"):
+        value = _coerce_unit_interval(answer.get(field_name))
+        if value is not None:
+            return value
+    return None
+
+
 @dataclass
 class LayaDecisionResult:
     """Typed output returned by a Laya System-1 forward pass."""
@@ -352,7 +381,13 @@ class LayaSystem1Engine:
         model: str,
         backend: str,
     ) -> LayaDecisionResult | None:
-        """Reject incomplete or malformed model results so callers get fallback scoring."""
+        """Normalise a model result, or reject it so callers get fallback scoring.
+
+        Accepts the real Laya answer contract (``answer_confidence`` for a
+        choice, an ordinal ``score`` above 1.0 for a score question) as well as
+        the fallback's own shape, and rewrites each answer into one canonical
+        form so downstream callers do not have to know which backend replied.
+        """
         if isinstance(raw, LayaDecisionResult):
             answers = raw.answers
             routing = raw.routing
@@ -374,23 +409,43 @@ class LayaSystem1Engine:
             if question_type == "choice":
                 criteria = spec.get("criteria")
                 choice = answer.get("choice")
-                probability = answer.get("probability")
                 if not isinstance(criteria, dict) or choice not in criteria:
                     return None
-                if not isinstance(probability, (int, float)) or isinstance(probability, bool):
+                probability = _choice_probability(answer, str(choice))
+                if probability is None:
                     return None
-                if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
-                    return None
+                normalized[key] = {
+                    **answer,
+                    "choice": choice,
+                    "probability": probability,
+                }
             elif question_type in {"score", "noul"}:
                 field_name = "score" if question_type == "score" else "noul"
-                value = answer.get(field_name)
-                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                value = _coerce_unit_interval(answer.get(field_name))
+                if value is None:
+                    # A score question answers on an ordinal level scale whose
+                    # top level sits above 1.0 (Laya returned 1.1508 for
+                    # low/medium/high). Convert that level into the [0, 1]
+                    # fraction the callers expect instead of rejecting it.
+                    criteria = spec.get("criteria")
+                    level_count = (
+                        len(criteria)
+                        if isinstance(criteria, (list, tuple)) and criteria
+                        else 3
+                    )
+                    raw_value = answer.get(field_name)
+                    if (
+                        question_type == "score"
+                        and not isinstance(raw_value, bool)
+                        and isinstance(raw_value, (int, float))
+                        and math.isfinite(raw_value)
+                    ):
+                        value = max(0.0, min(1.0, float(raw_value) / (level_count - 1)))
+                if value is None:
                     return None
-                if not math.isfinite(value) or not 0.0 <= value <= 1.0:
-                    return None
+                normalized[key] = {**answer, field_name: value}
             else:
                 return None
-            normalized[key] = answer
 
         result_routing = dict(routing)
         result_routing.setdefault("model", model)
