@@ -1404,3 +1404,90 @@ def test_default_capture_fps_is_conservative(monkeypatch):
 
     assert module._DEFAULT_AVCS_CAPTURE_FPS <= 15
     assert module._DEFAULT_AVCS_STREAM_IDLE_SECONDS > 0
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_scroll_vertical_uses_wheel_buttons_4_and_5():
+    """Vertical scroll must keep the classic X11 wheel buttons 4/5."""
+    provider = DockerComputerProvider()
+    provider._docker_exec = AsyncMock(return_value=(0, "", ""))
+    provider.screenshot = AsyncMock(
+        return_value=ScreenObservation(
+            screenshot_base64=_png_base64(1280, 800),
+            width=1280,
+            height=800,
+            capture_age_ms=0,
+            desktop_state="INTERACTIVE",
+        )
+    )
+    provider._last_screenshot = ScreenObservation(
+        screenshot_base64=_png_base64(1280, 800),
+        width=1280,
+        height=800,
+        capture_age_ms=0,
+        desktop_state="INTERACTIVE",
+    )
+    provider._last_screenshot_time = time.monotonic()
+
+    await provider.gui_action(
+        "ws-1",
+        GUIAction(action=GUIActionType.SCROLL, x=400, y=300, scroll_delta=3),
+    )
+
+    commands = " ".join(str(call.args[0]) for call in provider._docker_exec.await_args_list)
+    assert "click --repeat 3 4" in commands, commands
+    assert " 6" not in commands and " 7" not in commands
+
+
+@pytest.mark.no_live_infra
+@pytest.mark.asyncio
+async def test_docker_scroll_horizontal_uses_wheel_buttons_6_and_7():
+    """Left/right scrolling needs buttons 6/7; 4/5 can only scroll up/down."""
+    provider = DockerComputerProvider()
+    provider._docker_exec = AsyncMock(return_value=(0, "", ""))
+    provider.screenshot = AsyncMock(
+        return_value=ScreenObservation(
+            screenshot_base64=_png_base64(1280, 800),
+            width=1280,
+            height=800,
+            capture_age_ms=0,
+            desktop_state="INTERACTIVE",
+        )
+    )
+    provider._last_screenshot = ScreenObservation(
+        screenshot_base64=_png_base64(1280, 800),
+        width=1280,
+        height=800,
+        capture_age_ms=0,
+        desktop_state="INTERACTIVE",
+    )
+    provider._last_screenshot_time = time.monotonic()
+
+    await provider.gui_action(
+        "ws-1",
+        GUIAction(
+            action=GUIActionType.SCROLL,
+            x=400,
+            y=300,
+            scroll_delta=2,
+            scroll_axis="horizontal",
+        ),
+    )
+
+    commands = " ".join(str(call.args[0]) for call in provider._docker_exec.await_args_list)
+    assert "click --repeat 2 6" in commands, commands
+
+    provider._docker_exec.reset_mock()
+    await provider.gui_action(
+        "ws-1",
+        GUIAction(
+            action=GUIActionType.SCROLL,
+            x=400,
+            y=300,
+            scroll_delta=-2,
+            scroll_axis="horizontal",
+        ),
+    )
+    commands = " ".join(str(call.args[0]) for call in provider._docker_exec.await_args_list)
+    assert "click --repeat 2 7" in commands, commands

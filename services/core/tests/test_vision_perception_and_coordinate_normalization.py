@@ -1,6 +1,7 @@
 """
 Tests for AVCS-local perception and coordinate normalization in sonic-core:
-1. GUI reasoning requires a fresh AVCS pixel frame but does not upload it.
+1. GUI reasoning requires a fresh AVCS pixel frame and attaches it to the
+   reasoning request when a vision-capable route is configured.
 2. extract_bbox_midpoint scales normalized 0-1000 coordinates to
    (raw_x / 1000.0) * width and (raw_y / 1000.0) * height in 1280x800 screens.
 3. ScreenObservation supports active_window_geometry (x, y, w, h) in various formats.
@@ -9,6 +10,7 @@ Tests for AVCS-local perception and coordinate normalization in sonic-core:
 import base64
 import io
 import sys
+import time
 import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -103,6 +105,7 @@ async def test_gui_reasoning_attaches_fresh_frame_to_computer_use_route():
     frame = _make_test_image_b64()
     agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
     agent.llm_router = MagicMock()
+    agent.llm_router.vision_route_ready = MagicMock(return_value=True)
     agent.llm_router.complete = AsyncMock(
         return_value=SimpleNamespace(
             content=(
@@ -135,7 +138,7 @@ async def test_gui_reasoning_attaches_fresh_frame_to_computer_use_route():
         observation_age_ms=0,
     )
 
-    await agent._llm_choose_action(
+    action, target, _payload, thought = await agent._llm_choose_action(
         goal="Save the document",
         observation=observation,
         step_index=1,
@@ -153,6 +156,139 @@ async def test_gui_reasoning_attaches_fresh_frame_to_computer_use_route():
     assert request.messages[1].images[0].media_type == "image/png"
     assert observation.image_attached is True
     assert "ACCESSIBILITY CONTROLS" not in user_content
+    assert frame not in user_content
+
+
+@pytest.mark.asyncio
+async def test_gui_reasoning_without_vision_route_attaches_no_frame():
+    """Without a vision-capable route no pixels are sent and it is recorded."""
+    frame = _make_test_image_b64()
+    agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+    agent.llm_router = MagicMock()
+    agent.llm_router.vision_route_ready = MagicMock(return_value=False)
+    agent.llm_router.complete = AsyncMock(
+        return_value=SimpleNamespace(
+            content=(
+                '{"action":"GOAL_COMPLETE","target":"goal_complete",'
+                '"payload":{},"expected":"Hand off for independent verification"}'
+            ),
+            tool_calls=[],
+        )
+    )
+    screen = ScreenObservation(
+        screenshot_base64=frame,
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": 1,
+            "scene_hash": "document-scene",
+            "width": 1280,
+            "height": 800,
+        },
+        width=1280,
+        height=800,
+        active_window="Document",
+        desktop_state="INTERACTIVE",
+        capture_age_ms=0,
+        perception_version=1,
+    )
+    observation = ComputerWorldObservation(
+        screen=screen,
+        active_application="Document",
+        perception_version=1,
+        observation_age_ms=0,
+    )
+
+    action, target, _payload, thought = await agent._llm_choose_action(
+        goal="Save the document",
+        observation=observation,
+        step_index=1,
+        primary_file="",
+        test_file="",
+    )
+
+    assert action == ActionExecutionStatus.BLOCKED
+    assert target == "reasoning-unavailable"
+    assert "vision" in thought.lower()
+    agent.llm_router.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gui_reasoning_encodes_avcs_raw_rgb_into_attached_png():
+    """The AVCS path delivers raw RGB and an empty screenshot_base64.
+
+    Regression guard for the real production gap: even after re-enabling the
+    vision attachment, a GUI worker would still send no pixels because the
+    frame only exists as raw RGB. The agent must encode those bytes into a PNG
+    before attaching.
+    """
+    width, height = 8, 6
+    raw_rgb = bytes([128] * (width * height * 3))
+    agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+    agent.llm_router = MagicMock()
+    agent.llm_router.vision_route_ready = MagicMock(return_value=True)
+    agent.llm_router.complete = AsyncMock(
+        return_value=SimpleNamespace(
+            content=(
+                '{"action":"GOAL_COMPLETE","target":"goal_complete",'
+                '"payload":{},"expected":"Hand off for independent verification"}'
+            ),
+            tool_calls=[],
+        )
+    )
+    screen = ScreenObservation(
+        screenshot_base64="",
+        raw_rgb=raw_rgb,
+        frame_id=1,
+        avcs_state={
+            "engine": "avcs_reflex",
+            "frame_index": 1,
+            "scene_hash": "raw-scene",
+            "width": width,
+            "height": height,
+            "source_frame_id": 1,
+        },
+        width=width,
+        height=height,
+        active_window="Desktop",
+        desktop_state="INTERACTIVE",
+        capture_age_ms=0,
+        perception_version=1,
+    )
+    observation = ComputerWorldObservation(
+        screen=screen,
+        active_application="Desktop",
+        perception_version=1,
+        observation_age_ms=0,
+    )
+    agent._last_world_observation = observation
+    agent._last_gui_state_observation = screen
+    agent._last_screen_observation_received_at = time.monotonic()
+    agent._last_screenshot_b64 = screen.screenshot_base64
+    agent._screen_width = screen.width
+    agent._screen_height = screen.height
+
+    await agent._llm_choose_action(
+        goal="Describe the desktop", observation=observation, step_index=1,
+        primary_file="", test_file="",
+    )
+
+    request = agent.llm_router.complete.await_args.args[0]
+    user_message = request.messages[1]
+    assert user_message.has_images
+    import base64 as _b64
+
+    decoded = _b64.b64decode(user_message.images[0].base64)
+    assert decoded[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_frame_to_png_base64_returns_empty_for_incomplete_pixels():
+    from sonic.computer_use.agent import ComputerUseAgent as _CUA
+
+    # Bypass model validation to exercise the encoder's defensive guards.
+    partial = SimpleNamespace(screenshot_base64="", raw_rgb=b"\x00" * 10, width=100, height=100)
+    assert _CUA._frame_to_png_base64(partial) == ""
+    empty = SimpleNamespace(screenshot_base64="", raw_rgb=b"", width=0, height=0)
+    assert _CUA._frame_to_png_base64(empty) == ""
 
 
 def test_gui_screenshot_content_encodes_raw_rgb_pixels_as_png():

@@ -52,8 +52,14 @@ from sonic.llm.schemas import (
 REFUSAL_PHRASES = (
     "can't help with that",
     "cannot help with that",
+    "can't help",
+    "cannot help",
     "cannot assist",
     "can't assist",
+    "not able to assist",
+    "not able to help",
+    "unable to assist",
+    "unable to help",
     "unethical",
     "against safety policies",
     "against safety policy",
@@ -356,6 +362,36 @@ class ModelRouter:
             import os
             return bool(os.environ.get("LOCAL_LLM_URL"))
         return bool(p.api_key)
+
+    def vision_route_ready(self) -> bool:
+        """Whether a vision-capable provider+model is configured and ready.
+
+        A GUI worker may only attach desktop pixels when this is true. This is
+        an honest capability probe (credentials + declared image support), not
+        proof that the model comprehends the image; a failed vision request
+        still surfaces as a real error rather than being silently downgraded.
+        """
+        for task_type in ("computer_use", "vision"):
+            rule = self.routing_rules.get(task_type)
+            if not rule:
+                continue
+            candidates: list[tuple[str, str | None]] = [
+                (rule.get("provider"), rule.get("model"))
+            ]
+            for fallback in rule.get("fallback", []):
+                fb_provider = fallback.split("/")[0] if "/" in fallback else fallback
+                fb_model = fallback.split("/", 1)[1] if "/" in fallback else None
+                candidates.append((fb_provider, fb_model))
+            for provider_name, model_name in candidates:
+                if not provider_name or not self._is_provider_ready(provider_name):
+                    continue
+                provider = self.providers[provider_name]
+                selected_model = model_name or provider.default_model
+                if selected_model and self._model_supports_images(
+                    selected_model, provider
+                ):
+                    return True
+        return False
 
     def _resolve_provider(
         self,

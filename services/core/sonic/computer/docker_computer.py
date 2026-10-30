@@ -1506,7 +1506,14 @@ class DockerComputerProvider(ComputerProvider):
                 await exec_gui(f"DISPLAY={disp} xdotool key --clearmodifiers {safe_key}")
 
             elif atype == GUIActionType.SCROLL:
-                btn = 5 if action.scroll_delta < 0 else 4
+                # X11 wheel buttons: 4/5 = vertical up/down, 6/7 = horizontal
+                # left/right. Mapping by axis is what lets the agent reach
+                # content that is off to the side, not just above/below.
+                horizontal = getattr(action, "scroll_axis", "vertical") == "horizontal"
+                if horizontal:
+                    btn = 7 if action.scroll_delta < 0 else 6
+                else:
+                    btn = 5 if action.scroll_delta < 0 else 4
                 times = abs(action.scroll_delta) if action.scroll_delta != 0 else 3
                 move_prefix = f"test -x /usr/local/bin/sonic_cursor.py || exit 126; python3 /usr/local/bin/sonic_cursor.py move {action.x} {action.y} && "
                 await exec_gui(f"export DISPLAY={disp}; {move_prefix}xdotool click --repeat {times} {btn}")

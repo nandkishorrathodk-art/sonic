@@ -58,6 +58,18 @@ _AFTER_FRAME = _png_base64(255)
 _FOCUSED_FRAME = _png_base64(128)
 
 
+@pytest.fixture(autouse=True)
+def _disable_vision_bridge(monkeypatch):
+    """Keep this file on the local-AVCS contract.
+
+    These tests assert the behaviour when no evaluated local AVCS grounding or
+    focus head exists. The vision-route fallback is a separate path and is
+    covered in ``test_vlm_grounding_bridge.py``; disabling it here keeps the
+    local-head expectations deterministic and prevents live model calls.
+    """
+    monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
+
+
 def _mock_provider():
     """Build a mock ComputerProvider with async methods."""
     p = AsyncMock()
@@ -1147,6 +1159,61 @@ class TestGUIActionDispatch:
         provider.gui_action.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_gui_scroll_defaults_to_vertical_axis(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1", ComputerActionType.GUI_SCROLL, "640,400",
+            {"x": 640, "y": 400, "delta": -3}, "Scroll up"
+        )
+        assert trace.status == "SUCCESS"
+        assert "axis=vertical" in trace.actual_observation
+        gui_action = provider.gui_action.call_args[0][1]
+        assert gui_action.scroll_axis == "vertical"
+
+    @pytest.mark.asyncio
+    async def test_gui_scroll_horizontal_axis_is_forwarded(self):
+        """Left/right scrolling must reach the provider, not degrade to vertical."""
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1", ComputerActionType.GUI_SCROLL, "640,400",
+            {"x": 640, "y": 400, "delta": 5, "axis": "horizontal"}, "Scroll right"
+        )
+        assert trace.status == "SUCCESS"
+        assert "axis=horizontal" in trace.actual_observation
+        gui_action = provider.gui_action.call_args[0][1]
+        assert gui_action.scroll_axis == "horizontal"
+
+    @pytest.mark.asyncio
+    async def test_gui_scroll_axis_aliases_normalize(self):
+        """`x`/`left`/`right` aliases must resolve to a horizontal scroll."""
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1", ComputerActionType.GUI_SCROLL, "640,400",
+            {"x": 640, "y": 400, "delta": -2, "axis": "left"}, "Scroll left"
+        )
+        assert trace.status == "SUCCESS"
+        assert provider.gui_action.call_args[0][1].scroll_axis == "horizontal"
+
+    @pytest.mark.asyncio
+    async def test_gui_scroll_unknown_axis_falls_back_to_vertical(self):
+        """An unrecognised axis must not crash; it degrades safely to vertical."""
+        provider = _mock_provider()
+        agent = ComputerUseAgent(computer_provider=provider)
+        await agent.observe("ws-1")
+        trace = await agent.execute_action(
+            "ws-1", ComputerActionType.GUI_SCROLL, "640,400",
+            {"x": 640, "y": 400, "delta": 3, "axis": "diagonal"}, "Scroll"
+        )
+        assert trace.status == "SUCCESS"
+        assert provider.gui_action.call_args[0][1].scroll_axis == "vertical"
+
+    @pytest.mark.asyncio
     async def test_gui_screenshot_dispatches(self):
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider)
@@ -1270,22 +1337,84 @@ class TestActionParsing:
         assert payload == {"key": "Ctrl+L"}
         assert expected == "Focus the location field"
 
-    def test_gui_worker_rejects_ambiguous_or_extended_json_envelopes(self):
+    def test_gui_worker_takes_first_action_of_a_multi_step_plan(self):
+        """A vision model may answer with an ordered plan of several actions.
+
+        The agent executes one action per step, so the first envelope in
+        reading order is the next action. Rejecting the whole response stalled
+        live workers (observed: a 3-object APP_LAUNCH/GUI_CLICK/GUI_KEYPRESS
+        plan) even though the first action was unambiguous.
+        """
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        first = (
+            '{"action":"APP_LAUNCH","target":"Terminal Emulator","payload":{},'
+            '"expected":"Terminal Emulator launched"}'
+        )
+        second = (
+            '{"action":"GUI_CLICK","target":"Terminal Emulator",'
+            '"payload":{"x":119,"y":85},"expected":"Terminal Emulator focused"}'
+        )
+        action_type, target, _, _ = agent._parse_gui_action_response(
+            f"{first} {second}",
+            "",
+        )
+        assert action_type == ComputerActionType.APP_LAUNCH
+        assert target == "terminal emulator"
+
+    def test_gui_worker_rejects_extended_json_envelope(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
         envelope = (
             '{"action":"GUI_HOTKEY","target":"keyboard",'
             '"payload":{"key":"Ctrl+L"},"expected":"Focus the location field"}'
         )
-        for response in (
-            f"{envelope} {envelope}",
+        action_type, target, _, _ = agent._parse_gui_action_response(
             envelope[:-1] + ',"commentary":"extra"}',
+            "",
+        )
+        assert action_type == ActionExecutionStatus.BLOCKED
+        assert target == "gui-invalid-response"
+
+    def test_gui_worker_maps_near_miss_action_aliases(self):
+        """A cosmetic action-name mismatch must not stall the worker.
+
+        Live regression: the vision model emitted ``GUI_LAUNCH`` (not
+        ``APP_LAUNCH``) for an installed app and the whole response was
+        rejected as an unsupported action type.
+        """
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        for alias, canonical in (
+            ("GUI_LAUNCH", ComputerActionType.APP_LAUNCH),
+            ("OPEN_APP", ComputerActionType.APP_LAUNCH),
+            ("FOCUS_APP", ComputerActionType.APP_FOCUS),
+            ("SCREENSHOT", ComputerActionType.GUI_SCREENSHOT),
+            ("CLICK", ComputerActionType.GUI_CLICK),
         ):
-            action_type, target, _, _ = agent._parse_gui_action_response(
-                response,
-                "",
+            payload = (
+                {
+                    "x": 100,
+                    "y": 100,
+                    "coordinate_space": "screen_pixels",
+                    "postcondition": {"screen_changed": True},
+                }
+                if alias == "CLICK"
+                else {}
             )
-            assert action_type == ActionExecutionStatus.BLOCKED
-            assert target == "gui-invalid-response"
+            response = (
+                f'{{"action":"{alias}","target":"mousepad","payload":{json.dumps(payload)},'
+                '"expected":"do the thing"}'
+            )
+            action_type, _, _, _ = agent._parse_gui_action_response(response, "")
+            assert action_type == canonical, alias
+
+    def test_gui_worker_still_rejects_truly_unknown_action(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
+        response = (
+            '{"action":"GUI_TELEPORT","target":"mousepad","payload":{},'
+            '"expected":"do the thing"}'
+        )
+        action_type, target, _, _ = agent._parse_gui_action_response(response, "")
+        assert action_type == ActionExecutionStatus.BLOCKED
+        assert target == "gui-invalid-response"
 
     def test_gui_worker_accepts_markdown_wrapped_action_fields(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), gui_only=True)
@@ -1753,6 +1882,7 @@ class TestReasoningPrompt:
         assert "File Edit View" not in user_prompt
         assert "OPTIONAL AVCS_REFLEX TOOL OUTPUT" in user_prompt
         assert "attached current screenshot" in user_prompt
+        assert _FRESH_FRAME not in user_prompt
 
     @pytest.mark.asyncio
     async def test_gui_reasoning_attaches_screenshot_without_exposing_controls(self):
@@ -1802,6 +1932,7 @@ class TestReasoningPrompt:
         assert len(request.messages[1].images) == 1
         assert request.messages[1].images[0].media_type == "image/png"
         assert "OPTIONAL AVCS_REFLEX TOOL OUTPUT" in request.messages[1].content
+        assert _FRESH_FRAME not in request.messages[1].content
         assert "Grounded visible controls" not in request.messages[1].content
         assert "File Edit View" not in request.messages[1].content
 
@@ -1843,6 +1974,7 @@ class TestReasoningPrompt:
         assert len(request.messages[1].images) == 1
         assert request.messages[1].images[0].media_type == "image/png"
         assert "OPTIONAL AVCS_REFLEX TOOL OUTPUT" in request.messages[1].content
+        assert _FRESH_FRAME not in request.messages[1].content
 
 
 @pytest.mark.asyncio
@@ -1892,6 +2024,8 @@ async def test_next_gui_reasoning_context_uses_refreshed_optional_avcs_summary()
     assert len(request.messages[1].images) == 1
     assert request.messages[1].images[0].base64 == _AFTER_FRAME
     assert request.task_type == "computer_use"
+    # The refreshed frame is attached as pixels, never inlined as text.
+    assert _AFTER_FRAME not in user_prompt
 
 
 @pytest.mark.asyncio

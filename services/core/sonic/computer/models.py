@@ -145,12 +145,23 @@ class GUIAction(BaseModel):
     window_id: str | None = None
     app_name: str | None = None
     scroll_delta: int = 0
+    # X11 delivers vertical wheel events on buttons 4/5 and horizontal ones on
+    # 6/7. Without an axis, the agent can only scroll up/down and cannot reach
+    # content off to the side (wide pages, spreadsheets, code, timelines).
+    scroll_axis: str = "vertical"
     delay_ms: int = 25
 
     @model_validator(mode="after")
     def validate_scroll_delta(self) -> "GUIAction":
         if self.action == GUIActionType.SCROLL and self.scroll_delta == 0:
             raise ValueError("GUIActionType.SCROLL requires a non-zero scroll_delta")
+        normalized = str(self.scroll_axis).strip().lower()
+        if normalized in ("horizontal", "x", "left", "right"):
+            self.scroll_axis = "horizontal"
+        elif normalized in ("vertical", "y", "up", "down", ""):
+            self.scroll_axis = "vertical"
+        else:
+            raise ValueError("scroll_axis must be 'vertical' or 'horizontal'")
         return self
 
 

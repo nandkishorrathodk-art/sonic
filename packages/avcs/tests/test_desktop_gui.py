@@ -1,11 +1,26 @@
 """Unit Tests for Native Desktop Computer GUI Application."""
 from __future__ import annotations
 
-import tkinter as tk
 import pytest
 
-from avcs.gui import AVCSDesktopApp
-from avcs import SyntheticScreen, ScreenEye
+# The desktop GUI needs a Tk-enabled Python *and* an X display. A bare CI runner
+# has neither, and a top-level import would abort collection of the whole suite,
+# so skip the module instead of failing it. importorskip() is not enough here:
+# a Tk build without libtk raises ImportError from inside tkinter's own import.
+try:
+    import tkinter as tk
+except ImportError as exc:  # pragma: no cover - environment dependent
+    pytest.skip(f"tkinter unavailable: {exc}", allow_module_level=True)
+
+try:
+    _probe = tk.Tk()
+    _probe.withdraw()
+    _probe.destroy()
+except Exception as exc:  # pragma: no cover - environment dependent
+    pytest.skip(f"no usable X display for Tk: {exc}", allow_module_level=True)
+
+from avcs import SyntheticScreen  # noqa: E402
+from avcs.gui import AVCSDesktopApp  # noqa: E402
 
 
 def test_desktop_gui_app_initialization_and_widgets():

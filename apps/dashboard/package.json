@@ -12,7 +12,7 @@
     "@types/three": "^0.186.0",
     "3d-force-graph": "^1.80.0",
     "lucide-react": "^0.469.0",
-    "next": "15.5.26",
+    "next": "15.5.28",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-force-graph": "^1.48.2",
@@ -24,13 +24,14 @@
     "@types/react-dom": "^18",
     "autoprefixer": "^10.4.20",
     "eslint": "^8.57.1",
-    "eslint-config-next": "^15.5.26",
+    "eslint-config-next": "15.5.28",
     "postcss": "^8.5.26",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2"
   },
   "overrides": {
     "postcss": "^8.5.26",
-    "source-map-js": "^1.2.2"
+    "source-map-js": "^1.2.2",
+    "follow-redirects": "^1.16.2"
   }
 }

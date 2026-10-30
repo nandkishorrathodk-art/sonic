@@ -76,3 +76,63 @@ def test_soak_runner_short_run():
         assert summary_path.is_file()
         assert trace_path.is_file()
 
+
+def test_short_run_memory_gate_ignores_absolute_rss_baseline():
+    """A flat run must pass even when the host process already has a large RSS.
+
+    The runner is normally embedded in a larger process (a pytest session with
+    torch loaded already exceeds 1 GB), so an absolute RSS ceiling is not a
+    valid leak signal. This reproduced a false failure in CI where delta RSS
+    was 0.0 MB yet the gate reported memory_stable=False.
+    """
+    ballast = bytearray(700 * 1024 * 1024)
+    for i in range(0, len(ballast), 4096):
+        ballast[i] = 1
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        runner = SoakTestRunner(
+            duration_seconds=15.0,
+            max_cycles=15,
+            telemetry_interval_cycles=5,
+            warmup_cycles=5,
+            base_seed=999,
+        )
+        summary = runner.run(
+            summary_path=f"{tmpdir}/s.json",
+            trace_jsonl_path=f"{tmpdir}/t.jsonl",
+        )
+
+    final_rss = summary["resource_telemetry"]["final"]["rss_mb"]
+    assert final_rss > 1000.0, "test premise: host RSS should exceed the old cap"
+    assert summary["acceptance_gates"]["memory_stable"] is True
+    assert summary["acceptance_gates"]["exit_gate_passed"] is True
+
+
+def test_short_run_memory_gate_still_fails_on_real_growth(monkeypatch):
+    """A genuine RSS leak must still fail the short-run gate."""
+    grown = {"rss": 0.0}
+    original = SystemResourceTracker.get_metrics
+
+    def leaking_get_metrics(self):
+        rss, vms, handles, gdi, user = original(self)
+        grown["rss"] += 30.0  # 30 MB of growth > the 25 MB budget
+        return grown["rss"], vms, handles, gdi, user
+
+    monkeypatch.setattr(SystemResourceTracker, "get_metrics", leaking_get_metrics)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        runner = SoakTestRunner(
+            duration_seconds=15.0,
+            max_cycles=15,
+            telemetry_interval_cycles=5,
+            warmup_cycles=5,
+            base_seed=999,
+        )
+        summary = runner.run(
+            summary_path=f"{tmpdir}/s.json",
+            trace_jsonl_path=f"{tmpdir}/t.jsonl",
+        )
+
+    assert summary["acceptance_gates"]["memory_stable"] is False
+    assert summary["acceptance_gates"]["exit_gate_passed"] is False
+

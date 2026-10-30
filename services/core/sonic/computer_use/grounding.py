@@ -496,6 +496,218 @@ def _resolve_avcs_target(
         return None
 
 
+def _parse_vlm_grounding_reply(
+    response: str, width: int, height: int
+) -> tuple[int, int] | None:
+    """Parse a VLM grounding reply in normalized [0, 1000] space to pixels.
+
+    Accepts the machine-readable shapes ``{"x":..,"y":..}`` (normalized
+    0-1000), ``{"point":[x,y]}``, ``[x,y]``, and UI-TARS style
+    ``<|box_start|>(x1,y1,x2,y2)<|box_end|>``. Returns ``None`` when the model
+    reports ``NOT_FOUND`` or returns anything ambiguous. Out-of-range values
+    are rejected rather than clamped.
+    """
+    if not response:
+        return None
+    text = response.strip()
+    if not text or text.upper() == "NOT_FOUND":
+        return None
+
+    number = r"-?\d+(?:\.\d+)?"
+    box_match = re.search(
+        rf"<\|box_start\|>\s*\(?\s*({number})\s*,\s*({number})\s*,"
+        rf"\s*({number})\s*,\s*({number})\s*\)?\s*<\|box_end\|>",
+        text,
+        re.IGNORECASE,
+    )
+    if box_match:
+        x1, y1, x2, y2 = (float(v) for v in box_match.groups())
+        nx, ny = (x1 + x2) / 2, (y1 + y2) / 2
+        # UI-TARS boxes are already in pixel space of the image sent.
+        return _direct_screen_point(int(round(nx)), int(round(ny)), width, height, "pixel")
+
+    match = re.search(r"\{[^{}]*\}", text)
+    if not match:
+        match = re.search(r"\[[^\[\]]*\]", text)
+    if not match:
+        return None
+    try:
+        decoded = json.loads(match.group(0))
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if isinstance(decoded, dict) and decoded.get("not_found") is True:
+        return None
+    if isinstance(decoded, dict) and "x" in decoded and "y" in decoded:
+        point = (decoded["x"], decoded["y"])
+    elif (
+        isinstance(decoded, dict)
+        and isinstance(decoded.get("point"), list)
+        and len(decoded["point"]) == 2
+    ):
+        point = tuple(decoded["point"])
+    elif isinstance(decoded, list) and len(decoded) == 2:
+        point = tuple(decoded)
+    else:
+        return None
+
+    try:
+        nx, ny = float(point[0]), float(point[1])
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(nx) and math.isfinite(ny)):
+        return None
+    if not (0 <= nx <= 1000 and 0 <= ny <= 1000):
+        return None
+    px = int(round(nx / 1000.0 * width))
+    py = int(round(ny / 1000.0 * height))
+    return _direct_screen_point(px, py, width, height, "pixel")
+
+
+async def _resolve_vlm_target(
+    query: str,
+    screenshot_b64: str,
+    width: int,
+    height: int,
+    router: Any | None = None,
+) -> tuple[int, int] | None:
+    """Ground a target with the configured vision model (VLM) route.
+
+    This is the cloud/API bridge: it sends the live frame plus the target
+    phrase to the ``vision`` model route and parses a normalized point from the
+    reply. It is used only when no evaluated local AVCS grounder checkpoint is
+    configured. The caller (SONIC) still owns the decision and the dispatch;
+    this function only answers "where is X?".
+    """
+    if router is None:
+        return None
+
+    try:
+        from sonic.llm.prompts import grounding_user_prompt
+        from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning("vlm_grounding_import_failed", error=str(exc))
+        return None
+
+    encoded = screenshot_b64.split(",", 1)[-1]
+    try:
+        base64.b64decode(encoded, validate=True)
+    except Exception:
+        return None
+
+    prompt = grounding_user_prompt(query, width, height)
+    request = LLMRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content=prompt,
+                images=[ImageContent(base64=encoded, media_type="image/png")],
+            )
+        ],
+        task_type="vision",
+        max_tokens=128,
+        temperature=0.0,
+    )
+    try:
+        response = await router.complete(request)
+    except Exception as exc:
+        logger.warning("vlm_grounding_call_failed", error=str(exc))
+        return None
+
+    reply = getattr(response, "content", "") or ""
+    point = _parse_vlm_grounding_reply(reply, width, height)
+    if point is None:
+        logger.info("vlm_grounding_no_target", query=query, reply=reply[:200])
+    return point
+
+
+def _parse_vlm_focus_reply(response: str) -> tuple[bool, str] | None:
+    """Parse a vision focus-verification reply into ``(focused, evidence)``.
+
+    Returns ``None`` when the reply is missing, ambiguous, or lacks evidence, so
+    the caller fails closed rather than treating a malformed answer as success.
+    """
+    if not response:
+        return None
+    match = re.search(r"\{.*\}", response.strip(), re.DOTALL)
+    if not match:
+        return None
+    try:
+        decoded = json.loads(match.group(0))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    focused = decoded.get("focused")
+    evidence = decoded.get("evidence")
+    if not isinstance(focused, bool):
+        return None
+    if not isinstance(evidence, str) or not evidence.strip():
+        return None
+    return focused, evidence.strip()
+
+
+async def _verify_focus_with_vlm(
+    target: str,
+    screenshot_b64: str,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    router: Any | None = None,
+) -> tuple[bool, str]:
+    """Confirm text-field focus with the configured vision model route.
+
+    Used only when no evaluated local AVCS focus head exists. This is a
+    model-mediated guard, not independent proof: it asks a single yes/no
+    question about a visible focus indicator and fails closed on any error,
+    ambiguity, or missing evidence. The caller still owns whether to type.
+    """
+    if router is None:
+        return False, "no vision route is configured for focus verification"
+
+    try:
+        from sonic.llm.prompts import focus_verification_user_prompt
+        from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning("vlm_focus_import_failed", error=str(exc))
+        return False, "vision focus verification is unavailable"
+
+    encoded = screenshot_b64.split(",", 1)[-1]
+    try:
+        base64.b64decode(encoded, validate=True)
+    except Exception:
+        return False, "focus verification requires a valid screenshot"
+
+    prompt = focus_verification_user_prompt(target, width, height, x, y)
+    request = LLMRequest(
+        messages=[
+            Message(
+                role=MessageRole.USER,
+                content=prompt,
+                images=[ImageContent(base64=encoded, media_type="image/png")],
+            )
+        ],
+        task_type="vision",
+        max_tokens=128,
+        temperature=0.0,
+    )
+    try:
+        response = await router.complete(request)
+    except Exception as exc:
+        logger.warning("vlm_focus_call_failed", error=str(exc))
+        return False, "vision focus verification request failed"
+
+    reply = getattr(response, "content", "") or ""
+    parsed = _parse_vlm_focus_reply(reply)
+    if parsed is None:
+        logger.info("vlm_focus_inconclusive", target=target, reply=reply[:200])
+        return False, "vision focus verification was inconclusive"
+    focused, evidence = parsed
+    logger.info("vlm_focus_result", target=target, focused=focused)
+    return focused, evidence
+
+
 def resolve_ui_target(
     query: str,
     screenshot_b64: str | None = None,

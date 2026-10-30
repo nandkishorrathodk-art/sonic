@@ -5141,3 +5141,448 @@ still are; greeting reply is honest; a greeting makes zero provider calls. Two
 existing pipeline-error tests in `test_workstation_boss_integration.py` were
 retargeted from "hello" to a non-greeting prompt so they still exercise the
 error path. Workstation regression: 122 passed; ruff clean.
+
+## Cloud VLM grounding bridge + live vision-model reality (2026-10-27)
+
+Built and live-tested the missing bridge that lets SONIC answer "where is X?"
+through a configured vision model when no evaluated local AVCS grounder
+checkpoint exists. Committed `44133e3` (bridge) and `1991743` (operation model
+doc).
+
+### What was added
+- `grounding.py::_parse_vlm_grounding_reply()` — parses a VLM reply in
+  normalized `[0,1000]` space (JSON `{"x","y"}`, `{"point":[x,y]}`, bare
+  `[x,y]`, UI-TARS `<|box_start|>(x1,y1,x2,y2)<|box_end|>`) into screen pixels.
+  Fails closed on prose, `NOT_FOUND`, non-finite/non-numeric values, and
+  out-of-range points (rejected, never clamped).
+- `grounding.py::_resolve_vlm_target()` — sends the live frame + target phrase
+  to the `vision` route; returns a point or `None` on any failure. Takes the
+  router explicitly (there is no global `get_router()`; the agent holds
+  `self.llm_router`).
+- `agent.py::_ground_target_with_avcs()` — uses the bridge ONLY when
+  `SONIC_ENABLE_VLM_GROUNDING=1` AND no local AVCS grounder checkpoint is
+  configured. The local checkpoint always wins; default path keeps workstation
+  pixels inside the workstation.
+- Tests: `services/core/tests/test_vlm_grounding_bridge.py` (14) — parsing,
+  fail-closed behavior, vision-route selection, image attachment.
+
+### LIVE finding — the NVIDIA vision models available here do NOT ground
+Ran the real bridge against the real NVIDIA NIM endpoint with a synthetic
+1280x800 UI of known ground truth (SEARCH button, Clone button, address bar):
+
+- `meta/llama-3.2-11b-vision-instruct` — responds in PROSE, never emits a
+  coordinate JSON; latency 32-119 s per call. It is a caption model, not a
+  grounder. Useless for `resolve_ui_target`.
+- `nvidia/nemotron-3.5-super-vl-120b-a12b` — resolves server-side to
+  `private/nvidia/nemotron-3.5-super-120b-a12b`, a TEXT/reasoning model. It
+  spends the whole budget on `reasoning_content` and returns empty `content`
+  (`finish_reason=length`). Also NOT a grounder.
+- The router's budget guard additionally rejects models with no configured
+  pricing ("Cannot enforce LLM budget..."), so only the priced
+  `meta/llama-3.2-11b-vision-instruct` can even be called today.
+
+**Conclusion:** a generic cloud VLM is not a drop-in grounder. Real grounding
+needs either (a) a purpose-trained grounder (UI-TARS / OS-Atlas style, or the
+local AVCS checkpoint), or (b) a much stronger general VLM with explicit
+coordinate post-processing. The bridge is correct and ready; the model is the
+missing piece. Do not claim semantic grounding works until a real grounder
+model is wired and measured.
+
+### Capability picture after this pass (honest)
+- Works: AVCS reflex perception, LLM reasoning, app launch, pixel-coordinate
+  GUI actions, the new grounding bridge plumbing.
+- Still blocked (fail-closed, capability genuinely absent): semantic GUI
+  targeting (no real grounder model) and text entry (no focus checkpoint).
+
+## Local grounder pipeline completed + provenance honesty bug fixed (2026-10-27)
+
+Follow-up to the cloud-VLM pass. Live testing showed the available cloud VLMs do
+not ground, so the correct target is the grounder the repo ALREADY ships:
+`avcs.goal_grounder.GoalConditionedGrounder` (~776K params, CPU-fast,
+privacy-safe, and the model `load_grounding_checkpoint` already gates on). The
+real blocker was never the model — it was DATA and one honesty bug.
+
+### REAL BUG FIXED — trainer fabricated provenance
+`avcs/training/train_grounder.py` wrote `dataset_provenance:
+"recorded_ui_click_demonstrations"` **unconditionally** into both the checkpoint
+and the report. Since `load_grounding_checkpoint` gates on exactly that string,
+a checkpoint trained on ANY data (including synthetic) would have passed the
+production gate and been loaded as a real-demonstration grounder — the exact
+"success by decree" failure class this project forbids.
+
+Fixed by making provenance travel with the data:
+- `demonstrations.py`: `DemoRecord` gained a `provenance` field;
+  `discover_demonstrations` reads `manifest["provenance"]` (defaulting to the
+  recorder's `recorded_ui_click_demonstrations` when absent, so existing
+  recorder sessions are unchanged). Empty/invalid provenance is rejected.
+- `train_grounder.py`: `_resolve_dataset_provenance()` derives provenance from
+  the actual records (`"mixed"` if they disagree), stamps it into the checkpoint
+  and report, prints a WARNING when training on non-recorder data, and
+  `runtime_ready` is now also gated on real provenance.
+- Verified live: a synthetic-trained checkpoint carries
+  `synthetic_rendered_controls` and `load_grounding_checkpoint` REJECTS it
+  ("invalid 'dataset_provenance' provenance"). Recorder sessions still load.
+
+### NEW — synthetic session generator (headless pipeline testing)
+`avcs/training/synthetic_sessions.py` renders labelled UI controls and emits
+sessions in the recorder's exact on-disk schema, so loader -> dataset -> trainer
+-> checkpoint can be exercised without a desktop. Sessions are marked
+`synthetic_rendered_controls`; the generator is never a substitute for the
+recorder. CLI: `python -m avcs.training.synthetic_sessions --output-dir <dir>`.
+
+### NEW — Kaggle notebook for the LOCAL grounder
+`packages/avcs/notebooks/train_grounder_kaggle.ipynb` (generated by
+`build_train_grounder_notebook.py`, so the cells stay reviewable Python rather
+than hand-edited JSON). Trains `GoalConditionedGrounder` on uploaded recorder
+sessions; Step 6 verifies against the real production loader. Without real data
+it falls back to the synthetic smoke path and reports the honest rejection.
+
+### Verified end-to-end (CPU, this environment)
+Generated 12 synthetic sessions -> ran real `train_grounder` training -> real
+checkpoint written -> loader correctly rejects it. Existing recorder sessions
+are unaffected. No Docker/X11 here, so no real demonstration recording was run;
+that requires the workstation desktop.
+
+### Docs
+`packages/avcs/docs/GROUNDING_CHECKPOINT_PIPELINE.md` — the full path: Docker
+recorder -> Kaggle training -> `SONIC_AVCS_GROUNDING_CHECKPOINT`.
+
+### Tests
+- `packages/avcs/tests/test_synthetic_grounding_sessions.py` (10): loader
+  accepts generated sessions; manifest contract; normalized points; frames
+  exist; over-write refused; generated data is marked synthetic; legacy
+  recorder sessions default to recorded provenance; blank provenance rejected;
+  split + dataset shapes.
+- Regression: `packages/avcs/tests/` **644 passed, 20 skipped**, 1 pre-existing
+  load-flake (`test_soak_runner`, passes alone). Core grounding suites 49 passed.
+  Ruff clean on every changed/new file (61 pre-existing errors in untouched
+  `dataset.py`/`demo_recorder.py`/`train_kaggle.py`/`vicreg_safeguard.py` remain).
+
+## Boss -> worker visibility: real dispatch seam verified (2026-10-27)
+
+The operator complaint was: "when the Boss launches agents, they must have IDs,
+they must run in the background, and clicking an agent's id/name must show what it
+is doing." Audited the whole chain manually and closed the one real gap.
+
+### What was already correct (verified, not assumed)
+- `boss.py` emits `sub_dispatch` / `sub_step` / `sub_report` / `sub_heartbeat`
+  carrying `agent_id` (positional), `agent_uid` (run-unique), `agent_name`, `goal`,
+  `plane`, `max_steps`.
+- `api/routes/workstation.py` translates each event into a worklog item and pins
+  `sub_dispatch`/`sub_report` so worker cards survive worklog bounding.
+- `agent_activity.py` projects the worklog into per-worker records keyed by
+  `uid:{agent_uid}` (falling back to agent id / mission id / number).
+- `WorklogFeed.tsx` renders one card per worker with the uid shown, distinct keys
+  so React cannot merge two workers, and an expand toggle showing live activity.
+
+### The real gap: the dispatch seam was never tested
+`test_boss_worker_visibility.py` stubs `BossAgent._dispatch_sub_agent`, so the code
+that actually builds a worker, runs `run_mission`, and streams per-step traces was
+never exercised. A regression there would keep every test green while the operator
+saw nothing.
+
+### NEW — `services/core/tests/test_boss_real_dispatch_seam.py` (5 tests)
+Drives the REAL `_dispatch_sub_agent` against the REAL in-process
+`HeadlessComputeProvider` (no Docker, no desktop); only the LLM router is scripted.
+Asserts: workers surface with unique `agent_uid` + positional `agent_id` + goal;
+each worker's steps reach the board (thought + action); workers are individually
+addressable by uid and never merge; a fresh objective yields fresh identities; and
+a worker that ran without independent evidence reports UNVERIFIED, never COMPLETED.
+
+### Verified honest status chain (live in-process, real provider)
+- Host execution disabled -> `FAILED` with "FAIL-CLOSED: Host execution is disabled".
+- Command succeeds, no independent evidence -> `UNVERIFIED` ("successful execution
+  lacks independent task evidence").
+- Only independently verified work becomes COMPLETED. No fake success.
+
+### Test baseline
+133 passed across the Boss/worker/receipt regression set; Ruff clean.
+
+## Real demonstration capture on a headless desktop (2026-10-27)
+
+Closed the practical blocker behind "SONIC can't do semantic GUI work": the repo
+had NO `recorded_ui_click_demonstrations` dataset and NO evaluated grounder
+checkpoint, so semantic targeting stayed fail-closed. The only real recorder
+(`vnc_demo_recorder`) needs a live desktop AND a human clicking, which is why
+real data was never collected.
+
+### NEW — `packages/avcs/avcs/training/headless_demo_recorder.py`
+Drives the SAME `vnc_demo_recorder` over a headless Xvfb display: it starts the
+display + a window manager, launches real windows, issues real X11 pointer
+events via `xdotool`, and stops the recorder gracefully (stdin `:stop`) so the
+manifest is written. Pixels and click points are genuinely observed on a real X
+server, so the recorder's normal `recorded_ui_click_demonstrations` provenance is
+honest. Labels are always supplied by the caller — the module never fabricates
+one. Requirements (Xvfb/xdotool/wmctrl/xinput/mss + a WM) are checked with clear
+errors; a terminal is discovered via POSIX alternatives, never a pinned product.
+
+### Verified end-to-end on this machine (real X server)
+- Installed Xvfb/xdotool/wmctrl/xinput/openbox/xterm + `mss`; started `Xvfb :99`.
+- Recorded 6 distinct task/window sessions -> **12 real labeled samples** with
+  real cropped frames (484x316 RGB).
+- `discover_demonstrations` + `split_sessions` accepted them: 6 sessions,
+  leakage-free 8/2/2 train/val/test, provenance
+  `recorded_ui_click_demonstrations`.
+- `train_grounder` produced `/tmp/real_grounder_run/goal_grounder_best.pt` whose
+  report records `dataset_provenance: recorded_ui_click_demonstrations`.
+- **Honesty:** with only 12 samples the held-out accuracy is **0.000** and the
+  runtime gate reports **"not ready"**. This module builds the DATA PATH; it does
+  not claim a usable checkpoint. Real readiness needs far more sessions.
+
+### Tests — `packages/avcs/tests/test_headless_demo_recorder.py` (7)
+Pure helpers always; the live recording test runs only where the X11 tooling + a
+WM exist and is skipped (never faked) otherwise. Ruff clean.
+
+### Regression
+39 passed, 7 skipped across the AVCS recorder/focus/video suites and the Boss
+worker-visibility suites.
+
+## Decisive diagnosis: the grounder pipeline is sound; only real data was missing (2026-10-27)
+
+The prior "0.000 accuracy" run left it ambiguous whether the grounding pipeline
+was broken or merely data-starved. Resolved by training on a scaled dataset and
+reading the gate conditions directly.
+
+### Evidence
+- 12 real samples -> held-out accuracy **0.000** (ambiguous).
+- 40 synthetic sessions / 240 samples -> held-out accuracy **1.000**
+  (`top1_point_accuracy_within_0.02_diagonal = 1.0`, target 0.85), query
+  calibration `passed: true` (precision 1.0, 36 accepted samples >= 10).
+- The ONLY failing gate is `dataset_provenance == RECORDED_PROVENANCE`: the
+  synthetic run carries `synthetic_rendered_controls`, so `runtime_ready=False`.
+  That is correct fail-closed behaviour, not a defect.
+
+### Conclusion
+`runtime_ready` requires three conditions (`train_grounder.py`):
+`evaluation["passed"]` AND `confidence_passed` AND
+`dataset_provenance == "recorded_ui_click_demonstrations"`. A scaled run meets
+the first two outright. **The pipeline, the split, the model and the readiness
+gate all work.** What is missing is *volume* of genuine recorded demonstrations.
+
+### Also fixed this pass (real bug)
+`train_grounder` hardcoded `num_workers=2`, which aborts with
+"unable to allocate shared memory" under the Docker default `/dev/shm` of
+64 MB — so training could not start in the container it is meant to run in.
+`_resolve_loader_workers()` now sizes workers to available shared memory
+(env override `SONIC_AVCS_DATALOADER_WORKERS`). Verified: a 1600-sample run that
+died at ~90 s then trained 26+ minutes. Tests:
+`packages/avcs/tests/test_train_grounder_workers.py` (7).
+
+### Next step (unchanged, now with certainty)
+Collect a large real demonstration set with
+`avcs.training.headless_demo_recorder` (or human recording), then train. Do not
+expect `runtime_ready=True` from synthetic data — by design it cannot pass.
+
+## Horizontal (left/right) scrolling added to the GUI action surface (2026-10-23)
+
+The operator asked whether SONIC could scroll "like down, left, right". Audit
+found a real capability gap: only **vertical** scrolling existed. X11 delivers
+wheel events on buttons **4/5** (up/down) and **6/7** (left/right), but every
+dispatch site hardcoded 4/5, so content off to the side (wide tables,
+spreadsheets, code, timelines, horizontal carousels) was unreachable.
+
+### Change
+- `computer/models.py`: `GUIAction` gains `scroll_axis` ("vertical" default,
+  "horizontal"), normalized from `horizontal`/`x`/`left`/`right` aliases.
+- `computer/docker_computer.py` + `computer/daytona_computer.py`: SCROLL maps to
+  buttons 6/7 when the axis is horizontal, 4/5 otherwise.
+- `computer_use/agent.py`: `GUI_SCROLL` accepts `payload["axis"]`
+  (`horizontal`/`x`/`left`/`right` -> horizontal, anything else -> vertical);
+  `BROWSER_SCROLL` honours `delta_x` and preserves the axis; burst actions accept
+  the `axis` alias so a horizontal scroll inside a chunk is not silently
+  vertical. The prompt documents `axis` and the delta sign convention
+  (negative = up/left, positive = down/right).
+- The scroll observation string now reports `axis=<vertical|horizontal>`.
+
+### Tests (5 new agent-level, 2 new provider-level)
+- `test_phase8_visual_computer_use.py`: default axis vertical; horizontal axis
+  forwarded to the provider; `left`/`x` aliases normalize; unknown axis degrades
+  safely to vertical.
+- `test_docker_computer_provider.py`: vertical uses buttons 4/5 and never 6/7;
+  horizontal uses 6 for right and 7 for left. Verified the horizontal test FAILS
+  against the pre-fix mapping (emitted button 4), so it genuinely guards the fix.
+
+### Baseline
+- 152 passed / 2 skipped across the two touched suites; 785 passed / 14 skipped
+  on the broad gui/scroll/motor/action/computer/vision/grounding selection.
+- Ruff clean on every changed file.
+
+## Verifiable AVCS model bundles (2026-10-23)
+
+A trained `.pt` checkpoint is not shippable on its own: nothing recorded what
+data it was measured on, whether it still loads, or whether the bytes an
+operator received are the bytes that were evaluated. Added
+`packages/avcs/avcs/model_bundle.py` (+ `docs/MODEL_BUNDLE.md`,
+`tests/test_model_bundle.py`) to close that gap.
+
+- `pack_model(checkpoint, output_dir, archive=...)` refuses to bundle a
+  checkpoint that does not exist, does not strict-load into
+  `ArtificialVisualCortex`, has no `.eval.json` sidecar, or has a sidecar with no
+  named `dataset_provenance`. It writes `<name>-bundle/{checkpoint, sidecar,
+  manifest.json}` with a SHA-256 + size for every file, the resolved evaluation,
+  the runtime (python/torch/avcs), and `strict_load_verified: true`.
+- `verify_bundle(dir)` re-checks the manifest and every checksum; returns
+  `(ok, problems)` with specific reasons (checksum mismatch, missing file,
+  absent provenance).
+- `load_bundle(dir)` verifies first and raises `ValueError` instead of loading
+  weights from a bundle whose bytes do not match its manifest.
+- CLI: `python -m avcs.model_bundle pack|verify`.
+
+Packed the two real production checkpoints (both verified OK, archives written):
+- `sonic_data/model_bundles/cortex_real-bundle` (`.env`'s
+  `SONIC_AVCS_CORTEX_CHECKPOINT`; held-out category accuracy 0.833, provenance
+  "real desktop capture: sonic_data/avcs/real_desktop/split/heldout.json").
+- `sonic_data/model_bundles/cortex_learned-bundle` (apprenticeship-promoted;
+  0.998 on 589 samples, provenance "live desktop apprenticeship").
+Bundles live under `sonic_data/` (gitignored) — the repo convention is that
+model binaries are not tracked in git.
+
+Tests: `packages/avcs/tests/test_model_bundle.py` (12) cover checksum/provenance
+emission and the refusal cases (no sidecar, no provenance, unloadable
+checkpoint), tamper detection, and load-verification. 16 passed with the lazy
+import regression; ruff clean on the new files.
+
+## Boss worker live-run: four real defects fixed (2026-10-23)
+
+Reproduced end-to-end against the live `sonic-desktop-workstation`: Boss launched
+a GUI worker with a stable `agent_uid` that showed RUNNING on the dashboard but
+did almost no real work, then stalled. Root causes were all in the GUI worker's
+reasoning/parse loop, not in dispatch or the dashboard:
+
+1. **Multi-step plan response rejected** (the dominant stall). The vision model
+   answered with an ordered plan of several JSON action envelopes in sequence
+   (e.g. `APP_LAUNCH` + `GUI_CLICK` + `GUI_KEYPRESS`). `_parse_gui_action_response`
+   took an envelope only when exactly ONE candidate was present, so every
+   multi-action reply was discarded and the worker burned steps until it died.
+   The agent executes one action per step by design, so the first envelope in
+   reading order is the unambiguous next action; it is now taken. A single
+   malformed/extended envelope (extra keys) is still rejected.
+2. **Vision-model refusal misread as a parse error.** The fallback vision model
+   intermittently returns "I'm not able to assist with that." The agent's local
+   refusal list missed the "not able to assist" family, so a refusal surfaced as
+   a confusing `gui_action_response_invalid` instead of a recorded refusal that
+   triggers replanning. The agent now reuses `sonic.llm.router.REFUSAL_PHRASES`
+   (single source of truth) plus a few extras; the router already triggers
+   provider/model fallback on a detected refusal.
+3. **Hardcoded 60s GUI reasoning timeout.** A slow-but-working vision route
+   (large fallback model + full screenshot) exceeded it and the worker died with
+   `reasoning-unavailable`. Now `SONIC_GUI_REASONING_TIMEOUT_SECONDS` (bounded
+   10-600, default 60) via `_gui_reasoning_timeout_seconds()`; the module
+   constant remains the default so existing tests can monkeypatch it.
+4. **`application:mousepad` role-prefix not stripped.** The model prefixed the
+   app role; resolution ran the string literally and failed for an installed
+   app. `_normalize_app_name` now strips a leading
+   `application|app|binary|program|executable[:=]` qualifier, and the APP_LAUNCH
+   dispatch site normalizes `payload.app_name` before calling the provider.
+
+Also improved GUI-worker prompts: the mandatory `postcondition` now has a
+concrete worked example (was prose only), the GUI-only observation surfaces
+`Active Application / Window` + `Open Windows` + actions-so-far with a PROGRESS
+RULE (do not relaunch an app already open; emit GOAL_COMPLETE if the
+postcondition already holds), and the action instructions now permit the
+explicit integer pixel form (the old text forbade the very pixel target the
+prompt also asked for). The invalid-response warning logs a bounded
+`response_preview` for operator diagnosis.
+
+Live result after the fixes: the worker took 8 real steps, launched Mousepad
+(`Untitled 1 - Mousepad` window confirmed via `wmctrl`), and the independent
+Judge returned `INCONCLUSIVE` — the documented fail-closed contract, because no
+evaluated local AVCS task-verification head exists. This is honest: the being
+can now drive the GUI and open applications, but semantic task confirmation
+still requires a trained AVCS head.
+
+Tests: `services/core/tests/test_boss_worker_live_regressions.py` (8) plus the
+updated `test_phase8_visual_computer_use.py` parser contract and
+`test_app_launch_no_silent_substitution.py`. Broad Boss/worker/GUI regression:
+346 passed, 0 failures.
+
+## "Mouse ka use nahi" root cause: the prompt forbade the pointer (2026-10-23)
+
+Operator report: SONIC does automated work but the mouse is never used. Verified
+live by polling `xdotool getmouselocation` every 0.4s during a real mission — the
+cursor stayed at `0,0` for the whole run. Root cause was NOT the provider: the
+cursor motor (`sonic_cursor.py`), the visual servo, and `DockerComputerProvider.gui_action`
+all work (direct test moves the cursor and the servo logs
+`visual_servo_reach converged=True`).
+
+The real cause was the GUI-only system prompt. When no evaluated AVCS grounding
+checkpoint is configured (`_avcs_grounder_ready()` is False, which is the normal
+state — no checkpoint exists in-repo), the prompt told the model:
+
+    "No AVCS grounding checkpoint is configured, so semantic GUI_CLICK targets
+     cannot be resolved and will fail closed. Do not propose
+     GUI_CLICK/.../GUI_SCROLL on a described control. Instead open an observed
+     installed application with APP_LAUNCH, then use keyboard actions ..."
+
+That conflates two different things. A *semantic* target (a described control
+the grounder must resolve) does need the checkpoint. An *explicit pixel* click
+read from the attached screenshot does NOT — the screenshot is already attached
+(`image_attached=True`, vision route ready). By forbidding GUI_CLICK wholesale,
+the prompt pushed every worker onto silent `APP_LAUNCH`/keyboard routes, so the
+pointer never moved and the operator never saw the mouse used.
+
+Fix: the no-grounder clause now blocks only the *semantic* form and explicitly
+keeps the pointer available via explicit integer pixel coordinates, which is the
+preferred visible interaction; APP_LAUNCH/keyboard are demoted to fallback. Live
+re-run after the fix: the cursor moved and 3 of 4 worker steps were real
+`GUI_CLICK`s (2 VERIFIED by a real scene change).
+
+Supporting fixes in the same pass:
+- Multi-step plan responses are accepted (first envelope in reading order) —
+  the vision model returns an ordered plan, and rejecting it stalled workers.
+- Near-miss action names are canonicalized (`_GUI_ACTION_ALIASES`: `GUI_LAUNCH`
+  -> `APP_LAUNCH`, `FOCUS_APP` -> `APP_FOCUS`, `SCREENSHOT` -> `GUI_SCREENSHOT`,
+  etc.). Truly unknown names are still rejected.
+- Documentation placeholders echoed verbatim (`<observed control>`) are treated
+  as an absent label so the payload pixel point carries the click.
+- The worked postcondition example is now concrete ("File menu", 18,14) with an
+  explicit instruction not to copy it verbatim, because the model echoed the old
+  angle-bracket placeholders.
+
+Honest residual: without a trained AVCS grounder the model must *estimate* pixel
+points from the screenshot, so a click can miss its control (observed: a click
+at x=1920 was out of bounds and rejected, and a repeated miss tripped the action
+loop breaker, which stopped the worker rather than looping). Training and
+configuring the AVCS grounding checkpoint (packages/avcs/docs/LOCAL_GROUNDING_QUICKSTART.md)
+is what turns estimated clicks into grounded ones.
+
+Tests: `test_gui_capability_aware_prompt.py::test_prompt_without_grounder_blocks_semantic_but_allows_pixel_clicks`,
+`test_phase8_visual_computer_use.py::test_gui_worker_maps_near_miss_action_aliases`
+and `::test_gui_worker_takes_first_action_of_a_multi_step_plan`. Broad regression:
+346 passed, 0 failures.
+
+## Track 2 (coordinate grid overlay): implemented, measured, default OFF (2026-10-23)
+
+Goal: improve explicit-pixel click accuracy for GUI workers that have no trained
+AVCS grounding checkpoint. Idea: stamp a labeled coordinate grid onto the image
+attached to the vision model, so an estimated pixel point has a readable
+reference frame. The overlay is applied ONLY to the model-facing image in
+`_reasoning_screenshot_images()`; the stored `_last_screenshot_b64` used for
+scene signatures and post-action verification is never modified.
+
+Implementation: `ComputerUseAgent._grid_overlay_png_base64(frame_b64, w, h)` —
+thin dashed lines every 100 px, heavier red lines every 500 px, x,y labels at
+the heavy intersections. Honest on bad input (returns the frame unchanged /
+empty, never raises). Gated by `SONIC_GRID_OVERLAY`.
+
+MEASURED RESULT (this is why it is OFF by default): against the vision model
+actually available in this environment (`meta/llama-3.2-11b-vision-instruct` —
+only `NVIDIA_API_KEY` is set, so the configured primary `openai/gpt-4o` falls
+back), the grid did NOT improve pixel localization:
+
+- corner target (XFCE menu button, ground truth ~(10,10)):
+  - no-grid: 4/4 within 20 px, avg 6.0 px
+  - grid:    3/4 within 20 px, avg 36.8 px
+- mid-screen target (center of a placed editor window, ground truth (970,648)):
+  - both variants were very noisy (hundreds of px) on the 11B model.
+
+Conclusion: an 11B vision model cannot localize reliably with or without a grid,
+so the grid is not a fix at this tier. It is retained as an opt-in experiment
+(`SONIC_GRID_OVERLAY=1`) for a stronger vision route, and defaults OFF so we do
+not ship a change that degrades clicks. The real fix remains Track 1: train and
+configure an evaluated AVCS grounding checkpoint.
+
+Tests: `test_boss_worker_live_regressions.py` — overlay adds a coordinate
+reference; honest on empty/degenerate/broken input; opt-in and off by default
+(unset attaches the raw frame, `SONIC_GRID_OVERLAY=1` attaches the gridded
+frame). Focused regression: 208 passed, ruff clean.

@@ -432,6 +432,7 @@ def test_configured_avcs_grounder_binds_semantic_target_to_current_frame(monkeyp
             self.frame = ""
 
     computer = _GroundingComputer()
+    monkeypatch.setenv("SONIC_AVCS_GROUNDING_CHECKPOINT", "evaluated-checkpoint.pt")
     agent = ComputerUseAgent(computer_provider=computer)
     image = Image.new("RGB", (1280, 800), color=(20, 30, 40))
     image_buffer = BytesIO()
@@ -441,6 +442,8 @@ def test_configured_avcs_grounder_binds_semantic_target_to_current_frame(monkeyp
 
     from sonic.computer_use.avcs_perception import AVCSPerception
 
+    # Constructed after the checkpoint env var is set, as it is at real startup,
+    # so the local grounder is configured and wins over the vision bridge.
     grounder = AVCSPerception()
     grounder.request = None
 
@@ -472,7 +475,6 @@ def test_configured_avcs_grounder_binds_semantic_target_to_current_frame(monkeyp
 
     grounder.ground_target_png = ground_target_png
     agent._avcs_perception = grounder
-    monkeypatch.setenv("SONIC_AVCS_GROUNDING_CHECKPOINT", "evaluated-checkpoint.pt")
 
     async def run_click():
         screen = agent._ensure_avcs_state(
@@ -529,7 +531,7 @@ def test_agent_processes_raw_rgb_observation_locally_and_keeps_frame_private():
     assert "raw_rgb" not in observed.model_dump_json()
 
 
-def test_gui_dispatch_accepts_raw_avcs_frame_without_png_serialization():
+def test_gui_dispatch_encodes_raw_avcs_frame_for_private_vision_cache():
     computer = _ReceiptComputer()
     agent = ComputerUseAgent(computer_provider=computer)
     before = agent._ensure_avcs_state(
@@ -575,7 +577,9 @@ def test_gui_dispatch_accepts_raw_avcs_frame_without_png_serialization():
     assert result.avcs_state["source_frame_id"] == 21
     assert agent._last_gui_action_observation_valid is True
     assert agent._last_screen_frame_id == 21
-    assert agent._last_screenshot_b64 == ""
+    assert base64.b64decode(agent._last_screenshot_b64).startswith(
+        b"\x89PNG\r\n\x1a\n"
+    )
 
 
 def test_dashboard_snapshot_encodes_raw_frame_only_at_explicit_api_boundary():

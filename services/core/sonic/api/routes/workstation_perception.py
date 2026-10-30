@@ -315,6 +315,9 @@ def avcs_capability_state() -> dict[str, Any]:
         "apprenticeship_enabled": False,
         "apprenticeship_samples": 0,
         "apprenticeship_labels": {},
+        "vision_route_ready": False,
+        "grounding_source": "none",
+        "focus_verification_source": "none",
         "reason": "",
     }
     try:
@@ -326,12 +329,13 @@ def avcs_capability_state() -> dict[str, Any]:
 
     try:
         from sonic.api.routes.llm import get_model_router
-
-        get_model_router()._resolve_provider(
+        router = get_model_router()
+        router._resolve_provider(
             task_type="computer_use",
             require_images=True,
         )
         capability["vision_route_configured"] = True
+        capability["vision_route_ready"] = router.vision_route_ready()
     except Exception as exc:
         if not capability["reason"]:
             capability["reason"] = f"No configured image-capable computer-use route: {exc}"
