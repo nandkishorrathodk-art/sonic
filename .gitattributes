@@ -1,3 +1,0 @@
-# Preserve Unix line endings for shell scripts on Windows
-*.sh text eol=lf
-docker/entrypoint-workstation.sh text eol=lf
