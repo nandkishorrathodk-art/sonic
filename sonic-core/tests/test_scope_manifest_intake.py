@@ -1,0 +1,55 @@
+from sonic.api.routes.workstation import _extract_target_url_or_domain
+from sonic.computer_use.scope_manifest import parse_scope_document
+
+
+def test_scope_document_separates_assets_from_reference_links():
+    text = """
+    Bug Bounty Program. Safe harbor. Targets 4 out of 4.
+    target.test In scope https://target.test/
+    Target MCP In scope https://mcp.target.test
+    Seaport Deployment In scope.
+    Current deployments: https://docs.target.test/deployments
+    Contract reference: https://registry.target.test/address/0x123
+    Exclusions: phishing and similar attacks. Third-party services are excluded.
+    """ * 4
+
+    manifest = parse_scope_document(text)
+
+    assert manifest.program_detected is True
+    assert "mcp.target.test" in manifest.in_scope_assets
+    assert "https://registry.target.test/address/0x123" in manifest.reference_links
+    assert "https://registry.target.test/address/0x123" in manifest.reference_links
+    assert "phishing/social engineering" in manifest.exclusions
+    assert manifest.requires_asset_selection is True
+
+
+def test_normal_conversation_is_not_treated_as_scope_document():
+    manifest = parse_scope_document("Please inspect https://target.test for the issue.")
+
+    assert manifest.program_detected is False
+    assert manifest.in_scope_assets == ()
+
+
+def test_execution_prompt_with_generic_targets_is_not_scope_document():
+    text = """
+    You are authorized to work only inside the assigned workspace.
+    Do not scan arbitrary internet hosts or use placeholder targets as findings.
+    Create and verify one local workspace file.
+    """ * 4
+
+    manifest = parse_scope_document(text)
+
+    assert manifest.program_detected is False
+
+
+def test_single_scope_asset_wins_over_reference_url():
+    text = """
+    Bug Bounty Program. Safe harbor. Targets.
+    Primary target: https://target.example in scope.
+    Deployment documentation: https://docs.target.test/project
+    Exclusions: phishing and similar attacks.
+    """ * 4
+
+    state = {}
+    assert _extract_target_url_or_domain(text, state) == "target.example"
+    assert state["active_target"] == "target.example"

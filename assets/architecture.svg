@@ -1,0 +1,280 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 860" width="100%" height="100%" style="background:#090d16; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Background Grid Pattern -->
+    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#131c2e" stroke-width="0.8"/>
+    </pattern>
+
+    <!-- Gradients -->
+    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#06B6D4"/>
+      <stop offset="50%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#8B5CF6"/>
+    </linearGradient>
+
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#151e33"/>
+      <stop offset="100%" stop-color="#0d1424"/>
+    </linearGradient>
+
+    <linearGradient id="layaGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#083344"/>
+      <stop offset="100%" stop-color="#0e2a38"/>
+    </linearGradient>
+
+    <linearGradient id="system2Grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#241442"/>
+      <stop offset="100%" stop-color="#18112c"/>
+    </linearGradient>
+
+    <linearGradient id="safetyGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#064e3b"/>
+      <stop offset="50%" stop-color="#0f3d32"/>
+      <stop offset="100%" stop-color="#064e3b"/>
+    </linearGradient>
+
+    <linearGradient id="guiGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#102a45"/>
+      <stop offset="100%" stop-color="#0a192f"/>
+    </linearGradient>
+
+    <linearGradient id="headlessGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1838"/>
+      <stop offset="100%" stop-color="#110d24"/>
+    </linearGradient>
+
+    <!-- Glowing Filters -->
+    <filter id="cyanGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="purpleGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <!-- Marker Arrow -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38BDF8"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#10B981"/>
+    </marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#A855F7"/>
+    </marker>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="100%" height="100%" fill="#090d16"/>
+  <rect width="100%" height="100%" fill="url(#grid)"/>
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(40, 24)">
+    <text x="0" y="32" font-size="28" font-weight="900" fill="url(#headerGrad)" letter-spacing="1.5">⚡ SONIC v0.3.0 — AUTONOMOUS AI-HUMAN DIGITAL BEING</text>
+    <text x="0" y="56" font-size="13" font-weight="500" fill="#94A3B8" letter-spacing="0.5">Dual-Brain Cognitive Engine • Workstation Application Plane • Cryptographic Safety Envelope</text>
+
+    <!-- Top Status Badges -->
+    <g transform="translate(860, 10)">
+      <rect x="0" y="0" width="110" height="24" rx="12" fill="#0E2F3D" stroke="#06B6D4" stroke-width="1"/>
+      <text x="55" y="16" font-size="10" font-weight="700" fill="#38BDF8" text-anchor="middle">PRIORITY #1 BASE</text>
+
+      <rect x="120" y="0" width="130" height="24" rx="12" fill="#1E163B" stroke="#8B5CF6" stroke-width="1"/>
+      <text x="185" y="16" font-size="10" font-weight="700" fill="#C084FC" text-anchor="middle">DUAL-PLANE DOCKER</text>
+    </g>
+  </g>
+
+  <!-- ==================== LAYER 1: PERSISTENT BEING & MEMORY ==================== -->
+  <g transform="translate(40, 95)">
+    <!-- Layer Label -->
+    <rect x="0" y="0" width="1120" height="125" rx="12" fill="url(#cardGrad)" stroke="#1E293B" stroke-width="1.2"/>
+    <rect x="16" y="-10" width="220" height="20" rx="4" fill="#0F172A" stroke="#38BDF8" stroke-width="1"/>
+    <text x="126" y="4" font-size="11" font-weight="700" fill="#38BDF8" text-anchor="middle" letter-spacing="0.5">🧠 PERSISTENT BEING &amp; MEMORY</text>
+
+    <!-- Card 1.1: Identity & Affect -->
+    <g transform="translate(20, 22)">
+      <rect width="345" height="85" rx="8" fill="#111B2E" stroke="#1E2E4A" stroke-width="1"/>
+      <text x="16" y="24" font-size="13" font-weight="700" fill="#F1F5F9">Being Identity &amp; Affect</text>
+      <text x="16" y="44" font-size="11" fill="#94A3B8">• Persistent UUID &amp; Born-at Lifecycle</text>
+      <text x="16" y="60" font-size="11" fill="#94A3B8">• BeingMind: Curiosity, Focus &amp; Satiety Curves</text>
+      <text x="16" y="76" font-size="11" fill="#94A3B8">• Always-On Curiosity LifeLoop</text>
+    </g>
+
+    <!-- Card 1.2: Durable Craft & Vault -->
+    <g transform="translate(385, 22)">
+      <rect width="345" height="85" rx="8" fill="#111B2E" stroke="#1E2E4A" stroke-width="1"/>
+      <text x="16" y="24" font-size="13" font-weight="700" fill="#F1F5F9">Durable Craft &amp; BeingVault</text>
+      <text x="16" y="44" font-size="11" fill="#94A3B8">• Host Artifacts Ledger (sonic_data/craft/)</text>
+      <text x="16" y="60" font-size="11" fill="#94A3B8">• Persistent Operator Accounts &amp; Sessions</text>
+      <text x="16" y="76" font-size="11" fill="#94A3B8">• Toolsmith Compiled Scripts &amp; Methods</text>
+    </g>
+
+    <!-- Card 1.3: Graph & Vector Memory -->
+    <g transform="translate(750, 22)">
+      <rect width="350" height="85" rx="8" fill="#111B2E" stroke="#1E2E4A" stroke-width="1"/>
+      <text x="16" y="24" font-size="13" font-weight="700" fill="#F1F5F9">Multi-Tier Memory Architecture</text>
+      <text x="16" y="44" font-size="11" fill="#94A3B8">• Neo4j Knowledge Graph (Fallthrough)</text>
+      <text x="16" y="60" font-size="11" fill="#94A3B8">• Persistent SQLite Write-Through (No Amnesia)</text>
+      <text x="16" y="76" font-size="11" fill="#94A3B8">• Vector Embeddings &amp; Cosine Retrieval</text>
+    </g>
+  </g>
+
+  <!-- Connectors Layer 1 -> Layer 2 -->
+  <line x1="230" y1="220" x2="230" y2="255" stroke="#38BDF8" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrow)"/>
+  <line x1="600" y1="220" x2="600" y2="255" stroke="#818CF8" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrow)"/>
+  <line x1="970" y1="220" x2="970" y2="255" stroke="#A855F7" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowPurple)"/>
+
+  <!-- ==================== LAYER 2: DUAL-BRAIN COGNITIVE ENGINE ==================== -->
+  <g transform="translate(40, 260)">
+    <rect x="0" y="0" width="1120" height="180" rx="12" fill="url(#cardGrad)" stroke="#1E293B" stroke-width="1.2"/>
+    <rect x="16" y="-10" width="240" height="20" rx="4" fill="#0F172A" stroke="#A855F7" stroke-width="1"/>
+    <text x="136" y="4" font-size="11" font-weight="700" fill="#C084FC" text-anchor="middle" letter-spacing="0.5">🧬 DUAL-BRAIN COGNITIVE ENGINE</text>
+
+    <!-- Subsystem 2.1: System 1 (Laya Fast Intuition) -->
+    <g transform="translate(20, 22)">
+      <rect width="420" height="142" rx="10" fill="url(#layaGrad)" stroke="#06B6D4" stroke-width="1.5"/>
+      <rect x="14" y="14" width="110" height="20" rx="4" fill="#083344" stroke="#22D3EE" stroke-width="1"/>
+      <text x="69" y="28" font-size="10" font-weight="800" fill="#22D3EE" text-anchor="middle">SYSTEM 1 (FAST)</text>
+
+      <text x="140" y="30" font-size="15" font-weight="800" fill="#E0F2FE">Laya Decision Engine</text>
+      <text x="350" y="30" font-size="12" font-weight="700" fill="#38BDF8">~2ms Latency</text>
+
+      <line x1="14" y1="44" x2="406" y2="44" stroke="#164E63" stroke-width="1"/>
+
+      <text x="16" y="64" font-size="11.5" fill="#BAE6FD">• Non-Autoregressive Instant Triage</text>
+      <text x="16" y="82" font-size="11.5" fill="#BAE6FD">• Autonomous Plane Routing: GUI (:99) vs Headless</text>
+      <text x="16" y="100" font-size="11.5" fill="#BAE6FD">• Stagnation &amp; Dead-End Loop Detection</text>
+      <text x="16" y="118" font-size="11.5" fill="#BAE6FD">• Instant Destructive Risk Filter &amp; RAM Safety Guard</text>
+      <text x="16" y="136" font-size="10.5" font-weight="600" fill="#67E8F9">Zero-Cost Deterministic Fallback • No Token Wastage</text>
+    </g>
+
+    <!-- Communication Bridge between Sys1 & Sys2 -->
+    <g transform="translate(445, 75)">
+      <line x1="0" y1="15" x2="40" y2="15" stroke="#38BDF8" stroke-width="1.8" marker-end="url(#arrow)"/>
+      <line x1="40" y1="35" x2="0" y2="35" stroke="#A855F7" stroke-width="1.8" marker-end="url(#arrowPurple)"/>
+      <text x="20" y="8" font-size="9" font-weight="700" fill="#94A3B8" text-anchor="middle">CONTEXT</text>
+      <text x="20" y="52" font-size="9" font-weight="700" fill="#94A3B8" text-anchor="middle">AFFECT</text>
+    </g>
+
+    <!-- Subsystem 2.2: System 2 (Deep Reasoning & Orchestration) -->
+    <g transform="translate(490, 22)">
+      <rect width="610" height="142" rx="10" fill="url(#system2Grad)" stroke="#8B5CF6" stroke-width="1.5"/>
+      <rect x="14" y="14" width="110" height="20" rx="4" fill="#3B0764" stroke="#A855F7" stroke-width="1"/>
+      <text x="69" y="28" font-size="10" font-weight="800" fill="#D8B4FE" text-anchor="middle">SYSTEM 2 (DEEP)</text>
+
+      <text x="140" y="30" font-size="15" font-weight="800" fill="#F3E8FF">BossAgent &amp; LLM Multi-Provider Router</text>
+
+      <line x1="14" y1="44" x2="596" y2="44" stroke="#4C1D95" stroke-width="1"/>
+
+      <!-- Three inner columns -->
+      <g transform="translate(16, 56)">
+        <text x="0" y="14" font-size="12" font-weight="700" fill="#E9D5FF">BossAgent Planner</text>
+        <text x="0" y="32" font-size="11" fill="#C4B5FD">• Multi-Phase Waves</text>
+        <text x="0" y="48" font-size="11" fill="#C4B5FD">• StateDelta Passing</text>
+        <text x="0" y="64" font-size="11" fill="#C4B5FD">• WAIT_FOR_HUMAN Gate</text>
+      </g>
+
+      <g transform="translate(200, 56)">
+        <text x="0" y="14" font-size="12" font-weight="700" fill="#E9D5FF">LLM Model Router</text>
+        <text x="0" y="32" font-size="11" fill="#C4B5FD">• NVIDIA NIM 120B/550B</text>
+        <text x="0" y="48" font-size="11" fill="#C4B5FD">• Claude 3.5 / GPT-4o</text>
+        <text x="0" y="64" font-size="11" fill="#C4B5FD">• Vision &amp; Code Specialist</text>
+      </g>
+
+      <g transform="translate(400, 56)">
+        <text x="0" y="14" font-size="12" font-weight="700" fill="#E9D5FF">Subagent Teamwork</text>
+        <text x="0" y="32" font-size="11" fill="#C4B5FD">• Concurrent Subagents</text>
+        <text x="0" y="48" font-size="11" fill="#C4B5FD">• Isolated Git Worktrees</text>
+        <text x="0" y="64" font-size="11" fill="#C4B5FD">• Verified Merge Receipts</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Connectors Layer 2 -> Layer 3 -->
+  <line x1="600" y1="440" x2="600" y2="475" stroke="#10B981" stroke-width="1.8" marker-end="url(#arrowGreen)"/>
+
+  <!-- ==================== LAYER 3: IMMUTABLE SAFETY ENVELOPE ==================== -->
+  <g transform="translate(40, 480)">
+    <rect x="0" y="0" width="1120" height="74" rx="10" fill="url(#safetyGrad)" stroke="#10B981" stroke-width="1.5"/>
+    <rect x="16" y="-10" width="260" height="20" rx="4" fill="#022C22" stroke="#10B981" stroke-width="1"/>
+    <text x="146" y="4" font-size="11" font-weight="700" fill="#34D399" text-anchor="middle" letter-spacing="0.5">🛡️ SEALED SAFETY ENVELOPE (SHA-256)</text>
+
+    <g transform="translate(24, 22)">
+      <!-- Item 1 -->
+      <g transform="translate(0, 0)">
+        <text x="0" y="18" font-size="13" font-weight="700" fill="#ECFDF5">SealedActionPolicy</text>
+        <text x="0" y="36" font-size="11" fill="#A7F3D0">HMAC-SHA256 Tamper Seals</text>
+      </g>
+
+      <!-- Item 2 -->
+      <g transform="translate(260, 0)">
+        <text x="0" y="18" font-size="13" font-weight="700" fill="#ECFDF5">Scope &amp; Path Confinement</text>
+        <text x="0" y="36" font-size="11" fill="#A7F3D0">Workspace Root Bounds Check</text>
+      </g>
+
+      <!-- Item 3 -->
+      <g transform="translate(540, 0)">
+        <text x="0" y="18" font-size="13" font-weight="700" fill="#ECFDF5">Default-Deny Egress Gate</text>
+        <text x="0" y="36" font-size="11" fill="#A7F3D0">Metadata &amp; Internal IP Blocking</text>
+      </g>
+
+      <!-- Item 4 -->
+      <g transform="translate(800, 0)">
+        <text x="0" y="18" font-size="13" font-weight="700" fill="#F87171">Fail-Closed Enforcement</text>
+        <text x="0" y="36" font-size="11" fill="#FECACA">Blocked Actions Exit 126 (Zero Masking)</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Connectors Layer 3 -> Layer 4 (Bifurcation into 2 planes) -->
+  <path d="M 400 554 L 400 585 L 290 585 L 290 605" fill="none" stroke="#38BDF8" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <path d="M 800 554 L 800 585 L 900 585 L 900 605" fill="none" stroke="#A855F7" stroke-width="1.8" marker-end="url(#arrowPurple)"/>
+
+  <!-- ==================== LAYER 4: DUAL-PLANE WORKSTATION SUBSTRATE ==================== -->
+  <g transform="translate(40, 610)">
+    <!-- Plane 1: GUI Workstation -->
+    <g transform="translate(0, 0)">
+      <rect width="545" height="175" rx="12" fill="url(#guiGrad)" stroke="#0284C7" stroke-width="1.5"/>
+      <rect x="16" y="-10" width="270" height="20" rx="4" fill="#0C243B" stroke="#0284C7" stroke-width="1"/>
+      <text x="151" y="4" font-size="11" font-weight="700" fill="#38BDF8" text-anchor="middle" letter-spacing="0.5">🖥️ WORKSTATION APPLICATION PLANE (GUI)</text>
+
+      <g transform="translate(20, 24)">
+        <text x="0" y="18" font-size="14" font-weight="800" fill="#F0F9FF">Virtual Dedicated Desktop (DISPLAY=:99)</text>
+        <text x="0" y="38" font-size="11.5" fill="#BAE6FD">• Full XFCE4 Graphical Environment inside Docker</text>
+        <text x="0" y="56" font-size="11.5" fill="#BAE6FD">• Arbitrary Desktop Apps: Chrome, Geany, Terminals, Managers</text>
+        <text x="0" y="74" font-size="11.5" fill="#BAE6FD">• Multimodal Vision &amp; NSI Retina Sub-Pixel Grounding</text>
+        <text x="0" y="92" font-size="11.5" fill="#BAE6FD">• Dynamic Window Focus, Resizing &amp; Tiling without Fixed App Names</text>
+        <text x="0" y="110" font-size="11.5" fill="#BAE6FD">• Remote Operator Streaming via noVNC WebSocket (:6080 / :5900)</text>
+
+        <rect x="0" y="122" width="505" height="22" rx="4" fill="#082238" stroke="#0369A1" stroke-width="1"/>
+        <text x="252" y="137" font-size="10" font-weight="700" fill="#7DD3FC" text-anchor="middle">ACTIONS: GUI_CLICK, GUI_TYPE, GUI_DRAG, BROWSER_*, APP_LAUNCH</text>
+      </g>
+    </g>
+
+    <!-- Plane 2: Headless Operator Sandbox -->
+    <g transform="translate(575, 0)">
+      <rect width="545" height="175" rx="12" fill="url(#headlessGrad)" stroke="#7C3AED" stroke-width="1.5"/>
+      <rect x="16" y="-10" width="270" height="20" rx="4" fill="#1C143B" stroke="#7C3AED" stroke-width="1"/>
+      <text x="151" y="4" font-size="11" font-weight="700" fill="#C084FC" text-anchor="middle" letter-spacing="0.5">💻 OPERATOR SANDBOX PLANE (HEADLESS)</text>
+
+      <g transform="translate(20, 24)">
+        <text x="0" y="18" font-size="14" font-weight="800" fill="#FAF5FF">High-Throughput Isolated Sandbox</text>
+        <text x="0" y="38" font-size="11.5" fill="#DDD6FE">• Headless Terminal Execution with Ground-Truth Exit Codes</text>
+        <text x="0" y="56" font-size="11.5" fill="#DDD6FE">• Native Rust Kernel Integration (sonic-kernel-rs)</text>
+        <text x="0" y="74" font-size="11.5" fill="#DDD6FE">• Toolsmith Autonomous Python Script Synthesis &amp; Testing</text>
+        <text x="0" y="92" font-size="11.5" fill="#DDD6FE">• Git Worktree Branch Isolation &amp; Zero-Loss Merges</text>
+        <text x="0" y="110" font-size="11.5" fill="#DDD6FE">• Empirical Reproduction Receipts (SHA-256 Hashes)</text>
+
+        <rect x="0" y="122" width="505" height="22" rx="4" fill="#1C1438" stroke="#6D28D9" stroke-width="1"/>
+        <text x="252" y="137" font-size="10" font-weight="700" fill="#E9D5FF" text-anchor="middle">ACTIONS: TERMINAL_EXEC, FILE_WRITE, GIT_PUSH, TOOL_SYNTHESIS</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== FOOTER ==================== -->
+  <g transform="translate(40, 815)">
+    <line x1="0" y1="0" x2="1120" y2="0" stroke="#1E293B" stroke-width="1"/>
+    <text x="0" y="22" font-size="11" font-weight="600" fill="#64748B">SONIC v0.3.0 CORE INVARIANTS: ZERO SUCCESS-BY-DECREE • EMPIRICAL RECEIPTS ONLY • FAIL-CLOSED SAFETY ENVELOPE</text>
+    <text x="1120" y="22" font-size="11" font-weight="600" fill="#64748B" text-anchor="end">AUTONOMOUS AI-HUMAN DIGITAL BEING ARCHITECTURE</text>
+  </g>
+</svg>
