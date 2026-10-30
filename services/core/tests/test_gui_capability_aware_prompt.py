@@ -1,12 +1,4 @@
-"""Tests for AVCS-capability-aware GUI reasoning prompts.
-
-When no evaluated local AVCS grounding checkpoint is configured, semantic
-``GUI_CLICK`` targets fail closed. The GUI-only system prompt must say so and
-steer the model toward routes that need no semantic grounding (launching an
-observed installed application, keyboard actions) instead of letting it burn the
-whole step budget on a target that can never resolve. It must also forbid
-inventing an application name that is not installed.
-"""
+"""Tests for screenshot-grounded GUI reasoning prompts."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -26,21 +18,12 @@ def _agent(*, grounder_ready: bool) -> ComputerUseAgent:
     return agent
 
 
-def test_prompt_without_grounder_blocks_semantic_but_allows_pixel_clicks():
-    """No grounder blocks *semantic* clicks only, never the mouse.
-
-    Live regression: the old prompt told the model to avoid GUI_CLICK entirely
-    when no grounder was configured, so workers never moved the cursor (it
-    stayed at 0,0) and silently launched apps instead of using the pointer.
-    Pixel clicks read from the attached screenshot do not need the grounder.
-    """
+def test_prompt_without_grounder_uses_attached_screenshot_coordinates():
     prompt = _agent(grounder_ready=False)._gui_only_system_prompt()
-    assert "No AVCS grounding checkpoint is configured" in prompt
-    assert "fail closed" in prompt
-    # The pointer must remain available via explicit pixel coordinates.
-    assert '"x":<int>,"y":<int>' in prompt
-    assert "Pixel clicks do not need the grounder" in prompt
-    # Non-pointer fallbacks must still be offered.
+    assert "attached fresh workstation screenshot" in prompt
+    assert "screen-pixel coordinates" in prompt
+    assert "coordinate_space to screen_pixels" in prompt
+    assert "Do not use AVCS to identify controls" in prompt
     assert "APP_LAUNCH" in prompt
     assert "GUI_HOTKEY" in prompt
 
@@ -51,10 +34,11 @@ def test_prompt_without_grounder_forbids_inventing_apps():
     assert "do not invent a binary name" in prompt
 
 
-def test_prompt_with_grounder_allows_semantic_targets():
+def test_prompt_does_not_depend_on_grounder_readiness():
     prompt = _agent(grounder_ready=True)._gui_only_system_prompt()
     assert "No AVCS grounding checkpoint is configured" not in prompt
-    assert "AVCS grounding checkpoint resolves it to pixels" in prompt
+    assert "attached fresh workstation screenshot" in prompt
+    assert "screen-pixel coordinates" in prompt
 
 
 def test_grounder_readiness_probe_fails_closed_without_checkpoint(monkeypatch):
@@ -87,7 +71,7 @@ def test_gui_only_observation_surfaces_installed_apps():
     # banner) the installed-application inventory must appear before the AVCS
     # pixel summary, so the model can pick a real binary instead of guessing.
     start = src.index("ASSIGNED PLANE: visible desktop GUI only.")
-    end = src.index("CURRENT AVCS PIXEL STATE SUMMARY", start)
+    end = src.index("OPTIONAL AVCS_REFLEX TOOL OUTPUT", start)
     gui_branch = src[start:end]
     assert "Available Installed Desktop Applications" in gui_branch
 

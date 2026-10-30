@@ -9,6 +9,7 @@ X server.
 
 from __future__ import annotations
 
+import ctypes
 import importlib.util
 import struct
 import sys
@@ -128,6 +129,8 @@ class TestCursorCompositing:
 
     def test_read_parses_32bit_argb_from_64bit_slots(self, stream_module, monkeypatch):
         """XFixes stores CARD32 ARGB values in C ``long`` (8-byte) slots."""
+        if ctypes.sizeof(ctypes.c_ulong) != 8:
+            pytest.skip("XFixes uses 8-byte C long slots on the Linux workstation ABI")
         # Two slots: 0x00000000_AARRGGBB little-endian each.
         raw = struct.pack("<Q", 0xFF112233) + struct.pack("<Q", 0x80445566)
 

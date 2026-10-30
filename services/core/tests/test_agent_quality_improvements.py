@@ -634,8 +634,6 @@ async def test_visual_grounding_unresolved_blocks_without_blind_click():
     agent = ComputerUseAgent(computer_provider=provider)
     await agent.observe("ws-1")
 
-    agent._ground_target_with_avcs = AsyncMock(return_value=None)
-
     trace = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_CLICK,
@@ -645,8 +643,7 @@ async def test_visual_grounding_unresolved_blocks_without_blind_click():
     )
 
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "AVCS grounder did not resolve" in trace.actual_observation
-    agent._ground_target_with_avcs.assert_awaited_once_with("Login button")
+    assert "screen-pixel coordinates" in trace.actual_observation.lower()
     # Ensure provider gui_action was NOT called with (0, 0)
     for act in provider.gui_actions_taken:
         if getattr(act, "action", None) == "click":

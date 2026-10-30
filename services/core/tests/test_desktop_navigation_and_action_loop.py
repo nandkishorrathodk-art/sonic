@@ -107,7 +107,7 @@ async def test_destination_navigation_uses_visible_desktop_without_terminal_disc
         "open target",
     )
     assert trace1.status == ActionExecutionStatus.BLOCKED
-    assert "focus-verification" in trace1.actual_observation.lower()
+    assert "legacy browser_navigate is blocked" in trace1.actual_observation.lower()
     assert agent._last_gui_navigation_target == ""
     assert not comp.gui_actions
     assert not comp.commands_executed
@@ -130,13 +130,13 @@ async def test_destination_navigation_fails_without_live_desktop_evidence():
         "open target",
     )
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "focus-verification" in trace.actual_observation.lower()
+    assert "legacy browser_navigate is blocked" in trace.actual_observation.lower()
     assert agent._last_gui_navigation_target == previous_target
     assert not comp.commands_executed
 
 
 @pytest.mark.asyncio
-async def test_consecutive_action_loop_breaker():
+async def test_unresolved_semantic_click_stays_blocked_without_grounded_coordinates():
     comp = _MockComputerProvider()
     agent = ComputerUseAgent(computer_provider=comp)
     await agent.observe(comp.workspace_id)
@@ -150,13 +150,7 @@ async def test_consecutive_action_loop_breaker():
         "click search",
     )
     assert t1.status == ActionExecutionStatus.BLOCKED
-    assert any(
-        reason in t1.actual_observation.lower()
-        for reason in (
-            "grounding",
-            "avcs",
-        )
-    )
+    assert "screen-pixel coordinates" in t1.actual_observation.lower()
 
     t2 = await agent.execute_action(
         comp.workspace_id,
@@ -174,8 +168,10 @@ async def test_consecutive_action_loop_breaker():
         {"query": "search bar"},
         "click search",
     )
-    # The action remains blocked until a live frame grounds the target.
     assert t3.status == ActionExecutionStatus.BLOCKED
+    assert "[ACTION LOOP DETECTED]" in t3.actual_observation
+    assert not comp.gui_actions
+    assert comp.commands_executed == ["echo __sonic_obs_ready__"]
 
 
 @pytest.mark.asyncio

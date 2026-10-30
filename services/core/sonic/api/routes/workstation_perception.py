@@ -289,21 +289,20 @@ def _awareness_snapshot() -> dict[str, Any]:
 
 
 def avcs_capability_state() -> dict[str, Any]:
-    """Report the real AVCS capability readiness for GUI task execution.
+    """Report AVCS tool availability separately from GUI model readiness.
 
-    This is an honesty surface, not a capability grant. Semantic GUI targeting
-    and text entry fail closed unless an evaluated local AVCS head is loaded.
-    Without a configured, evaluated grounding checkpoint the model cannot turn
-    a described control into screen pixels, and without an evaluated focus head
-    it cannot confirm text focus; both actions are blocked by design. Reporting
-    that state lets the operator see why a GUI worker cannot act instead of
-    reading a misleading "LIVE" desktop as "ready to work".
+    AVCS is a deterministic, read-only reflex tool in the workstation agent.
+    It does not provide semantic targets, focus verification, or task success.
+    The vision route check only confirms that an image-capable provider/model is
+    configured; it does not prove localization quality or GUI task completion.
     """
     capability: dict[str, Any] = {
-        "reflex_perception": True,
+        "reflex_perception": False,
+        "avcs_observe_available": False,
         "live_narration": False,
         "semantic_grounding": False,
         "focus_verification": False,
+        "vision_route_configured": False,
         "gui_actions_ready": False,
         "grounding_checkpoint_configured": False,
         "focus_checkpoint_configured": False,
@@ -321,110 +320,40 @@ def avcs_capability_state() -> dict[str, Any]:
         "focus_verification_source": "none",
         "reason": "",
     }
-    # Live narration runs on the same reflex frames, so it needs no checkpoint
-    # and is available whenever the AVCS package is importable.  It describes
-    # pixels only and cannot read on-screen text.
     try:
-        from sonic.computer_use.avcs_narrator import AVCSNarrator
+        _shared_capability_probe()
+        capability["reflex_perception"] = True
+        capability["avcs_observe_available"] = True
+    except Exception as exc:  # pragma: no cover - defensive capability probe
+        capability["reason"] = f"AVCS reflex tool unavailable: {exc}"
 
-        capability["live_narration"] = bool(AVCSNarrator().available)
-    except Exception:
-        capability["live_narration"] = False
     try:
-        perception = _shared_capability_probe()
-        grounding_configured = bool(perception.goal_grounder_configured)
-        focus_configured = bool(perception.focus_verifier_configured)
-        capability["grounding_checkpoint_configured"] = grounding_configured
-        capability["focus_checkpoint_configured"] = focus_configured
-
-        # The LLM-vision route is a real grounding/focus path when no evaluated
-        # local head exists. Report it honestly rather than claiming AVCS heads
-        # that are not trained.
-        vlm_enabled = os.environ.get(
-            "SONIC_ENABLE_VLM_GROUNDING", "1"
-        ).strip().lower() not in ("0", "false", "no", "off")
-        vision_ready = False
-        if vlm_enabled:
-            try:
-                from sonic.llm.router import ModelRouter
-
-                vision_ready = bool(ModelRouter.from_config().vision_route_ready())
-            except Exception:
-                vision_ready = False
-        capability["vision_route_ready"] = vision_ready
-
-        if grounding_configured:
-            capability["semantic_grounding"] = True
-            capability["grounding_source"] = "local_avcs_checkpoint"
-        elif vision_ready:
-            capability["semantic_grounding"] = True
-            capability["grounding_source"] = "llm_vision_route"
-
-        local_focus_ready = bool(perception.ensure_focus_verifier_ready())
-        if local_focus_ready:
-            capability["focus_verification"] = True
-            capability["focus_verification_source"] = "local_avcs_checkpoint"
-        elif vision_ready:
-            capability["focus_verification"] = True
-            capability["focus_verification_source"] = "llm_vision_route"
-
-        capability["gui_actions_ready"] = bool(
-            capability["semantic_grounding"] and capability["focus_verification"]
+        from sonic.api.routes.llm import get_model_router
+        router = get_model_router()
+        router._resolve_provider(
+            task_type="computer_use",
+            require_images=True,
         )
-        capability["learned_cortex_configured"] = bool(
-            getattr(perception, "cortex_configured", False)
-        )
-        capability["learned_cortex_ready"] = bool(
-            getattr(perception, "ensure_cortex_ready", lambda: False)()
-        )
-        capability["affordance_head_trained"] = bool(
-            getattr(perception, "affordance_head_trained", False)
-        )
-        capability["continuous_awareness"] = bool(_awareness_snapshot().get("running"))
-        capability["awareness_stats"] = _awareness_snapshot()
-        capability["apprenticeship_enabled"] = os.environ.get("SONIC_AVCS_APPRENTICESHIP") == "1"
-        try:
-            from sonic.computer_use.apprenticeship import ApprenticeshipStore
+        capability["vision_route_configured"] = True
+        capability["vision_route_ready"] = router.vision_route_ready()
+    except Exception as exc:
+        if not capability["reason"]:
+            capability["reason"] = f"No configured image-capable computer-use route: {exc}"
 
-            store = ApprenticeshipStore()
-            capability["apprenticeship_samples"] = store.count()
-            capability["apprenticeship_labels"] = store.label_counts()
-            try:
-                from sonic.computer_use.apprenticeship import OutcomeSampleStore
-
-                capability["affordance_outcome_samples"] = OutcomeSampleStore(
-                    store.root
-                ).count()
-            except Exception:
-                pass
-        except Exception:
-            pass
-    except Exception as exc:  # pragma: no cover - defensive, stays fail-closed
-        capability["reason"] = f"AVCS capability probe failed: {exc}"
-        return capability
-
-    if not capability["semantic_grounding"]:
+    capability["continuous_awareness"] = bool(_awareness_snapshot().get("running"))
+    capability["awareness_stats"] = _awareness_snapshot()
+    capability["apprenticeship_enabled"] = (
+        os.environ.get("SONIC_AVCS_APPRENTICESHIP") == "1"
+    )
+    if capability["vision_route_configured"]:
         capability["reason"] = (
-            "No evaluated AVCS grounding checkpoint is configured "
-            "(SONIC_AVCS_GROUNDING_CHECKPOINT) and no vision route is ready "
-            "(SONIC_ENABLE_VLM_GROUNDING + provider credentials). Semantic GUI "
-            "targets (clicks on described controls) are blocked; only explicit "
-            "pixel-coordinate actions can dispatch."
+            "Image-capable computer-use route is configured. AVCS is optional; "
+            "GUI localization quality and task success remain unverified."
         )
-    elif not capability["focus_verification"]:
+    elif not capability["reason"]:
         capability["reason"] = (
-            "Semantic targeting is available but no evaluated AVCS "
-            "focus-verification head and no vision route are configured "
-            "(SONIC_AVCS_FOCUS_CHECKPOINT / vision route). Text entry is blocked."
+            "No configured image-capable computer-use route. GUI reasoning requires "
+            "a vision model; AVCS reflex data is not a semantic substitute."
         )
-    elif capability["grounding_source"] == "llm_vision_route":
-        capability["reason"] = (
-            "Semantic grounding and focus verification are served by the "
-            "configured LLM vision route (no local AVCS checkpoints trained). "
-            "GUI targeting and text entry are enabled; accuracy depends on the "
-            "vision model."
-        )
-    else:
-        capability["reason"] = "AVCS semantic grounding and focus verification are ready."
     return capability
 

@@ -28,6 +28,8 @@ interface ComputerSurfaceProps {
     active_services?: Array<{ name: string; status: string; port: number }>;
     vnc_url?: string;
     avcs_capability?: {
+      avcs_observe_available?: boolean;
+      vision_route_configured?: boolean;
       reflex_perception?: boolean;
       semantic_grounding?: boolean;
       focus_verification?: boolean;
@@ -355,12 +357,16 @@ export function ComputerSurface({
                 : "NO FRESH FRAME"}
             </span>
           )}
-          {isDesktopConnected && avcsCapability && !avcsCapability.gui_actions_ready && (
+          {isDesktopConnected && avcsCapability && (
             <span
-              className="chip border border-amber-500/40 bg-amber-500/10 text-amber-300"
-              title={avcsCapability.reason || "AVCS GUI capability is not ready"}
+              className={`chip ${avcsCapability.vision_route_configured ? "border border-secondary-500/40 bg-secondary-500/10 text-secondary-300" : "border border-amber-500/40 bg-amber-500/10 text-amber-300"}`}
+              title={avcsCapability.reason || "Vision route readiness is unknown"}
             >
-              <span>EYES ONLY · ACTIONS BLOCKED</span>
+              <span>
+                {avcsCapability.vision_route_configured
+                  ? "VISION ROUTE · TASK UNVERIFIED"
+                  : "NO VISION ROUTE · GUI BLOCKED"}
+              </span>
             </span>
           )}
         </div>

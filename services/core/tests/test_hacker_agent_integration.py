@@ -180,4 +180,4 @@ class TestHackerAgentIntegration:
         agent.motor.enforce_tab_budget.assert_not_awaited()
         provider.terminal.assert_not_awaited()
         assert trace.status == ActionExecutionStatus.BLOCKED
-        assert "no evaluated local focus-verification head" in trace.actual_observation
+        assert "legacy browser_navigate is blocked" in trace.actual_observation.lower()

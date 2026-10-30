@@ -1007,57 +1007,15 @@ class ComputerUseAgent:
             if action in self._GUI_ONLY_ACTIONS
             and not action.name.startswith("BROWSER_")
         )
-        grounding_source = "the current AVCS pixel-state summary"
-        # Semantic clicks need a grounder. An evaluated local AVCS checkpoint is
-        # preferred; otherwise the configured LLM-vision route resolves the
-        # described control from the same screenshot the model sees. Only when
-        # neither is available does a semantic target fail closed, so tell the
-        # model up front and point it at routes that need no grounding.
-        vlm_grounding_available = False
-        if os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "1").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        ):
-            _router = getattr(self, "llm_router", None)
-            if _router is not None and callable(
-                getattr(_router, "vision_route_ready", None)
-            ):
-                try:
-                    vlm_grounding_available = bool(_router.vision_route_ready())
-                except Exception:  # pragma: no cover - defensive
-                    vlm_grounding_available = False
-        if self._avcs_grounder_ready():
-            grounding_clause = (
-                "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and "
-                "GUI_SCROLL, provide an observed semantic target in TARGET; a configured "
-                "AVCS grounding checkpoint resolves it to pixels before dispatch. "
-                "Never guess coordinates. "
-            )
-        elif vlm_grounding_available:
-            grounding_clause = (
-                "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and "
-                "GUI_SCROLL, provide an observed semantic target in TARGET (a short, "
-                "unambiguous description of the control you can see). The configured "
-                "vision route resolves it to screen pixels before dispatch, so you do "
-                "not need to supply coordinates for a described control. You may also "
-                'give an explicit integer screen-pixel point in PAYLOAD '
-                '({"x":<int>,"y":<int>}) when you are certain of it. Never guess. '
-            )
-        else:
-            grounding_clause = (
-                "No AVCS grounding checkpoint is configured, so a *semantic* GUI_CLICK "
-                "target (a described control resolved by the grounder) will fail closed. "
-                "This does NOT prevent the mouse: you are shown the live desktop "
-                "screenshot, so drive the pointer with an explicit integer screen-pixel "
-                'point in PAYLOAD ({"x":<int>,"y":<int>}) read from what you can actually '
-                "see, and give a short TARGET label for the control at that point. "
-                "Pixel clicks do not need the grounder and are the preferred way to "
-                "interact visibly. Only fall back to APP_LAUNCH (an observed installed "
-                "application name) plus keyboard actions (GUI_HOTKEY/GUI_KEYPRESS) when "
-                "no visible control can be located in the screenshot. "
-            )
+        grounding_source = "the attached fresh workstation screenshot"
+        grounding_clause = (
+            "Use the attached screenshot to understand the visible interface. For "
+            "pointer and typing actions, give an explicit integer screen-pixel point "
+            "as x/y screen-pixel coordinates "
+            "in PAYLOAD and set coordinate_space to screen_pixels. Do not use AVCS "
+            "to identify controls or invent coordinates. If the target is ambiguous, "
+            "ask for another observation instead of guessing. "
+        )
         return (
             "You are SONIC, a general-purpose AI-human colleague operating a live "
             "desktop. This worker's assigned plane is the visible GUI only.\n"
@@ -1094,11 +1052,12 @@ class ComputerUseAgent:
             "objective names an application that is NOT in that list, it is not "
             "installed — do not invent a binary name (for example do not guess a "
             "different terminal emulator), and instead report the objective as blocked. "
-            "Text entry is unavailable until AVCS "
-            "has an evaluated local focus-verification head. If a visual target cannot be grounded, do "
-            "not repeat it or guess coordinates: use another observed route, including "
-            "keyboard navigation when appropriate. If no route is grounded, choose "
-            "GUI_SCREENSHOT once to refresh AVCS state, then stop as blocked. "
+            "For typing, use GUI_TYPE with screenshot-grounded screen-pixel coordinates; "
+            "SONIC will take a fresh screenshot and ask the configured vision route to "
+            "confirm a visible focus cue before text is sent. If target or focus is unclear, "
+            "do not type or guess. AVCS_OBSERVE is an optional read-only tool for coarse "
+            "pixel-change metadata only. If the screen itself is unavailable, choose "
+            "GUI_SCREENSHOT once to refresh, then stop as blocked. "
             "GOAL_COMPLETE is only a handoff proposal; the independent Judge decides "
             "completion from independently verifiable evidence and worker receipts."
         )
@@ -1176,7 +1135,7 @@ class ComputerUseAgent:
         # 1. Check for explicit numbered/bulleted steps in user prompt
         lines = [line.strip() for line in goal.splitlines() if line.strip()]
         if len(lines) <= 1:
-            lines = [line.strip() for line in re.split(r'(?<=\w\w)\.\s+(?=[0-9]\.|\b[A-Z])', goal) if line.strip()]
+            lines = [line.strip() for line in re.split(r'(?<=\w\w)\.\s+(?=[0-9]|\b[A-Z])', goal) if line.strip()]
         rubric_bullet_pattern = re.compile(
             r'^(?:-|\*|\d+[\.\)])?\s*(?:-\s*)?(?:\*\*R\d+[:\*]*|\[[\s xX]\]|\*\*Requirement\s*\d+|R\d+:)',
             flags=re.IGNORECASE,
@@ -1261,27 +1220,18 @@ class ComputerUseAgent:
             ):
                 raise ValueError("AVCS returned invalid frame metadata")
         except Exception as exc:
-            logger.error(
+            logger.warning(
                 "avcs_agent_perception_failed",
                 workspace_id=getattr(self, "_active_workspace_id", ""),
                 error=str(exc),
             )
-            raise RuntimeError("AVCS could not process the current workstation frame") from exc
+            screen.avcs_state = {"engine": "unavailable"}
+            screen.visible_text = ""
+            screen.detected_controls = []
+            screen.controls_age_ms = None
+            return screen
 
         screen.avcs_state = state
-        # Learned semantics ride along when a trained cortex checkpoint is
-        # configured; an empty mapping means "unavailable", not "nothing there".
-        if screen.raw_rgb:
-            try:
-                frame = np.frombuffer(screen.raw_rgb, dtype=np.uint8).reshape(
-                    screen.height, screen.width, 3
-                )
-                semantics = perception.perceive_semantics_rgb(frame)
-            except Exception as exc:
-                logger.warning("avcs_cortex_perception_failed", error=str(exc))
-                semantics = {}
-            if semantics:
-                state["semantics"] = semantics
         screen.visible_text = ""
         screen.detected_controls = []
         screen.controls_age_ms = None
@@ -1341,7 +1291,7 @@ class ComputerUseAgent:
         Narration is an enhancement: any failure yields an empty string so the
         caller's prompt is unchanged rather than broken.
         """
-        if screen is None:
+        if screen is None or self._gui_action_contract_active():
             return ""
         narrator = self._get_avcs_narrator()
         if narrator is None or not getattr(narrator, "available", False):
@@ -1367,6 +1317,8 @@ class ComputerUseAgent:
         detail: str = "",
     ) -> str:
         """Phrase an action's outcome for the next reasoning step ("" on fail)."""
+        if self._gui_action_contract_active():
+            return ""
         narrator = self._get_avcs_narrator()
         if narrator is None or not getattr(narrator, "available", False):
             return ""
@@ -1618,8 +1570,13 @@ class ComputerUseAgent:
                     and 0 <= capture_age_ms <= 2_000
                 )
                 if has_pixels and has_dimensions and frame_is_fresh:
-                    perception_source = "avcs_pixels"
                     screen_obs = self._ensure_avcs_state(screen_obs)
+                    perception_source = (
+                        "avcs_pixels"
+                        if getattr(screen_obs, "avcs_state", {}).get("engine")
+                        == "avcs_reflex"
+                        else "screenshot_pixels"
+                    )
                     break
                 if attempt == 1:
                     logger.warning(
@@ -2528,6 +2485,16 @@ class ComputerUseAgent:
                     "GUI payload must contain a complete valid integer coordinate x/y pair.",
                 )
             payload_coordinates = (x, y)
+            if payload.get("coordinate_space") != "screen_pixels":
+                if target_coordinates == payload_coordinates:
+                    payload["coordinate_space"] = "screen_pixels"
+                else:
+                    return (
+                        ActionExecutionStatus.BLOCKED,
+                        "gui-invalid-response",
+                        {},
+                        "GUI payload coordinates require coordinate_space=screen_pixels.",
+                    )
         if (
             target_coordinates is not None
             and payload_coordinates is not None
@@ -2542,6 +2509,8 @@ class ComputerUseAgent:
         coordinates = target_coordinates or payload_coordinates
         if action_type in coordinate_actions and coordinates is not None:
             payload["x"], payload["y"] = coordinates
+            if target_coordinates is not None and payload_coordinates is None:
+                payload["coordinate_space"] = "screen_pixels"
 
         if action_type in (ComputerActionType.GUI_KEYPRESS, ComputerActionType.GUI_HOTKEY):
             if (
@@ -2556,7 +2525,7 @@ class ComputerUseAgent:
                 )
         elif action_type in coordinate_actions:
             if action_type == ComputerActionType.GUI_DRAG:
-                for names in (("x", "y"), ("x2", "y2"), ("end_x", "end_y")):
+                for names in (("x", "y"), ("x2", "y2")):
                     present = [name in payload for name in names]
                     if any(present) and not all(
                         isinstance(payload.get(name), int)
@@ -2569,19 +2538,19 @@ class ComputerUseAgent:
                             {},
                             "GUI_DRAG coordinate pairs must be complete integer pixel pairs when provided.",
                         )
-                if not str(payload.get("destination_grounding_query") or "").strip():
+                if not all(name in payload for name in ("x", "y", "x2", "y2")):
                     return (
                         ActionExecutionStatus.BLOCKED,
                         "gui-invalid-response",
                         {},
-                        "GUI_DRAG requires a semantic destination_grounding_query for local AVCS grounding.",
+                        "GUI_DRAG requires source and destination screen-pixel coordinates.",
                     )
-            elif not coordinates and not str(parsed[1]).strip():
+            elif not coordinates:
                 return (
                     ActionExecutionStatus.BLOCKED,
                     "gui-invalid-response",
                     {},
-                    f"{action_type.value} requires an explicit pixel point or semantic target query.",
+                    f"{action_type.value} requires explicit screen-pixel coordinates from the screenshot.",
                 )
         parsed = (parsed[0], parsed[1], payload, parsed[3])
         return parsed
@@ -3112,7 +3081,11 @@ class ComputerUseAgent:
         # in the GUI-only branch below. Draining twice would silently drop the
         # second copy, and the GUI-only branch is exactly the worker most likely
         # to be facing the popup the eye just reported.
-        ambient_block = self._ambient_narration_block()
+        ambient_block = (
+            ""
+            if self._gui_action_contract_active()
+            else self._ambient_narration_block()
+        )
         if ambient_block and not self._gui_action_contract_active():
             raw_facts.append(
                 "AVCS unsolicited observations since your last step (the eye noticed "
@@ -3382,7 +3355,7 @@ class ComputerUseAgent:
             avcs_summary = self._fresh_avcs_reflex_summary(
                 getattr(observation, "screen", None)
             )
-            narration_block = self._narrate_screen(getattr(observation, "screen", None))
+            narration_block = ""
             # ``ambient_block`` was drained once above; reuse it so the GUI-only
             # worker still hears what the eye said (draining again yields "").
             narration_line = (
@@ -3406,16 +3379,15 @@ class ComputerUseAgent:
                 f"Active Application / Window: {active_app}\n"
                 f"Open Windows (currently running X11 windows): {windows_str}\n"
                 f"Available Installed Desktop Applications: {installed_str}\n"
-                "CURRENT AVCS PIXEL STATE SUMMARY "
-                "(fresh local frame; coarse scene/change/motion signals only; "
-                "not semantic certainty or task proof; "
-                f"the desktop screenshot is attached separately when a vision route is ready): {avcs_summary}\n"
+                "OPTIONAL AVCS_REFLEX TOOL OUTPUT "
+                "(coarse pixel-change/motion metadata only; may be unavailable; "
+                f"not semantic evidence or task proof): {avcs_summary}\n"
                 f"{narration_line}"
                 f"{ambient_line}"
-                "GROUNDING RULE: AVCS reflex state describes pixel changes and scene "
-                "motion; it does not provide OCR or semantic controls. Semantic targets "
-                "must be resolved locally by the configured, evaluated AVCS grounder. "
-                "Never invent coordinates.\n"
+                "GROUNDING RULE: use the attached current screenshot to identify visible "
+                "controls and provide explicit screen-pixel coordinates. AVCS output is "
+                "advisory only and never grounds targets. Earlier actions are history, "
+                "not current evidence.\n"
                 "PROGRESS RULE: 'Open Windows' and 'Active Application / Window' above "
                 "are the CURRENT desktop state after your previous actions, not history. "
                 "If the application you were asked to open already appears in 'Open "
@@ -3985,11 +3957,9 @@ class ComputerUseAgent:
         avcs_summary = self._fresh_avcs_reflex_summary(
             getattr(observation, "screen", None)
         )
-        if gui_reasoning and (
-            not self._last_screen_has_pixels or avcs_summary == "unavailable"
-        ):
+        if gui_reasoning and not self._last_screen_has_pixels:
             return self._reasoning_unavailable_action(
-                "AVCS requires fresh, frame-matched pixel state; no GUI reasoning request was sent."
+                "A fresh workstation screenshot is unavailable; no GUI reasoning request was sent."
             )
         # Build the prompt only after any fresh-frame recovery so the next
         # System2 turn reasons from the same pixels as the AVCS state.
@@ -3997,27 +3967,37 @@ class ComputerUseAgent:
             goal, observation, step_index, primary_file, test_file
         )
         user_text = obs_summary
-        # A GUI worker must reason from the visible interface, not from a
-        # hand-built text summary alone. When a fresh frame is available and a
-        # vision-capable route is configured, attach the pixels to the
-        # reasoning request so the model can actually see the screen. This is
-        # the documented "visual-first GUI" contract; the earlier AVCS
-        # migration hardcoded this to False and silently reduced GUI workers to
-        # blind text reasoning.
-        reasoning_images: list[Any] = []
-        image_attached = False
-        if gui_reasoning and self._last_screen_has_pixels:
-            reasoning_images = self._reasoning_screenshot_images()
-            image_attached = bool(reasoning_images)
         if gui_reasoning:
-            if image_attached:
-                escalation_reason = "visual_reasoning_requested"
-            elif self._last_screen_has_pixels:
-                escalation_reason = "vision_route_unavailable"
-            else:
-                escalation_reason = "visual_frame_unavailable"
-        else:
-            escalation_reason = "non_gui_reasoning"
+            vision_route_ready = getattr(self.llm_router, "vision_route_ready", None)
+            if callable(vision_route_ready):
+                try:
+                    if not vision_route_ready():
+                        return self._reasoning_unavailable_action(
+                            "No image-capable computer-use vision route is ready; "
+                            "no GUI reasoning request was sent."
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "computer_use_vision_route_readiness_failed",
+                        error=str(exc),
+                    )
+                    return self._reasoning_unavailable_action(
+                        "The computer-use vision route readiness could not be verified; "
+                        "no GUI reasoning request was sent."
+                    )
+        image_content = (
+            self._screen_image_content(getattr(observation, "screen", None))
+            if gui_reasoning
+            else None
+        )
+        if gui_reasoning and image_content is None:
+            return self._reasoning_unavailable_action(
+                "A fresh workstation screenshot could not be attached to the GUI vision request."
+            )
+        image_attached = image_content is not None
+        escalation_reason = (
+            "computer_use_screenshot" if gui_reasoning else "non_gui_reasoning"
+        )
 
         observation.accessible_scene_fresh = structured_scene_available
         observation.image_attached = image_attached
@@ -4042,13 +4022,6 @@ class ComputerUseAgent:
             "visual_escalation_reason": escalation_reason,
             "image_escalation_count": counters["visual_escalations"],
         }
-        if self._gui_action_contract_active() and avcs_summary == "unavailable":
-            return (
-                ActionExecutionStatus.BLOCKED,
-                "gui-perception-unavailable",
-                {},
-                "No fresh AVCS pixel-state observation is available; GUI reasoning stopped.",
-            )
         logger.info(
             "computer_reasoning_perception",
             perception_source=observation.perception_source,
@@ -4078,13 +4051,13 @@ class ComputerUseAgent:
         gui_action_values = [
             action.value
             for action in ComputerActionType
-            if action in advertised_actions and action != ComputerActionType.GUI_TYPE
+            if action in advertised_actions
         ]
         action_schema = "|".join(gui_action_values)
         efficiency_directive = (
             "2. GUI CONTROL SEMANTICS: APP_LAUNCH targets an installed application executable/name only. "
-            "For a visible menu, button, launcher, or other on-screen control, use GUI_CLICK with "
-            "a semantic target for local AVCS grounding; never pass a control label to APP_LAUNCH.\n"
+            "For visible controls, use coordinates grounded in the attached fresh screenshot; "
+            "never pass a control label to APP_LAUNCH.\n"
             "3. DIRECT & EFFICIENT: solve the objective with the fewest necessary visible GUI actions.\n"
             if self._gui_action_contract_active()
             else
@@ -4092,22 +4065,19 @@ class ComputerUseAgent:
         )
         if self._gui_action_contract_active():
             action_instructions = (
-                "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, and GUI_SCROLL, "
-                "either (a) give an explicit integer screen-pixel point in PAYLOAD "
-                '({"x":<int>,"y":<int>}) read from the attached screenshot, or (b) give a '
-                "concise semantic target in TARGET for the local AVCS grounder. "
-                "You are shown the current desktop screenshot when a vision route is "
-                "configured, so base targets on what is actually visible. A semantic "
-                "target is resolved locally by the AVCS grounder before dispatch; if no "
-                "grounder is configured the semantic form fails closed, so prefer the "
-                "explicit pixel form when you can see the control. Never invent pixel "
-                "coordinates that do not correspond to something visible, and never "
-                "claim a semantic target is already grounded. PAYLOAD "
-                "must be a JSON object. GUI_SCROLL also accepts `axis` "
-                "(\"vertical\" default, or \"horizontal\" for left/right) with an integer "
-                "`delta`. GUI_TYPE is unavailable until a tested local "
-                "AVCS focus-verification capability exists, so do not propose it. GUI_HOTKEY "
-                "requires {\"key\": \"Ctrl+L\"}. Do not include shell commands.\n"
+                "For GUI_CLICK, GUI_DOUBLE_CLICK, GUI_RIGHT_CLICK, GUI_MOVE, GUI_SCROLL, "
+                "and GUI_TYPE, identify the control in the attached current screenshot and "
+                "return integer x/y screen-pixel coordinates in PAYLOAD with "
+                "coordinate_space set to screen_pixels. GUI_DRAG must also include "
+                "integer x2/y2 destination pixels. Never use AVCS to identify controls "
+                "or invent coordinates. GUI_TYPE requires explicit text and coordinates; "
+                "SONIC will click, re-observe, and visually check focus before typing. "
+                "If the target or focus is ambiguous, do not type or guess. GUI_HOTKEY "
+                "requires {\"key\": \"Ctrl+L\"}. AVCS_OBSERVE is an optional read-only "
+                "tool for coarse pixel-change metadata; it never identifies controls. "
+                "Do not include shell commands.\n"
+                "GUI_SCROLL accepts `axis` (\"vertical\" default or \"horizontal\") "
+                "and an integer `delta`.\n"
                 "3. COMPLETION: use GOAL_COMPLETE only when the current visual evidence already "
                 "supports handing the result to the independent Judge."
             )
@@ -4195,10 +4165,10 @@ class ComputerUseAgent:
                 Message(
                     role=MessageRole.USER,
                     content=user_text,
-                    images=reasoning_images,
+                    images=[image_content] if image_content is not None else [],
                 ),
             ],
-            task_type="reasoning",
+            task_type="computer_use" if gui_reasoning else "reasoning",
             max_tokens=2048,
             tools=None,
             reasoning_effort="medium",
@@ -5156,6 +5126,7 @@ class ComputerUseAgent:
         ComputerActionType.GUI_MOVE,
         ComputerActionType.GUI_SCROLL,
         ComputerActionType.GUI_SCREENSHOT,
+        ComputerActionType.AVCS_OBSERVE,
         ComputerActionType.GUI_DRAG,
         ComputerActionType.GUI_WAIT,
         ComputerActionType.APP_LAUNCH,
@@ -5184,6 +5155,7 @@ class ComputerUseAgent:
         ComputerActionType.GUI_MOVE,
         ComputerActionType.GUI_SCROLL,
         ComputerActionType.GUI_SCREENSHOT,
+        ComputerActionType.AVCS_OBSERVE,
         ComputerActionType.GUI_DRAG,
         ComputerActionType.GUI_WAIT,
         ComputerActionType.APP_LAUNCH,
@@ -5467,7 +5439,7 @@ class ComputerUseAgent:
 
     @classmethod
     def _screen_state_signature(cls, screen: Any) -> str:
-        """Fingerprint a frame from AVCS pixels and the active window only."""
+        """Fingerprint a frame and active window, using AVCS when available."""
         avcs_state = getattr(screen, "avcs_state", None)
         scene_hash = (
             str(avcs_state.get("scene_hash", "")).strip()
@@ -5475,6 +5447,12 @@ class ComputerUseAgent:
             and avcs_state.get("engine") == "avcs_reflex"
             else ""
         )
+        if not scene_hash:
+            raw_rgb = getattr(screen, "raw_rgb", b"")
+            screenshot = getattr(screen, "screenshot_base64", "")
+            frame_bytes = raw_rgb if isinstance(raw_rgb, bytes) and raw_rgb else str(screenshot).encode("ascii", errors="ignore")
+            if frame_bytes:
+                scene_hash = hashlib.sha256(frame_bytes).hexdigest()
         return json.dumps(
             {
                 "active_window": str(getattr(screen, "active_window", "") or ""),
@@ -5540,6 +5518,50 @@ class ComputerUseAgent:
             getattr(screen, "raw_rgb", b"")
             or getattr(screen, "screenshot_base64", "")
         )
+
+    @staticmethod
+    def _screen_image_content(screen: Any) -> Any | None:
+        """Build image content from the exact observed screenshot, if available."""
+        from sonic.llm.schemas import ImageContent
+
+        screenshot_base64 = str(getattr(screen, "screenshot_base64", "") or "")
+        if screenshot_base64:
+            try:
+                base64.b64decode(screenshot_base64, validate=True)
+                return ImageContent(base64=screenshot_base64, media_type="image/png")
+            except (ValueError, TypeError):
+                pass
+
+        raw_rgb = getattr(screen, "raw_rgb", b"")
+        width = getattr(screen, "width", 0)
+        height = getattr(screen, "height", 0)
+        if (
+            not isinstance(raw_rgb, bytes)
+            or isinstance(width, bool)
+            or not isinstance(width, int)
+            or width <= 0
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or height <= 0
+            or width * height > 64_000_000
+            or len(raw_rgb) != width * height * 3
+        ):
+            return None
+
+        try:
+            from io import BytesIO
+
+            from PIL import Image
+
+            buffer = BytesIO()
+            Image.frombytes("RGB", (width, height), raw_rgb).save(buffer, format="PNG")
+            return ImageContent(
+                base64=base64.b64encode(buffer.getvalue()).decode("ascii"),
+                media_type="image/png",
+            )
+        except Exception as exc:
+            logger.warning("computer_use_screenshot_encoding_failed", error=str(exc))
+            return None
 
     @classmethod
     def _screen_pixels_changed(cls, before: Any, after: Any) -> bool | None:
@@ -6212,15 +6234,75 @@ class ComputerUseAgent:
             logger.warning("avcs_focus_verification_failed", reason=str(exc))
             return False, "AVCS focus verification failed"
 
-    def _focus_verification_available(self) -> bool:
-        """True when text entry can be focus-verified by any real mechanism.
+    async def _verify_gui_focus_with_vision(
+        self,
+        screen: ScreenObservation,
+        *,
+        x: int,
+        y: int,
+        target: str,
+    ) -> tuple[bool, str]:
+        """Ask the configured vision model for visible focus evidence on a fresh frame."""
+        from sonic.llm.schemas import LLMRequest, Message, MessageRole
 
-        Prefers an evaluated local AVCS focus head; otherwise requires a
-        configured, ready vision route. When neither exists, GUI_TYPE stays
-        blocked rather than typing into an unconfirmed field.
-        """
-        if self._avcs_focus_head_ready():
-            return True
+        image = self._screen_image_content(screen)
+        if image is None or self.llm_router is None:
+            return False, "vision route or fresh screenshot is unavailable"
+        try:
+            response = await asyncio.wait_for(
+                self.llm_router.complete(
+                    LLMRequest(
+                        messages=[
+                            Message(
+                                role=MessageRole.SYSTEM,
+                                content=(
+                                    "Inspect the screenshot pixels. Decide only whether a "
+                                    "visible text-entry focus cue is present at the given "
+                                    "screen-pixel point. Never infer focus from the previous "
+                                    "click or from the target label. If unclear, return focused=false. "
+                                    "Return exactly JSON with focused (boolean), confidence "
+                                    "(number 0..1), and evidence (short visible cue)."
+                                ),
+                            ),
+                            Message(
+                                role=MessageRole.USER,
+                                content=(
+                                    f"Target: {target}\nPoint: ({x}, {y}) pixels on a "
+                                    f"{screen.width}x{screen.height} screen. Is a caret, "
+                                    "focus outline, or other unambiguous text-entry focus cue "
+                                    "visible at that point?"
+                                ),
+                                images=[image],
+                            ),
+                        ],
+                        task_type="computer_use",
+                        temperature=0.0,
+                        max_tokens=192,
+                    )
+                ),
+                timeout=_GUI_REASONING_TIMEOUT_SECONDS,
+            )
+            result = json.loads(str(getattr(response, "content", "") or ""))
+            confidence = result.get("confidence")
+            evidence = result.get("evidence")
+            if (
+                not isinstance(result, dict)
+                or result.get("focused") is not True
+                or isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not math.isfinite(float(confidence))
+                or float(confidence) < 0.9
+                or not isinstance(evidence, str)
+                or not evidence.strip()
+            ):
+                return False, "vision model did not confirm an unambiguous focus cue"
+            return True, evidence.strip()[:200]
+        except Exception as exc:
+            logger.warning("vision_focus_verification_failed", reason=str(exc))
+            return False, "vision focus verification failed"
+
+    def _focus_verification_available(self) -> bool:
+        """Whether the configured image-capable route can verify visual focus."""
         if os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "1").strip().lower() in (
             "0",
             "false",
@@ -6229,59 +6311,14 @@ class ComputerUseAgent:
         ):
             return False
         router = getattr(self, "llm_router", None)
-        if router is None or not callable(getattr(router, "vision_route_ready", None)):
+        ready = getattr(router, "vision_route_ready", None)
+        if not callable(ready):
             return False
         try:
-            return bool(router.vision_route_ready())
-        except Exception:  # pragma: no cover - defensive
+            return bool(ready())
+        except Exception as exc:
+            logger.warning("vision_route_readiness_check_failed", error=str(exc))
             return False
-
-    async def _verify_gui_focus(self, screen: ScreenObservation, *, x: int, y: int, target: str) -> tuple[bool, str]:
-        """Confirm focus with the local AVCS head, else the vision route.
-
-        The evaluated local head always wins. When it is not configured, the
-        configured vision route answers a single yes/no question about the
-        visible focus indicator. Any error, ambiguity, or missing evidence
-        fails closed, so text is never typed on an unconfirmed field.
-        """
-        if self._avcs_focus_head_ready():
-            return await self._verify_gui_focus_with_avcs(
-                screen, x=x, y=y, target=target
-            )
-
-        vlm_enabled = os.environ.get(
-            "SONIC_ENABLE_VLM_GROUNDING", "1"
-        ).strip().lower() not in ("0", "false", "no", "off")
-        frame_b64 = str(
-            getattr(screen, "screenshot_base64", "")
-            or getattr(self, "_last_screenshot_b64", "")
-            or ""
-        )
-        router = getattr(self, "llm_router", None)
-        vision_ready = False
-        if router is not None and callable(getattr(router, "vision_route_ready", None)):
-            try:
-                vision_ready = bool(router.vision_route_ready())
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("vision_route_readiness_check_failed", error=str(exc))
-        if vlm_enabled and vision_ready and frame_b64:
-            from sonic.computer_use.grounding import _verify_focus_with_vlm
-
-            return await _verify_focus_with_vlm(
-                target,
-                frame_b64,
-                int(getattr(screen, "width", 0) or 0),
-                int(getattr(screen, "height", 0) or 0),
-                x,
-                y,
-                router=router,
-            )
-        if not vision_ready:
-            return False, (
-                "no evaluated local focus head and no vision route is configured "
-                "for focus verification"
-            )
-        return False, "AVCS has no evaluated local focus-verification head"
 
     async def execute_action(
         self,
@@ -6451,6 +6488,32 @@ class ComputerUseAgent:
             target_resource = str(payload.get("key") or target_resource)
         if action_type in legacy_gui_actions:
             action_type = legacy_gui_actions[action_type]
+        if action_type == ComputerActionType.BROWSER_NAVIGATE:
+            actual_obs_str = (
+                "Legacy BROWSER_NAVIGATE is blocked; use screenshot-grounded visible GUI "
+                "actions so focus is checked before typing."
+            )
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource=target_resource,
+                payload=str(payload),
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=ActionExecutionStatus.BLOCKED,
+                exit_code=126,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append(
+                {"action": f"BLOCKED {target_resource}", "result": actual_obs_str}
+            )
+            return trace
         actual_obs_str = ""
         status = ActionExecutionStatus.COMPLETED
         recovery_needed = False
@@ -6494,37 +6557,6 @@ class ComputerUseAgent:
             payload = {} if payload is None else {"raw": payload}
 
         if action_type in (
-            ComputerActionType.GUI_TYPE,
-            ComputerActionType.BROWSER_NAVIGATE,
-        ) and not self._focus_verification_available():
-            actual_obs_str = (
-                f"{action_type.value} blocked: AVCS has no evaluated local "
-                "focus-verification head and no ready vision route, so text "
-                "will not be sent."
-            )
-            trace = ComputerDecisionTrace(
-                step_index=self.action_counter,
-                action_type=action_type,
-                target_resource=target_resource,
-                payload=str(payload),
-                predicted_outcome=predicted_outcome,
-                actual_observation=actual_obs_str,
-                expected_observation=predicted_outcome,
-                info_gain=0.0,
-                recovery_attempted=False,
-                status=ActionExecutionStatus.BLOCKED,
-                exit_code=126,
-                thought=getattr(self, "_last_thought", ""),
-                duration_seconds=round(time.perf_counter() - t_start, 3),
-                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
-            )
-            self.traces.append(trace)
-            self.history.append(
-                {"action": f"BLOCKED {target_resource}", "result": actual_obs_str}
-            )
-            return trace
-
-        if action_type in (
             ComputerActionType.GUI_KEYPRESS,
             ComputerActionType.GUI_HOTKEY,
         ) and not str(payload.get("key") or payload.get("keys") or "").strip() and (
@@ -6555,22 +6587,8 @@ class ComputerUseAgent:
             return trace
 
         async def resolve_visible_desktop_target(query: str) -> tuple[int, int] | None:
-            """Resolve a desktop target only with the local AVCS grounder."""
-            if not query or not (
-                getattr(self, "_last_screen_has_pixels", False)
-                or self._last_screenshot_b64
-            ):
-                return None
-            try:
-                grounded = await self._ground_target_with_avcs(query)
-            except Exception as exc:
-                logger.error(
-                    "avcs_target_grounding_failed_closed",
-                    query=query,
-                    error=str(exc),
-                )
-                return None
-            return (grounded["x"], grounded["y"]) if grounded else None
+            """Legacy selector actions cannot ground targets without a screenshot point."""
+            return None
 
         gui_actions = {
             ComputerActionType.GUI_CLICK,
@@ -6582,78 +6600,6 @@ class ComputerUseAgent:
             ComputerActionType.GUI_SCROLL,
             ComputerActionType.GUI_DRAG,
         }
-        observed_screen = getattr(self, "_last_observed_screen", None)
-        observed_avcs = getattr(observed_screen, "avcs_state", None)
-        system3 = (
-            observed_avcs.get("system3")
-            if isinstance(observed_avcs, dict)
-            and observed_avcs.get("engine") == "avcs_reflex"
-            else None
-        )
-        # Only a frame the agent actually reasoned on can raise "the desktop
-        # changed unexpectedly". The post-action frame captured by the agent's
-        # own GUI dispatch is its expected effect; treating it as surprise would
-        # block the very next legitimate action.
-        from_reasoning = bool(
-            getattr(self, "_last_observed_screen_from_reasoning", False)
-        )
-        surprise_score = (
-            system3.get("surprise_score")
-            if from_reasoning
-            and isinstance(system3, dict)
-            and system3.get("engine") == "system3_temporal_prediction"
-            and system3.get("prediction_available") is True
-            and system3.get("stability_state") == "surprise_event"
-            else None
-        )
-        mutates_desktop = action_type in gui_actions or action_type in {
-            ComputerActionType.APP_LAUNCH,
-            ComputerActionType.APP_CLOSE,
-            ComputerActionType.APP_FOCUS,
-            ComputerActionType.APP_MAXIMIZE,
-            ComputerActionType.WINDOW_MAXIMIZE,
-            ComputerActionType.WINDOW_TILE,
-        }
-        if (
-            mutates_desktop
-            and isinstance(surprise_score, (int, float))
-            and not isinstance(surprise_score, bool)
-            and math.isfinite(float(surprise_score))
-            and float(surprise_score) >= 0.85
-        ):
-            actual_obs_str = (
-                "AVCS temporal surprise detected "
-                f"(score={float(surprise_score):.3f}); desktop input was held. "
-                "Observe the new screen and re-reason before trying again. "
-                "This signal detects visual change only; it does not identify "
-                "the cause or prove an alert is present."
-            )
-            logger.info(
-                "gui_action_held_on_avcs_surprise",
-                action_type=action_type.value,
-                score=round(float(surprise_score), 4),
-            )
-            trace = ComputerDecisionTrace(
-                step_index=self.action_counter,
-                action_type=action_type,
-                target_resource=target_resource,
-                payload=str(payload),
-                predicted_outcome=predicted_outcome,
-                actual_observation=actual_obs_str,
-                expected_observation=predicted_outcome,
-                info_gain=0.0,
-                recovery_attempted=False,
-                status=ActionExecutionStatus.BLOCKED,
-                exit_code=126,
-                thought=getattr(self, "_last_thought", ""),
-                duration_seconds=round(time.perf_counter() - t_start, 3),
-                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
-            )
-            self.traces.append(trace)
-            self.history.append(
-                {"action": f"HELD {action_type.value} {target_resource}", "result": actual_obs_str}
-            )
-            return trace
         status_method = getattr(self.computer, "status", None)
         is_test_double = type(self.computer).__module__ == "unittest.mock"
         if action_type in gui_actions:
@@ -7177,6 +7123,45 @@ class ComputerUseAgent:
             self.history.append({"action": action_type.value, "result": actual_obs_str})
             return trace
 
+        if action_type == ComputerActionType.AVCS_OBSERVE:
+            screen = getattr(self, "_last_observed_screen", None)
+            summary = (
+                self._fresh_avcs_reflex_summary(screen)
+                if self._frame_is_fresh_for_reasoning(screen)
+                else "unavailable"
+            )
+            available = summary != "unavailable"
+            actual_obs_str = (
+                f"AVCS_REFLEX tool output (advisory, pixel-only): {summary}"
+                if available
+                else "AVCS_REFLEX unavailable for the current frame; use the screenshot directly."
+            )
+            trace = ComputerDecisionTrace(
+                step_index=self.action_counter,
+                action_type=action_type,
+                target_resource="current-frame",
+                payload="{}",
+                predicted_outcome=predicted_outcome,
+                actual_observation=actual_obs_str,
+                expected_observation=predicted_outcome,
+                info_gain=0.0,
+                recovery_attempted=False,
+                status=(
+                    ActionExecutionStatus.COMPLETED
+                    if available
+                    else ActionExecutionStatus.UNVERIFIED
+                ),
+                exit_code=0 if available else None,
+                thought=getattr(self, "_last_thought", ""),
+                duration_seconds=round(time.perf_counter() - t_start, 3),
+                thought_duration_seconds=getattr(self, "_last_thought_duration", 0.0),
+            )
+            self.traces.append(trace)
+            self.history.append(
+                {"action": action_type.value, "result": actual_obs_str}
+            )
+            return trace
+
         # ----- Substrate Outage Detection (Failure Budget) -----
         # If 3 consecutive provider errors occurred, STOP target actions and switch to substrate diagnostic action.
         provider_name = self._get_provider_name()
@@ -7402,23 +7387,13 @@ class ComputerUseAgent:
             explicit_pixel_target is None and payload_pixel_target is None
         )
         if action_type in coordinate_actions and natural_target_needs_live_grounding:
-            grounding_reason = ""
+            grounding_reason = "vision model did not return explicit screen-pixel coordinates"
             grounded = None
-            if getattr(self, "_last_screen_has_pixels", False) or self._last_screenshot_b64:
-                try:
-                    grounded = await self._ground_target_with_avcs(target_resource)
-                except Exception as exc:
-                    grounding_reason = str(exc)
-                    logger.error(
-                        "avcs_target_grounding_failed_closed",
-                        query=target_resource,
-                        error=grounding_reason,
-                    )
             if grounded is None:
                 detail = f" {grounding_reason}" if grounding_reason else ""
                 actual_obs_str = (
-                    "GUI action blocked: the local AVCS grounder did not resolve "
-                    f"the target '{target_resource}'.{detail}"
+                    "GUI action blocked: "
+                    f"'{target_resource}' has no screenshot-grounded pixel point.{detail}"
                 )
                 trace = ComputerDecisionTrace(
                     step_index=self.action_counter,
@@ -7883,7 +7858,9 @@ class ComputerUseAgent:
                             ),
                         )
                         focused_observation = await self.observe(workspace_id)
-                        if self._last_screenshot_b64:
+                        if self._screen_has_pixel_data(
+                            getattr(focused_observation, "screen", None)
+                        ):
                             focused_screen = await self.computer.screenshot(
                                 workspace_id
                             )
@@ -7903,7 +7880,7 @@ class ComputerUseAgent:
                                 getattr(focused_screen, "active_window", "") or ""
                             ).strip()
                             if not (
-                                getattr(focused_screen, "screenshot_base64", "")
+                                self._screen_has_pixel_data(focused_screen)
                                 and getattr(focused_screen, "width", 0) > 0
                                 and getattr(focused_screen, "height", 0) > 0
                                 and isinstance(focused_age, (int, float))
@@ -7941,7 +7918,7 @@ class ComputerUseAgent:
                                 )
                                 self._update_screen_dims(focused_screen)
                                 focus_confirmed, focus_evidence = (
-                                    await self._verify_gui_focus(
+                                    await self._verify_gui_focus_with_vision(
                                         focused_screen,
                                         x=int(focus_x),
                                         y=int(focus_y),
@@ -7959,7 +7936,7 @@ class ComputerUseAgent:
                                     action_exit_code = 126
                         else:
                             actual_obs_str = (
-                                "GUI_TYPE blocked: AVCS screenshot pixels are "
+                                "GUI_TYPE blocked: fresh screenshot pixels are "
                                 "unavailable for focus verification; no text was sent."
                             )
                             status = ActionExecutionStatus.BLOCKED

@@ -160,7 +160,7 @@ async def test_watchdog_never_injects_application_specific_shortcuts():
         (ComputerActionType.APP_LAUNCH, "sample-app", {"application": "sample-app"}),
     ],
 )
-async def test_avcs_surprise_holds_desktop_mutations(action_type, target, payload):
+async def test_system3_surprise_is_advisory_for_desktop_mutations(action_type, target, payload):
     provider = _mock_static_gui_provider("surprise_screen")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
     await agent.observe("ws-1")
@@ -181,16 +181,15 @@ async def test_avcs_surprise_holds_desktop_mutations(action_type, target, payloa
         "Perform the requested desktop action",
     )
 
-    assert trace.status == ActionExecutionStatus.BLOCKED
-    assert trace.exit_code == 126
-    assert "Observe the new screen and re-reason" in trace.actual_observation
-    assert "does not identify the cause" in trace.actual_observation
-    assert provider.gui_action.await_count == 0
-    assert provider.launch_application.await_count == 0
+    assert trace.status != ActionExecutionStatus.BLOCKED
+    if action_type == ComputerActionType.GUI_CLICK:
+        assert provider.gui_action.await_count == 1
+    else:
+        assert provider.launch_application.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_avcs_surprise_hold_clears_after_a_stable_observation():
+async def test_system3_surprise_does_not_gate_actions_before_or_after_stability():
     provider = _mock_static_gui_provider("surprise_then_stable")
     agent = ComputerUseAgent(computer_provider=provider, gui_only=True)
     await agent.observe("ws-1")
@@ -204,15 +203,15 @@ async def test_avcs_surprise_hold_clears_after_a_stable_observation():
     }
     agent._last_observed_screen.avcs_state["system3"] = system3_state
 
-    held_trace = await agent.execute_action(
+    first_trace = await agent.execute_action(
         "ws-1",
         ComputerActionType.GUI_CLICK,
         "100,100",
         {"x": 100, "y": 100},
         "Click the observed control",
     )
-    assert held_trace.status == ActionExecutionStatus.BLOCKED
-    assert provider.gui_action.await_count == 0
+    assert first_trace.status != ActionExecutionStatus.BLOCKED
+    assert provider.gui_action.await_count == 1
 
     await agent.observe("ws-1")
     agent._last_observed_screen.avcs_state["system3"] = {
@@ -229,7 +228,7 @@ async def test_avcs_surprise_hold_clears_after_a_stable_observation():
     )
 
     assert resumed_trace.status == ActionExecutionStatus.UNVERIFIED
-    assert provider.gui_action.await_count == 1
+    assert provider.gui_action.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -321,12 +320,12 @@ async def test_unchanged_typing_and_keypress_do_not_trigger_recovery():
         "Submit the focused field",
     )
 
-    assert typing_trace.status == ActionExecutionStatus.BLOCKED
-    assert keypress_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert typing_trace.status == ActionExecutionStatus.UNVERIFIED
+    assert keypress_trace.status == ActionExecutionStatus.BLOCKED
     assert typing_trace.recovery_attempted is False
     assert keypress_trace.recovery_attempted is False
     actions = [call.args[1].action for call in provider.gui_action.call_args_list]
-    assert actions == [GUIActionType.KEYPRESS]
+    assert actions == [GUIActionType.CLICK, GUIActionType.TYPE]
 
 
 @pytest.mark.asyncio
@@ -403,7 +402,6 @@ async def test_typing_verification_rejects_garbage_and_sentinel_text():
             "Type into input",
         )
         assert trace.status == ActionExecutionStatus.BLOCKED, f"Payload {p} was not fail-closed: {trace.status}"
-        assert "AVCS has no evaluated local focus-verification" in trace.actual_observation
     assert provider.gui_action.await_count == 0
 
 
@@ -430,7 +428,6 @@ async def test_typing_verification_rejects_wrong_field_targets():
             f"Type into {target}",
         )
         assert trace.status == ActionExecutionStatus.BLOCKED, f"Target {target} was not fail-closed: {trace.status}"
-        assert "AVCS has no evaluated local focus-verification" in trace.actual_observation
     assert provider.gui_action.await_count == 0
 
 
@@ -448,7 +445,6 @@ async def test_valid_typing_payload_remains_blocked_without_local_focus_verifica
         "Type query",
     )
     assert trace.status == ActionExecutionStatus.BLOCKED, trace.actual_observation
-    assert "AVCS has no evaluated local focus-verification" in trace.actual_observation
     assert provider.gui_action.await_count == 0
 
 

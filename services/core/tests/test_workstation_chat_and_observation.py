@@ -324,10 +324,8 @@ def test_fresh_avcs_evidence_summary_drops_semantic_and_unbounded_fields():
     assert evidence["summary"]["regions"] == [{"row": 1, "col": 2, "salience": 0.5}]
 
 
-def test_avcs_capability_state_fails_closed_without_evaluated_heads(monkeypatch):
-    """A LIVE desktop is not a working desktop: without evaluated AVCS heads the
-    capability surface must report semantic GUI targeting and text entry as
-    unavailable so the operator is not misled by a green 'LIVE' status."""
+def test_avcs_capability_state_separates_tool_from_vision_route(monkeypatch):
+    """AVCS is optional tool telemetry, not a GUI-model readiness gate."""
     from sonic.api.routes.workstation_perception import avcs_capability_state
 
     monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
@@ -341,16 +339,16 @@ def test_avcs_capability_state_fails_closed_without_evaluated_heads(monkeypatch)
     capability = avcs_capability_state()
 
     assert capability["reflex_perception"] is True
+    assert capability["avcs_observe_available"] is True
     assert capability["semantic_grounding"] is False
     assert capability["focus_verification"] is False
     assert capability["gui_actions_ready"] is False
-    assert "grounding checkpoint" in capability["reason"].lower()
+    assert capability["vision_route_configured"] is True
+    assert "optional" in capability["reason"].lower()
 
 
 def test_avcs_capability_state_reports_vision_route(monkeypatch):
-    """With no local heads but a ready vision route, the capability surface must
-    honestly credit the vision route as the grounding/focus source instead of
-    reporting the being as unable to act."""
+    """A configured vision route is not proof of grounding or focus quality."""
     from sonic.api.routes.workstation_perception import avcs_capability_state
 
     monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
@@ -358,25 +356,29 @@ def test_avcs_capability_state_reports_vision_route(monkeypatch):
     monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "1")
 
     class _Router:
+        def _resolve_provider(self, **_kwargs):
+            return object(), "vision-model"
+
         def vision_route_ready(self) -> bool:
             return True
 
     monkeypatch.setattr(
-        "sonic.llm.router.ModelRouter.from_config", classmethod(lambda cls, *a, **k: _Router())
+        "sonic.api.routes.llm.get_model_router", lambda: _Router()
     )
 
     capability = avcs_capability_state()
 
-    assert capability["semantic_grounding"] is True
-    assert capability["focus_verification"] is True
-    assert capability["gui_actions_ready"] is True
-    assert capability["grounding_source"] == "llm_vision_route"
-    assert capability["focus_verification_source"] == "llm_vision_route"
+    assert capability["semantic_grounding"] is False
+    assert capability["focus_verification"] is False
+    assert capability["gui_actions_ready"] is False
+    assert capability["grounding_source"] == "none"
+    assert capability["focus_verification_source"] == "none"
+    assert capability["vision_route_configured"] is True
     assert capability["vision_route_ready"] is True
 
 
-def test_avcs_capability_state_local_checkpoint_wins_over_vision(monkeypatch):
-    """An evaluated local checkpoint is the authoritative source when present."""
+def test_avcs_capability_state_does_not_claim_checkpoint_backed_grounding(monkeypatch):
+    """AVCS checkpoint metadata does not authorize GUI reasoning capabilities."""
     from sonic.api.routes import workstation_perception as wp
 
     monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "1")
@@ -393,18 +395,24 @@ def test_avcs_capability_state_local_checkpoint_wins_over_vision(monkeypatch):
             return False
 
     class _Router:
+        def _resolve_provider(self, **_kwargs):
+            return object(), "vision-model"
+
         def vision_route_ready(self) -> bool:
             return True
 
     monkeypatch.setattr(wp, "_shared_capability_probe", lambda: _Perception())
     monkeypatch.setattr(
-        "sonic.llm.router.ModelRouter.from_config", classmethod(lambda cls, *a, **k: _Router())
+        "sonic.api.routes.llm.get_model_router", lambda: _Router()
     )
 
     capability = wp.avcs_capability_state()
 
-    assert capability["grounding_source"] == "local_avcs_checkpoint"
-    assert capability["focus_verification_source"] == "local_avcs_checkpoint"
+    assert capability["grounding_checkpoint_configured"] is False
+    assert capability["focus_checkpoint_configured"] is False
+    assert capability["semantic_grounding"] is False
+    assert capability["focus_verification"] is False
+    assert capability["vision_route_ready"] is True
 
 
 def test_desktop_status_surfaces_avcs_capability(monkeypatch):

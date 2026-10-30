@@ -374,7 +374,8 @@ async def test_judge_keeps_gui_verification_local_and_inconclusive():
 
     assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
     assert any("AVCS frame 1" in item for item in evaluation.evidence_items)
-    assert "No screenshot was sent to a model" in evaluation.notes
+    assert "Fresh desktop pixels were processed locally by AVCS" in evaluation.notes
+    assert "cannot establish this task's semantic postcondition" in evaluation.notes
     router.complete.assert_not_awaited()
 
 
@@ -423,7 +424,8 @@ async def test_judge_does_not_send_gui_screenshot_to_vision_model():
         worker_agent_id="sub-agent-gui",
     )
     assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
-    assert "No screenshot was sent to a model" in evaluation.notes
+    assert "Fresh desktop pixels were processed locally by AVCS" in evaluation.notes
+    assert "cannot establish this task's semantic postcondition" in evaluation.notes
     vision_judge.complete.assert_not_awaited()
 
 
@@ -472,7 +474,8 @@ async def test_judge_keeps_browser_gui_screenshot_local():
         worker_agent_id="sub-agent-browser",
     )
     assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
-    assert "No screenshot was sent to a model" in evaluation.notes
+    assert "Fresh desktop pixels were processed locally by AVCS" in evaluation.notes
+    assert "cannot establish this task's semantic postcondition" in evaluation.notes
     vision_judge.complete.assert_not_awaited()
 
 

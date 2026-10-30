@@ -253,8 +253,8 @@ async def test_motor_human_type_with_clear_field():
 
 
 @pytest.mark.asyncio
-async def test_agent_gui_type_blocks_without_evaluated_avcs_focus_verification():
-    """Text entry must fail closed until local AVCS focus verification is ready."""
+async def test_agent_gui_type_blocks_without_visual_focus_confirmation():
+    """Text entry must fail closed until the fresh screenshot confirms focus."""
     comp = _MockMotorComputer()
     agent = ComputerUseAgent(computer_provider=comp)
     await agent.observe("ws-1")
@@ -267,14 +267,14 @@ async def test_agent_gui_type_blocks_without_evaluated_avcs_focus_verification()
         "Type additional text",
     )
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "focus-verification" in trace.actual_observation.lower()
+    assert "focus" in trace.actual_observation.lower()
     assert not any("ctrl+a BackSpace" in cmd or "xdotool type" in cmd for cmd in comp.commands_executed)
     assert all(action.action != GUIActionType.TYPE for action in comp.gui_actions)
 
 
 @pytest.mark.asyncio
-async def test_agent_gui_type_does_not_clear_or_type_without_focus_verification():
-    """Missing local focus verification blocks replacement before clearing or typing."""
+async def test_agent_gui_type_does_not_clear_or_type_without_visual_focus_confirmation():
+    """Unconfirmed visual focus blocks replacement before clearing or typing."""
     comp = _MockMotorComputer()
     events: list[tuple[str, object]] = []
 
@@ -299,7 +299,7 @@ async def test_agent_gui_type_does_not_clear_or_type_without_focus_verification(
         "Replace the current input text",
     )
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "focus-verification" in trace.actual_observation.lower()
+    assert "focus" in trace.actual_observation.lower()
     assert not any(
         kind == "exec" and ("ctrl+a BackSpace" in value or "xdotool type" in value)
         for kind, value in events

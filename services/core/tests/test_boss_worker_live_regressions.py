@@ -223,7 +223,4 @@ def test_grid_overlay_is_opt_in_and_off_by_default(monkeypatch):
     grid_images = agent._reasoning_screenshot_images()
     assert len(grid_images) == 1
     assert grid_images[0].base64 != default_images[0].base64
-    assert grid_images[0].base64 == ComputerUseAgent._grid_overlay_png_base64(
-        frame, 400, 300
-    )
-
+    assert grid_images[0].base64 == ComputerUseAgent._grid_overlay_png_base64(frame, 400, 300)
