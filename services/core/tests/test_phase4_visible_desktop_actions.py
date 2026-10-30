@@ -123,7 +123,7 @@ async def test_navigation_alias_uses_live_shared_desktop():
     )
 
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "focus-verification" in trace.actual_observation.lower()
+    assert "legacy browser_navigate is blocked" in trace.actual_observation.lower()
     assert computer.actions == []
     assert agent._last_gui_navigation_target == ""
 

@@ -289,21 +289,20 @@ def _awareness_snapshot() -> dict[str, Any]:
 
 
 def avcs_capability_state() -> dict[str, Any]:
-    """Report the real AVCS capability readiness for GUI task execution.
+    """Report AVCS tool availability separately from GUI model readiness.
 
-    This is an honesty surface, not a capability grant. Semantic GUI targeting
-    and text entry fail closed unless an evaluated local AVCS head is loaded.
-    Without a configured, evaluated grounding checkpoint the model cannot turn
-    a described control into screen pixels, and without an evaluated focus head
-    it cannot confirm text focus; both actions are blocked by design. Reporting
-    that state lets the operator see why a GUI worker cannot act instead of
-    reading a misleading "LIVE" desktop as "ready to work".
+    AVCS is a deterministic, read-only reflex tool in the workstation agent.
+    It does not provide semantic targets, focus verification, or task success.
+    The vision route check only confirms that an image-capable provider/model is
+    configured; it does not prove localization quality or GUI task completion.
     """
     capability: dict[str, Any] = {
-        "reflex_perception": True,
+        "reflex_perception": False,
+        "avcs_observe_available": False,
         "live_narration": False,
         "semantic_grounding": False,
         "focus_verification": False,
+        "vision_route_configured": False,
         "gui_actions_ready": False,
         "grounding_checkpoint_configured": False,
         "focus_checkpoint_configured": False,
@@ -318,71 +317,39 @@ def avcs_capability_state() -> dict[str, Any]:
         "apprenticeship_labels": {},
         "reason": "",
     }
-    # Live narration runs on the same reflex frames, so it needs no checkpoint
-    # and is available whenever the AVCS package is importable.  It describes
-    # pixels only and cannot read on-screen text.
     try:
-        from sonic.computer_use.avcs_narrator import AVCSNarrator
+        _shared_capability_probe()
+        capability["reflex_perception"] = True
+        capability["avcs_observe_available"] = True
+    except Exception as exc:  # pragma: no cover - defensive capability probe
+        capability["reason"] = f"AVCS reflex tool unavailable: {exc}"
 
-        capability["live_narration"] = bool(AVCSNarrator().available)
-    except Exception:
-        capability["live_narration"] = False
     try:
-        perception = _shared_capability_probe()
-        grounding_configured = bool(perception.goal_grounder_configured)
-        focus_configured = bool(perception.focus_verifier_configured)
-        capability["grounding_checkpoint_configured"] = grounding_configured
-        capability["focus_checkpoint_configured"] = focus_configured
-        capability["semantic_grounding"] = grounding_configured
-        capability["focus_verification"] = bool(perception.ensure_focus_verifier_ready())
-        capability["gui_actions_ready"] = bool(
-            capability["semantic_grounding"] and capability["focus_verification"]
-        )
-        capability["learned_cortex_configured"] = bool(
-            getattr(perception, "cortex_configured", False)
-        )
-        capability["learned_cortex_ready"] = bool(
-            getattr(perception, "ensure_cortex_ready", lambda: False)()
-        )
-        capability["affordance_head_trained"] = bool(
-            getattr(perception, "affordance_head_trained", False)
-        )
-        capability["continuous_awareness"] = bool(_awareness_snapshot().get("running"))
-        capability["awareness_stats"] = _awareness_snapshot()
-        capability["apprenticeship_enabled"] = os.environ.get("SONIC_AVCS_APPRENTICESHIP") == "1"
-        try:
-            from sonic.computer_use.apprenticeship import ApprenticeshipStore
+        from sonic.api.routes.llm import get_model_router
 
-            store = ApprenticeshipStore()
-            capability["apprenticeship_samples"] = store.count()
-            capability["apprenticeship_labels"] = store.label_counts()
-            try:
-                from sonic.computer_use.apprenticeship import OutcomeSampleStore
+        get_model_router()._resolve_provider(
+            task_type="computer_use",
+            require_images=True,
+        )
+        capability["vision_route_configured"] = True
+    except Exception as exc:
+        if not capability["reason"]:
+            capability["reason"] = f"No configured image-capable computer-use route: {exc}"
 
-                capability["affordance_outcome_samples"] = OutcomeSampleStore(
-                    store.root
-                ).count()
-            except Exception:
-                pass
-        except Exception:
-            pass
-    except Exception as exc:  # pragma: no cover - defensive, stays fail-closed
-        capability["reason"] = f"AVCS capability probe failed: {exc}"
-        return capability
-
-    if not capability["grounding_checkpoint_configured"]:
+    capability["continuous_awareness"] = bool(_awareness_snapshot().get("running"))
+    capability["awareness_stats"] = _awareness_snapshot()
+    capability["apprenticeship_enabled"] = (
+        os.environ.get("SONIC_AVCS_APPRENTICESHIP") == "1"
+    )
+    if capability["vision_route_configured"]:
         capability["reason"] = (
-            "No evaluated AVCS grounding checkpoint is configured "
-            "(SONIC_AVCS_GROUNDING_CHECKPOINT). Semantic GUI targets "
-            "(clicks on described controls) are blocked; only explicit "
-            "pixel-coordinate actions can dispatch."
+            "Image-capable computer-use route is configured. AVCS is optional; "
+            "GUI localization quality and task success remain unverified."
         )
-    elif not capability["focus_verification"]:
+    elif not capability["reason"]:
         capability["reason"] = (
-            "No evaluated AVCS focus-verification head is configured "
-            "(SONIC_AVCS_FOCUS_CHECKPOINT). Text entry is blocked."
+            "No configured image-capable computer-use route. GUI reasoning requires "
+            "a vision model; AVCS reflex data is not a semantic substitute."
         )
-    else:
-        capability["reason"] = "AVCS semantic grounding and focus verification are ready."
     return capability
 

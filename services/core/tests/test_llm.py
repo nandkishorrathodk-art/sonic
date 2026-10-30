@@ -315,6 +315,60 @@ def test_vision_routes_configure_distinct_multimodal_fallbacks():
 
 
 @pytest.mark.asyncio
+async def test_image_computer_use_request_keeps_computer_use_route(monkeypatch):
+    router = ModelRouter()
+    computer_provider = CustomLLMProvider(
+        name="computer",
+        base_url="https://computer.invalid/v1",
+        api_key="computer-key",
+        default_model="computer-vision-model",
+        capabilities=["vision", "multimodal"],
+        model_capabilities={"computer-vision-model": ["vision", "multimodal"]},
+    )
+    vision_provider = CustomLLMProvider(
+        name="vision",
+        base_url="https://vision.invalid/v1",
+        api_key="vision-key",
+        default_model="generic-vision-model",
+        capabilities=["vision", "multimodal"],
+        model_capabilities={"generic-vision-model": ["vision", "multimodal"]},
+    )
+    router.add_provider(computer_provider)
+    router.add_provider(vision_provider)
+    router.routing_rules["computer_use"] = {
+        "provider": "computer",
+        "model": "computer-vision-model",
+        "fallback": [],
+    }
+    router.routing_rules["vision"] = {
+        "provider": "vision",
+        "model": "generic-vision-model",
+        "fallback": [],
+    }
+    completion = AsyncMock(return_value=LLMResponse(
+        content="{}",
+        model="computer-vision-model",
+        provider=ProviderName.OPENROUTER,
+    ))
+    monkeypatch.setattr(router, "_budgeted_complete", completion)
+    request = LLMRequest(
+        messages=[Message(
+            role=MessageRole.USER,
+            content="Inspect the current desktop.",
+            images=[ImageContent(base64="frame-bytes", media_type="image/png")],
+        )],
+        task_type="computer_use",
+    )
+
+    await router.complete(request)
+
+    routed_provider, routed_request = completion.await_args.args[:2]
+    assert routed_provider is computer_provider
+    assert routed_request.task_type == "computer_use"
+    assert routed_request.messages[0].images[0].base64 == "frame-bytes"
+
+
+@pytest.mark.asyncio
 async def test_multimodal_model_without_tool_use_uses_text_action_fallback():
     model = "meta/llama-3.2-11b-vision-instruct"
     provider = CustomLLMProvider(
@@ -419,7 +473,7 @@ async def test_vision_fallback_preserves_image_and_reports_provider_status():
     ))
     router.add_provider(primary)
     router.add_provider(fallback)
-    router.routing_rules["vision"] = {
+    router.routing_rules["computer_use"] = {
         "provider": "nvidia",
         "model": "vision-model",
         "fallback": ["openrouter/openai/gpt-4o"],

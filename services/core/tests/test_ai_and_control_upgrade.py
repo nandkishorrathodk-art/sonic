@@ -652,7 +652,7 @@ async def test_gui_reasoning_timeout_returns_explicit_blocked_result(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_computer_use_keeps_avcs_frames_local():
+async def test_computer_use_attaches_fresh_screenshot_to_vision_request():
     router = _RecordingRouter()
     agent = ComputerUseAgent(
         computer_provider=_StubComputer(),
@@ -668,7 +668,7 @@ async def test_computer_use_keeps_avcs_frames_local():
         test_file="",
     )
     assert router.request is not None
-    assert not any(message.images for message in router.request.messages)
+    assert any(message.images for message in router.request.messages)
 
 
 @pytest.mark.parametrize(

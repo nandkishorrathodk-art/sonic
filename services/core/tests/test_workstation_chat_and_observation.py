@@ -324,10 +324,8 @@ def test_fresh_avcs_evidence_summary_drops_semantic_and_unbounded_fields():
     assert evidence["summary"]["regions"] == [{"row": 1, "col": 2, "salience": 0.5}]
 
 
-def test_avcs_capability_state_fails_closed_without_evaluated_heads(monkeypatch):
-    """A LIVE desktop is not a working desktop: without evaluated AVCS heads the
-    capability surface must report semantic GUI targeting and text entry as
-    unavailable so the operator is not misled by a green 'LIVE' status."""
+def test_avcs_capability_state_separates_tool_from_vision_route(monkeypatch):
+    """AVCS is optional tool telemetry, not a GUI-model readiness gate."""
     from sonic.api.routes.workstation_perception import avcs_capability_state
 
     monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
@@ -336,10 +334,12 @@ def test_avcs_capability_state_fails_closed_without_evaluated_heads(monkeypatch)
     capability = avcs_capability_state()
 
     assert capability["reflex_perception"] is True
+    assert capability["avcs_observe_available"] is True
     assert capability["semantic_grounding"] is False
     assert capability["focus_verification"] is False
     assert capability["gui_actions_ready"] is False
-    assert "grounding checkpoint" in capability["reason"].lower()
+    assert capability["vision_route_configured"] is True
+    assert "optional" in capability["reason"].lower()
 
 
 def test_desktop_status_surfaces_avcs_capability():

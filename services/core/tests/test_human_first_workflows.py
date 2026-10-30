@@ -103,7 +103,7 @@ def test_gui_workflow_uses_grounded_controls_in_the_shared_desktop():
     ))
 
     assert typed.status == ActionExecutionStatus.BLOCKED, typed.actual_observation
-    assert "focus-verification" in typed.actual_observation.lower()
+    assert "focus" in typed.actual_observation.lower()
     assert all(action.text != "Quarterly notes" for action in computer.actions)
 
 

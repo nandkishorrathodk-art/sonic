@@ -133,8 +133,8 @@ class TestEyeToBrainEndToEnd:
         )
         assert "popped up" in user_prompt
 
-    def test_eye_commentary_reaches_the_gui_only_prompt(self):
-        """The GUI worker is the one most likely to be facing a popup."""
+    def test_gui_only_prompt_does_not_depend_on_ambient_avcs_narration(self):
+        """GUI decisions use the fresh screenshot, not ambient narration."""
         base = _grey()
         popup = _with_red_dialog(base)
         monitor = AwarenessMonitor(
@@ -155,7 +155,7 @@ class TestEyeToBrainEndToEnd:
             primary_file="",
             test_file="",
         )
-        assert "popped up" in user_prompt
+        assert "AVCS unsolicited observations" not in user_prompt
 
     def test_each_observation_is_delivered_once_across_steps(self):
         """A long-running alert must not be repeated in every later prompt."""

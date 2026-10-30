@@ -99,7 +99,7 @@ async def test_gui_only_worker_fails_closed_when_fresh_pixels_are_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_gui_reasoning_requires_local_avcs_pixels_without_uploading_frame():
+async def test_gui_reasoning_attaches_fresh_frame_to_computer_use_route():
     frame = _make_test_image_b64()
     agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
     agent.llm_router = MagicMock()
@@ -147,9 +147,38 @@ async def test_gui_reasoning_requires_local_avcs_pixels_without_uploading_frame(
     request = agent.llm_router.complete.await_args.args[0]
     user_content = request.messages[1].content
     assert isinstance(user_content, str)
-    assert frame not in user_content
-    assert "image_url" not in user_content
+    assert request.task_type == "computer_use"
+    assert len(request.messages[1].images) == 1
+    assert request.messages[1].images[0].base64 == frame
+    assert request.messages[1].images[0].media_type == "image/png"
+    assert observation.image_attached is True
     assert "ACCESSIBILITY CONTROLS" not in user_content
+
+
+def test_gui_screenshot_content_encodes_raw_rgb_pixels_as_png():
+    import base64
+    from io import BytesIO
+
+    from PIL import Image
+
+    rgb = bytes((255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255))
+    screen = ScreenObservation(
+        raw_rgb=rgb,
+        screenshot_base64="",
+        frame_id=1,
+        width=2,
+        height=2,
+    )
+
+    image = ComputerUseAgent._screen_image_content(screen)
+
+    assert image is not None
+    assert image.media_type == "image/png"
+    decoded = base64.b64decode(image.base64, validate=True)
+    with Image.open(BytesIO(decoded)) as png:
+        assert png.mode == "RGB"
+        assert png.size == (2, 2)
+        assert png.tobytes() == rgb
 
 
 def test_extract_bbox_midpoint_normalized_scaling_1280x800():

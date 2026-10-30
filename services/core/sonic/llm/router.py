@@ -191,18 +191,17 @@ class ModelRouter:
             from sonic.config import PROJECT_ROOT
             config_path = PROJECT_ROOT / "configs" / "models.yaml"
         import os
-        env = dict(os.environ)
-        try:
-            from sonic.config import get_settings
-            settings = get_settings()
-            for k, v in settings.model_dump().items():
-                uk = k.upper()
-                if uk not in env and v:
-                    env[uk] = str(v)
-        except Exception:
-            pass
-        if env_vars:
-            env.update(env_vars)
+        env = dict(os.environ) if env_vars is None else dict(env_vars)
+        if env_vars is None:
+            try:
+                from sonic.config import get_settings
+                settings = get_settings()
+                for k, v in settings.model_dump().items():
+                    uk = k.upper()
+                    if uk not in env and v:
+                        env[uk] = str(v)
+            except Exception:
+                pass
 
         config_path = Path(config_path)
         if not config_path.exists() and not config_path.is_absolute():
@@ -820,10 +819,10 @@ class ModelRouter:
         # Use request's task_type if not explicitly provided
         effective_task = task_type or request.task_type
 
-        # Requests containing pixels require a vision-capable model even when
-        # their caller labels the surrounding task as reasoning or computer use.
+        # Requests containing pixels require a vision-capable model. Preserve
+        # the dedicated computer-use route when the caller selected it.
         has_images = any(getattr(msg, "has_images", False) for msg in request.messages)
-        if has_images:
+        if has_images and effective_task not in ("vision", "computer_use"):
             effective_task = "vision"
 
         provider, model_override = self._resolve_provider(

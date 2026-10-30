@@ -100,7 +100,7 @@ class ActionPolicy:
     DEFAULT_ALLOWED_TYPES = frozenset({
         # GUI desktop interaction (in-sandbox only, no host execution risk)
         "GUI_CLICK", "GUI_DOUBLE_CLICK", "GUI_RIGHT_CLICK", "GUI_TYPE", "GUI_KEYPRESS", "GUI_HOTKEY",
-        "GUI_MOVE", "GUI_SCROLL", "GUI_SCREENSHOT", "GUI_DRAG", "GUI_WAIT",
+        "GUI_MOVE", "GUI_SCROLL", "GUI_SCREENSHOT", "AVCS_OBSERVE", "GUI_DRAG", "GUI_WAIT",
         "FILE_READ", "FILE_WRITE", "TERMINAL_EXEC",
         "GIT_STATUS", "GIT_DIFF", "GIT_BRANCH", "GIT_COMMIT", "GIT_PUSH",
         "APP_LAUNCH", "APP_CLOSE", "APP_FOCUS", "APP_MAXIMIZE", "WINDOW_MAXIMIZE", "WINDOW_TILE",
