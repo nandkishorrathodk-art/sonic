@@ -1,1 +1,0 @@
-"""SONIC-REDA CLI Commands."""
