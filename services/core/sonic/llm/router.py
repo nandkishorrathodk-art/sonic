@@ -971,6 +971,9 @@ class ModelRouter:
         """Try fallback providers when the primary fails."""
         if request_spent is None:
             request_spent = [Decimal(0)]
+        requires_images = any(
+            getattr(message, "has_images", False) for message in request.messages
+        )
         candidates = self._fallback_candidates(task_type)
         original_model = request.model
         failures: list[str] = []
@@ -991,11 +994,11 @@ class ModelRouter:
                 continue
             fb_provider = self.providers[fb_name]
             fallback_model = fb_model or fb_provider.default_model
-            if task_type == "vision" and not self._model_supports_images(
+            if requires_images and not self._model_supports_images(
                 fallback_model, fb_provider
             ):
                 failures.append(
-                    f"{fb_name}/{fallback_model}: model is not configured as vision-capable"
+                    f"{fb_name}/{fallback_model}: model is not configured as image-capable"
                 )
                 continue
 
@@ -1014,10 +1017,10 @@ class ModelRouter:
                 )
                 continue
 
-        if task_type == "vision":
+        if task_type == "vision" or requires_images:
             failure_detail = f" Attempts: {'; '.join(failures)}." if failures else ""
             raise RuntimeError(
-                "All configured vision providers failed."
+                "All configured image-capable providers failed."
                 f"{failure_detail} Configure a working "
                 "vision provider or start its local vision model."
             )
@@ -1046,7 +1049,7 @@ class ModelRouter:
         """Route and stream, falling back only before the first emitted chunk."""
         effective_task = task_type or request.task_type
         has_images = any(getattr(msg, "has_images", False) for msg in request.messages)
-        if has_images:
+        if has_images and effective_task not in ("vision", "computer_use"):
             effective_task = "vision"
         provider, model_override = self._resolve_provider(
             provider_name,

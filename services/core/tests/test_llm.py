@@ -241,7 +241,10 @@ def test_vision_route_fails_closed_instead_of_using_local_text_model(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_vision_request_does_not_fall_back_to_global_text_provider(monkeypatch):
+@pytest.mark.parametrize("task_type", ["vision", "computer_use"])
+async def test_image_request_does_not_fall_back_to_global_text_provider(
+    monkeypatch, task_type
+):
     monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:11434")
     router = ModelRouter()
     primary = CustomLLMProvider(
@@ -266,11 +269,17 @@ async def test_vision_request_does_not_fall_back_to_global_text_provider(monkeyp
     }
     router.fallback_chain = ["local"]
 
-    with pytest.raises(RuntimeError, match="All configured vision providers failed"):
+    with pytest.raises(RuntimeError, match="All configured image-capable providers failed"):
         await router._try_fallbacks(
-            LLMRequest(messages=[Message(role=MessageRole.USER, content="describe image")]),
+            LLMRequest(
+                messages=[Message(
+                    role=MessageRole.USER,
+                    content="describe image",
+                    images=[ImageContent(base64="synthetic-image")],
+                )]
+            ),
             failed_provider="nvidia",
-            task_type="vision",
+            task_type=task_type,
         )
     text_fallback.complete_with_timing.assert_not_awaited()
 

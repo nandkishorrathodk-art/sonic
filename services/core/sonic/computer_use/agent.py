@@ -829,6 +829,25 @@ class ComputerUseAgent:
             action_type = action_types.get(action.action)
             if action_type is None:
                 return False, f"GUI burst action is not permitted: {action.action.value}", 126
+            if action.action == GUIActionType.TYPE:
+                return (
+                    False,
+                    "GUI_TYPE cannot run inside a burst; focus must be verified "
+                    "from a fresh screenshot before text is sent",
+                    126,
+                )
+            if self.safety is not None:
+                verdict = self.safety.evaluate(
+                    action_type.value,
+                    target_resource,
+                    action.model_dump(exclude={"action"}),
+                )
+                if not verdict.allowed:
+                    return (
+                        False,
+                        f"GUI burst action blocked by safety policy: {verdict.reason}",
+                        126,
+                    )
             coordinate_error = self._validate_coordinates(
                 action_type,
                 action.model_dump(exclude={"action"}),
@@ -838,6 +857,30 @@ class ComputerUseAgent:
 
         bus = self.perception_bus
         initial = bus.current()
+        pending_intent = getattr(self, "_pending_gui_action_intent", None)
+        if pending_intent is not None:
+            expected_version = payload.get("state_version")
+            if (
+                not isinstance(expected_version, int)
+                or isinstance(expected_version, bool)
+                or expected_version != initial.version
+            ):
+                return False, "GUI burst requires the current state_version; re-observe and replan", 126
+            try:
+                fresh_screen = await self.computer.screenshot(workspace_id)
+                fresh_screen = self._ensure_avcs_state(fresh_screen)
+                observation_errors = pending_intent.validate_observation(
+                    fresh_screen,
+                    elapsed_ms=0,
+                )
+            except Exception as exc:
+                return False, f"GUI burst could not revalidate fresh evidence: {exc}", 126
+            if observation_errors:
+                return (
+                    False,
+                    "GUI burst source is stale: " + "; ".join(observation_errors),
+                    126,
+                )
 
         async def refresh_after_failure() -> None:
             try:

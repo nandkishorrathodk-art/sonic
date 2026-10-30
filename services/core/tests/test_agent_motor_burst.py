@@ -8,6 +8,7 @@ from PIL import Image
 from sonic.computer.models import GUIActionType, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import ActionExecutionStatus, ComputerActionType
+from sonic.safety.action_policy import ActionPolicy
 
 
 def _frame(frame):
@@ -216,6 +217,84 @@ async def test_burst_checks_coordinates_before_any_action_is_dispatched():
     assert trace.status == ActionExecutionStatus.FAILED
     assert provider.calls == 0
     assert "outside screen 800x600" in trace.actual_observation
+
+
+@pytest.mark.asyncio
+async def test_burst_checks_safety_policy_for_each_inner_action():
+    provider = _Provider()
+    policy = ActionPolicy(allowed_action_types={"GUI_KEYPRESS"})
+    agent = ComputerUseAgent(provider, safety=policy)
+    await agent.observe("workspace")
+    payload = _payload()
+    payload["burst_actions"][0] = {
+        "action": GUIActionType.CLICK.value,
+        "x": 10,
+        "y": 10,
+        "postcondition": {"screen_changed": True},
+    }
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.GUI_KEYPRESS,
+        "target",
+        payload,
+        "advance",
+    )
+
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert provider.calls == 0
+    assert "action type not allowed: GUI_CLICK" in trace.actual_observation
+
+
+@pytest.mark.asyncio
+async def test_burst_rejects_typing_that_would_bypass_focus_verification():
+    provider = _Provider()
+    agent = ComputerUseAgent(provider)
+    await agent.observe("workspace")
+    payload = _payload()
+    payload["burst_actions"][0] = {
+        "action": GUIActionType.TYPE.value,
+        "x": 10,
+        "y": 10,
+        "text": "must not be typed",
+        "postcondition": {"screen_changed": True},
+    }
+
+    trace = await agent.execute_action(
+        "workspace",
+        ComputerActionType.GUI_KEYPRESS,
+        "target",
+        payload,
+        "advance",
+    )
+
+    assert trace.status == ActionExecutionStatus.FAILED
+    assert provider.calls == 0
+    assert "GUI_TYPE cannot run inside a burst" in trace.actual_observation
+
+
+@pytest.mark.asyncio
+async def test_burst_with_pending_intent_requires_matching_version_and_fresh_frame():
+    provider = _Provider()
+    agent = ComputerUseAgent(provider)
+    await agent.observe("workspace")
+    payload = _payload()
+    agent._pending_gui_action_intent = SimpleNamespace(
+        validate_observation=lambda *_args, **_kwargs: ("scene differs",)
+    )
+
+    missing_version = await agent._execute_gui_burst(
+        "workspace", payload, "target"
+    )
+    assert missing_version[0] is False
+    assert provider.calls == 0
+    assert "requires the current state_version" in missing_version[1]
+
+    payload["state_version"] = agent.perception_bus.current().version
+    stale_frame = await agent._execute_gui_burst("workspace", payload, "target")
+    assert stale_frame[0] is False
+    assert provider.calls == 0
+    assert "scene differs" in stale_frame[1]
 
 
 @pytest.mark.asyncio
