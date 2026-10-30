@@ -1,0 +1,242 @@
+# ============================================
+# SONIC-REDA — Model Routing Configuration
+# ============================================
+# Maps task types to preferred LLM providers/models.
+# The Model Router uses this to pick the best model for each job.
+# ============================================
+
+# Default provider and model when no task-specific rule matches
+default_provider: nvidia
+default_model: nvidia/nemotron-3-super-120b-a12b
+
+# ---- Provider Definitions ----
+providers:
+  openrouter:
+    name: OpenRouter (All Flagship Models)
+    api_key_env: OPENROUTER_API_KEY
+    base_url_env: OPENROUTER_BASE_URL
+    base_url: https://openrouter.ai/api/v1
+    models:
+      - id: deepseek/deepseek-r1
+        speed_tier: medium
+        cost_per_1k_input: 0.0008
+        cost_per_1k_output: 0.0024
+        capabilities: [reasoning, coding, planning, tool_use]
+      - id: anthropic/claude-3.5-sonnet
+        speed_tier: medium
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.015
+        capabilities: [reasoning, coding, planning, tool_use]
+      - id: meta-llama/llama-3.3-70b-instruct
+        speed_tier: fast
+        cost_per_1k_input: 0.0004
+        cost_per_1k_output: 0.0008
+        capabilities: [reasoning, coding, planning]
+      - id: openai/gpt-4o
+        speed_tier: medium
+        cost_per_1k_input: 0.0025
+        cost_per_1k_output: 0.01
+        capabilities: [reasoning, coding, verification]
+
+  deepseek:
+    name: DeepSeek Native (V3 & R1 671B)
+    api_key_env: DEEPSEEK_API_KEY
+    base_url_env: DEEPSEEK_BASE_URL
+    base_url: https://api.deepseek.com
+    models:
+      - id: deepseek-chat
+        speed_tier: fast
+        cost_per_1k_input: 0.00027
+        cost_per_1k_output: 0.0011
+        capabilities: [reasoning, coding, planning, tool_use]
+      - id: deepseek-reasoner
+        speed_tier: medium
+        cost_per_1k_input: 0.00055
+        cost_per_1k_output: 0.00219
+        capabilities: [reasoning, coding, static_analysis]
+
+  groq:
+    name: Groq Ultra-Fast Inference
+    api_key_env: GROQ_API_KEY
+    base_url_env: GROQ_BASE_URL
+    base_url: https://api.groq.com/openai/v1
+    models:
+      - id: qwen/qwen3.8-27b
+        speed_tier: fast
+        cost_per_1k_input: 0.0003
+        cost_per_1k_output: 0.0006
+        capabilities: [reasoning, coding, planning, vision, computer_use, multimodal, tool_use]
+      - id: openai/gpt-oss-120b
+        speed_tier: fast
+        cost_per_1k_input: 0.0005
+        cost_per_1k_output: 0.001
+        capabilities: [reasoning, coding, planning, verification, architecture]
+      - id: openai/gpt-oss-20b
+        speed_tier: fast
+        cost_per_1k_input: 0.0002
+        cost_per_1k_output: 0.0004
+        capabilities: [fast_tasks, classification]
+      - id: qwen/qwen3.6-27b
+        speed_tier: medium
+        cost_per_1k_input: 0.0003
+        cost_per_1k_output: 0.0006
+        capabilities: [reasoning, coding, thinking, vision]
+
+  nvidia:
+    name: NVIDIA NIM API
+    api_key_env: NVIDIA_API_KEY
+    base_url_env: NVIDIA_BASE_URL
+    base_url: https://integrate.api.nvidia.com/v1
+    models:
+      - id: nvidia/nemotron-3-super-120b-a12b
+        speed_tier: fast
+        cost_per_1k_input: 0.0003
+        cost_per_1k_output: 0.0006
+        capabilities: [reasoning, coding, planning, tool_use, verification, general]
+      - id: nvidia/nemotron-3-ultra-550b-a55b
+        speed_tier: fast
+        cost_per_1k_input: 0.0005
+        cost_per_1k_output: 0.001
+        capabilities: [reasoning, coding, planning, tool_use, verification, architecture]
+      - id: meta/llama-3.2-11b-vision-instruct
+        speed_tier: fast
+        cost_per_1k_input: 0.0003
+        cost_per_1k_output: 0.0006
+        capabilities: [vision, computer_use, multimodal]
+      - id: openai/gpt-oss-20b
+        speed_tier: fast
+        cost_per_1k_input: 0.0002
+        cost_per_1k_output: 0.0004
+        capabilities: [reasoning, coding, fast_tasks, classification]
+
+  claude:
+    name: Anthropic Claude
+    api_key_env: ANTHROPIC_API_KEY
+    base_url: https://api.anthropic.com
+    models:
+      - id: claude-3-5-sonnet-20241022
+        speed_tier: medium
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.015
+        capabilities: [reasoning, coding, planning, tool_use]
+      - id: claude-3-7-sonnet-20250219
+        speed_tier: medium
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.015
+        capabilities: [reasoning, coding, planning, tool_use]
+      - id: claude-haiku-3
+        speed_tier: fast
+        cost_per_1k_input: 0.00025
+        cost_per_1k_output: 0.00125
+        capabilities: [fast_tasks, classification]
+
+  openai:
+    name: OpenAI
+    api_key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+    models:
+      - id: gpt-4o
+        speed_tier: medium
+        cost_per_1k_input: 0.0025
+        cost_per_1k_output: 0.01
+        capabilities: [reasoning, coding, verification]
+      - id: gpt-4o-mini
+        speed_tier: fast
+        cost_per_1k_input: 0.00015
+        cost_per_1k_output: 0.0006
+        capabilities: [fast_tasks, classification]
+
+  grok:
+    name: xAI Grok
+    api_key_env: XAI_API_KEY
+    base_url: https://api.x.ai/v1
+    models:
+      - id: grok-3
+        speed_tier: fast
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.015
+        capabilities: [reasoning, fast_recon, tool_use]
+
+  local:
+    name: Local (Ollama / vLLM)
+    base_url_env: LOCAL_LLM_URL
+    models:
+      - id: llama3.1:70b
+        speed_tier: slow
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+        capabilities: [reasoning, coding, offline]
+
+# ---- Task Routing Rules ----
+# Maps agent task types to preferred provider + model
+routing_rules:
+  planning:
+    description: 'High-level planning, task decomposition, strategy'
+    provider: nvidia
+    model: nvidia/nemotron-3-ultra-550b-a55b
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
+
+  reasoning:
+    description: 'Code analysis, dataflow tracing, pattern matching'
+    provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b
+    fallback: [nvidia/nvidia/nemotron-3-ultra-550b-a55b]
+
+  fast_recon:
+    description: 'Quick environment discovery, system inspection, tech detection'
+    provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b
+    fallback: [nvidia/nvidia/nemotron-3-ultra-550b-a55b]
+
+  coding:
+    description: 'Code generation, fix generation, test writing'
+    provider: nvidia
+    model: nvidia/nemotron-3-ultra-550b-a55b
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
+
+  verification:
+    description: 'Evidence checking, confidence scoring, FP filtering'
+    provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b
+    fallback: [nvidia/nvidia/nemotron-3-ultra-550b-a55b]
+
+  hypothesis:
+    description: 'Novel architecture ideation, creative reasoning'
+    provider: nvidia
+    model: nvidia/nemotron-3-ultra-550b-a55b
+    fallback: [nvidia/nvidia/nemotron-3-super-120b-a12b]
+
+  classification:
+    description: 'Quick labeling, triage, categorization'
+    provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b
+    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
+
+  vision:
+    description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
+    provider: nvidia
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
+
+  computer_use:
+    description: 'Autonomous computer vision and desktop interaction'
+    provider: nvidia
+    model: meta/llama-3.2-11b-vision-instruct
+    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
+
+# ---- Global Fallback Chain ----
+# If the preferred provider for a task fails, try these in order
+global_fallback_chain:
+  - nvidia
+  - openrouter
+  - deepseek
+  - claude
+  - openai
+  - groq
+  - local
+
+# ---- Cost Controls ----
+cost_limits:
+  max_per_request_usd: 1.00
+  max_per_engagement_usd: 50.00
+  warn_at_percent: 80

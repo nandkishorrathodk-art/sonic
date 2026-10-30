@@ -1,0 +1,11 @@
+# SONIC ownership
+# Keep the global owner until dedicated GitHub teams are established.
+* @nandkishorrathodk-art
+
+# Architecture and governance
+/AGENTS.md @nandkishorrathodk-art
+/docs/ @nandkishorrathodk-art
+
+# Security and CI
+/.github/ @nandkishorrathodk-art
+/SECURITY.md @nandkishorrathodk-art
