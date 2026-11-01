@@ -5586,3 +5586,63 @@ Tests: `test_boss_worker_live_regressions.py` — overlay adds a coordinate
 reference; honest on empty/degenerate/broken input; opt-in and off by default
 (unset attaches the raw frame, `SONIC_GRID_OVERLAY=1` attaches the gridded
 frame). Focused regression: 208 passed, ruff clean.
+
+## CI/CD pipeline repair (2026-11-01)
+
+`SONIC CI/CD` (`.github/workflows/ci.yml`) had been red on `main` for days.
+Two independent defects, both fixed (PR #93, merged as `2433f828`):
+
+1. **`Backend Tests` failed every run** at
+   `services/core/tests/test_workstation_chat_and_observation.py::
+   test_avcs_capability_state_separates_tool_from_vision_route`, asserting
+   `vision_route_configured is True`. That flag comes from the model router
+   resolving an image-capable provider (`_resolve_provider(require_images=True)`)
+   — it needs **live credentials**, which CI does not have, so the value is
+   legitimately `False`. Same environment-dependent-test class fixed in
+   `c9d016a`. Fixed by stubbing the router in the contract test (matching the
+   sibling test) and adding an explicit no-credentials case.
+
+2. **`Production Container Build` (the `docker` job) failed once the tests
+   passed.** It had *never run before* — it `needs: [lint, typecheck, test,
+   rust, dashboard]`, so the always-failing `test` job kept it `skipped`. Its
+   first real run died with `Build SONIC Core image` stuck `in_progress` and no
+   log: **runner disk exhaustion**. The core image was **9.32 GB**, ~3 GB of
+   which was CUDA libraries pulled by the default PyPI torch wheel. The
+   container is CPU-only (`torch.cuda.is_available()` is `False`). Fixed in
+   `services/core/Dockerfile` by installing the CPU wheel first
+   (`--index-url https://download.pytorch.org/whl/cpu`, `ARG TORCH_INDEX_URL`),
+   so the `torch>=2.0.0` requirement is already satisfied and `pip install .`
+   does not re-fetch CUDA torch. **Image 9.32 GB -> 1.88 GB.**
+
+Verified: PR #93 run `41316335631` all 6 jobs green; `main` run
+`41316426885` (`2433f828`) **completed/success, all 8 jobs** including
+`Publish Release Images` and `Continuous Delivery Gate` (main-only) — the first
+time those have ever run.
+
+Lesson for future CI work: when a `needs:`-gated job has been skipped for a long
+time, the first time it actually runs is the first time it is tested. Check the
+job history (`/actions/runs/<id>/jobs`) to see whether a "failing" job is a new
+failure or a never-executed latent one.
+
+## Stale open PRs closed as superseded (2026-11-01)
+
+PRs #91 (`departments/experience-interface`) and #92
+(`departments/evaluation-reliability`) were open with `main` conflicts and
+GitGuardian failures. Both are **pre-monorepo duplicates**: they edit
+`sonic-core/` and `sonic-dashboard/`, which no longer exist on `main` (moved to
+`services/core/` and `apps/dashboard/`), and their content is already present at
+the new paths.
+
+- #91: `agentName`/`agentId` in `apps/dashboard/components/worklog/CommandBlock.tsx`
+  + `WorklogFeed.tsx` wiring + `sub_agent_id`/`sub_agent_name` in
+  `apps/dashboard/types/workstation.ts` — all present on `main`.
+- #92: vision-provider readiness in `services/core/sonic/health.py` (present,
+  stronger wording) and GUI-`INCONCLUSIVE` judge tests in
+  `services/core/tests/test_judge_agent.py` /
+  `test_closed_loop_visual_delta_and_judge.py` (present).
+- The GitGuardian "1 secret" flag on #92 is a **false positive**:
+  `.env.example` line 48 `NEO4J_PASSWORD=sonic-reda-dev` is a documented
+  local-dev placeholder in a template, byte-identical on `main`.
+
+Both closed with an explanatory comment (nothing to preserve). Result: **0 open
+PRs**, `main` green.
