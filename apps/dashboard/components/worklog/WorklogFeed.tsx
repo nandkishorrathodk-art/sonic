@@ -962,6 +962,76 @@ function PhaseCompleteBanner({ item }: { item: WorklogItem }) {
   );
 }
 
+function ReasoningTracePanel({ items }: { items: WorklogItem[] }) {
+  const [open, setOpen] = useState(false);
+  if (!items || items.length === 0) return null;
+
+  const stepCount = items.filter((i) => i.step_index != null || i.type === "action" || i.type === "error").length;
+  const durationSeconds = items.reduce(
+    (total, item) => total + (item.duration_seconds || 0),
+    0,
+  );
+
+  return (
+    <div className="my-2 rounded-xl border border-ink-800 bg-ink-900/60 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-ink-850/60 transition"
+        aria-expanded={open}
+      >
+        <Brain className="w-3.5 h-3.5 text-secondary-400 shrink-0" />
+        <span className="text-[11.5px] font-mono font-semibold text-slate-200">
+          Reasoning Trace
+        </span>
+        <span className="text-[10px] text-muted-dim">
+          {stepCount} step{stepCount === 1 ? "" : "s"}
+        </span>
+        {durationSeconds > 0 && (
+          <span className="text-[10px] text-muted-dim font-mono">
+            {durationSeconds.toFixed(1)}s
+          </span>
+        )}
+        <ChevronRight
+          className={`w-3.5 h-3.5 text-muted-dim ml-auto shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+      </button>
+      {open && (
+        <div className="border-t border-ink-800 px-3 py-2 space-y-1.5">
+          {items.map((item, idx) => {
+            const isThought = item.type === "thought" || item.title === "Thinking";
+            const isError = item.type === "error";
+            const label = item.title?.replace(/^Step \d+:\s*/, "") || item.type || "step";
+            return (
+              <div key={item.id || `rt-${idx}`} className="flex items-start gap-2 text-[11px] font-mono">
+                <span
+                  className={`mt-0.5 w-1.5 h-1.5 rounded-full shrink-0 ${
+                    isError ? "bg-rose-400" : isThought ? "bg-secondary-400" : "bg-accent-cyan"
+                  }`}
+                />
+                <span className="text-slate-300 font-semibold shrink-0">
+                  {isThought ? "Thought" : label}
+                </span>
+                {item.step_index != null && (
+                  <span className="text-muted-dim shrink-0">#{item.step_index}</span>
+                )}
+                <span className="text-muted-bright truncate">
+                  {item.content || item.command || item.target_resource || ""}
+                </span>
+                {item.action_status && (
+                  <span className="ml-auto text-[9.5px] text-muted-dim shrink-0">
+                    {item.action_status}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function WorklogFeed({
   worklog,
   currentAction,
@@ -1002,6 +1072,24 @@ export function WorklogFeed({
   }
   const currentRunItems =
     latestObjectiveIndex >= 0 ? displayItems.slice(latestObjectiveIndex) : displayItems;
+
+  // The counted desktop/GUI steps and the reasoning that produced them are
+  // folded into a single collapsible "Reasoning Trace" panel, so the open feed
+  // stays a clean action timeline while the step-by-step detail stays available.
+  // Counted steps carry a step_index; banner-style "action" items (e.g. "Boss
+  // Agent Orchestration") do not and stay in the open feed.
+  const isReasoningItem = (item: WorklogItem) =>
+    item.type === "thought" ||
+    item.title === "Thinking" ||
+    item.type === "error" ||
+    item.type === "screenshot" ||
+    (item.type === "action" && item.step_index != null);
+  const reasoningTrace = currentRunItems.filter(
+    (item) => isReasoningItem(item) && !isWorkerDispatch(item) && !isWorkerReport(item),
+  );
+  const displayFeedItems = currentRunItems.filter(
+    (item) => !isReasoningItem(item),
+  );
   const workerActivities = workersFromServer(
     workers,
     buildWorkerActivities(currentRunItems),
@@ -1193,7 +1281,7 @@ export function WorklogFeed({
               missionRunning={missionTaskAlive ?? !isFinished}
               sessionId={sessionId}
             />
-            {displayItems.map((item, idx) => {
+            {displayFeedItems.map((item, idx) => {
             const itemId = item.id || `item-${idx}`;
 
             if (isWorkerDispatch(item) || isWorkerReport(item)) return null;
@@ -1226,7 +1314,9 @@ export function WorklogFeed({
               );
             }
 
-            // Keep internal reasoning out of the activity feed.
+            // Internal reasoning stays out of the open activity feed. It is
+            // surfaced inside the collapsible "Reasoning Trace" panel below,
+            // where the counted GUI/desktop steps are grouped per thought.
             if (item.type === "thought" || item.title === "Thinking") {
               return null;
             }
@@ -1465,6 +1555,7 @@ export function WorklogFeed({
               </div>
             );
             })}
+            <ReasoningTracePanel items={reasoningTrace} />
           </>
         )}
 
