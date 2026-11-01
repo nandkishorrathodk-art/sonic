@@ -1623,7 +1623,6 @@ Rules:
                                 for marker in (
                                     "sonic_avcs_grounding_checkpoint is not configured",
                                     "local avcs pixel processor is unavailable",
-                                    "avcs has no evaluated local focus-verification head",
                                 )
                             )
                             for trace in traces

@@ -5697,3 +5697,60 @@ reachability/comprehension not pre-verified"), not an outage.
 Full `services/core` suite: **2664 passed, 40 skipped, 0 failed**; ruff clean;
 dashboard `tsc --noEmit` + `next build` clean. `scripts/novnc_proxy.py` was added
 so an operator on another machine can watch the loopback-only noVNC desktop.
+
+## AVCS stays a tool, not a model (2026-11-01)
+
+Operator directive: *"avcs ko model mat banao usko as tool rahene do"* — AVCS
+must remain an optional read-only reflex tool, never a required model that
+gates GUI actions.
+
+### Removed dead "AVCS as required model" plumbing (`computer_use/agent.py`)
+Three methods existed solely to require a local AVCS checkpoint before a GUI
+action could proceed, and **none had a production caller** — only tests
+referenced them. They were the last vestige of AVCS-as-a-required-model:
+- `_avcs_focus_head_ready()` — capability probe requiring `SONIC_AVCS_FOCUS_CHECKPOINT`.
+- `_avcs_grounder_ready()` — capability probe requiring `SONIC_AVCS_GROUNDING_CHECKPOINT`.
+- `_verify_gui_focus_with_avcs()` — focus verdict from a local AVCS focus head.
+
+The live path never used them: semantic targets resolve through the configured
+vision route (`_resolve_vlm_target`), and text entry verifies focus through
+`_verify_gui_focus_with_vision`. A local AVCS checkpoint remains an *optional*
+precedence only when one is configured and evaluated.
+
+### Cleaned orphaned marker strings
+After removing the AVCS focus-head method, its marker strings had no producer
+left, so they were dropped from the "stop the GUI mission" blocks in
+`agent.py` and `boss.py`:
+- `"no evaluated local focus-verification head and no ready vision route"`
+- `"avcs has no evaluated local focus-verification head"`
+- `"no evaluated local focus head and no vision route is configured"`
+
+The genuinely-reachable markers stay: `"sonic_avcs_grounding_checkpoint is not
+configured"` (from `avcs_perception.py`) and `"local avcs pixel processor is
+unavailable"` (from `agent.py`). Those describe an optional tool that was
+*asked for* and is absent, which is honest; the removed ones implied AVCS was a
+mandatory model.
+
+### Docs + catalog reframed
+- `SKILLS.md`: `semantic_gui_grounding` / `focus_verified_text_entry` now state
+  the vision route is the default with a local AVCS checkpoint as optional
+  precedence; `avcs_visual_perception` is labelled an **optional read-only
+  reflex tool (not a model)**; `learned_visual_cortex` is an optional advisory
+  add-on, never required for GUI actions.
+- `docs/AVCS_OPERATION_MODEL.md`: corrected stale method references and the
+  "two missing models" framing to the vision-route-first reality.
+
+### Tests
+- `test_gui_capability_aware_prompt.py`: removed the grounder-readiness probe
+  tests; the prompt is now asserted grounder-agnostic.
+- `test_phase8_visual_computer_use.py`: the three removed-method probes replaced
+  with one test asserting text entry does **not** depend on a local focus head.
+- `test_windows_host_desktop.py`: retargeted the removed agent method to the
+  still-live perception-level contract (`AVCSPerception.focus_verifier_configured`
+  / `focus_verifier_ready` / `verify_focus_rgb_bytes` fail-closed) and the
+  `_validated_focus_metadata` provenance rejection.
+
+Full `services/core` suite: **2629 passed, 40 skipped, 0 failed**; ruff clean on
+every changed file. No live GUI task was run this pass (no workstation/creds);
+this removes dead AVCS-model plumbing and aligns docs/catalog, it does not add
+new capability.
