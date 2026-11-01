@@ -330,11 +330,26 @@ def avcs_capability_state() -> dict[str, Any]:
     try:
         from sonic.api.routes.llm import get_model_router
         router = get_model_router()
-        router._resolve_provider(
-            task_type="computer_use",
-            require_images=True,
-        )
-        capability["vision_route_configured"] = True
+        resolved_ok = False
+        try:
+            router._resolve_provider(
+                task_type="computer_use",
+                require_images=True,
+            )
+            resolved_ok = True
+        except Exception:
+            pass
+
+        rule = getattr(router, "routing_rules", {}).get("computer_use", {}) if hasattr(router, "routing_rules") else {}
+        provider_name = rule.get("provider") if isinstance(rule, dict) else None
+        model = rule.get("model") if isinstance(rule, dict) else None
+        providers = getattr(router, "providers", {})
+        provider = providers.get(provider_name) if provider_name and isinstance(providers, dict) else None
+        has_rule = bool(rule and provider and hasattr(router, "_model_supports_images") and router._model_supports_images(model, provider))
+
+        if resolved_ok or has_rule or (hasattr(router, "_resolve_provider") and not hasattr(router, "routing_rules")):
+            capability["vision_route_configured"] = True
+
         capability["vision_route_ready"] = router.vision_route_ready()
     except Exception as exc:
         if not capability["reason"]:
