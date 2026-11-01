@@ -24,11 +24,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY services/core/pyproject.toml .
 # AVCS's forge.vision package initializer eagerly imports its cortex modules,
 # so PyTorch is required even when only the pixel-reflex path is enabled.
+# Install the CPU-only wheel explicitly: the default PyPI wheel pulls ~3 GB of
+# CUDA libraries that are unused in this CPU container and pushed the image past
+# the CI runner's disk budget. The project's `torch>=2.0.0` requirement is then
+# already satisfied, so the later `pip install .` does not re-fetch CUDA torch.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --index-url "$TORCH_INDEX_URL" "torch>=2.0.0" && \
     if [ "$INSTALL_AVCS_GROUNDING" = "1" ]; then \
       pip install --no-cache-dir ".[avcs-grounding]"; \
     else \
-      pip install --no-cache-dir . "torch>=2.0.0"; \
+      pip install --no-cache-dir .; \
     fi
 
 # Stage 3: Runtime
