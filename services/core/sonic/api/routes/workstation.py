@@ -95,6 +95,10 @@ def get_computer() -> Any:
             from sonic.computer.windows_host import WindowsHostAVCSComputerProvider
 
             _primary_computer_instance = WindowsHostAVCSComputerProvider()
+        elif provider_kind == "macos_docker_osx":
+            from sonic.computer.macos_docker_osx import MacOSDockerComputerProvider
+
+            _primary_computer_instance = MacOSDockerComputerProvider()
         elif provider_kind == "daytona":
             _primary_computer_instance = DaytonaComputerProvider()
         elif provider_kind == "docker":
@@ -103,7 +107,8 @@ def get_computer() -> Any:
             _primary_computer_instance = DockerComputerProvider()
         else:
             raise RuntimeError(
-                "SONIC_WORKSTATION_PROVIDER must be one of: docker, daytona, windows_host_avcs."
+                "SONIC_WORKSTATION_PROVIDER must be one of: docker, daytona, "
+                "windows_host_avcs, macos_docker_osx."
             )
         _daytona_provider_instance = _primary_computer_instance
     return _primary_computer_instance
