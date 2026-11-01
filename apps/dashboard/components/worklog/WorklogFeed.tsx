@@ -60,6 +60,7 @@ interface WorkerActivity {
   number?: number | null;
   name: string;
   role?: string;
+  skills?: string[];
   plane?: string;
   goal: string;
   status: string;
@@ -167,6 +168,7 @@ function buildWorkerActivities(worklog: WorklogItem[]): WorkerActivity[] {
             ? `Worker ${item.sub_agent_number}`
             : "Worker"),
         role: item.worker_role,
+        skills: item.worker_skills || [],
         plane: item.execution_plane,
         goal:
           item.goal ||
@@ -239,6 +241,7 @@ function workersFromServer(
       worker.agent_name ||
       (worker.sub_agent_number != null ? `Worker ${worker.sub_agent_number}` : "Worker"),
     role: worker.role,
+    skills: worker.skills || [],
     plane: worker.plane,
     goal: worker.goal || "Task details unavailable",
     status: worker.status || "RUNNING",
@@ -375,6 +378,21 @@ function WorkerDetail({
         <p className="text-[9px] uppercase tracking-wide text-muted-dim">Goal</p>
         <p className="mt-0.5 text-[10.5px] leading-relaxed text-slate-200">{view.goal}</p>
       </div>
+      {view.skills && view.skills.length > 0 && (
+        <div>
+          <p className="text-[9px] uppercase tracking-wide text-muted-dim">Assigned skills</p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {view.skills.map((skill) => (
+              <span
+                key={`${worker.key}-skill-${skill}`}
+                className="rounded border border-ink-700 bg-ink-850 px-1.5 py-0.5 text-[9px] text-muted-bright"
+              >
+                {skill}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       {view.latestAction && (
         <div>
           <p className="text-[9px] uppercase tracking-wide text-muted-dim">Current activity</p>

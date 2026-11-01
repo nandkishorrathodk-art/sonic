@@ -1,3 +1,4 @@
+import base64
 import time
 
 import pytest
@@ -251,7 +252,7 @@ def test_gui_intent_accepts_frame_bound_raw_rgb_without_base64_encoding():
     assert intent.validate_observation(screen) == ()
 
 
-def test_gui_intent_rejects_raw_rgb_with_mismatched_avcs_frame_id():
+def test_gui_intent_uses_raw_rgb_when_avcs_frame_id_is_unavailable():
     observation = _gui_observation()
     screen = ScreenObservation(
         raw_rgb=bytes((24, 48, 72)) * (8 * 6),
@@ -273,14 +274,16 @@ def test_gui_intent_rejects_raw_rgb_with_mismatched_avcs_frame_id():
     )
     observation = observation.model_copy(update={"screen": screen})
 
-    with pytest.raises(ValueError, match="trustworthy AVCS frame identity"):
-        GUIActionIntent.create(
-            action_type="GUI_CLICK",
-            target="40,30",
-            payload={"x": 40, "y": 30},
-            expected_outcome="target changed",
-            observation=observation,
-        )
+    intent = GUIActionIntent.create(
+        action_type="GUI_CLICK",
+        target="40,30",
+        payload={"x": 40, "y": 30},
+        expected_outcome="target changed",
+        observation=observation,
+    )
+
+    assert intent.source_state_version == 5
+    assert intent.source_scene_hash != "raw-scene"
 
 
 def test_gui_intent_keeps_perception_bus_and_avcs_frame_versions_distinct():
@@ -353,7 +356,7 @@ def test_gui_intent_keeps_perception_bus_and_avcs_frame_versions_distinct():
         ),
     ],
 )
-def test_gui_intent_rejects_missing_or_untrustworthy_avcs_identity(
+def test_gui_intent_rejects_missing_pixel_identity_when_avcs_is_unavailable(
     screen_updates, observation_updates
 ):
     observation = _gui_observation()
@@ -362,7 +365,7 @@ def test_gui_intent_rejects_missing_or_untrustworthy_avcs_identity(
         update={"screen": updated_screen, **observation_updates}
     )
 
-    with pytest.raises(ValueError, match="trustworthy AVCS frame identity"):
+    with pytest.raises(ValueError, match="trustworthy pixel frame identity"):
         GUIActionIntent.create(
             action_type="GUI_CLICK",
             target="Save",
@@ -435,7 +438,7 @@ def test_gui_intent_expires_from_observation_age_and_requires_matching_live_wind
             }
         }
     )
-    assert "AVCS scene differs from GUI action intent" in (
+    assert "pixel frame differs from GUI action intent" in (
         intent.validate_observation(changed_scene)
     )
     assert "fresh desktop evidence is unavailable" in intent.validate_observation(
@@ -492,7 +495,7 @@ def test_gui_intent_ttl_rounds_age_up_and_rejects_invalid_monotonic_arithmetic()
         )
 
 
-def test_gui_observation_validation_rejects_stale_or_malformed_avcs_frame():
+def test_gui_observation_validation_rejects_stale_or_malformed_frame_identity():
     observation = _gui_observation()
     intent = GUIActionIntent.create(
         action_type="GUI_CLICK",
@@ -513,7 +516,7 @@ def test_gui_observation_validation_rejects_stale_or_malformed_avcs_frame():
             },
         }
     )
-    assert "AVCS frame is older than the GUI action intent" in (
+    assert "pixel frame is older than the GUI action intent" in (
         intent.validate_observation(older_frame)
     )
 
@@ -528,7 +531,7 @@ def test_gui_observation_validation_rejects_stale_or_malformed_avcs_frame():
             }
         }
     )
-    assert "a trustworthy AVCS frame identity is unavailable" in (
+    assert "a trustworthy pixel frame identity is unavailable" in (
         intent.validate_observation(malformed_frame)
     )
 
@@ -548,6 +551,39 @@ def test_gui_intent_uses_only_avcs_scene_and_active_window():
     assert not hasattr(intent, "target_identity")
 
 
+def test_gui_intent_accepts_fresh_versioned_pixels_without_avcs():
+    pixels = base64.b64encode(b"fresh screen pixels").decode("ascii")
+    screen = ScreenObservation(
+        screenshot_base64=pixels,
+        width=1280,
+        height=800,
+        active_window="Editor",
+        desktop_state="INTERACTIVE",
+        capture_age_ms=10,
+        perception_version=12,
+    )
+    received_at_ns = time.perf_counter_ns()
+    observation = ComputerWorldObservation(
+        screen=screen,
+        active_application="Editor",
+        perception_version=12,
+        observation_age_ms=10,
+        observation_received_monotonic_ns=received_at_ns,
+    )
+
+    intent = GUIActionIntent.create(
+        action_type="GUI_CLICK",
+        target="40,30",
+        payload={"x": 40, "y": 30},
+        expected_outcome="The selected control responds",
+        observation=observation,
+        now_ns=received_at_ns,
+    )
+
+    assert intent.source_state_version == 12
+    assert intent.validate_observation(screen, now_ns=received_at_ns) == ()
+
+
 def test_gui_intent_refuses_stale_or_unversioned_observations():
     stale = _gui_observation(age_ms=300)
     with pytest.raises(ValueError, match="fresh observation"):
@@ -561,7 +597,7 @@ def test_gui_intent_refuses_stale_or_unversioned_observations():
         )
 
     unversioned = _gui_observation(version=0)
-    with pytest.raises(ValueError, match="versioned AVCS frame"):
+    with pytest.raises(ValueError, match="versioned desktop frame"):
         GUIActionIntent.create(
             action_type="GUI_CLICK",
             target="Save",

@@ -329,7 +329,7 @@ async def test_judge_falsifies_gui_mission_without_window_or_gui_action():
 
 
 @pytest.mark.asyncio
-async def test_judge_keeps_gui_verification_local_and_inconclusive():
+async def test_judge_uses_vision_route_and_keeps_ambiguous_gui_inconclusive():
     mock_computer = MagicMock()
     mock_computer.screenshot = AsyncMock(return_value=type(
         "Screen", (), {
@@ -351,7 +351,11 @@ async def test_judge_keeps_gui_verification_local_and_inconclusive():
         }
     )())
     router = MagicMock()
-    router.complete = AsyncMock()
+    router.vision_route_ready = MagicMock(return_value=True)
+    router.complete = AsyncMock(return_value=MagicMock(content=(
+        '{"verdict":"INCONCLUSIVE","confidence":0.3,'
+        '"visible_evidence":"The saved state is not visible."}'
+    )))
     judge = JudgeAgent(computer_provider=mock_computer, llm_router=router)
     sub_mission = SubMission(goal="Save the completed report", plane="gui")
     result = SubMissionResult(
@@ -374,13 +378,14 @@ async def test_judge_keeps_gui_verification_local_and_inconclusive():
 
     assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
     assert any("AVCS frame 1" in item for item in evaluation.evidence_items)
-    assert "Fresh desktop pixels were processed locally by AVCS" in evaluation.notes
-    assert "cannot establish this task's semantic postcondition" in evaluation.notes
-    router.complete.assert_not_awaited()
+    assert "independent vision Judge" in evaluation.notes
+    request = router.complete.await_args.args[0]
+    assert request.task_type == "vision"
+    assert len(request.messages[1].images) == 1
 
 
 @pytest.mark.asyncio
-async def test_judge_does_not_send_gui_screenshot_to_vision_model():
+async def test_judge_sends_gui_screenshot_to_vision_model():
     mock_computer = MagicMock()
     mock_computer.screenshot = AsyncMock(return_value=type(
         "Screen", (), {
@@ -400,7 +405,11 @@ async def test_judge_does_not_send_gui_screenshot_to_vision_model():
         }
     )())
     vision_judge = MagicMock()
-    vision_judge.complete = AsyncMock()
+    vision_judge.vision_route_ready = MagicMock(return_value=True)
+    vision_judge.complete = AsyncMock(return_value=MagicMock(content=(
+        '{"verdict":"INCONCLUSIVE","confidence":0.2,'
+        '"visible_evidence":"The requested app state is not clear."}'
+    )))
     judge = JudgeAgent(computer_provider=mock_computer, llm_router=vision_judge)
     sub_m = SubMission(goal="Launch terminal window on desktop", plane="gui")
     trace = {
@@ -424,13 +433,13 @@ async def test_judge_does_not_send_gui_screenshot_to_vision_model():
         worker_agent_id="sub-agent-gui",
     )
     assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
-    assert "Fresh desktop pixels were processed locally by AVCS" in evaluation.notes
-    assert "cannot establish this task's semantic postcondition" in evaluation.notes
-    vision_judge.complete.assert_not_awaited()
+    request = vision_judge.complete.await_args.args[0]
+    assert request.task_type == "vision"
+    assert len(request.messages[1].images) == 1
 
 
 @pytest.mark.asyncio
-async def test_judge_keeps_browser_gui_screenshot_local():
+async def test_judge_sends_browser_gui_screenshot_to_vision_model():
     mock_computer = MagicMock()
     mock_computer.screenshot = AsyncMock(return_value=type(
         "Screen", (), {
@@ -450,7 +459,11 @@ async def test_judge_keeps_browser_gui_screenshot_local():
         }
     )())
     vision_judge = MagicMock()
-    vision_judge.complete = AsyncMock()
+    vision_judge.vision_route_ready = MagicMock(return_value=True)
+    vision_judge.complete = AsyncMock(return_value=MagicMock(content=(
+        '{"verdict":"INCONCLUSIVE","confidence":0.3,'
+        '"visible_evidence":"The dashboard state is not directly visible."}'
+    )))
     judge = JudgeAgent(computer_provider=mock_computer, llm_router=vision_judge)
     sub_m = SubMission(goal="Navigate to local portal and verify dashboard", plane="gui")
     trace = {
@@ -474,9 +487,9 @@ async def test_judge_keeps_browser_gui_screenshot_local():
         worker_agent_id="sub-agent-browser",
     )
     assert evaluation.verdict == JudgeVerdict.INCONCLUSIVE
-    assert "Fresh desktop pixels were processed locally by AVCS" in evaluation.notes
-    assert "cannot establish this task's semantic postcondition" in evaluation.notes
-    vision_judge.complete.assert_not_awaited()
+    request = vision_judge.complete.await_args.args[0]
+    assert request.task_type == "vision"
+    assert len(request.messages[1].images) == 1
 
 
 @pytest.mark.asyncio

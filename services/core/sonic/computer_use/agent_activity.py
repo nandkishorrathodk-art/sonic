@@ -160,6 +160,11 @@ def collect_worker_activity(
                 "sub_mission_id": item.get("sub_mission_id") or "",
                 "sub_agent_number": _as_int(item.get("sub_agent_number")),
                 "role": item.get("worker_role") or "subagent",
+                "skills": [
+                    str(skill)
+                    for skill in item.get("worker_skills", [])
+                    if isinstance(skill, str) and skill.strip()
+                ][:8] if isinstance(item.get("worker_skills"), list) else [],
                 "plane": item.get("execution_plane") or "dual",
                 "goal": item.get("goal") or "",
                 "raw_status": str(item.get("status") or "RUNNING").upper(),

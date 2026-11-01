@@ -42,12 +42,15 @@ claims below.
 
 - Maintain a current estimate of desktop pixels and recent visual changes.
 - Process workstation frames locally through AVCS. Do not send workstation
-  screenshots to any model, including workstation reasoning or the Judge, or
-  use OCR, AT-SPI, DOM, or accessibility controls as alternate workstation
-  grounding sources.
-- Use AVCS reflex state as compact text context for reasoning, and use only a
-  configured, evaluated AVCS head for semantic pointer grounding. Freshness,
-  coordinate bounds, and action safety must still be checked before dispatch.
+  screenshots to the Judge. For GUI reasoning, attach the fresh screenshot only
+  to the configured image-capable `computer_use` route; fail closed if that
+  route is unavailable, and never downgrade an image-required decision to a
+  text-only model. AVCS processing remains local and its reflex summary is
+  advisory context, not semantic grounding. Do not use OCR, AT-SPI, DOM, or
+  accessibility controls as alternate workstation grounding sources.
+- Use only a configured, evaluated AVCS head for semantic pointer grounding.
+  Freshness, coordinate bounds, and action safety must still be checked before
+  dispatch.
 - Do not claim that local reflex features establish visible text, focus, semantic
   controls, or task completion. Missing AVCS capability must fail closed.
 - For non-GUI tasks, avoid unnecessary image transfer; use image reasoning when

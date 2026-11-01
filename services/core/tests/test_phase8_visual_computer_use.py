@@ -822,6 +822,22 @@ class TestGUIActionDispatch:
         assert "x" not in payload
         assert "y" not in payload
 
+    def test_gui_action_parser_normalizes_named_screen_pixel_target(self):
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+
+        action, _, payload, _ = agent._parse_gui_action_response(
+            (
+                "ACTION: GUI_MOVE\nTARGET: Screen pixel x=400, y=300\n"
+                'PAYLOAD: {}\nEXPECTED: Move the pointer'
+            ),
+            "",
+        )
+
+        assert action == ComputerActionType.GUI_MOVE
+        assert payload["x"] == 400
+        assert payload["y"] == 300
+        assert payload["coordinate_space"] == "screen_pixels"
+
     def test_gui_action_parser_blocks_conflicting_target_and_payload_coordinates(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
 
@@ -1551,7 +1567,7 @@ class TestReasoningPrompt:
         assert "visible cursor" in system_prompt
         assert "APP_FOCUS" in system_prompt
         assert "actual screen pixels" in user_prompt
-        assert "Semantic GUI targets are resolved locally by AVCS" in user_prompt
+        assert "AVCS reflex is coarse change metadata" in user_prompt
 
     def test_gui_context_sends_fresh_coarse_avcs_summary_to_system2(self):
         agent = ComputerUseAgent(
@@ -1935,6 +1951,11 @@ class TestReasoningPrompt:
         assert _FRESH_FRAME not in request.messages[1].content
         assert "Grounded visible controls" not in request.messages[1].content
         assert "File Edit View" not in request.messages[1].content
+        assert "prefer one bounded chunk" in request.messages[1].content
+        assert "not a canned workflow or macro" in request.messages[1].content
+        assert "stops/replans on a mismatch" in request.messages[1].content
+        assert "Do not chunk across uncertain transitions, dialogs, text entry" in request.messages[1].content
+        assert "Never add actions just to fill a chunk" in request.messages[1].content
 
     @pytest.mark.asyncio
     async def test_gui_reasoning_uses_screenshot_without_controls(self):
@@ -1975,6 +1996,146 @@ class TestReasoningPrompt:
         assert request.messages[1].images[0].media_type == "image/png"
         assert "OPTIONAL AVCS_REFLEX TOOL OUTPUT" in request.messages[1].content
         assert _FRESH_FRAME not in request.messages[1].content
+
+
+    @pytest.mark.asyncio
+    async def test_gui_reasoning_keeps_fresh_pixels_when_avcs_reflex_fails(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(
+            computer_provider=provider,
+            execution_plane="gui",
+        )
+
+        class _BrokenReflex:
+            def perceive_png(self, _png):
+                raise RuntimeError("reflex unavailable")
+
+        agent._avcs_perception = _BrokenReflex()
+        observation = await agent.observe("ws-1")
+        assert observation.perception_source == "screenshot_pixels"
+        assert observation.screen.perception_version > 0
+        assert agent._last_screen_has_pixels is True
+        assert agent._last_screenshot_b64 == _FRESH_FRAME
+
+        agent.llm_router = MagicMock()
+        agent.llm_router.vision_route_ready = MagicMock(return_value=True)
+        agent.llm_router.complete = AsyncMock(return_value=MagicMock(
+            content=(
+                '{"action":"GUI_SCREENSHOT","target":"visible-desktop",'
+                '"payload":{},"expected":"Inspect the current desktop"}'
+            ),
+            reasoning_content="",
+            tool_calls=[],
+        ))
+
+        await agent._llm_choose_action("Inspect the visible desktop", observation, 1, "", "")
+
+        request = agent.llm_router.complete.await_args.args[0]
+        assert len(request.messages[1].images) == 1
+        assert request.messages[1].images[0].base64 == _FRESH_FRAME
+
+
+    @pytest.mark.asyncio
+    async def test_semantic_target_uses_vision_fallback_without_avcs_state(self, monkeypatch):
+        from sonic.computer_use import grounding
+
+        agent = ComputerUseAgent(
+            computer_provider=_mock_provider(),
+            execution_plane="gui",
+        )
+        screen = ScreenObservation(
+            screenshot_base64=_FRESH_FRAME,
+            width=1280,
+            height=800,
+            active_window="Desktop",
+            desktop_state="INTERACTIVE",
+            capture_age_ms=0,
+            perception_version=1,
+        )
+        agent.llm_router = MagicMock()
+        monkeypatch.setenv("SONIC_ENABLE_VLM_TARGET_GROUNDING", "1")
+        resolve = AsyncMock(return_value=(420, 315))
+        monkeypatch.setattr(grounding, "_resolve_vlm_target", resolve)
+
+        target = await agent._ground_target_with_avcs("visible save control", screen=screen)
+
+        assert target == {"x": 420, "y": 315, "engine": "vlm_grounder"}
+        resolve.assert_awaited_once()
+
+
+    @pytest.mark.asyncio
+    async def test_run_mission_grounds_target_before_bounded_intent_creation(self):
+        agent = ComputerUseAgent(
+            computer_provider=_mock_provider(),
+            execution_plane="gui",
+        )
+        observation = _seed_fresh_gui_observation(agent)
+        agent.observe = AsyncMock(return_value=observation)
+        agent.choose_action = AsyncMock(return_value=(
+            ComputerActionType.GUI_CLICK,
+            "Save control",
+            {"postcondition": {"screen_changed": True}},
+            "The save control responds",
+        ))
+        agent._ground_target_with_avcs = AsyncMock(return_value={
+            "x": 420,
+            "y": 315,
+            "engine": "vlm_grounder",
+        })
+        agent._create_gui_action_intent = AsyncMock(return_value=MagicMock())
+        agent.execute_action = AsyncMock(return_value=MagicMock(
+            action_type=ComputerActionType.GUI_CLICK,
+            status=ActionExecutionStatus.COMPLETED,
+            state_changed=True,
+            actual_observation="The visible control changed the screen.",
+        ))
+
+        await agent.run_mission("ws-1", "Save the current document", steps=1)
+
+        agent._ground_target_with_avcs.assert_awaited_once_with(
+            "Save control",
+            screen=observation.screen,
+        )
+        intent_payload = agent._create_gui_action_intent.await_args.kwargs["payload"]
+        assert intent_payload["x"] == 420
+        assert intent_payload["y"] == 315
+
+
+    @pytest.mark.asyncio
+    async def test_gui_click_dispatches_with_fresh_pixels_when_avcs_reflex_fails(self):
+        provider = _mock_provider()
+        agent = ComputerUseAgent(
+            computer_provider=provider,
+            execution_plane="gui",
+        )
+
+        class _BrokenReflex:
+            def perceive_png(self, _png):
+                raise RuntimeError("reflex unavailable")
+
+        agent._avcs_perception = _BrokenReflex()
+        observation = await agent.observe("ws-1")
+        intent = await agent._create_gui_action_intent(
+            "ws-1",
+            action_type=ComputerActionType.GUI_CLICK,
+            target="40,30",
+            payload={"x": 40, "y": 30},
+            expected_outcome="Visible control responds",
+            observation=observation,
+            ttl_ms=2_000,
+        )
+        agent._pending_gui_action_intent = intent
+
+        trace = await agent.execute_action(
+            "ws-1",
+            ComputerActionType.GUI_CLICK,
+            "40,30",
+            {"x": 40, "y": 30},
+            "Visible control responds",
+        )
+
+        provider.gui_action.assert_awaited_once()
+        assert trace.status != ActionExecutionStatus.BLOCKED
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ from sonic.llm.schemas import ImageContent, LLMRequest, Message, MessageRole
 def test_models_yaml_multimodal_routing():
     """Verify visual tasks use a provider/model configured for multimodal input."""
     router = ModelRouter.from_config("configs/models.yaml", env_vars={"NVIDIA_API_KEY": "test-key", "GROQ_API_KEY": "groq-key"})
-    assert router.default_provider in ("nvidia", "groq")
+    assert router.default_provider == "groq"
     
     prov_vision, model_vision = router._resolve_provider(task_type="vision")
     assert prov_vision is not None

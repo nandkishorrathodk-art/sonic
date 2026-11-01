@@ -85,7 +85,7 @@ async def test_boss_agent_tracks_task_graph_lifecycle_during_run():
         "thinking": "Single worker task.",
         "phase_name": "Scan",
         "sub_missions": [
-            {"goal": "Enumerate endpoints", "plane": "headless", "max_steps": 2, "priority": 1},
+            {"goal": "Find endpoints on target.com", "plane": "headless", "max_steps": 2, "priority": 1},
         ],
     })
     llm = _make_llm_mock([

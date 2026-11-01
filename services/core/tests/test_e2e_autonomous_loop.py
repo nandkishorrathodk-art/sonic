@@ -841,7 +841,7 @@ class TestTier3CrossFeatureCombinations:
             "thinking": "Objective requires verifying system uptime.",
             "phase_name": "Verification Phase",
             "sub_missions": [
-                {"id": "sub-uptime", "goal": "Run uptime command", "max_steps": 2, "plane": "headless"},
+                {"id": "sub-uptime", "goal": "Check server uptime", "max_steps": 2, "plane": "headless"},
             ],
         })
         summary_json = "Uptime: up 12 days, load average 0.05"
@@ -868,7 +868,7 @@ class TestTier3CrossFeatureCombinations:
         )
         worker_result = SubMissionResult(
             sub_mission_id="sub-uptime",
-            goal="Run uptime command",
+            goal="Check server uptime",
             traces=[worker_trace],
             success=True,
             status="SUCCESS",
@@ -1024,8 +1024,8 @@ class TestTier4RealWorldWorkloadScenarios:
             "thinking": "Step 1: Write config in terminal. Step 2: Open and inspect in editor.",
             "phase_name": "Configuration Deployment",
             "sub_missions": [
-                {"id": "sub-write", "name": "Terminal Config Writer", "goal": "Write app config", "plane": "headless", "max_steps": 2, "priority": 1},
-                {"id": "sub-gui", "name": "GUI Config Inspector", "goal": "Inspect config visually", "plane": "gui", "max_steps": 2, "priority": 2},
+                {"id": "sub-write", "name": "Terminal Config Writer", "goal": "Deploy config.env", "plane": "headless", "max_steps": 2, "priority": 1},
+                {"id": "sub-gui", "name": "GUI Config Inspector", "goal": "Inspect config.env", "plane": "gui", "max_steps": 2, "priority": 2},
             ],
         })
         summary_json = "Configuration deployed and visually verified."
@@ -1048,7 +1048,7 @@ class TestTier4RealWorldWorkloadScenarios:
         )
         res1 = SubMissionResult(
             sub_mission_id="sub-write",
-            goal="Write app config",
+            goal="Deploy config.env",
             traces=[trace1],
             success=True,
             status="SUCCESS",
@@ -1068,7 +1068,7 @@ class TestTier4RealWorldWorkloadScenarios:
         )
         res2 = SubMissionResult(
             sub_mission_id="sub-gui",
-            goal="Inspect config visually",
+            goal="Inspect config.env",
             traces=[trace2],
             success=True,
             status="SUCCESS",
@@ -1096,7 +1096,7 @@ class TestTier4RealWorldWorkloadScenarios:
             "thinking": "Phase 1: Discover available API service endpoints.",
             "phase_name": "Discovery",
             "sub_missions": [
-                {"id": "sub-disc-1", "goal": "Discover API endpoints", "plane": "headless", "max_steps": 2},
+                {"id": "sub-disc-1", "goal": "Verify service availability by discovering API endpoints", "plane": "headless", "max_steps": 2},
             ],
         })
         phase1_summary = "Discovery completed: service endpoint identified at /api/v1."
@@ -1106,7 +1106,7 @@ class TestTier4RealWorldWorkloadScenarios:
             "thinking": "Phase 2: Test API endpoint and confirm service response.",
             "phase_name": "Service Verification",
             "sub_missions": [
-                {"id": "sub-test-2", "goal": "Send probe to /api/v1", "plane": "headless", "max_steps": 2},
+                {"id": "sub-test-2", "goal": "Verify service availability at /api/v1", "plane": "headless", "max_steps": 2},
             ],
         })
         phase2_summary = "Probe successful: 200 OK received."
@@ -1126,7 +1126,7 @@ class TestTier4RealWorldWorkloadScenarios:
         # Result 1: Discovery progress
         res1 = SubMissionResult(
             sub_mission_id="sub-disc-1",
-            goal="Discover API endpoints",
+            goal="Verify service availability by discovering API endpoints",
             traces=[_make_trace(
                 step_index=1,
                 action_type=ComputerActionType.TERMINAL_EXEC,
@@ -1145,7 +1145,7 @@ class TestTier4RealWorldWorkloadScenarios:
         # Result 2: Verification success
         res2 = SubMissionResult(
             sub_mission_id="sub-test-2",
-            goal="Send probe to /api/v1",
+            goal="Verify service availability at /api/v1",
             traces=[_make_trace(
                 step_index=1,
                 action_type=ComputerActionType.TERMINAL_EXEC,

@@ -94,6 +94,20 @@ def test_running_worker_requires_live_task():
     assert workers[0]["is_running"] is True
 
 
+def test_assigned_skills_survive_worker_activity_projection():
+    worklog = [
+        _dispatch_event(
+            "worker-1-abc",
+            worker_skills=["desktop application control", "verification"],
+        )
+    ]
+
+    workers = collect_worker_activity(worklog, mission_task_alive=True)
+
+    assert workers[0]["role"] == "subagent"
+    assert workers[0]["skills"] == ["desktop application control", "verification"]
+
+
 def test_terminal_report_wins_over_live_task():
     worklog = [
         _dispatch_event("worker-1-abc"),

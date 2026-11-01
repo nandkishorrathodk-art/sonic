@@ -1,6 +1,6 @@
 # SONIC + AVCS: Current Desktop Perception and Action Flow
 
-**Status:** Current implementation description, checked 2026-10-23. This
+**Status:** Current implementation description, checked 2026-10-30. This
 document describes the normal SONIC workstation path; it does not claim that
 arbitrary desktop tasks are reliable or that every optional model is ready.
 The [computer-user goal](SONIC_COMPUTER_USER_GOAL.md) remains the acceptance
@@ -11,7 +11,7 @@ contract.
 | Role | Component | Responsibility | Does not prove |
 |---|---|---|---|
 | Eye / System 1 | AVCS pixel-reflex perception **+ live narration** | Process a fresh desktop frame locally, derive bounded pixel/scene-change signals, and describe what it sees in plain language. | App identity, readable screen text, semantic control identity, or task success. |
-| Brain / System 2 | SONIC workstation reasoning | Interpret the operator's goal and available evidence, then propose the next action. | That the proposed action was dispatched or worked. |
+| Brain / System 2 | SONIC workstation reasoning | For GUI decisions, interpret the fresh screenshot attached to the image-capable `computer_use` route, alongside bounded AVCS context and task history, then propose the next action. | That the proposed action was dispatched or worked. |
 | Hands | Computer/action provider plus policy | Validate and dispatch an allowed GUI or other task-appropriate action; record the result. | That a dispatch changed the intended application state. |
 | Independent check | Boss/Judge and task-specific evidence | Review worker receipts and fresh evidence; the current AVCS-only GUI Judge returns inconclusive because it has no validated task-verification head. | Universal reliability or success from scene change alone. |
 
@@ -22,7 +22,8 @@ current reflex implementation has human-level perception or cognition.
 
 The reflex layer produces numbers; narration turns them into the sentence a
 sighted colleague would say out loud. This is the "talking eye" link: the
-reasoning model plans from words instead of from full frames.
+reasoning model receives local AVCS context and, for GUI decisions, the fresh
+workstation screenshot through the image-capable `computer_use` route.
 
 `forge/vision/narrator.py` (`LiveNarrator`) watches the same frame stream the
 reflex consumes and emits a `Narration` only when something a human would
@@ -74,7 +75,9 @@ flowchart TD
     AVCS --> V{"Frame fresh, valid,<br/>and matched?"}
     V -- "No" --> STOP["Stop / report unavailable;<br/>do not reason or click on stale state"]
     V -- "Yes" --> S["Allowlisted, bounded AVCS summary"]
-    S --> LLM["System 2 reasoning<br/>goal + summary + task history"]
+    V -- "Yes" --> IMG["Fresh screenshot attached<br/>for GUI reasoning only"]
+    S --> LLM["Image-capable computer_use reasoning<br/>goal + screenshot + summary + task history"]
+    IMG --> LLM
     LLM --> INTENT["One proposed next action"]
     INTENT --> G{"Grounded with current<br/>evaluated capability?"}
     G -- "No / ambiguous" --> STOP2["Block and re-observe or replan"]
@@ -106,10 +109,12 @@ advisory temporal telemetry. It does not forward arbitrary event text.
 ### 2. System 2 reasoning
 
 For GUI reasoning, `ComputerUseAgent` builds the prompt after any frame
-refresh. The model receives the operator objective, a bounded AVCS text
-summary, and task history. It does **not** receive workstation screenshot
-pixels through this reasoning request. If pixels or matching fresh AVCS state
-are missing, stale, malformed or inconsistent, GUI reasoning fails closed.
+refresh and attaches that fresh screenshot to the configured image-capable
+`computer_use` request, alongside the operator objective, bounded AVCS text
+summary, and task history. Screenshot pixels are not sent to a text-only
+fallback or to the Judge. If the image-capable route is unavailable, or pixels
+or matching fresh AVCS state are missing, stale, malformed or inconsistent,
+GUI reasoning fails closed.
 
 The reflex summary is evidence about pixel-derived change, not a natural
 language description of the desktop. It must not be interpreted as proof that

@@ -1,16 +1,36 @@
-"""
-SONIC-REDA — Autonomous Engineer Multi-Trial & Hold-out Benchmark Suite (Phase 14)
-==================================================================================
-Standardized multi-trial empirical benchmark suite evaluating human engineers
-vs SONIC Autonomous Computer across Engineering, Research, and Security task families.
-Enforces strict separation between Training and Hold-out task sets.
+"""Measured human-versus-SONIC benchmark aggregation.
+
+This module deliberately does not create task names, timings, or success flags.
+Callers must supply recorded human measurements and SONIC trials with
+independent verification evidence. An unsuccessful or unverified SONIC trial
+contributes zero speedup, regardless of how quickly it ended.
 """
 
 from __future__ import annotations
 
 import statistics
+from collections.abc import Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class TrialMeasurement(BaseModel):
+    """One measured task attempt; verification must be independently assessed."""
+
+    duration_seconds: float = Field(gt=0)
+    success: bool
+    evidence_verified: bool
+    action_count: int | None = Field(default=None, ge=0)
+
+
+class BenchmarkTaskTrials(BaseModel):
+    """Recorded human and SONIC attempts for the same task and conditions."""
+
+    task_family: str
+    task_name: str
+    is_holdout: bool = False
+    human_trials: list[TrialMeasurement]
+    sonic_trials: list[TrialMeasurement]
 
 
 class MultiTrialResult(BaseModel):
@@ -19,97 +39,142 @@ class MultiTrialResult(BaseModel):
     task_name: str
     is_holdout: bool
     trials: int
-    human_median_seconds: float
-    human_p25_seconds: float
-    human_p75_seconds: float
-    human_variance: float
+    human_trials: int
+    human_median_seconds: float | None
+    human_p25_seconds: float | None
+    human_p75_seconds: float | None
+    human_variance: float | None
     human_success_rate: float
     sonic_median_seconds: float
     sonic_p25_seconds: float
     sonic_p75_seconds: float
     sonic_variance: float
     sonic_success_rate: float
-    time_reduction_pct: float
-    action_efficiency_pct: float
+    trial_speedups: list[float]
+    median_speedup: float
+    time_reduction_pct: float | None
+    action_efficiency_pct: float | None
+    certification_eligible: bool
 
 
 class MultiTrialBenchmarkSuite:
-    """
-    Standardized multi-trial benchmark engine with Hold-Out task evaluation.
-    """
+    """Compute statistics only from explicitly supplied trial measurements."""
 
-    TRAINING_TASKS = [
-        "ENG_01_JWT_ALGORITHM_BYPASS",
-        "RES_01_RATE_LIMIT_HEADER_ANOMALY",
-        "SEC_01_CONTROLLED_IDOR_EXPLOIT",
-    ]
-
-    HOLDOUT_TASKS = [
-        "ENG_02_ASYNC_QUEUE_DEADLOCK_REPAIR",
-        "RES_02_DIFF_PARSER_AMBIGUITY_ROOT_CAUSE",
-        "SEC_02_OAUTH_STATE_INJECTION_REPRODUCTION",
-    ]
+    MIN_CERTIFICATION_TRIALS = 5
 
     @classmethod
     def evaluate_task(
         cls,
-        task_name: str,
-        is_holdout: bool = False,
+        task: BenchmarkTaskTrials,
     ) -> MultiTrialResult:
-        """
-        Executes a 5-trial standardized comparison between Human and SONIC.
-        """
-        # Standardized Human Trials (5 runs)
-        human_runs = [175.0, 182.0, 190.0, 168.0, 205.0]
-        # Standardized SONIC Autonomous Runs (5 runs)
-        sonic_runs = [38.2, 41.0, 36.5, 42.1, 39.5]
+        if not task.human_trials or not task.sonic_trials:
+            raise ValueError("human and SONIC trial measurements are required")
 
-        # Success flags (per-trial): whether the trial reached a correct
-        # outcome. These are simulated outcomes, but the SUCCESS RATE is
-        # derived from them — not decreed. SONIC completes all trials; one
-        # human trial exceeds the correctness budget.
-        sonic_success_flags = [True, True, True, True, True]
-        human_success_flags = [True, True, False, True, True]
+        human_successes = [
+            trial.duration_seconds
+            for trial in task.human_trials
+            if trial.success and trial.evidence_verified
+        ]
+        sonic_durations = [trial.duration_seconds for trial in task.sonic_trials]
+        human_median = statistics.median(human_successes) if human_successes else None
+        human_quartiles = cls._quartiles(human_successes)
+        sonic_quartiles = cls._quartiles(sonic_durations)
 
-        h_median = round(statistics.median(human_runs), 2)
-        h_p25 = round(statistics.quantiles(human_runs, n=4)[0], 2)
-        h_p75 = round(statistics.quantiles(human_runs, n=4)[2], 2)
-        h_var = round(statistics.variance(human_runs), 2)
-        h_success = round(sum(human_success_flags) / len(human_success_flags), 2)
-
-        s_median = round(statistics.median(sonic_runs), 2)
-        s_p25 = round(statistics.quantiles(sonic_runs, n=4)[0], 2)
-        s_p75 = round(statistics.quantiles(sonic_runs, n=4)[2], 2)
-        s_var = round(statistics.variance(sonic_runs), 2)
-        s_success = round(sum(sonic_success_flags) / len(sonic_success_flags), 2)
-
-        time_red = round(((h_median - s_median) / h_median) * 100, 1)
-
-        return MultiTrialResult(
-            task_family="ENGINEERING" if "ENG" in task_name else ("RESEARCH" if "RES" in task_name else "SECURITY"),
-            task_name=task_name,
-            is_holdout=is_holdout,
-            trials=5,
-            human_median_seconds=h_median,
-            human_p25_seconds=h_p25,
-            human_p75_seconds=h_p75,
-            human_variance=h_var,
-            human_success_rate=h_success,
-            sonic_median_seconds=s_median,
-            sonic_p25_seconds=s_p25,
-            sonic_p75_seconds=s_p75,
-            sonic_variance=s_var,
-            sonic_success_rate=s_success,
-            time_reduction_pct=time_red,
-            action_efficiency_pct=69.5,
+        trial_speedups = [
+            round(human_median / trial.duration_seconds, 4)
+            if human_median is not None and trial.success and trial.evidence_verified
+            else 0.0
+            for trial in task.sonic_trials
+        ]
+        median_speedup = round(statistics.median(trial_speedups), 4)
+        time_reduction = (
+            round((median_speedup - 1.0) * 100, 1)
+            if human_median is not None
+            else None
         )
 
+        human_actions = [
+            trial.action_count
+            for trial in task.human_trials
+            if trial.success and trial.evidence_verified and trial.action_count is not None
+        ]
+        sonic_actions = [
+            trial.action_count
+            for trial in task.sonic_trials
+            if trial.success and trial.evidence_verified and trial.action_count is not None
+        ]
+        action_efficiency = None
+        if human_actions and sonic_actions:
+            human_action_median = statistics.median(human_actions)
+            sonic_action_median = statistics.median(sonic_actions)
+            if human_action_median > 0:
+                action_efficiency = round(
+                    (human_action_median - sonic_action_median)
+                    / human_action_median
+                    * 100,
+                    1,
+                )
+
+        return MultiTrialResult(
+            task_family=task.task_family,
+            task_name=task.task_name,
+            is_holdout=task.is_holdout,
+            trials=len(task.sonic_trials),
+            human_trials=len(task.human_trials),
+            human_median_seconds=(round(human_median, 2) if human_median is not None else None),
+            human_p25_seconds=human_quartiles[0],
+            human_p75_seconds=human_quartiles[1],
+            human_variance=(
+                round(statistics.variance(human_successes), 2)
+                if len(human_successes) > 1
+                else None
+            ),
+            human_success_rate=round(len(human_successes) / len(task.human_trials), 4),
+            sonic_median_seconds=round(statistics.median(sonic_durations), 2),
+            sonic_p25_seconds=sonic_quartiles[0],
+            sonic_p75_seconds=sonic_quartiles[1],
+            sonic_variance=(
+                round(statistics.variance(sonic_durations), 2)
+                if len(sonic_durations) > 1
+                else 0.0
+            ),
+            sonic_success_rate=round(
+                sum(trial.success and trial.evidence_verified for trial in task.sonic_trials)
+                / len(task.sonic_trials),
+                4,
+            ),
+            trial_speedups=trial_speedups,
+            median_speedup=median_speedup,
+            time_reduction_pct=time_reduction,
+            action_efficiency_pct=action_efficiency,
+            certification_eligible=(
+                len(task.human_trials) >= cls.MIN_CERTIFICATION_TRIALS
+                and len(task.sonic_trials) >= cls.MIN_CERTIFICATION_TRIALS
+                and human_median is not None
+                and all(
+                    trial.success and trial.evidence_verified
+                    for trial in task.sonic_trials
+                )
+            ),
+        )
+
+    @staticmethod
+    def _quartiles(values: Sequence[float]) -> tuple[float | None, float | None]:
+        if not values:
+            return None, None
+        if len(values) == 1:
+            value = round(float(values[0]), 2)
+            return value, value
+        quartiles = statistics.quantiles(values, n=4)
+        return round(quartiles[0], 2), round(quartiles[2], 2)
+
     @classmethod
-    def run_full_suite(cls) -> list[MultiTrialResult]:
-        """Runs the entire training and hold-out evaluation suite."""
-        results = []
-        for task in cls.TRAINING_TASKS:
-            results.append(cls.evaluate_task(task, is_holdout=False))
-        for task in cls.HOLDOUT_TASKS:
-            results.append(cls.evaluate_task(task, is_holdout=True))
-        return results
+    def run_full_suite(
+        cls,
+        tasks: Sequence[BenchmarkTaskTrials],
+    ) -> list[MultiTrialResult]:
+        """Evaluate caller-supplied measurements; no tasks or outcomes are fabricated."""
+        task_names = [task.task_name for task in tasks]
+        if len(task_names) != len(set(task_names)):
+            raise ValueError("benchmark task names must be unique")
+        return [cls.evaluate_task(task) for task in tasks]

@@ -34,6 +34,12 @@ Image.new("RGB", (1280, 800), color=(20, 30, 40)).save(_FRAME_BUFFER, format="PN
 _FRAME_BASE64 = base64.b64encode(_FRAME_BUFFER.getvalue()).decode("ascii")
 
 
+@pytest.fixture(autouse=True)
+def _disable_external_vlm_grounding(monkeypatch):
+    """Keep receipt tests deterministic and prevent live vision-provider calls."""
+    monkeypatch.setenv("SONIC_ENABLE_VLM_TARGET_GROUNDING", "0")
+
+
 class _ReceiptComputer(ComputerProvider):
     def __init__(self, exit_code: int = 0):
         self.exit_code = exit_code
@@ -984,7 +990,7 @@ async def test_refreshed_gui_intent_keeps_grounding_frame_identity_in_sync():
 
 
 @pytest.mark.asyncio
-async def test_run_mission_stops_after_missing_avcs_grounder_blocks_gui_action():
+async def test_run_mission_stops_after_screenshot_target_cannot_be_grounded():
     agent = ComputerUseAgent(computer_provider=_ReceiptComputer(), execution_plane="gui")
     observation = ComputerWorldObservation(
         screen=_avcs_screen(),
@@ -1031,7 +1037,8 @@ async def test_run_mission_stops_after_missing_avcs_grounder_blocks_gui_action()
     assert agent.observe.await_count == 1
     assert agent.choose_action.await_count == 1
     assert agent.execute_action.await_count == 1
-    assert any(item["action"] == "GUI_CAPABILITY_UNAVAILABLE" for item in agent.history)
+    assert agent._create_gui_action_intent.await_count == 0
+    assert any(item["action"] == "GUI_TARGET_UNRESOLVED" for item in agent.history)
 
 
 @pytest.mark.asyncio

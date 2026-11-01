@@ -30,6 +30,7 @@ class SubMission(BaseModel):
     name: str = ""
     goal: str
     role: str = "subagent"
+    skills: list[str] = Field(default_factory=list)
     owned_paths: list[str] = Field(default_factory=list)
     sub_planner: bool = False
     requires_exclusive_display: bool = False

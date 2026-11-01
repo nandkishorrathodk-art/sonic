@@ -289,17 +289,21 @@ def test_vision_routes_configure_distinct_multimodal_fallbacks():
     router = ModelRouter.from_config(
         from_config,
         env_vars={
+            "GEMINI_API_KEY": "gemini-test-key",
             "GROQ_API_KEY": "groq-test-key",
             "OPENROUTER_API_KEY": "openrouter-test-key",
         },
     )
 
-    assert router.routing_rules["vision"]["provider"] == "openrouter"
+    assert router.default_provider == "groq"
+    assert router.routing_rules["vision"]["provider"] == "gemini"
     assert router.routing_rules["vision"]["fallback"] == [
+        "openrouter/openai/gpt-4o",
         "nvidia/meta/llama-3.2-11b-vision-instruct",
     ]
-    assert router.routing_rules["computer_use"]["provider"] == "openrouter"
+    assert router.routing_rules["computer_use"]["provider"] == "gemini"
     assert router.routing_rules["computer_use"]["fallback"] == [
+        "openrouter/openai/gpt-4o",
         "nvidia/meta/llama-3.2-11b-vision-instruct",
     ]
     vision_provider, vision_model = router._resolve_provider(
@@ -309,10 +313,10 @@ def test_vision_routes_configure_distinct_multimodal_fallbacks():
     computer_use_provider, computer_use_model = router._resolve_provider(
         task_type="computer_use"
     )
-    assert vision_provider.name == "openrouter"
-    assert vision_model == "openai/gpt-4o"
-    assert computer_use_provider.name == "openrouter"
-    assert computer_use_model == "openai/gpt-4o"
+    assert vision_provider.name == "gemini"
+    assert vision_model == "gemini-3.6-flash"
+    assert computer_use_provider.name == "gemini"
+    assert computer_use_model == "gemini-3.6-flash"
     assert "vision" not in router.providers["groq"].model_capabilities[
         "qwen/qwen3.8-27b"
     ]
@@ -576,6 +580,34 @@ async def test_llm_health_reports_ready_vision_route(monkeypatch):
 
     assert health.status == HealthStatus.DEGRADED
     assert health.message == (
-        "Vision provider credentials are configured: groq, nvidia; remote "
-        "reachability and image comprehension are not verified."
+        "Primary vision provider credentials are configured: nvidia; ready "
+        "fallback providers: groq; remote reachability and image comprehension "
+        "are not verified."
     )
+
+
+@pytest.mark.asyncio
+async def test_llm_health_identifies_missing_gemini_primary_with_ready_fallback(monkeypatch):
+    from types import SimpleNamespace
+
+    router = SimpleNamespace(
+        providers={"gemini": object(), "nvidia": object()},
+        routing_rules={
+            "vision": {
+                "provider": "gemini",
+                "fallback": ["nvidia/meta/llama-3.2-11b-vision-instruct"],
+            },
+        },
+        _is_provider_ready=lambda name: name == "nvidia",
+    )
+    monkeypatch.setattr(
+        ModelRouter,
+        "from_config",
+        classmethod(lambda cls: router),
+    )
+
+    health = await HealthChecker.check_llm()
+
+    assert health.status == HealthStatus.DEGRADED
+    assert "Primary vision provider credentials are unavailable: gemini" in health.message
+    assert "ready fallback providers: nvidia" in health.message

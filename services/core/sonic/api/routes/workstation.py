@@ -4347,6 +4347,7 @@ async def _run_prompt_reasoning(
                                         status=data.get("status", "RUNNING"),
                                         goal=data.get("goal"),
                                         worker_role=data.get("role", "subagent"),
+                                        worker_skills=data.get("skills", []),
                                         execution_plane=data.get("plane", "dual"),
                                         max_steps=data.get("max_steps"),
                                     )

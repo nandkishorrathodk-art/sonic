@@ -233,15 +233,13 @@ class TestVerifyFocusWithVlm:
 
 
 class TestVlmGroundingDefault:
-    """The bridge is the default grounder when no local checkpoint exists."""
+    """The secondary target-grounding call is opt-in to avoid extra model cost."""
 
-    def test_default_is_enabled(self, monkeypatch):
+    def test_secondary_target_grounding_is_disabled_by_default(self, monkeypatch):
         import sonic.computer_use.agent as agent_mod
 
-        monkeypatch.delenv("SONIC_ENABLE_VLM_GROUNDING", raising=False)
-        # The default must be "on" (not "0"), so the bridge runs without an
-        # explicit opt-in when no local checkpoint is configured.
-        assert agent_mod.os.environ.get("SONIC_ENABLE_VLM_GROUNDING", "1") != "0"
+        monkeypatch.delenv("SONIC_ENABLE_VLM_TARGET_GROUNDING", raising=False)
+        assert agent_mod.os.environ.get("SONIC_ENABLE_VLM_TARGET_GROUNDING", "0") == "0"
 
     def test_focus_availability_helper_blocks_without_any_path(self, monkeypatch):
         from sonic.computer_use.agent import ComputerUseAgent

@@ -216,6 +216,31 @@ class HealthChecker:
             name for name in vision_candidates
             if name in router.providers and router._is_provider_ready(name)
         })
+        primary_vision = str(vision_rule.get("provider", "") or "").strip()
+        ready_fallbacks = [name for name in ready_vision if name != primary_vision]
+        if primary_vision and primary_vision in ready_vision:
+            fallbacks = ", ".join(ready_fallbacks) if ready_fallbacks else "none"
+            return ComponentHealth(
+                name="llm_router",
+                status=HealthStatus.DEGRADED,
+                message=(
+                    f"Primary vision provider credentials are configured: {primary_vision}; "
+                    f"ready fallback providers: {fallbacks}; remote reachability and image "
+                    "comprehension are not verified."
+                ),
+                is_critical=True,
+            )
+        if ready_fallbacks:
+            return ComponentHealth(
+                name="llm_router",
+                status=HealthStatus.DEGRADED,
+                message=(
+                    f"Primary vision provider credentials are unavailable: {primary_vision or 'none'}; "
+                    f"ready fallback providers: {', '.join(ready_fallbacks)}; remote reachability "
+                    "and image comprehension are not verified."
+                ),
+                is_critical=True,
+            )
         if not ready_vision:
             active_names = ", ".join(active) if active else "none"
             return ComponentHealth(

@@ -253,7 +253,11 @@ async def test_watchdog_aborts_run_mission_before_burning_quota():
 
     # Request 15 steps; watchdog must abort well before burning quota
     traces = await agent.run_mission("ws-1", "Test mission", steps=15)
-    assert len(traces) <= 5
+    assert len(traces) <= 5, (
+        agent._consecutive_unchanged_screens,
+        agent._watchdog_aborted,
+        [trace.actual_observation for trace in traces[:5]],
+    )
     assert agent._consecutive_unchanged_screens >= 4
     assert any("WATCHDOG_ABORT" in h.get("action", "") for h in agent.history)
     assert all(
@@ -432,9 +436,12 @@ async def test_typing_verification_rejects_wrong_field_targets():
 
 
 @pytest.mark.asyncio
-async def test_valid_typing_payload_remains_blocked_without_local_focus_verification():
+async def test_valid_typing_payload_stays_blocked_without_confirmed_focus():
     provider = _mock_static_gui_provider("diff_screen_3")
     agent = ComputerUseAgent(computer_provider=provider)
+    agent._verify_gui_focus_with_vision = AsyncMock(
+        return_value=(False, "no ready focus-verification route")
+    )
     await agent.observe("ws-1")
 
     trace = await agent.execute_action(
@@ -445,7 +452,9 @@ async def test_valid_typing_payload_remains_blocked_without_local_focus_verifica
         "Type query",
     )
     assert trace.status == ActionExecutionStatus.BLOCKED, trace.actual_observation
-    assert provider.gui_action.await_count == 0
+    actions = [call.args[1].action for call in provider.gui_action.await_args_list]
+    assert actions == [GUIActionType.CLICK]
+    assert GUIActionType.TYPE not in actions
 
 
 # =========================================================================

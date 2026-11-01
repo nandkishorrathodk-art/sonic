@@ -289,12 +289,11 @@ def _awareness_snapshot() -> dict[str, Any]:
 
 
 def avcs_capability_state() -> dict[str, Any]:
-    """Report AVCS tool availability separately from GUI model readiness.
+    """Report AVCS reflex and screenshot-model readiness separately.
 
-    AVCS is a deterministic, read-only reflex tool in the workstation agent.
-    It does not provide semantic targets, focus verification, or task success.
-    The vision route check only confirms that an image-capable provider/model is
-    configured; it does not prove localization quality or GUI task completion.
+    AVCS reflex is optional, coarse pixel-change telemetry. Semantic GUI
+    localization and focus checks use the image-capable model route; route
+    readiness does not prove localization quality or task completion.
     """
     capability: dict[str, Any] = {
         "reflex_perception": False,
@@ -316,6 +315,7 @@ def avcs_capability_state() -> dict[str, Any]:
         "apprenticeship_samples": 0,
         "apprenticeship_labels": {},
         "vision_route_ready": False,
+        "vision_target_grounding_enabled": False,
         "grounding_source": "none",
         "focus_verification_source": "none",
         "reason": "",
@@ -345,15 +345,40 @@ def avcs_capability_state() -> dict[str, Any]:
     capability["apprenticeship_enabled"] = (
         os.environ.get("SONIC_AVCS_APPRENTICESHIP") == "1"
     )
-    if capability["vision_route_configured"]:
+    vision_ready = capability["vision_route_ready"] is True
+    vlm_enabled = os.environ.get(
+        "SONIC_ENABLE_VLM_GROUNDING", "1"
+    ).strip().lower() not in ("0", "false", "no", "off")
+    target_grounding_enabled = os.environ.get(
+        "SONIC_ENABLE_VLM_TARGET_GROUNDING", "0"
+    ).strip().lower() not in ("0", "false", "no", "off")
+    capability["vision_target_grounding_enabled"] = target_grounding_enabled
+    capability["gui_actions_ready"] = vision_ready
+    capability["semantic_grounding"] = vision_ready and vlm_enabled
+    capability["focus_verification"] = vision_ready and vlm_enabled
+    capability["grounding_source"] = (
+        "vision_model" if vision_ready and vlm_enabled else "none"
+    )
+    capability["focus_verification_source"] = (
+        "vision_model" if vision_ready and vlm_enabled else "none"
+    )
+    if vision_ready:
         capability["reason"] = (
-            "Image-capable computer-use route is configured. AVCS is optional; "
-            "GUI localization quality and task success remain unverified."
+            "An image-capable route and credentials are configured. Provider quota "
+            "or request failures can still prevent reasoning; localization accuracy "
+            "and task completion remain unverified. "
+            "The extra target-grounding request is "
+            f"{'enabled' if target_grounding_enabled else 'disabled'}."
+        )
+    elif capability["vision_route_configured"]:
+        capability["reason"] = (
+            "An image-capable route is configured but is not ready; GUI reasoning "
+            "cannot proceed until provider readiness is restored."
         )
     elif not capability["reason"]:
         capability["reason"] = (
-            "No configured image-capable computer-use route. GUI reasoning requires "
-            "a vision model; AVCS reflex data is not a semantic substitute."
+            "No ready image-capable computer-use route. GUI reasoning requires "
+            "a vision model; AVCS reflex telemetry is not a semantic substitute."
         )
     return capability
 

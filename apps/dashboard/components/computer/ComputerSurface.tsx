@@ -30,6 +30,7 @@ interface ComputerSurfaceProps {
     avcs_capability?: {
       avcs_observe_available?: boolean;
       vision_route_configured?: boolean;
+      vision_route_ready?: boolean;
       reflex_perception?: boolean;
       semantic_grounding?: boolean;
       focus_verification?: boolean;
@@ -359,13 +360,13 @@ export function ComputerSurface({
           )}
           {isDesktopConnected && avcsCapability && (
             <span
-              className={`chip ${avcsCapability.vision_route_configured ? "border border-secondary-500/40 bg-secondary-500/10 text-secondary-300" : "border border-amber-500/40 bg-amber-500/10 text-amber-300"}`}
+              className={`chip ${avcsCapability.vision_route_ready ? "border border-secondary-500/40 bg-secondary-500/10 text-secondary-300" : "border border-amber-500/40 bg-amber-500/10 text-amber-300"}`}
               title={avcsCapability.reason || "Vision route readiness is unknown"}
             >
               <span>
-                {avcsCapability.vision_route_configured
-                  ? "VISION ROUTE · TASK UNVERIFIED"
-                  : "NO VISION ROUTE · GUI BLOCKED"}
+                {avcsCapability.vision_route_ready
+                  ? "VISION ROUTE CONFIGURED · TASK UNVERIFIED"
+                  : "VISION ROUTE NOT READY · GUI BLOCKED"}
               </span>
             </span>
           )}

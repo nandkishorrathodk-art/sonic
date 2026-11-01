@@ -308,13 +308,24 @@ def test_awareness_stats_reflects_live_monitors():
 
 
 def test_capability_surface_reports_awareness_and_cortex_honestly(monkeypatch):
-    """The capability report must not overstate AVCS readiness."""
+    """Missing local AVCS heads remain distinct from screenshot-route readiness."""
     monkeypatch.delenv("SONIC_AVCS_CORTEX_CHECKPOINT", raising=False)
     monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
     monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
     # This test asserts the local-only fail-closed state; pin the vision bridge
     # off so a ready live vision route cannot legitimately enable the actions.
     monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
+
+    class _UnavailableRouter:
+        def _resolve_provider(self, **_kwargs):
+            return object(), "vision-model"
+
+        def vision_route_ready(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "sonic.api.routes.llm.get_model_router", lambda: _UnavailableRouter()
+    )
 
     from sonic.api.routes.workstation_perception import avcs_capability_state
 

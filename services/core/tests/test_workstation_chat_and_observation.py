@@ -330,11 +330,18 @@ def test_avcs_capability_state_separates_tool_from_vision_route(monkeypatch):
 
     monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
     monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
-    # Pin the LLM-vision bridge off so this test exercises the local-only
-    # fail-closed contract. With the bridge on (the default) a ready vision
-    # route legitimately enables these actions; that path is covered by
-    # test_avcs_capability_state_reports_vision_route.
+    # Disable semantic target and focus fallback while keeping route readiness
+    # deterministic for this capability-contract test.
     monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
+
+    class _Router:
+        def _resolve_provider(self, **_kwargs):
+            return object(), "vision-model"
+
+        def vision_route_ready(self) -> bool:
+            return True
+
+    monkeypatch.setattr("sonic.api.routes.llm.get_model_router", lambda: _Router())
 
     capability = avcs_capability_state()
 
@@ -342,9 +349,9 @@ def test_avcs_capability_state_separates_tool_from_vision_route(monkeypatch):
     assert capability["avcs_observe_available"] is True
     assert capability["semantic_grounding"] is False
     assert capability["focus_verification"] is False
-    assert capability["gui_actions_ready"] is False
+    assert capability["gui_actions_ready"] is True
     assert capability["vision_route_configured"] is True
-    assert "optional" in capability["reason"].lower()
+    assert "unverified" in capability["reason"].lower()
 
 
 def test_avcs_capability_state_reports_vision_route(monkeypatch):
@@ -368,11 +375,11 @@ def test_avcs_capability_state_reports_vision_route(monkeypatch):
 
     capability = avcs_capability_state()
 
-    assert capability["semantic_grounding"] is False
-    assert capability["focus_verification"] is False
-    assert capability["gui_actions_ready"] is False
-    assert capability["grounding_source"] == "none"
-    assert capability["focus_verification_source"] == "none"
+    assert capability["semantic_grounding"] is True
+    assert capability["focus_verification"] is True
+    assert capability["gui_actions_ready"] is True
+    assert capability["grounding_source"] == "vision_model"
+    assert capability["focus_verification_source"] == "vision_model"
     assert capability["vision_route_configured"] is True
     assert capability["vision_route_ready"] is True
 
@@ -410,8 +417,8 @@ def test_avcs_capability_state_does_not_claim_checkpoint_backed_grounding(monkey
 
     assert capability["grounding_checkpoint_configured"] is False
     assert capability["focus_checkpoint_configured"] is False
-    assert capability["semantic_grounding"] is False
-    assert capability["focus_verification"] is False
+    assert capability["semantic_grounding"] is True
+    assert capability["focus_verification"] is True
     assert capability["vision_route_ready"] is True
 
 
@@ -423,11 +430,19 @@ def test_desktop_status_surfaces_avcs_capability(monkeypatch):
     from sonic.auth.google_auth import create_jwt_token
     from sonic.auth.models import User, UserRole
 
-    # Exercise the local-only contract deterministically (the vision-route path
-    # depends on live provider credentials and is covered separately).
+    # Exercise the local-only bridge contract with a not-ready image route.
     monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
     monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
     monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
+
+    class _Router:
+        def _resolve_provider(self, **_kwargs):
+            return object(), "vision-model"
+
+        def vision_route_ready(self) -> bool:
+            return False
+
+    monkeypatch.setattr("sonic.api.routes.llm.get_model_router", lambda: _Router())
 
     client = TestClient(app)
     user = User(

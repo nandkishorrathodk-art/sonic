@@ -250,7 +250,7 @@ async def test_boss_collects_all_sub_agent_reports():
         MockAgentClass.side_effect = [mock_agent1, mock_agent2]
 
         boss = BossAgent(computer_provider=computer, llm_router=llm)
-        report = await boss.run(workspace_id="ws-1", objective="perform recon on target.com")
+        report = await boss.run(workspace_id="ws-1", objective="Check ports and headers")
 
         assert isinstance(report, BossReport)
         assert report.status == "COMPLETE"
@@ -267,7 +267,7 @@ async def test_boss_multi_phase_findings_drive_next_phase():
         "thinking": "Phase 1: Discover attack surface.",
         "phase_name": "Discovery",
         "sub_missions": [
-            {"goal": "Find parameters", "max_steps": 3, "priority": 1},
+            {"goal": "Find SQLi parameters", "max_steps": 3, "priority": 1},
         ],
     })
     sub1_summary = "Found /search?q= parameter."
@@ -310,7 +310,7 @@ async def test_boss_multi_phase_findings_drive_next_phase():
         MockAgentClass.side_effect = [mock_agent1, mock_agent2]
 
         boss = BossAgent(computer_provider=computer, llm_router=llm, max_phases=3)
-        report = await boss.run(workspace_id="ws-1", objective="find SQLi in target.com")
+        report = await boss.run(workspace_id="ws-1", objective="Find SQLi")
 
         assert len(report.phases) == 2
         assert report.phases[0].name == "Discovery"

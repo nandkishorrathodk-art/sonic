@@ -192,6 +192,13 @@ def _parse_pixel_coordinate_target(target: Any) -> tuple[int, int] | None:
         pair = re.fullmatch(r"\(?\s*(-?\d+)\s*,\s*(-?\d+)\s*\)?", text)
         if pair:
             return int(pair.group(1)), int(pair.group(2))
+        named_pair = re.fullmatch(
+            r"(?:screen\s+pixels?\s+)?x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)",
+            text,
+            re.IGNORECASE,
+        )
+        if named_pair:
+            return int(named_pair.group(1)), int(named_pair.group(2))
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
@@ -1126,13 +1133,16 @@ class ComputerUseAgent:
         prompt = (
             f"Given this engineering or security mission:\n\"{goal}\"\n"
             f"{target_info}\n"
-            "List 2 to 4 concrete, actionable, sequential sub-goals to accomplish it.\n"
+            "Derive the minimum number of observable checkpoints needed to reach the requested outcome. "
+            "Do not assume a fixed step count or prescribe an application-specific workflow. "
+            "Each checkpoint describes a verifiable state, not a macro; after each observation, "
+            "skip satisfied checkpoints and revise the remainder when reality differs. A single "
+            "cohesive outcome may need only one checkpoint.\n"
             "Rules:\n"
             f"- {action_examples}\n"
             "- Do NOT generate vague generic steps like 'Inspect environment and orient', 'Execute core operation', or 'Verify outcome'.\n"
-            "- Output ONLY numbered lines, e.g.:\n"
+            "- Output ONLY the minimum necessary numbered checkpoints, e.g.:\n"
             "1. <action>\n"
-            "2. <action>\n"
         )
         request = LLMRequest(
             messages=[
@@ -1151,7 +1161,7 @@ class ComputerUseAgent:
                 m = re.match(r'^(?:\d+[\.\)]|\-|\*)\s*(.*)', line.strip())
                 if m and len(m.group(1).strip()) > 5:
                     items.append(m.group(1).strip())
-            if len(items) >= 2:
+            if items:
                 sub_goals = [SubGoal(description=item) for item in items[:5]]
                 return SubGoalChecklist(top_level_goal=goal, sub_goals=sub_goals, active_index=0)
         except Exception as e:
@@ -1389,7 +1399,7 @@ class ComputerUseAgent:
         query: str,
         screen: ScreenObservation | None = None,
     ) -> dict[str, Any] | None:
-        """Resolve a GUI target locally; screenshots never leave the workstation path."""
+        """Resolve a target with a validated local model or configured vision route."""
         if not isinstance(query, str) or not query.strip():
             raise ValueError("AVCS target grounding requires a semantic target query")
         source_screen = screen or getattr(self, "_last_observed_screen", None)
@@ -1422,33 +1432,18 @@ class ComputerUseAgent:
         height = int(getattr(source_screen, "height", 0) or 0)
         if width <= 0 or height <= 0:
             raise ValueError("AVCS target grounding requires observed screen dimensions")
-        state = getattr(source_screen, "avcs_state", None)
-        if (
-            not isinstance(state, dict)
-            or state.get("engine") != "avcs_reflex"
-            or state.get("width") != width
-            or state.get("height") != height
-            or not isinstance(state.get("scene_hash"), str)
-            or not state["scene_hash"]
-        ):
-            raise RuntimeError("AVCS target grounding requires current local AVCS state")
         perception = getattr(self, "_avcs_perception", None)
-        if perception is None:
-            raise RuntimeError("local AVCS pixel processor is unavailable")
 
-        # LLM-vision grounding bridge. This is the default target-resolution
-        # path when no evaluated local AVCS grounder checkpoint exists: the
-        # reasoning model already receives the frame, so the same vision route
-        # answers "where is X?" and the caller keeps ownership of the click.
-        # An evaluated local checkpoint always wins when configured. Set
-        # SONIC_ENABLE_VLM_GROUNDING=0 to forbid sending frames to a vision route.
+        # A local evaluated grounder takes precedence. Otherwise, the configured
+        # image-capable route can resolve a missed semantic target; the returned
+        # point still passes the normal bounds, freshness, and safety checks.
         vlm_enabled = os.environ.get(
-            "SONIC_ENABLE_VLM_GROUNDING", "1"
+            "SONIC_ENABLE_VLM_TARGET_GROUNDING", "0"
         ).strip().lower() not in ("0", "false", "no", "off")
         if (
-            not getattr(perception, "goal_grounder_configured", False)
-            and vlm_enabled
-        ):
+            perception is None
+            or not getattr(perception, "goal_grounder_configured", False)
+        ) and vlm_enabled:
             bridge_b64 = frame_b64
             if not bridge_b64 and raw_rgb:
                 from io import BytesIO
@@ -1482,6 +1477,19 @@ class ComputerUseAgent:
             # grounder. Report an honest "not found" instead of falling through
             # to the unconfigured local grounder, which would raise.
             logger.info("vlm_grounding_no_target_returned", query=query)
+            return None
+
+        if perception is None or not getattr(perception, "goal_grounder_configured", False):
+            return None
+        state = getattr(source_screen, "avcs_state", None)
+        if (
+            not isinstance(state, dict)
+            or state.get("engine") != "avcs_reflex"
+            or state.get("width") != width
+            or state.get("height") != height
+            or not isinstance(state.get("scene_hash"), str)
+            or not state["scene_hash"]
+        ):
             return None
 
         if raw_rgb:
@@ -1686,16 +1694,10 @@ class ComputerUseAgent:
         # on demand; otherwise GUI workers would never receive pixels.
         self._last_screenshot_b64 = (
             self._frame_to_png_base64(screen_obs)
-            if perception_source == "avcs_pixels"
+            if self._screen_has_pixel_data(screen_obs)
             else ""
         )
-        self._last_screen_has_pixels = (
-            perception_source == "avcs_pixels"
-            and bool(
-                getattr(screen_obs, "raw_rgb", b"")
-                or getattr(screen_obs, "screenshot_base64", "")
-            )
-        )
+        self._last_screen_has_pixels = self._screen_has_pixel_data(screen_obs)
         self._last_screen_frame_id = (
             getattr(screen_obs, "frame_id", None)
             if self._last_screen_has_pixels
@@ -1839,6 +1841,11 @@ class ComputerUseAgent:
             visible_text=getattr(screen_obs, "visible_text", ""),
             controls=getattr(screen_obs, "detected_controls", []),
         )
+        if (
+            not isinstance(getattr(screen_obs, "avcs_state", None), dict)
+            or screen_obs.avcs_state.get("engine") != "avcs_reflex"
+        ):
+            screen_obs.perception_version = perception_snapshot.version
         if getattr(self, "skill_ledger", None) is not None:
             self.skill_ledger.observe_applications(list(status.open_applications))
         pending_skill = getattr(self, "_pending_skill_context", None)
@@ -3530,7 +3537,8 @@ class ComputerUseAgent:
             f"{capability_directive}"
             f"GUI ACTION COORDINATES: In GUI action TARGET/PAYLOAD fields, use actual screen pixels "
             f"(x=0..{max(0, screen_w - 1)}, y=0..{max(0, screen_h - 1)}), not normalized values. "
-            "Semantic GUI targets are resolved locally by AVCS; do not invent coordinates.\n"
+            "Ground points in the attached fresh screenshot; AVCS reflex is coarse change metadata, "
+            "not a semantic control locator. If no point is clear, re-observe or report blocked.\n"
             "================================================================================\n\n"
         )
         init_ctx = getattr(self, "initial_context", {}) or {}
@@ -3544,8 +3552,8 @@ class ComputerUseAgent:
             )
         elif init_ctx.get("delegated_plane") != "headless":
             target_header += (
-                "=== FULL DUAL-PLANE AGENCY (DESKTOP GUI :99 + TERMINAL/FILE SANDBOX) ===\n"
-                "You are an AI-Human Being & Engineer operating BOTH your graphical desktop (:99) and your terminal/file sandbox:\n"
+                "=== FULL DUAL-PLANE AGENCY (DESKTOP + OPERATOR TOOLKIT) ===\n"
+                "You are an AI-Human Being & Engineer operating both the visible desktop and operator toolkit:\n"
                 "- When the mission asks to operate desktop GUI applications or interact with visual tools, actively use your graphical desktop plane (`APP_LAUNCH`, `APP_FOCUS`, `GUI_CLICK`, `GUI_TYPE`, `GUI_MOVE`, `GUI_KEYPRESS`).\n"
                 "- When the mission asks for source code, build scripts, tests, or CLI commands (`pwd`, `ls`, `git`, `pytest`), use `TERMINAL_EXEC` and `FILE_WRITE`.\n"
                 "- Both planes work together: you can launch apps on screen and verify them with commands or inspect files while interacting with GUI windows.\n"
@@ -3555,10 +3563,10 @@ class ComputerUseAgent:
         elif init_ctx.get("delegated_plane") == "headless":
             target_header += (
                 "=== OPERATOR SANDBOX PLANE (HEADLESS DIRECT EXECUTION) ===\n"
-                "You are an AI-Human Engineer executing high-throughput tasks in the sandbox environment.\n"
+                "You are an AI-Human Engineer executing this assignment in the headless sandbox.\n"
                 "Use TERMINAL_EXEC for shell commands, background scripts, and process monitoring.\n"
                 "Use FILE_WRITE to author source code, servers, or configuration files directly.\n"
-                "Both your terminal and your graphical desktop remain available at all times.\n"
+                "This worker is not assigned the shared desktop. If visible GUI work is required, report the handoff to Boss.\n"
                 "==========================================================\n\n"
             )
         if not self._gui_action_contract_active():
@@ -3595,8 +3603,16 @@ class ComputerUseAgent:
                 )
             if init_ctx.get("silent_background") or init_ctx.get("subagent_role"):
                 role_label = str(init_ctx.get("subagent_role") or "Subagent Worker")
+                assigned_skills = init_ctx.get("delegated_skills") or []
+                skill_line = (
+                    "\nAssigned catalog skills (advisory only): "
+                    + ", ".join(str(skill) for skill in assigned_skills[:8])
+                    if isinstance(assigned_skills, list) and assigned_skills
+                    else "\nAssigned catalog skills: none"
+                )
                 obs_summary = (
                     f"=== ASSIGNED SUBAGENT ROLE & WORKSPACE: {role_label} ===\n"
+                    f"Role and skills guide task focus only; they grant no permissions.{skill_line}\n"
                     f"{json.dumps(init_ctx, ensure_ascii=True)[:1200]}\n"
                     "===========================================================\n\n"
                     + scope_block
@@ -3877,6 +3893,9 @@ class ComputerUseAgent:
         """Use the LLM to decide the next action from goal + observation + history."""
         from sonic.llm.schemas import LLMRequest, Message, MessageRole
 
+        plane = str(getattr(self, "execution_plane", "dual") or "dual").lower().strip()
+        gui_reasoning = plane in ("gui", "dual") or getattr(self, "gui_only", False)
+
         if (
             self.lessons_ledger is not None
             and self.llm_router is not None
@@ -3884,9 +3903,12 @@ class ComputerUseAgent:
             and self._agentic_lessons_goal != goal
         ):
             try:
-                self._agentic_lessons = await self.lessons_ledger.relevant_agentic(
-                    goal, self.llm_router
-                )
+                if gui_reasoning:
+                    self._agentic_lessons = self.lessons_ledger.relevant(goal)
+                else:
+                    self._agentic_lessons = await self.lessons_ledger.relevant_agentic(
+                        goal, self.llm_router
+                    )
                 self._agentic_lessons_goal = goal
             except Exception as exc:
                 logger.warning("agentic_rag_lesson_retrieval_failed", error=str(exc))
@@ -3907,7 +3929,7 @@ class ComputerUseAgent:
                 )
 
                 assembler = MultiContextAssembler(self.multi_context_sources)
-                if self.llm_router is not None:
+                if self.llm_router is not None and not gui_reasoning:
                     retriever = AgenticMultiContextRetriever(
                         assembler, self.llm_router
                     )
@@ -3930,11 +3952,6 @@ class ComputerUseAgent:
                 self._multi_context_pack = None
                 self._multi_context_goal = goal
 
-        plane = str(getattr(self, "execution_plane", "dual") or "dual").lower().strip()
-        gui_reasoning = (
-            plane in ("gui", "dual")
-            or getattr(self, "gui_only", False)
-        )
         structured_scene_available = False
         current_frame_is_fresh = self._frame_is_fresh_for_reasoning(observation.screen)
         if gui_reasoning:
@@ -3942,7 +3959,6 @@ class ComputerUseAgent:
         if (
             gui_reasoning
             and not current_frame_is_fresh
-            and not self._last_screen_has_pixels
             and getattr(self, "_active_workspace_id", "")
             and hasattr(self.computer, "screenshot")
         ):
@@ -4147,16 +4163,20 @@ class ComputerUseAgent:
                 "UNVERIFIED, never verified progress.\n"
             )
             action_instructions += (
-                "\nOPTIONAL SHORT GUI CHUNK: For a predictable, low-risk sequence of at most "
-                f"{_MAX_GUI_BURST_ACTIONS} directly grounded motor actions, you may put "
-                "\"burst_actions\" in PAYLOAD. Each item must use a low-level action name "
-                "(CLICK, DOUBLE_CLICK, RIGHT_CLICK, KEYPRESS, HOTKEY, SCROLL, MOVE, "
-                "or DRAG) and include its own observable \"postcondition\". Also include "
-                "a final PAYLOAD \"postcondition\". A postcondition must identify "
-                "a screen change or active window. The executor observes after every step, checks bounds "
-                "and the stated postcondition, and stops/replans on a mismatch; never "
-                "chunk through an uncertain transition, dialog, or "
-                "approval-required operation. A chunk is optional, not a fixed workflow.\n"
+                "\nEFFICIENT GUI CHUNKING: To avoid an unnecessary model round-trip, prefer "
+                "one bounded chunk of at most "
+                f"{_MAX_GUI_BURST_ACTIONS} directly grounded motor actions when the current "
+                "screenshot makes the whole sequence predictable and low-risk. Choose the "
+                "actions from the current screen; this is not a canned workflow or macro. "
+                "Each item must use a low-level action name (CLICK, DOUBLE_CLICK, "
+                "RIGHT_CLICK, KEYPRESS, HOTKEY, SCROLL, MOVE, or DRAG) and include its "
+                "own observable \"postcondition\"; also include a final PAYLOAD "
+                "\"postcondition\". A postcondition must identify a screen change or "
+                "active window. The executor observes after every step, checks bounds "
+                "and the stated postcondition, and stops/replans on a mismatch. Do not "
+                "chunk across uncertain transitions, dialogs, text entry, or "
+                "approval-required operations; use a fresh reasoning turn instead. "
+                "Never add actions just to fill a chunk.\n"
                 "Example shape: {\"burst_actions\":[{\"action\":\"CLICK\",\"x\":120,"
                 "\"y\":80,\"postcondition\":{\"screen_changed\":true}}],"
                 "\"postcondition\":{\"screen_changed\":true},"
@@ -4281,6 +4301,8 @@ class ComputerUseAgent:
                 if self._gui_action_contract_active()
                 else 120.0
             )
+            if image_attached:
+                counters["image_attached_requests"] += 1
             response = await asyncio.wait_for(
                 self.llm_router.complete(request),
                 timeout=reasoning_timeout,
@@ -5482,7 +5504,7 @@ class ComputerUseAgent:
 
     @classmethod
     def _screen_state_signature(cls, screen: Any) -> str:
-        """Fingerprint a frame and active window, using AVCS when available."""
+        """Fingerprint a frame and active window, using pixel bytes when available."""
         avcs_state = getattr(screen, "avcs_state", None)
         scene_hash = (
             str(avcs_state.get("scene_hash", "")).strip()
@@ -5490,12 +5512,11 @@ class ComputerUseAgent:
             and avcs_state.get("engine") == "avcs_reflex"
             else ""
         )
-        if not scene_hash:
-            raw_rgb = getattr(screen, "raw_rgb", b"")
-            screenshot = getattr(screen, "screenshot_base64", "")
-            frame_bytes = raw_rgb if isinstance(raw_rgb, bytes) and raw_rgb else str(screenshot).encode("ascii", errors="ignore")
-            if frame_bytes:
-                scene_hash = hashlib.sha256(frame_bytes).hexdigest()
+        raw_rgb = getattr(screen, "raw_rgb", b"")
+        screenshot = getattr(screen, "screenshot_base64", "")
+        frame_bytes = raw_rgb if isinstance(raw_rgb, bytes) and raw_rgb else str(screenshot).encode("ascii", errors="ignore")
+        if not scene_hash and frame_bytes:
+            scene_hash = hashlib.sha256(frame_bytes).hexdigest()
         return json.dumps(
             {
                 "active_window": str(getattr(screen, "active_window", "") or ""),
@@ -5626,7 +5647,7 @@ class ComputerUseAgent:
         )
         if isinstance(before_hash, str) and before_hash and isinstance(after_hash, str) and after_hash:
             return before_hash != after_hash
-        return None
+        return cls._screen_state_signature(before) != cls._screen_state_signature(after)
 
     @classmethod
     def _gui_observation_matches(cls, source: Any, fresh: Any) -> bool:
@@ -5666,11 +5687,14 @@ class ComputerUseAgent:
             and fresh_state.get("engine") == "avcs_reflex"
             else ""
         )
-        if not source_hash or not fresh_hash:
+        if source_hash and fresh_hash and source_hash != fresh_hash:
             return False
-        if source_hash != fresh_hash:
-            return False
-        return True
+        return bool(
+            cls._screen_has_pixel_data(source_screen)
+            and cls._screen_has_pixel_data(fresh_screen)
+            and cls._screen_state_signature(source_screen)
+            == cls._screen_state_signature(fresh_screen)
+        )
 
     async def _create_gui_action_intent(
         self,
@@ -5772,6 +5796,11 @@ class ComputerUseAgent:
             visible_text=fresh_screen.visible_text,
             controls=fresh_screen.detected_controls,
         )
+        if (
+            not isinstance(getattr(fresh_screen, "avcs_state", None), dict)
+            or fresh_screen.avcs_state.get("engine") != "avcs_reflex"
+        ):
+            fresh_screen.perception_version = snapshot.version
         fresh_observation.perception_version = snapshot.version
         self._last_world_observation = fresh_observation
         return GUIActionIntent.create(
@@ -5829,6 +5858,11 @@ class ComputerUseAgent:
                 "observation_received_monotonic_ns": now_ns,
             }
         )
+        if (
+            not isinstance(getattr(screen, "avcs_state", None), dict)
+            or screen.avcs_state.get("engine") != "avcs_reflex"
+        ):
+            screen.perception_version = observation.perception_version
         renewed = GUIActionIntent.create(
             action_type=intent.action_type,
             target=intent.target,
@@ -5838,14 +5872,18 @@ class ComputerUseAgent:
             now_ns=now_ns,
             ttl_ms=2_000,
         )
+        identity_mismatch = []
+        if renewed.source_active_window.casefold() != intent.source_active_window.casefold():
+            identity_mismatch.append("active window changed")
+        if renewed.source_scene_hash != intent.source_scene_hash:
+            identity_mismatch.append("pixel frame identity changed")
         if (
-            renewed.source_active_window.casefold()
-            != intent.source_active_window.casefold()
-            or renewed.source_scene_hash != intent.source_scene_hash
-            or renewed.source_width != intent.source_width
+            renewed.source_width != intent.source_width
             or renewed.source_height != intent.source_height
         ):
-            raise ValueError("GUI intent target, focus, or source state changed")
+            identity_mismatch.append("display geometry changed")
+        if identity_mismatch:
+            raise ValueError("GUI intent source changed: " + "; ".join(identity_mismatch))
 
         self._last_world_observation = fresh_observation
         self._last_screen_observation_received_at = asyncio.get_running_loop().time()
@@ -7432,7 +7470,38 @@ class ComputerUseAgent:
         if action_type in coordinate_actions and natural_target_needs_live_grounding:
             grounding_reason = "vision model did not return explicit screen-pixel coordinates"
             grounded = None
-            if grounded is None:
+            source_screen = getattr(self, "_last_observed_screen", None)
+            if source_screen is None:
+                source_screen = getattr(
+                    getattr(self, "_last_world_observation", None), "screen", None
+                )
+            if source_screen is not None:
+                try:
+                    grounded = await self._ground_target_with_avcs(
+                        target_resource,
+                        screen=source_screen,
+                    )
+                except Exception as exc:
+                    grounding_reason = f"visual target grounding was inconclusive: {exc}"
+            grounded_point = None
+            if isinstance(grounded, dict):
+                candidate_point = (grounded.get("x"), grounded.get("y"))
+                if (
+                    isinstance(candidate_point[0], int)
+                    and not isinstance(candidate_point[0], bool)
+                    and isinstance(candidate_point[1], int)
+                    and not isinstance(candidate_point[1], bool)
+                ):
+                    grounded_point = candidate_point
+            elif isinstance(grounded, (tuple, list)) and len(grounded) == 2:
+                if (
+                    isinstance(grounded[0], int)
+                    and not isinstance(grounded[0], bool)
+                    and isinstance(grounded[1], int)
+                    and not isinstance(grounded[1], bool)
+                ):
+                    grounded_point = (grounded[0], grounded[1])
+            if grounded_point is None:
                 detail = f" {grounding_reason}" if grounding_reason else ""
                 actual_obs_str = (
                     "GUI action blocked: "
@@ -7461,7 +7530,6 @@ class ComputerUseAgent:
                     {"action": f"BLOCKED {target_resource}", "result": actual_obs_str}
                 )
                 return trace
-            grounded_point = (grounded["x"], grounded["y"])
             if payload_pixel_target is not None and payload_pixel_target != grounded_point:
                 actual_obs_str = (
                     "GUI action blocked: model-proposed coordinates disagree "
@@ -10765,6 +10833,85 @@ class ComputerUseAgent:
                         break
                     continue
                 self._consecutive_gui_postcondition_violations = 0
+                coordinate_actions = {
+                    ComputerActionType.GUI_CLICK,
+                    ComputerActionType.GUI_DOUBLE_CLICK,
+                    ComputerActionType.GUI_RIGHT_CLICK,
+                    ComputerActionType.GUI_TYPE,
+                    ComputerActionType.GUI_MOVE,
+                    ComputerActionType.GUI_SCROLL,
+                    ComputerActionType.GUI_DRAG,
+                }
+                if action_type in coordinate_actions:
+                    explicit_point = _parse_pixel_coordinate_target(target)
+                    has_payload_point = "x" in payload or "y" in payload
+                    if explicit_point is not None and not has_payload_point:
+                        payload["x"], payload["y"] = explicit_point
+                    elif explicit_point is None and not has_payload_point:
+                        try:
+                            grounded = await self._ground_target_with_avcs(
+                                target,
+                                screen=getattr(obs, "screen", None),
+                            )
+                        except Exception as exc:
+                            logger.info(
+                                "gui_target_grounding_unavailable",
+                                target=target,
+                                error=str(exc),
+                            )
+                            grounded = None
+                        grounded_point = None
+                        if isinstance(grounded, dict):
+                            candidate_point = (grounded.get("x"), grounded.get("y"))
+                            if (
+                                isinstance(candidate_point[0], int)
+                                and not isinstance(candidate_point[0], bool)
+                                and isinstance(candidate_point[1], int)
+                                and not isinstance(candidate_point[1], bool)
+                            ):
+                                grounded_point = candidate_point
+                        elif isinstance(grounded, (tuple, list)) and len(grounded) == 2:
+                            if (
+                                isinstance(grounded[0], int)
+                                and not isinstance(grounded[0], bool)
+                                and isinstance(grounded[1], int)
+                                and not isinstance(grounded[1], bool)
+                            ):
+                                grounded_point = (grounded[0], grounded[1])
+                        if grounded_point is not None:
+                            payload["x"], payload["y"] = grounded_point
+                            self.history.append({
+                                "action": "GUI_TARGET_GROUNDED",
+                                "result": (
+                                    f"Resolved '{target}' to screenshot pixels "
+                                    f"({grounded_point[0]}, {grounded_point[1]}) using "
+                                    f"{grounded.get('engine', 'vision grounding') if isinstance(grounded, dict) else 'pixel grounding'}."
+                                ),
+                            })
+                        else:
+                            reason = (
+                                f"GUI action held: could not locate '{target}' in the fresh "
+                                "screenshot; no pointer action was dispatched."
+                            )
+                            self.history.append({"action": "GUI_TARGET_UNRESOLVED", "result": reason})
+                            blocked_trace = await self.execute_action(
+                                workspace_id,
+                                ActionExecutionStatus.BLOCKED,
+                                "gui-target-unresolved",
+                                {},
+                                reason,
+                            )
+                            if step_callback is not None:
+                                try:
+                                    callback_result = step_callback(blocked_trace)
+                                    if asyncio.iscoroutine(callback_result):
+                                        await callback_result
+                                except Exception as callback_error:
+                                    logger.warning(
+                                        "run_mission_step_callback_failed",
+                                        error=str(callback_error),
+                                    )
+                            break
                 try:
                     self._pending_gui_action_intent = await self._create_gui_action_intent(
                         workspace_id,

@@ -671,6 +671,115 @@ async def test_computer_use_attaches_fresh_screenshot_to_vision_request():
     assert any(message.images for message in router.request.messages)
 
 
+@pytest.mark.asyncio
+async def test_gui_reasoning_uses_deterministic_memory_retrieval():
+    class _Lessons:
+        def __init__(self):
+            self.local_calls = 0
+            self.agentic_calls = 0
+
+        def relevant(self, _goal):
+            self.local_calls += 1
+            return []
+
+        async def relevant_agentic(self, *_args, **_kwargs):
+            self.agentic_calls += 1
+            raise AssertionError("GUI reasoning must not wait on agentic retrieval")
+
+    class _Source:
+        name = "test"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def fetch(self, _query, *, tenant_id, limit):
+            self.calls += 1
+            assert tenant_id == "default"
+            assert limit > 0
+            return []
+
+    class _ImageRecordingRouter(_StubRouter):
+        def __init__(self):
+            super().__init__(
+                "ACTION: GUI_SCREENSHOT\n"
+                "TARGET: visible desktop\n"
+                "PAYLOAD: {}\n"
+                "EXPECTED: Refresh the screen"
+            )
+            self.request = None
+
+        async def complete(self, request):
+            self.request = request
+            return await super().complete(request)
+
+    lessons = _Lessons()
+    source = _Source()
+    router = _ImageRecordingRouter()
+    agent = ComputerUseAgent(
+        computer_provider=_StubComputer(),
+        llm_router=router,
+        execution_plane="gui",
+        lessons_ledger=lessons,
+        multi_context_sources=[source],
+    )
+    observation = await agent.observe(agent.computer.workspace_id)
+
+    await agent._llm_choose_action(
+        goal="Inspect the visible application",
+        observation=observation,
+        step_index=1,
+        primary_file="",
+        test_file="",
+    )
+
+    assert lessons.local_calls == 1
+    assert lessons.agentic_calls == 0
+    assert source.calls == 1
+    assert router.request is not None
+    assert any(message.images for message in router.request.messages)
+    assert agent._perception_counters["image_attached_requests"] == 1
+
+
+@pytest.mark.asyncio
+async def test_gui_reasoning_refreshes_stale_frame_even_when_old_pixels_exist():
+    class _CountingComputer(_StubComputer):
+        def __init__(self):
+            super().__init__()
+            self.screenshot_calls = 0
+
+        async def screenshot(self, workspace_id):
+            self.screenshot_calls += 1
+            return await super().screenshot(workspace_id)
+
+    computer = _CountingComputer()
+    router = _RecordingRouter()
+    agent = ComputerUseAgent(
+        computer_provider=computer,
+        llm_router=router,
+        execution_plane="gui",
+    )
+    agent._active_workspace_id = computer.workspace_id
+    observation = await agent.observe(computer.workspace_id)
+    observation.screen = observation.screen.model_copy(
+        update={"capture_age_ms": 2_500}
+    )
+    assert agent._last_screen_has_pixels is True
+    assert computer.screenshot_calls == 1
+
+    await agent._llm_choose_action(
+        goal="Inspect the visible application",
+        observation=observation,
+        step_index=1,
+        primary_file="",
+        test_file="",
+    )
+
+    assert computer.screenshot_calls == 2
+    assert observation.perception_source == "avcs_frame_refresh"
+    assert router.request is not None
+    assert any(message.images for message in router.request.messages)
+
+
 @pytest.mark.parametrize(
     "refusal_text",
     [

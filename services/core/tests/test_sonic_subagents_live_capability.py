@@ -644,6 +644,7 @@ async def test_boss_agent_coordinates_three_subagents_and_synthesizes_final_repo
     report = await boss._synthesize_final_report(
         objective="Deliver 3 concurrent core services: Math, Text, and System Reporter",
         t_start=0.0,
+        objective_complete=True,
     )
 
     assert report.status == "COMPLETE"

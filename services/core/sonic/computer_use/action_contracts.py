@@ -7,9 +7,11 @@ the :class:`SafetyKernel`.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import hashlib
 import json
 import math
 import time
@@ -73,61 +75,67 @@ def _encode_payload(payload: Mapping[str, Any]) -> str:
     )
 
 
-def _avcs_identity(
-    screen: Any,
-) -> tuple[int, str] | None:
-    """Return AVCS identity only when it matches the frame and version metadata."""
+def _frame_identity(screen: Any) -> tuple[int, str] | None:
+    """Return AVCS identity or a versioned pixel hash for a fresh desktop frame."""
     state = getattr(screen, "avcs_state", None)
-    if not isinstance(state, Mapping) or state.get("engine") != "avcs_reflex":
-        return None
-
-    frame_index = state.get("frame_index")
     screen_version = getattr(screen, "perception_version", None)
-    if (
-        not isinstance(frame_index, int)
-        or isinstance(frame_index, bool)
-        or frame_index <= 0
-        or not isinstance(screen_version, int)
-        or isinstance(screen_version, bool)
-        or screen_version != frame_index
-    ):
-        return None
-
-    frame_id = getattr(screen, "frame_id", None)
-    if getattr(screen, "raw_rgb", b"") and frame_id is not None:
+    if isinstance(state, Mapping) and state.get("engine") == "avcs_reflex":
+        frame_index = state.get("frame_index")
+        frame_id = getattr(screen, "frame_id", None)
         source_frame_id = state.get("source_frame_id")
+        width = getattr(screen, "width", None)
+        height = getattr(screen, "height", None)
+        scene_hash = state.get("scene_hash")
         if (
-            isinstance(frame_id, bool)
-            or not isinstance(frame_id, int)
-            or frame_id <= 0
-            or isinstance(source_frame_id, bool)
-            or not isinstance(source_frame_id, int)
-            or source_frame_id != frame_id
+            isinstance(frame_index, int)
+            and not isinstance(frame_index, bool)
+            and frame_index > 0
+            and isinstance(screen_version, int)
+            and not isinstance(screen_version, bool)
+            and screen_version == frame_index
+            and isinstance(width, int)
+            and not isinstance(width, bool)
+            and width > 0
+            and isinstance(height, int)
+            and not isinstance(height, bool)
+            and height > 0
+            and state.get("width") == width
+            and state.get("height") == height
+            and isinstance(scene_hash, str)
+            and scene_hash.strip()
+            and (
+                not getattr(screen, "raw_rgb", b"")
+                or frame_id is None
+                or (
+                    isinstance(frame_id, int)
+                    and not isinstance(frame_id, bool)
+                    and frame_id > 0
+                    and isinstance(source_frame_id, int)
+                    and not isinstance(source_frame_id, bool)
+                    and source_frame_id == frame_id
+                )
+            )
         ):
-            return None
+            return frame_index, scene_hash.strip()
 
-    width = getattr(screen, "width", None)
-    height = getattr(screen, "height", None)
     if (
-        not isinstance(width, int)
-        or isinstance(width, bool)
-        or width <= 0
-        or not isinstance(height, int)
-        or isinstance(height, bool)
-        or height <= 0
-        or not isinstance(state.get("width"), int)
-        or isinstance(state.get("width"), bool)
-        or not isinstance(state.get("height"), int)
-        or isinstance(state.get("height"), bool)
-        or state.get("width") != width
-        or state.get("height") != height
+        not isinstance(screen_version, int)
+        or isinstance(screen_version, bool)
+        or screen_version <= 0
+        or not _has_pixel_frame(screen)
     ):
         return None
 
-    scene_hash = state.get("scene_hash")
-    if not isinstance(scene_hash, str) or not scene_hash.strip():
-        return None
-    return frame_index, scene_hash.strip()
+    raw_rgb = getattr(screen, "raw_rgb", None)
+    if isinstance(raw_rgb, bytes) and raw_rgb:
+        frame_bytes = raw_rgb
+    else:
+        encoded = str(getattr(screen, "screenshot_base64", "") or "").split(",", 1)[-1]
+        try:
+            frame_bytes = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            return None
+    return screen_version, hashlib.sha256(frame_bytes).hexdigest()
 
 
 def _has_pixel_frame(screen: Any) -> bool:
@@ -225,11 +233,11 @@ class GUIActionIntent:
             or isinstance(screen_version, bool)
             or screen_version <= 0
         ):
-            raise ValueError("GUI action intent requires a versioned AVCS frame")
+            raise ValueError("GUI action intent requires a versioned desktop frame")
         version = getattr(observation, "perception_version", None)
-        identity = _avcs_identity(screen)
+        identity = _frame_identity(screen)
         if identity is None:
-            raise ValueError("GUI action intent requires trustworthy AVCS frame identity")
+            raise ValueError("GUI action intent requires trustworthy pixel frame identity")
         state_version, scene_hash = identity
         active_window = str(
             getattr(screen, "active_window", "")
@@ -386,13 +394,13 @@ class GUIActionIntent:
             or getattr(screen, "height", 0) != self.source_height
         ):
             reasons.append("display geometry differs from GUI action intent")
-        identity = _avcs_identity(screen)
+        identity = _frame_identity(screen)
         if identity is None:
-            reasons.append("a trustworthy AVCS frame identity is unavailable")
+            reasons.append("a trustworthy pixel frame identity is unavailable")
         elif identity[0] < self.source_state_version:
-            reasons.append("AVCS frame is older than the GUI action intent")
+            reasons.append("pixel frame is older than the GUI action intent")
         if identity is not None and identity[1] != self.source_scene_hash:
-            reasons.append("AVCS scene differs from GUI action intent")
+            reasons.append("pixel frame differs from GUI action intent")
         return tuple(reasons)
 
 

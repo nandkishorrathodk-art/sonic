@@ -108,6 +108,34 @@ def _safe_discovery_context(items: list[str]) -> str:
     return json.dumps({"source": "untrusted_worker_evidence", "items": safe}, separators=(",", ":"))
 
 
+def _available_worker_skill_names() -> list[str]:
+    """Return available worker skills from the runtime capability catalog."""
+    try:
+        from sonic.computer_use.skill_catalog import load_skill_catalog
+
+        return [skill.name for skill in load_skill_catalog().by_status("available")]
+    except Exception as exc:
+        logger.warning("boss_skill_catalog_unavailable", error=str(exc))
+        return []
+
+
+def _normalize_worker_skills(value: Any) -> list[str]:
+    """Keep only catalog-listed skills that are currently marked available."""
+    if not isinstance(value, list):
+        return []
+    available = {name.casefold(): name for name in _available_worker_skill_names()}
+    selected: list[str] = []
+    for raw_name in value:
+        if not isinstance(raw_name, str):
+            continue
+        name = available.get(raw_name.strip().casefold())
+        if name and name not in selected:
+            selected.append(name)
+        if len(selected) >= 8:
+            break
+    return selected
+
+
 class BossAgent:
     """Strategic orchestrator that delegates work to SubAgent workers.
 
@@ -528,6 +556,9 @@ class BossAgent:
             elif phase_planes:
                 self.requested_plane = phase_planes[0]
 
+        objective_complete = False
+        completion_reason = "The objective-level completion check did not confirm full coverage."
+
         # Execute phases
         for phase_idx in range(self.max_phases):
             if self._interrupted or (callable(interrupt_check) and interrupt_check()):
@@ -675,6 +706,7 @@ class BossAgent:
                         "agent_name": _sub_mission_display_name(sub_m, agent_num),
                         "goal": sub_m.goal,
                         "role": sub_m.role,
+                        "skills": list(sub_m.skills),
                         "plane": sub_m.plane,
                         "max_steps": sub_m.max_steps,
                         "sub_agent_number": agent_num,
@@ -881,6 +913,7 @@ class BossAgent:
             is_complete, completion_reason = await self._check_objective_complete(
                 objective, all_findings, all_phase_results
             )
+            objective_complete = is_complete
 
             if is_complete:
                 logger.info("boss_agent_objective_complete", reason=completion_reason[:200])
@@ -984,7 +1017,12 @@ class BossAgent:
                     break
 
         # Synthesize final report
-        report = await self._synthesize_final_report(objective, t_start)
+        report = await self._synthesize_final_report(
+            objective,
+            t_start,
+            objective_complete=objective_complete,
+            completion_reason=completion_reason,
+        )
 
         await self._emit(phase_callback, "boss_report", {
             "status": report.status,
@@ -1022,6 +1060,9 @@ Your job is to analyze the user's objective from first principles and decompose 
 
 USER OBJECTIVE: {objective}
 
+AVAILABLE WORKER SKILLS (advisory; catalog-validated): {json.dumps(_available_worker_skill_names())}
+Assign only relevant exact names from this list; use an empty list when none apply. Skills do not grant permissions.
+
 Apply target-agnostic first-principles reasoning:
 0. OBJECTIVE INTAKE:
    Analyze the user's desired outcome from first principles. The task may use desktop applications, multiple windows, files, software tools, terminal workflows, online services, or a combination of these.
@@ -1045,6 +1086,7 @@ Respond with EXACTLY this JSON format (no extra text):
       "id": "sub-1",
       "name": "Short, distinct worker name",
       "role": "Specific responsibility such as desktop operator, software builder, or verifier",
+            "skills": ["Relevant exact names from AVAILABLE WORKER SKILLS, or []"],
       "goal": "Clear, focused goal for this worker agent with concrete inputs and expected observations.",
       "owned_paths": ["repo/relative/path/or/dir this worker alone may modify"],
       "plane": "dual",
@@ -1062,12 +1104,12 @@ Rules:
 - owned_paths: repository-relative file or directory paths this worker is allowed to MODIFY. Two workers dispatched in the same phase MUST NOT list the same path; split work by file/directory so parallel workers cannot collide. Leave empty for read-only or GUI workers. Never claim a path you did not intend to change.
 - plane: the per-worker execution plane. "headless" = terminal/file/git only (no desktop); use it for purely non-visual work so several such workers can run in parallel. "gui" = visible desktop applications and controls only. "dual" = full agency (desktop AND operator toolkit), the worker chooses per step; use it only when the objective genuinely needs both modalities in one continuous task. Prefer the narrowest plane that fits the work; do not restrict by keyword.
 - A "gui" worker must stay within visible desktop applications and controls. Do not substitute shell, file, or backend actions when a GUI operation fails; report the limitation or replan through another observed GUI path.
-- Keep multi-application desktop GUI tasks (launching, focusing, and switching between 1, 2, or more desktop GUI windows) inside a SINGLE unified sub_mission with plane="gui" and max_steps=30 so window state and visual grounding remain continuous
+- A shared physical desktop is one serialized GUI lane: group tightly coupled window/focus work into one GUI worker when continuous context matters. Assign independent terminal/file work to headless workers so it can run alongside that GUI worker. Do not provision extra desktops.
 - depends_on: list of sub_mission IDs that must complete before this worker starts
-- max_steps should be 10-30 depending on task complexity
+- max_steps must stay within the runtime limit (1-30) and match observed task complexity; do not inflate it to fill a budget
 - priority: higher number = execute first
-- Create 1-3 sub_missions per phase
-- If the objective is a single cohesive workflow, return 1 sub_mission covering the full workflow"""
+- Create only the workers needed to cover genuinely independent outcomes; do not split a cohesive task merely to increase worker count.
+- If the objective is a single cohesive workflow, return one adaptive sub_mission for that workflow."""
 
         try:
             from sonic.llm.schemas import LLMRequest, Message, MessageRole
@@ -1140,6 +1182,7 @@ Rules:
                 plane = "dual"
 
             role = " ".join(str(sm.get("role") or "").split())[:60] or "subagent"
+            skills = _normalize_worker_skills(sm.get("skills"))
 
             raw_paths = sm.get("owned_paths")
             owned_paths: list[str] = []
@@ -1154,6 +1197,7 @@ Rules:
                 name=str(sm.get("name") or "").strip(),
                 goal=goal,
                 role=role,
+                skills=skills,
                 plane=plane,
                 owned_paths=owned_paths,
                 depends_on=depends_on,
@@ -1321,23 +1365,19 @@ Rules:
             scoped_context["delegated_goal"] = sub_mission.goal
             scoped_context["delegated_plane"] = execution_plane
             scoped_context["execution_plane"] = execution_plane
+            scoped_context["subagent_role"] = sub_mission.role
+            scoped_context["delegated_skills"] = list(sub_mission.skills)
             # A worker must know its own write scope. Parallel workers in one
             # phase are dispatched only when their owned paths do not overlap
             # (see the wave path-lock); this tells each worker what that scope
             # actually is so it does not wander into a peer's files.
             scoped_context["owned_paths"] = list(sub_mission.owned_paths or [])
 
-            # Allow structured task decomposition (enable_llm_decomposition=True) for multi-step GUI sub-missions
-            # so sub-agents can follow human workflows (Focus -> Maximize -> Type -> Save).
+            # Decompose bounded GUI work into observable checkpoints, not a
+            # keyword-selected application workflow.
             is_multi_step_gui = (
                 execution_plane in ("gui", "desktop")
-                and (
-                    getattr(sub_mission, "max_steps", 0) > 1
-                    or any(
-                        step_k in getattr(sub_mission, "goal", "").lower()
-                        for step_k in ("focus", "maximize", "type", "save", "click", "window")
-                    )
-                )
+                and getattr(sub_mission, "max_steps", 0) > 1
             )
             enable_decomp = getattr(sub_mission, "enable_llm_decomposition", None)
             if enable_decomp is None:
@@ -2245,6 +2285,9 @@ KNOWN TASK IDS (use these exact IDs in depends_on when referencing prior work):
 FINDINGS SO FAR:
 {all_findings[:2000]}
 
+AVAILABLE WORKER SKILLS (advisory; catalog-validated): {json.dumps(_available_worker_skill_names())}
+Assign only relevant exact names from this list; use an empty list when none apply. Skills do not grant permissions.
+
 EXECUTION PLANE INVARIANT: The active mission execution plane is '{effective_plane}'.
 When it is 'gui' or 'headless' every worker sub_mission must use that plane unless a cross-plane handoff is explicitly required. When it is 'dual' the mission may use either plane: give each worker the narrowest plane that fits its task ('headless' for pure terminal/file work so those workers can run in parallel, 'gui' for visible desktop work, 'dual' only when one worker genuinely needs both).
 
@@ -2257,7 +2300,11 @@ Respond with EXACTLY this JSON format:
   "sub_missions": [
     {{
       "id": "sub-next-1",
+                "name": "Short worker name",
+                "role": "Specific responsibility",
+                "skills": [],
       "goal": "Specific goal for this worker",
+                "owned_paths": [],
       "plane": "{effective_plane}",
       "depends_on": [],
       "max_steps": 4,
@@ -2332,11 +2379,21 @@ If the objective is complete or no more work is needed, return:
             depends_on = [str(x).strip() for x in raw_deps if str(x).strip()] if isinstance(raw_deps, list) else []
             sub_id = str(sm.get("id") or "").strip()
             role = " ".join(str(sm.get("role") or "").split())[:60] or "subagent"
+            skills = _normalize_worker_skills(sm.get("skills"))
+            raw_paths = sm.get("owned_paths")
+            owned_paths: list[str] = []
+            if isinstance(raw_paths, list):
+                for path in raw_paths:
+                    cleaned = " ".join(str(path).split()).strip().strip("/")
+                    if cleaned and cleaned not in owned_paths:
+                        owned_paths.append(cleaned)
             sub_missions.append(SubMission(
                 id=sub_id if sub_id else f"sub-{uuid.uuid4().hex[:8]}",
                 name=str(sm.get("name") or "").strip(),
                 goal=goal,
                 role=role,
+                skills=skills,
+                owned_paths=owned_paths,
                 plane=plane,
                 depends_on=depends_on,
                 max_steps=max(1, min(requested_steps, 30)),
@@ -2393,7 +2450,12 @@ If the objective is complete or no more work is needed, return:
     # ------------------------------------------------------------------
 
     async def _synthesize_final_report(
-        self, objective: str, t_start: float
+        self,
+        objective: str,
+        t_start: float,
+        *,
+        objective_complete: bool = False,
+        completion_reason: str = "",
     ) -> BossReport:
         """Generate the final comprehensive report."""
         total_actions = sum(len(r.traces) for p in self.phases for r in p.results)
@@ -2426,7 +2488,7 @@ If the objective is complete or no more work is needed, return:
 
         if any_waiting_for_human:
             status = "WAITING_FOR_HUMAN"
-        elif all_success and all_verified:
+        elif objective_complete and all_success and all_verified:
             status = "COMPLETE"
         elif any_success:
             status = "PARTIAL"
@@ -2478,6 +2540,14 @@ If the objective is complete or no more work is needed, return:
                     final_summary = re.sub(r"\[Insert[^\]]*\]", "Not verified", final_summary)
             except Exception:
                 final_summary = all_findings[:1000]
+
+        if status != "COMPLETE" and any_success and not objective_complete:
+            reason = " ".join(str(completion_reason).split())[:300]
+            detail = reason or "Full objective coverage was not independently confirmed."
+            final_summary = (
+                f"{final_summary.rstrip()}\n\n"
+                f"Objective coverage not confirmed: {detail}"
+            )
 
         self.thinking_log.append(BossThinking(
             phase=len(self.phases),

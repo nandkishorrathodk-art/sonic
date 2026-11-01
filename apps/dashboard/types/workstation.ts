@@ -32,6 +32,7 @@ export interface WorklogItem {
   agent_name?: string;
   orchestration_event?: "sub_dispatch" | "sub_report" | "sub_heartbeat" | "dispatch_decision" | string;
   worker_role?: string;
+  worker_skills?: string[];
   execution_plane?: "gui" | "headless" | string;
   action_type?: string;
   action_status?: string;
@@ -102,6 +103,7 @@ export interface WorkstationWorker {
   sub_mission_id?: string;
   sub_agent_number?: number | null;
   role?: string;
+  skills?: string[];
   plane?: string;
   goal?: string;
   status: string;

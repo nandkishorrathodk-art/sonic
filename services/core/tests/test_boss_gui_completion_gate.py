@@ -44,6 +44,7 @@ class _VisionJudge:
     def __init__(self, content):
         self.content = content
         self.complete = AsyncMock(return_value=SimpleNamespace(content=content))
+        self.vision_route_ready = MagicMock(return_value=True)
 
 
 def _gui_result():
@@ -67,9 +68,10 @@ def _gui_result():
 
 
 @pytest.mark.asyncio
-async def test_gui_judge_processes_pixels_locally_but_does_not_claim_semantic_completion():
+async def test_gui_judge_confirms_visible_postcondition_from_fresh_screenshot():
     router = _VisionJudge(
-        '{"verdict":"CONFIRMED","visible_evidence":"The report is displayed in the editor."}'
+        '{"verdict":"CONFIRMED","confidence":0.97,'
+        '"visible_evidence":"The requested report is displayed in the editor."}'
     )
     judge = JudgeAgent(computer_provider=_Desktop(), llm_router=router)
     result = _gui_result()
@@ -81,15 +83,19 @@ async def test_gui_judge_processes_pixels_locally_but_does_not_claim_semantic_co
 
     verdict = await judge.evaluate_sub_mission("workspace", sub_mission, result)
 
-    assert verdict.verdict == JudgeVerdict.INCONCLUSIVE
-    assert "processed locally by AVCS" in verdict.notes
-    router.complete.assert_not_awaited()
+    assert verdict.verdict == JudgeVerdict.CONFIRMED
+    assert "Vision Judge" in verdict.evidence_items[-1]
+    request = router.complete.await_args.args[0]
+    assert request.task_type == "vision"
+    assert len(request.messages[1].images) == 1
+    assert result.goal in request.messages[1].content
 
 
 @pytest.mark.asyncio
 async def test_gui_judge_processes_raw_avcs_frame_locally():
     router = _VisionJudge(
-        '{"verdict":"CONFIRMED","visible_evidence":"The requested result is visible."}'
+        '{"verdict":"CONFIRMED","confidence":0.95,'
+        '"visible_evidence":"The requested result is visible."}'
     )
     judge = JudgeAgent(computer_provider=_RawFrameDesktop(), llm_router=router)
     result = _gui_result()
@@ -100,17 +106,18 @@ async def test_gui_judge_processes_raw_avcs_frame_locally():
         result,
     )
 
-    assert verdict.verdict == JudgeVerdict.INCONCLUSIVE
-    assert "processed locally by AVCS" in verdict.notes
-    assert len(verdict.evidence_items) == 1
-    assert "frame 1" in verdict.evidence_items[0]
-    router.complete.assert_not_awaited()
+    assert verdict.verdict == JudgeVerdict.CONFIRMED
+    assert any("frame 1" in item for item in verdict.evidence_items)
+    request = router.complete.await_args.args[0]
+    assert len(request.messages[1].images) == 1
+    assert "image/png" == request.messages[1].images[0].media_type
 
 
 @pytest.mark.asyncio
 async def test_gui_judge_does_not_confirm_ambiguous_screenshot():
     router = _VisionJudge(
-        '{"verdict":"INCONCLUSIVE","visible_evidence":"The target state is not legible."}'
+        '{"verdict":"INCONCLUSIVE","confidence":0.4,'
+        '"visible_evidence":"The target state is not legible."}'
     )
     judge = JudgeAgent(computer_provider=_Desktop(), llm_router=router)
     result = _gui_result()
@@ -122,6 +129,53 @@ async def test_gui_judge_does_not_confirm_ambiguous_screenshot():
     )
 
     assert verdict.verdict == JudgeVerdict.INCONCLUSIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    (
+        '{"verdict":"CONFIRMED","confidence":0.89,"visible_evidence":"A save icon is visible."}',
+        "not valid JSON",
+    ),
+)
+async def test_gui_judge_abstains_on_low_confidence_or_malformed_reply(content):
+    router = _VisionJudge(content)
+    judge = JudgeAgent(computer_provider=_Desktop(), llm_router=router)
+
+    verdict = await judge.evaluate_sub_mission(
+        "workspace",
+        SubMission(id="gui-task", goal="Save the requested report", plane="gui"),
+        _gui_result(),
+    )
+
+    assert verdict.verdict == JudgeVerdict.INCONCLUSIVE
+    assert verdict.self_attestation_rejected is True
+
+
+@pytest.mark.asyncio
+async def test_gui_judge_can_verify_when_optional_avcs_reflex_is_unavailable(monkeypatch):
+    from sonic.computer_use import avcs_perception
+
+    class _UnavailablePerception:
+        def __init__(self):
+            raise RuntimeError("AVCS is unavailable")
+
+    monkeypatch.setattr(avcs_perception, "AVCSPerception", _UnavailablePerception)
+    router = _VisionJudge(
+        '{"verdict":"CONFIRMED","confidence":0.96,'
+        '"visible_evidence":"The requested report is displayed."}'
+    )
+    judge = JudgeAgent(computer_provider=_Desktop(), llm_router=router)
+
+    verdict = await judge.evaluate_sub_mission(
+        "workspace",
+        SubMission(id="gui-task", goal="Display the requested report", plane="gui"),
+        _gui_result(),
+    )
+
+    assert verdict.verdict == JudgeVerdict.CONFIRMED
+    assert any("Vision Judge" in item for item in verdict.evidence_items)
 
 
 @pytest.mark.asyncio
@@ -390,3 +444,85 @@ async def test_final_boss_report_is_not_complete_without_judge_confirmation():
     report = await boss._synthesize_final_report("Update the visible document", time.perf_counter())
 
     assert report.status == "PARTIAL"
+
+
+@pytest.mark.asyncio
+async def test_final_boss_report_requires_objective_coverage_confirmation():
+    boss = BossAgent(
+        computer_provider=_Desktop(),
+        llm_router=_VisionJudge("Only one of two requested outcomes was verified."),
+    )
+    boss.phases.append(Phase(
+        phase_number=1,
+        name="Partial work",
+        results=[
+            SubMissionResult(
+                sub_mission_id="verified-subtask",
+                goal="Create a folder for project notes",
+                success=True,
+                evidence_verified=True,
+                findings_summary="The project notes folder was independently verified.",
+            )
+        ],
+    ))
+
+    report = await boss._synthesize_final_report(
+        "Create a folder for project notes and save a report",
+        time.perf_counter(),
+        objective_complete=False,
+        completion_reason="Verified results do not cover every meaningful part of the objective.",
+    )
+
+    assert report.status == "PARTIAL"
+    assert "Objective coverage not confirmed" in report.findings_summary
+
+
+@pytest.mark.asyncio
+async def test_boss_run_preserves_rejected_objective_coverage_in_final_report():
+    boss = BossAgent(
+        computer_provider=_Desktop(),
+        llm_router=_VisionJudge("One verified subtask does not complete the objective."),
+        requested_plane="headless",
+    )
+    phase = Phase(
+        phase_number=1,
+        name="Partial objective",
+        sub_missions=[
+            SubMission(
+                id="sub-one",
+                goal="Create a folder for project notes",
+                plane="headless",
+            )
+        ],
+    )
+    boss.phases = [phase]
+    boss._dispatch_sub_agent = AsyncMock(return_value=SubMissionResult(
+        sub_mission_id="sub-one",
+        goal="Create a folder for project notes",
+        success=True,
+        evidence_verified=True,
+        actions_taken=1,
+        traces=[SimpleNamespace(
+            action_type=ComputerActionType.TERMINAL_EXEC,
+            target_resource="mkdir project-notes",
+            actual_observation="Folder created and checked.",
+            status="SUCCESS",
+            exit_code=0,
+        )],
+        findings_summary="The notes folder was created and independently checked.",
+    ))
+    boss._aggregate_findings = AsyncMock(return_value="The notes folder exists.")
+    boss._check_objective_complete = AsyncMock(return_value=(
+        False,
+        "The report requested by the objective is still missing.",
+    ))
+    boss._plan_next_phase = AsyncMock(return_value=None)
+
+    report = await boss.run(
+        "workspace",
+        "Create a folder for project notes and save a report",
+    )
+
+    assert boss._check_objective_complete.await_count == 1
+    assert report.status == "PARTIAL"
+    assert "report requested by the objective is still missing" in report.findings_summary

@@ -49,6 +49,8 @@ class LLMSettings(BaseSettings):
     deepseek_api_key: str = ""
     openrouter_api_key: str = ""
     groq_api_key: str = ""
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     local_llm_url: str = "http://localhost:11434"
@@ -112,6 +114,8 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     openrouter_api_key: str = ""
     groq_api_key: str = ""
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     nvidia_api_key: str = ""
     embedding_provider: str = Field(
         default="legacy_hash",
@@ -139,7 +143,7 @@ class Settings(BaseSettings):
     )
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     local_llm_url: str = "http://localhost:11434"
-    default_llm_provider: str = "nvidia"
+    default_llm_provider: str = "groq"
 
     # -- Database --
     neo4j_uri: str = "bolt://localhost:7687"
