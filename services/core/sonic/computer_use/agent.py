@@ -2485,7 +2485,13 @@ class ComputerUseAgent:
                     "GUI payload must contain a complete valid integer coordinate x/y pair.",
                 )
             payload_coordinates = (x, y)
-            if payload.get("coordinate_space") != "screen_pixels":
+            declared_space = payload.get("coordinate_space")
+            if declared_space is None:
+                # Integer x/y in the model's own action payload are screen
+                # pixels by contract; an absent declaration is not an
+                # ambiguity. A *present* non-pixel declaration still blocks.
+                payload["coordinate_space"] = "screen_pixels"
+            elif declared_space != "screen_pixels":
                 if target_coordinates == payload_coordinates:
                     payload["coordinate_space"] = "screen_pixels"
                 else:

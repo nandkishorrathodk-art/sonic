@@ -839,6 +839,46 @@ class TestGUIActionDispatch:
         assert payload == {}
         assert "conflicting screen coordinates" in reason
 
+    def test_gui_payload_integer_coordinates_without_declaration_are_screen_pixels(self):
+        """A payload with integer x/y but no coordinate_space must not be blocked.
+
+        Regression: the model commonly emits
+        ``PAYLOAD: {"x": 17, "y": 16, "postcondition": {...}}`` with an
+        explicit integer point and a semantic TARGET. Requiring a redundant
+        ``coordinate_space`` declaration blocked a valid click and stopped the
+        worker with a gui-contract-violation.
+        """
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+
+        action, target, payload, reason = agent._parse_gui_action_response(
+            (
+                'ACTION: GUI_CLICK\nTARGET: File System\n'
+                'PAYLOAD: {"x": 17, "y": 16, '
+                '"postcondition": {"screen_changed": true}}\nEXPECTED: Opens'
+            ),
+            "",
+        )
+
+        assert action == ComputerActionType.GUI_CLICK, reason
+        assert payload["x"] == 17 and payload["y"] == 16
+        assert payload["coordinate_space"] == "screen_pixels"
+
+    def test_gui_payload_explicit_non_pixel_declaration_still_blocks(self):
+        """An explicit non-pixel coordinate_space must still fail closed."""
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+
+        action, target, payload, reason = agent._parse_gui_action_response(
+            (
+                'ACTION: GUI_CLICK\nTARGET: File System\n'
+                'PAYLOAD: {"x": 500, "y": 500, '
+                '"coordinate_space": "normalized_1000"}\nEXPECTED: Opens'
+            ),
+            "",
+        )
+
+        assert action == ActionExecutionStatus.BLOCKED
+        assert "coordinate_space=screen_pixels" in reason
+
     def test_gui_keypress_requires_explicit_key(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
         action, target, payload, reason = agent._parse_gui_action_response(
