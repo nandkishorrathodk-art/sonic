@@ -5646,3 +5646,54 @@ the new paths.
 
 Both closed with an explanatory comment (nothing to preserve). Result: **0 open
 PRs**, `main` green.
+
+## Live GUI run: three real defects fixed + CI green (2026-11-01)
+
+Ran the real `ComputerUseAgent` / `BossAgent` against the live
+`sonic-desktop-workstation` with the real NVIDIA vision model. GUI work was
+blocked end-to-end by three genuine defects (all fixed, PR #97, CI green):
+
+1. **Vision routing pointed at unreachable models.** `vision` and `computer_use`
+   used `openrouter/openai/gpt-4o` with a `nvidia/meta/llama-3.2-11b-vision-instruct`
+   fallback whose model id **404s** on this account, so GUI reasoning never got a
+   usable vision answer. `configs/models.yaml` now uses
+   `nvidia/meta/llama-3.2-90b-vision-instruct` (~4 s/screenshot, verified
+   reachable) with the 11B id as secondary fallback only.
+2. **The GUI parser rejected a valid click payload.** The normal model shape —
+   integer `x`/`y` plus a semantic `TARGET` — was blocked with
+   `gui-contract-violation` because it omitted `coordinate_space=screen_pixels`.
+   `computer_use/agent.py` now treats an **absent** declaration as screen pixels;
+   a **present** non-pixel declaration still fails closed. After the fix a worker
+   executed real `GUI_CLICK`s, each `VERIFIED` by a real AVCS scene change
+   (`servo: converged=True residual=0.0px`).
+3. **Image requests fell back to a text-only model.** `llm/router.py` +
+   `llm/providers/custom.py` now skip fallback models without image support, so a
+   vision 404 no longer degrades into `400 "multimodal processing is not enabled"`.
+
+**Honest state after the fix:** the objective "Open the terminal application on
+the desktop." really launched `xfce4-terminal` (confirmed via `wmctrl -l` /
+`pgrep`), and the Boss correctly replanned after a failed GUI phase and completed
+the launch on its terminal plane. The mission still ends `UNVERIFIED` because no
+evaluated local AVCS task-verification head exists — the documented fail-closed
+contract, not a regression. Semantic clicks and text entry remain blocked by
+design until `SONIC_AVCS_GROUNDING_CHECKPOINT` / `SONIC_AVCS_FOCUS_CHECKPOINT`
+are trained from real demonstrations.
+
+**Dashboard:** counted steps (items with a `step_index`) and their thoughts were
+rendered as separate cards while thoughts were dropped entirely. They now fold
+into one collapsible **Reasoning Trace** panel (step count + elapsed time,
+expandable to per-step status). Commands, files, approvals, worker cards and
+banner items (`Agent Desktop Observation`, `Boss Agent Orchestration`, worker
+dispatches) stay in the open feed. Verified against real data: 12 counted steps +
+43 thoughts fold; 5 banner items stay visible.
+
+**Environment note:** `redis_queue` health shows `degraded` (transient in-memory
+fallback) whenever the `sonic-redis` container is not running; start it with
+`docker compose up -d redis` (no host root needed). `daytona_cloud: degraded` is
+expected — the local Docker workstation is the configured provider. `llm_router:
+degraded` is an honest self-report ("credentials configured; remote
+reachability/comprehension not pre-verified"), not an outage.
+
+Full `services/core` suite: **2664 passed, 40 skipped, 0 failed**; ruff clean;
+dashboard `tsc --noEmit` + `next build` clean. `scripts/novnc_proxy.py` was added
+so an operator on another machine can watch the loopback-only noVNC desktop.
