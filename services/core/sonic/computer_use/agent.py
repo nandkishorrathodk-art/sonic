@@ -7235,8 +7235,26 @@ class ComputerUseAgent:
             explicit_pixel_target is None and payload_pixel_target is None
         )
         if action_type in coordinate_actions and natural_target_needs_live_grounding:
+            # A described target ("Save button") with no explicit pixel point is
+            # resolved here. `_ground_target_with_avcs` prefers an evaluated
+            # local AVCS checkpoint when configured and otherwise asks the
+            # configured vision route ("where is X?"); SONIC still owns the
+            # decision and the dispatch. When neither can answer, it returns
+            # None and the action fails closed rather than guessing a pixel.
             grounding_reason = "vision model did not return explicit screen-pixel coordinates"
             grounded = None
+            try:
+                grounded = await self._ground_target_with_avcs(target_resource)
+            except Exception as exc:
+                # Grounding is an optional tool; any failure (no frame, no
+                # checkpoint, no vision route) degrades to an explicit block
+                # rather than propagating and crashing the action.
+                grounding_reason = f"grounding unavailable: {exc}"
+                logger.info(
+                    "gui_semantic_grounding_unavailable",
+                    target=target_resource,
+                    error=str(exc),
+                )
             if grounded is None:
                 detail = f" {grounding_reason}" if grounding_reason else ""
                 actual_obs_str = (

@@ -5754,3 +5754,58 @@ Full `services/core` suite: **2629 passed, 40 skipped, 0 failed**; ruff clean on
 every changed file. No live GUI task was run this pass (no workstation/creds);
 this removes dead AVCS-model plumbing and aligns docs/catalog, it does not add
 new capability.
+
+## GUI semantic grounding actually wired (2026-11-01)
+
+Follow-up to the AVCS-as-tool pass. While answering "can SONIC work the GUI?",
+found the semantic-grounding bridge was **dead**: the dispatch site hardcoded
+`grounded = None`, so a described target ("Save button") was always blocked
+even though `_ground_target_with_avcs` (local AVCS checkpoint -> vision route)
+existed and was fully implemented.
+
+### Change (`computer_use/agent.py`)
+The coordinate-action branch now actually calls the grounding tool:
+
+```python
+grounded = None
+try:
+    grounded = await self._ground_target_with_avcs(target_resource)
+except Exception as exc:            # optional tool: any failure -> block
+    grounding_reason = f"grounding unavailable: {exc}"
+if grounded is None:
+    ... BLOCKED (fail closed, no blind click)
+```
+
+- `_ground_target_with_avcs` prefers an evaluated local AVCS checkpoint when
+  configured and otherwise asks the configured vision route ("where is X?").
+  AVCS stays an **optional tool**; SONIC still owns the decision and dispatch.
+- Any grounding failure degrades to an explicit BLOCKED (exit 126) rather than
+  propagating and crashing the action. No pixel is ever guessed.
+
+### Tests (the reason this was invisible before)
+- `test_closed_loop_visual_delta_and_judge.py`: the autouse fixture stubbed
+  `_ground_target_with_avcs` to return a **tuple** `(240,180)` while the real
+  method returns a **dict** `{"x","y","engine"}`. The fixture was stale and had
+  never run (grounding was dead), so wiring it up surfaced a `TypeError`. Fixed
+  the fixture to the real contract.
+- `test_valid_typing_payload_remains_blocked_without_local_focus_verification`:
+  used a live auto-built router (a real ~15 s network call) and asserted
+  `gui_action.await_count == 0`, which was only true while grounding was dead.
+  Now stubs a deterministic offline vision route returning `focused=false` and
+  asserts no `TYPE` action is dispatched. Intent preserved, test made offline.
+- `test_agent_quality_improvements.py` / `test_desktop_navigation_and_action_loop.py`:
+  the two "unresolved semantic target blocks" tests asserted the old exact
+  reason string; updated to the new honest reason
+  (`no screenshot-grounded pixel point` + `grounding unavailable`). Their real
+  intent (fail closed, no blind click at (0,0)) is unchanged.
+- Added `test_semantic_target_is_grounded_and_dispatched`: with the grounding
+  tool stubbed to answer, a described target resolves to (640,360) and a real
+  `GUIActionType.CLICK` is dispatched at that point (status UNVERIFIED when the
+  mock screen does not change — honest).
+
+### Verified
+Full `services/core` suite: **2630 passed, 40 skipped, 0 failed**; ruff clean.
+Honest scope: this wires the bridge and proves it via the real dispatch path
+with a stubbed grounder. It does not add a grounder model; a live semantic GUI
+task still needs a configured vision route (or a local AVCS checkpoint) and was
+not run in this environment (no Docker / credentials here).
