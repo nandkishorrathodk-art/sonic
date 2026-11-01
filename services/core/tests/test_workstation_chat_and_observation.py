@@ -335,6 +335,19 @@ def test_avcs_capability_state_separates_tool_from_vision_route(monkeypatch):
     # route legitimately enables these actions; that path is covered by
     # test_avcs_capability_state_reports_vision_route.
     monkeypatch.setenv("SONIC_ENABLE_VLM_GROUNDING", "0")
+    # The configured-route flag depends on live provider credentials, so stub
+    # the router to keep this contract test environment-independent (CI has no
+    # API keys). The no-credentials case is covered separately below.
+    class _Router:
+        def _resolve_provider(self, **_kwargs):
+            return object(), "vision-model"
+
+        def vision_route_ready(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "sonic.api.routes.llm.get_model_router", lambda: _Router()
+    )
 
     capability = avcs_capability_state()
 
@@ -345,6 +358,36 @@ def test_avcs_capability_state_separates_tool_from_vision_route(monkeypatch):
     assert capability["gui_actions_ready"] is False
     assert capability["vision_route_configured"] is True
     assert "optional" in capability["reason"].lower()
+
+
+def test_avcs_capability_state_reports_missing_vision_route(monkeypatch):
+    """Without a ready vision route the surface says so honestly (CI state)."""
+    from sonic.api.routes.workstation_perception import avcs_capability_state
+
+    monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
+    monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
+
+    class _NoRouteRouter:
+        def _resolve_provider(self, **_kwargs):
+            raise RuntimeError("no vision-capable provider is ready")
+
+        def vision_route_ready(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "sonic.api.routes.llm.get_model_router", lambda: _NoRouteRouter()
+    )
+
+    capability = avcs_capability_state()
+
+    assert capability["reflex_perception"] is True
+    assert capability["avcs_observe_available"] is True
+    assert capability["semantic_grounding"] is False
+    assert capability["focus_verification"] is False
+    assert capability["gui_actions_ready"] is False
+    assert capability["vision_route_configured"] is False
+    assert capability["vision_route_ready"] is False
+    assert "image-capable" in capability["reason"].lower()
 
 
 def test_avcs_capability_state_reports_vision_route(monkeypatch):
