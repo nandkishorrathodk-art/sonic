@@ -150,7 +150,7 @@ async def test_unresolved_semantic_click_stays_blocked_without_grounded_coordina
         "click search",
     )
     assert t1.status == ActionExecutionStatus.BLOCKED
-    assert "screen-pixel coordinates" in t1.actual_observation.lower()
+    assert "no screenshot-grounded pixel point" in t1.actual_observation.lower()
 
     t2 = await agent.execute_action(
         comp.workspace_id,

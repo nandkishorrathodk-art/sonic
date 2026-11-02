@@ -48,8 +48,14 @@ AVCS is a service that SONIC calls. The call direction is one-way:
 
 | SONIC calls | AVCS returns | Source |
 |---|---|---|
-| `_ground_target_with_avcs(query)` | a screen point, or nothing | `computer_use/agent.py:6119`, `:6963` |
-| `_verify_gui_focus_with_avcs(...)` | a focus verdict | `computer_use/agent.py:7498` |
+| the vision route (`_resolve_vlm_target`) | a screen point, or nothing | `computer_use/grounding.py` |
+| `AVCS_OBSERVE` (read-only reflex tool) | frame identity, scene/change/motion metadata | `computer_use/avcs_perception.py` |
+| the vision route (`_verify_gui_focus_with_vision`) | a focus verdict | `computer_use/agent.py` |
+
+AVCS is an **optional reflex tool**, not a required model. A local AVCS
+grounding checkpoint or focus head takes precedence only when one is
+configured; otherwise SONIC uses the configured vision route, and blocks the
+action when that route cannot return explicit evidence.
 
 AVCS's own awareness loop is documented as observation-only:
 
@@ -150,23 +156,24 @@ grounding, not by the frame rate.
 | SONIC does | Where |
 |---|---|
 | Decide and plan | `computer_use/agent.py:choose_action` |
-| Ask AVCS for a target | `_ground_target_with_avcs` |
+| Resolve a described target | `computer_use/grounding.py:_resolve_vlm_target` (or a local AVCS checkpoint) |
 | Dispatch clicks | `computer/docker_computer.py:gui_action` |
 | Dispatch typing | `computer/docker_computer.py` + `computer_use/motor.py` |
-| Verify with AVCS | `_verify_gui_focus_with_avcs` |
+| Verify focus | `_verify_gui_focus_with_vision` (or a local AVCS focus head) |
 | Replan on failure | agent replan loop |
 
 ---
 
-## 9. The two missing capability slots
+## 9. The two capability slots
 
-Everything above is wired except two models. Both are perception inputs to
-SONIC; neither is an actor.
+Both are perception inputs to SONIC; neither is an actor. Both are optional:
+the vision route is the default, and a local AVCS checkpoint only takes
+precedence when one is configured and passes its held-out evaluation.
 
 | Slot | Purpose | Status | Who consumes it |
 |---|---|---|---|
-| Grounding model | "where is X?" | Not trained / not wired | SONIC agent |
-| Focus head | "is the cursor in a text field?" | Not trained | SONIC agent |
+| Grounding | "where is X?" | vision route (or local AVCS checkpoint) | SONIC agent |
+| Focus | "is the cursor in a text field?" | vision route (or local AVCS focus head) | SONIC agent |
 
 When both exist, SONIC can click a named control and type into a verified
 field — using its own provider, under its own control.
@@ -176,8 +183,11 @@ field — using its own provider, under its own control.
 ## 10. Summary
 
 - **SONIC operates AVCS.** Not the reverse.
-- **AVCS is eyes only** — it perceives, points, and verifies. It never acts.
+- **AVCS is an optional read-only reflex tool** — it perceives and reports; it
+  never acts and is never a required model.
 - **The brain is text-only** and never receives a pixel.
-- **The grounding model is a per-step tool**, not a real-time loop.
-- **Two perception slots remain empty:** grounding and focus. Filling them is
-  the whole remaining GUI project.
+- **Grounding is a per-step tool** (vision route, or a local AVCS checkpoint if
+  configured), not a real-time loop.
+- **Two perception slots** — grounding and focus — are served by the vision
+  route by default, with a local AVCS checkpoint taking precedence only when
+  configured and evaluated.

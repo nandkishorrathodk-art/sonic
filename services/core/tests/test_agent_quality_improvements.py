@@ -20,7 +20,7 @@ import time
 import pytest
 from PIL import Image
 
-from sonic.computer.models import ComputerState, GitStatusInfo, ScreenObservation
+from sonic.computer.models import ComputerState, GitStatusInfo, GUIActionType, ScreenObservation
 from sonic.computer_use.agent import ComputerUseAgent
 from sonic.computer_use.models import (
     ActionExecutionStatus,
@@ -643,11 +643,50 @@ async def test_visual_grounding_unresolved_blocks_without_blind_click():
     )
 
     assert trace.status == ActionExecutionStatus.BLOCKED
-    assert "screen-pixel coordinates" in trace.actual_observation.lower()
+    # Fail closed: no grounded pixel point was produced, so the click is blocked
+    # rather than blindly aimed at (0, 0). The reason names the missing point
+    # and the grounding tool that could not supply it.
+    obs = trace.actual_observation.lower()
+    assert "no screenshot-grounded pixel point" in obs
+    assert "grounding unavailable" in obs
     # Ensure provider gui_action was NOT called with (0, 0)
     for act in provider.gui_actions_taken:
         if getattr(act, "action", None) == "click":
             assert not (act.x == 0 and act.y == 0)
+
+
+@pytest.mark.asyncio
+async def test_semantic_target_is_grounded_and_dispatched(monkeypatch):
+    """A described target is resolved through the grounding tool, then clicked.
+
+    AVCS/vision grounding is an optional tool: when it can answer "where is X?"
+    the click is dispatched at that point; SONIC keeps ownership of the action.
+    """
+    provider = DummyComputerProvider()
+    agent = ComputerUseAgent(computer_provider=provider)
+    await agent.observe("ws-1")
+
+    async def _grounded(self, target, *args, **kwargs):
+        return {"x": 640, "y": 360, "engine": "vlm_grounder"}
+
+    monkeypatch.setattr(ComputerUseAgent, "_ground_target_with_avcs", _grounded)
+
+    trace = await agent.execute_action(
+        "ws-1",
+        ComputerActionType.GUI_CLICK,
+        "Login button",
+        {},
+        "click login",
+    )
+
+    assert trace.status != ActionExecutionStatus.BLOCKED, trace.actual_observation
+    assert "Visual grounding resolved 'Login button' to (640, 360)" in trace.actual_observation
+    clicked = [
+        act for act in provider.gui_actions_taken
+        if act.action == GUIActionType.CLICK
+    ]
+    assert clicked, "grounded click was never dispatched"
+    assert (clicked[-1].x, clicked[-1].y) == (640, 360)
 
 
 # ---------------------------------------------------------------------------

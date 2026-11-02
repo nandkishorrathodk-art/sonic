@@ -669,6 +669,28 @@ class CustomLLMProvider(LLMProvider):
                 # All fallbacks exhausted — re-raise original
             raise
 
+    def _request_has_images(self, request: LLMRequest) -> bool:
+        """Whether any message in the request carries image content."""
+        return any(getattr(message, "has_images", False) for message in request.messages)
+
+    def _model_supports_images(self, model_name: str) -> bool:
+        """Whether this provider's model can accept image content.
+
+        Mirrors ``ModelRouter._model_supports_images`` so the provider-level
+        model fallback and the router-level provider fallback agree on what
+        counts as vision-capable.
+        """
+        normalized = (model_name or "").lower()
+        capabilities = self.model_capabilities.get(model_name)
+        if capabilities is None:
+            capabilities = next(
+                (v for k, v in self.model_capabilities.items() if k.lower() == normalized),
+                None,
+            )
+        if capabilities is not None:
+            return "vision" in capabilities
+        return any(marker in normalized for marker in ("vision", "vl", "gpt-4o", "claude"))
+
     async def _try_fallback_models(
         self, request: LLMRequest, original_model: str
     ) -> LLMResponse | None:
@@ -680,6 +702,13 @@ class CustomLLMProvider(LLMProvider):
         """
         for fb_model in self.fallback_models:
             if fb_model == original_model or fb_model in self._unavailable_models:
+                continue
+            if request is not None and self._request_has_images(request) and not self._model_supports_images(fb_model):
+                # Never downgrade a multimodal request to a text-only model: the
+                # provider answers with a 400 that hides the real vision failure.
+                logger.warning(
+                    "model_fallback_skipped_not_vision_capable", name=self.name, model=fb_model
+                )
                 continue
             try:
                 request.model = fb_model

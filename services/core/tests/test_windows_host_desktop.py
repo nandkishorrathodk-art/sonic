@@ -4,7 +4,6 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-import base64
 
 import numpy as np
 import pytest
@@ -22,7 +21,6 @@ from sonic.computer.models import (
     GUIActionType,
 )
 from sonic.computer.windows_host import WindowsHostAVCSComputerProvider
-from sonic.computer_use.agent import ComputerUseAgent
 
 
 @dataclass(frozen=True)
@@ -333,29 +331,37 @@ async def test_host_provider_refuses_cross_tenant_desktop_reassignment():
 
 
 @pytest.mark.asyncio
-async def test_focus_verifier_rejects_unqualified_boolean_success():
-    agent = ComputerUseAgent(computer_provider=SimpleNamespace())
-    agent._avcs_perception = SimpleNamespace(
-        verify_focus_png=lambda *_args: {
-            "focused": True,
-            "evidence": "field appears active",
-        }
-    )
-    screen = SimpleNamespace(
-        screenshot_base64=base64.b64encode(b"local test pixels").decode("ascii"),
-        frame_id=4,
-        avcs_state={"scene_hash": "current-scene"},
-    )
+async def test_focus_verification_fails_closed_without_an_evaluated_checkpoint(monkeypatch):
+    """AVCS is an optional reflex tool: focus verification must fail closed when
+    no evaluated local focus checkpoint is configured, and an unqualified
+    boolean 'success' must never be accepted as focus evidence."""
+    from sonic.computer_use.avcs_perception import AVCSPerception
 
-    focused, reason = await agent._verify_gui_focus_with_avcs(
-        screen,
-        x=2,
-        y=1,
-        target="text field",
-    )
+    monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
+    perception = AVCSPerception()
+    assert perception.focus_verifier_configured is False
+    assert perception.focus_verifier_ready is False
 
-    assert not focused
-    assert "held-out focus-precision evaluation" in reason
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    with pytest.raises(RuntimeError, match="SONIC_AVCS_FOCUS_CHECKPOINT is not configured"):
+        perception.verify_focus_rgb_bytes(frame.tobytes(), 4, 4, 2, 1, "text field")
+
+
+@pytest.mark.asyncio
+async def test_focus_metadata_validation_rejects_unqualified_verifier():
+    """A verifier without demonstration provenance / held-out evidence must be
+    rejected — a bare `focused=True` is not qualifying evidence."""
+    from sonic.computer_use.avcs_perception import AVCSPerception
+
+    unqualified = SimpleNamespace(
+        is_trained=True,
+        checkpoint_metadata={
+            "dataset_provenance": "something_else",
+            "evaluation": {"metric": "focus_verification_precision", "passed": True},
+        },
+    )
+    with pytest.raises(ValueError):
+        AVCSPerception._validated_focus_metadata(unqualified)
 
 
 @pytest.mark.asyncio

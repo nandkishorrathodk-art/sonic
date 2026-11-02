@@ -36,7 +36,7 @@ from sonic.computer_use.models_boss import SubMission, SubMissionResult
 def _keep_visual_grounding_offline(monkeypatch):
     """Use deterministic mocked grounding; these unit tests never call a model."""
     async def _grounded_target(self, *args, **kwargs):
-        return (240, 180)
+        return {"x": 240, "y": 180, "engine": "vlm_grounder"}
 
     monkeypatch.setattr(
         ComputerUseAgent,
@@ -435,6 +435,20 @@ async def test_typing_verification_rejects_wrong_field_targets():
 async def test_valid_typing_payload_remains_blocked_without_local_focus_verification():
     provider = _mock_static_gui_provider("diff_screen_3")
     agent = ComputerUseAgent(computer_provider=provider)
+    # Deterministic, offline vision route: the focus cue is NOT confirmed, so
+    # typing must fail closed. The focus click itself may still be dispatched.
+    agent.llm_router = MagicMock()
+    agent.llm_router.complete = AsyncMock(
+        return_value=MagicMock(
+            content=json.dumps(
+                {
+                    "focused": False,
+                    "confidence": 0.10,
+                    "evidence": "No caret or focus outline is visible at that point.",
+                }
+            )
+        )
+    )
     await agent.observe("ws-1")
 
     trace = await agent.execute_action(
@@ -445,7 +459,11 @@ async def test_valid_typing_payload_remains_blocked_without_local_focus_verifica
         "Type query",
     )
     assert trace.status == ActionExecutionStatus.BLOCKED, trace.actual_observation
-    assert provider.gui_action.await_count == 0
+    # No text may be typed when focus is unconfirmed: no TYPE action is sent.
+    dispatched = [
+        call.args[1].action for call in provider.gui_action.call_args_list
+    ]
+    assert GUIActionType.TYPE not in dispatched
 
 
 # =========================================================================
