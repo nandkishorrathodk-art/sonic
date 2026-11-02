@@ -6,20 +6,17 @@ from unittest.mock import MagicMock
 from sonic.computer_use.agent import ComputerUseAgent
 
 
-def _agent(*, grounder_ready: bool) -> ComputerUseAgent:
-    agent = ComputerUseAgent(
+def _agent() -> ComputerUseAgent:
+    return ComputerUseAgent(
         computer_provider=MagicMock(),
         llm_router=MagicMock(),
         tenant_id="prompt-check",
         execution_plane="gui",
     )
-    # Stub the capability probe so the test does not need AVCS on disk.
-    agent._avcs_grounder_ready = lambda: grounder_ready  # type: ignore[method-assign]
-    return agent
 
 
 def test_prompt_without_grounder_uses_attached_screenshot_coordinates():
-    prompt = _agent(grounder_ready=False)._gui_only_system_prompt()
+    prompt = _agent()._gui_only_system_prompt()
     assert "attached fresh workstation screenshot" in prompt
     assert "screen-pixel coordinates" in prompt
     assert "coordinate_space to screen_pixels" in prompt
@@ -29,32 +26,25 @@ def test_prompt_without_grounder_uses_attached_screenshot_coordinates():
 
 
 def test_prompt_without_grounder_forbids_inventing_apps():
-    prompt = _agent(grounder_ready=False)._gui_only_system_prompt()
+    prompt = _agent()._gui_only_system_prompt()
     assert "Available Installed Desktop Applications" in prompt
     assert "do not invent a binary name" in prompt
 
 
-def test_prompt_does_not_depend_on_grounder_readiness():
-    prompt = _agent(grounder_ready=True)._gui_only_system_prompt()
-    assert "No AVCS grounding checkpoint is configured" not in prompt
+def test_prompt_uses_attached_screenshot_regardless_of_grounder():
+    prompt = _agent()._gui_only_system_prompt()
     assert "attached fresh workstation screenshot" in prompt
     assert "screen-pixel coordinates" in prompt
 
 
-def test_grounder_readiness_probe_fails_closed_without_checkpoint(monkeypatch):
-    """The real probe must report False when no checkpoint env var is set."""
-    monkeypatch.delenv("SONIC_AVCS_GROUNDING_CHECKPOINT", raising=False)
-    agent = ComputerUseAgent(
-        computer_provider=MagicMock(),
-        llm_router=MagicMock(),
-        tenant_id="probe-check",
-        execution_plane="gui",
-    )
-    assert agent._avcs_grounder_ready() is False
+def test_prompt_is_grounder_agnostic():
+    """AVCS is an optional reflex tool; the GUI prompt must not depend on it."""
+    prompt = _agent()._gui_only_system_prompt()
+    assert "Do not use AVCS to identify controls" in prompt
 
 
 def test_gui_prompt_is_json_action_contract():
-    prompt = _agent(grounder_ready=False)._gui_only_system_prompt()
+    prompt = _agent()._gui_only_system_prompt()
     assert "exactly one JSON object" in prompt
     assert "GOAL_COMPLETE" in prompt
 

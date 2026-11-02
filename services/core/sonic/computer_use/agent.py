@@ -2485,7 +2485,13 @@ class ComputerUseAgent:
                     "GUI payload must contain a complete valid integer coordinate x/y pair.",
                 )
             payload_coordinates = (x, y)
-            if payload.get("coordinate_space") != "screen_pixels":
+            declared_space = payload.get("coordinate_space")
+            if declared_space is None:
+                # Integer x/y in the model's own action payload are screen
+                # pixels by contract; an absent declaration is not an
+                # ambiguity. A *present* non-pixel declaration still blocks.
+                payload["coordinate_space"] = "screen_pixels"
+            elif declared_space != "screen_pixels":
                 if target_coordinates == payload_coordinates:
                     payload["coordinate_space"] = "screen_pixels"
                 else:
@@ -6076,164 +6082,6 @@ class ComputerUseAgent:
         self._last_servo_receipt = receipt.to_dict()
         return self._last_servo_receipt
 
-    def _avcs_focus_head_ready(self) -> bool:
-        """True only when a configured, evaluated local focus head can be loaded.
-
-        This is a pure capability probe: it never dispatches an action and never
-        treats a configured checkpoint path as readiness. A missing or failing
-        checkpoint returns False so text entry stays blocked.
-        """
-        try:
-            perception = getattr(self, "_avcs_perception", None)
-            if perception is None:
-                from sonic.computer_use.avcs_perception import AVCSPerception
-
-                perception = AVCSPerception()
-                self._avcs_perception = perception
-            ensure = getattr(perception, "ensure_focus_verifier_ready", None)
-            if not callable(ensure):
-                return False
-            return bool(ensure())
-        except Exception:
-            return False
-
-    def _avcs_grounder_ready(self) -> bool:
-        """True only when a configured, evaluated local grounding checkpoint loads.
-
-        Pure capability probe: it never dispatches an action and never treats a
-        configured path as readiness. When False, semantic GUI targets (clicks on
-        described controls) cannot be grounded and will fail closed, so the
-        reasoning prompt must steer the model toward non-semantic routes.
-        """
-        try:
-            perception = getattr(self, "_avcs_perception", None)
-            if perception is None:
-                from sonic.computer_use.avcs_perception import AVCSPerception
-
-                perception = AVCSPerception()
-                self._avcs_perception = perception
-            if not bool(getattr(perception, "goal_grounder_configured", False)):
-                return False
-            ready = getattr(perception, "goal_grounder_ready", None)
-            if callable(ready):
-                try:
-                    return bool(ready())
-                except Exception:
-                    return False
-            return False
-        except Exception:
-            return False
-
-    async def _verify_gui_focus_with_avcs(
-        self,
-        screen: ScreenObservation,
-        *,
-        x: int,
-        y: int,
-        target: str,
-    ) -> tuple[bool, str]:
-        """Use an AVCS focus head if one exists; never upload the frame to an LLM."""
-        try:
-            perception = getattr(self, "_avcs_perception", None)
-            if perception is None:
-                from sonic.computer_use.avcs_perception import AVCSPerception
-
-                perception = AVCSPerception()
-                self._avcs_perception = perception
-            raw_rgb = bytes(getattr(screen, "raw_rgb", b"") or b"")
-            verifier = getattr(perception, "verify_focus_rgb_bytes", None)
-            verifier_args = (
-                raw_rgb,
-                int(getattr(screen, "width", 0) or 0),
-                int(getattr(screen, "height", 0) or 0),
-                x,
-                y,
-                target,
-                getattr(screen, "frame_id", None),
-            )
-            if not callable(verifier):
-                verifier = getattr(perception, "verify_focus_png", None)
-                verifier_args = (
-                    base64.b64decode(
-                        str(getattr(screen, "screenshot_base64", "") or ""),
-                        validate=True,
-                    ),
-                    x,
-                    y,
-                    target,
-                )
-            if not callable(verifier):
-                return False, "AVCS has no evaluated local focus-verification head"
-            if not raw_rgb and not verifier_args[0]:
-                return False, "AVCS focus verification requires current pixel data"
-            result = await asyncio.to_thread(verifier, *verifier_args)
-            checkpoint = (
-                result.get("checkpoint_metadata")
-                if isinstance(result, dict)
-                else None
-            )
-            evaluation = (
-                checkpoint.get("evaluation")
-                if isinstance(checkpoint, dict)
-                else None
-            )
-            state = getattr(screen, "avcs_state", None)
-            precision = (
-                evaluation.get("precision")
-                if isinstance(evaluation, dict)
-                else None
-            )
-            samples = (
-                evaluation.get("samples")
-                if isinstance(evaluation, dict)
-                else None
-            )
-            score = result.get("decision_score") if isinstance(result, dict) else None
-            threshold = (
-                result.get("decision_threshold")
-                if isinstance(result, dict)
-                else None
-            )
-            if (
-                not isinstance(result, dict)
-                or result.get("focused") is not True
-                or not isinstance(result.get("evidence"), str)
-                or not result["evidence"].strip()
-                or result.get("engine") != "avcs_focus_verifier"
-                or result.get("frame_id") != getattr(screen, "frame_id", None)
-                or not isinstance(state, dict)
-                or result.get("scene_hash") != state.get("scene_hash")
-                or not isinstance(checkpoint, dict)
-                or checkpoint.get("dataset_provenance")
-                != "recorded_ui_focus_demonstrations"
-                or not isinstance(evaluation, dict)
-                or evaluation.get("metric") != "focus_verification_precision"
-                or evaluation.get("passed") is not True
-                or isinstance(precision, bool)
-                or not isinstance(precision, (int, float))
-                or not math.isfinite(float(precision))
-                or float(precision) < 0.8
-                or isinstance(samples, bool)
-                or not isinstance(samples, int)
-                or samples < 30
-                or isinstance(score, bool)
-                or not isinstance(score, (int, float))
-                or not math.isfinite(float(score))
-                or isinstance(threshold, bool)
-                or not isinstance(threshold, (int, float))
-                or not math.isfinite(float(threshold))
-                or not 0 < float(threshold) <= 1
-                or float(score) < float(threshold)
-            ):
-                return False, (
-                    "AVCS focus head lacks current-frame evidence or a passing "
-                    "held-out focus-precision evaluation (minimum 0.80 over 30 samples)"
-                )
-            return True, result["evidence"].strip()[:200]
-        except Exception as exc:
-            logger.warning("avcs_focus_verification_failed", reason=str(exc))
-            return False, "AVCS focus verification failed"
-
     async def _verify_gui_focus_with_vision(
         self,
         screen: ScreenObservation,
@@ -7387,8 +7235,26 @@ class ComputerUseAgent:
             explicit_pixel_target is None and payload_pixel_target is None
         )
         if action_type in coordinate_actions and natural_target_needs_live_grounding:
+            # A described target ("Save button") with no explicit pixel point is
+            # resolved here. `_ground_target_with_avcs` prefers an evaluated
+            # local AVCS checkpoint when configured and otherwise asks the
+            # configured vision route ("where is X?"); SONIC still owns the
+            # decision and the dispatch. When neither can answer, it returns
+            # None and the action fails closed rather than guessing a pixel.
             grounding_reason = "vision model did not return explicit screen-pixel coordinates"
             grounded = None
+            try:
+                grounded = await self._ground_target_with_avcs(target_resource)
+            except Exception as exc:
+                # Grounding is an optional tool; any failure (no frame, no
+                # checkpoint, no vision route) degrades to an explicit block
+                # rather than propagating and crashing the action.
+                grounding_reason = f"grounding unavailable: {exc}"
+                logger.info(
+                    "gui_semantic_grounding_unavailable",
+                    target=target_resource,
+                    error=str(exc),
+                )
             if grounded is None:
                 detail = f" {grounding_reason}" if grounding_reason else ""
                 actual_obs_str = (
@@ -10837,9 +10703,6 @@ class ComputerUseAgent:
                     for marker in (
                         "sonic_avcs_grounding_checkpoint is not configured",
                         "local avcs pixel processor is unavailable",
-                        "no evaluated local focus-verification head and no ready vision route",
-                        "avcs has no evaluated local focus-verification head",
-                        "no evaluated local focus head and no vision route is configured",
                     )
                 )
             )

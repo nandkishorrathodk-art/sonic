@@ -924,6 +924,11 @@ class ModelRouter:
             )
 
     @staticmethod
+    def _request_has_images(request: LLMRequest) -> bool:
+        """Whether any message in the request carries image content."""
+        return any(getattr(message, "has_images", False) for message in request.messages)
+
+    @staticmethod
     def _model_supports_images(
         model_name: str,
         provider: CustomLLMProvider | None = None,
@@ -991,9 +996,12 @@ class ModelRouter:
                 continue
             fb_provider = self.providers[fb_name]
             fallback_model = fb_model or fb_provider.default_model
-            if task_type == "vision" and not self._model_supports_images(
+            if self._request_has_images(request) and not self._model_supports_images(
                 fallback_model, fb_provider
             ):
+                # An image-bearing request must never be re-sent to a text-only
+                # model: providers reject multimodal payloads with a 400 and the
+                # real vision failure gets masked by an unrelated error.
                 failures.append(
                     f"{fb_name}/{fallback_model}: model is not configured as vision-capable"
                 )

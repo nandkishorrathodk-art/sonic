@@ -5646,3 +5646,166 @@ the new paths.
 
 Both closed with an explanatory comment (nothing to preserve). Result: **0 open
 PRs**, `main` green.
+
+## Live GUI run: three real defects fixed + CI green (2026-11-01)
+
+Ran the real `ComputerUseAgent` / `BossAgent` against the live
+`sonic-desktop-workstation` with the real NVIDIA vision model. GUI work was
+blocked end-to-end by three genuine defects (all fixed, PR #97, CI green):
+
+1. **Vision routing pointed at unreachable models.** `vision` and `computer_use`
+   used `openrouter/openai/gpt-4o` with a `nvidia/meta/llama-3.2-11b-vision-instruct`
+   fallback whose model id **404s** on this account, so GUI reasoning never got a
+   usable vision answer. `configs/models.yaml` now uses
+   `nvidia/meta/llama-3.2-90b-vision-instruct` (~4 s/screenshot, verified
+   reachable) with the 11B id as secondary fallback only.
+2. **The GUI parser rejected a valid click payload.** The normal model shape —
+   integer `x`/`y` plus a semantic `TARGET` — was blocked with
+   `gui-contract-violation` because it omitted `coordinate_space=screen_pixels`.
+   `computer_use/agent.py` now treats an **absent** declaration as screen pixels;
+   a **present** non-pixel declaration still fails closed. After the fix a worker
+   executed real `GUI_CLICK`s, each `VERIFIED` by a real AVCS scene change
+   (`servo: converged=True residual=0.0px`).
+3. **Image requests fell back to a text-only model.** `llm/router.py` +
+   `llm/providers/custom.py` now skip fallback models without image support, so a
+   vision 404 no longer degrades into `400 "multimodal processing is not enabled"`.
+
+**Honest state after the fix:** the objective "Open the terminal application on
+the desktop." really launched `xfce4-terminal` (confirmed via `wmctrl -l` /
+`pgrep`), and the Boss correctly replanned after a failed GUI phase and completed
+the launch on its terminal plane. The mission still ends `UNVERIFIED` because no
+evaluated local AVCS task-verification head exists — the documented fail-closed
+contract, not a regression. Semantic clicks and text entry remain blocked by
+design until `SONIC_AVCS_GROUNDING_CHECKPOINT` / `SONIC_AVCS_FOCUS_CHECKPOINT`
+are trained from real demonstrations.
+
+**Dashboard:** counted steps (items with a `step_index`) and their thoughts were
+rendered as separate cards while thoughts were dropped entirely. They now fold
+into one collapsible **Reasoning Trace** panel (step count + elapsed time,
+expandable to per-step status). Commands, files, approvals, worker cards and
+banner items (`Agent Desktop Observation`, `Boss Agent Orchestration`, worker
+dispatches) stay in the open feed. Verified against real data: 12 counted steps +
+43 thoughts fold; 5 banner items stay visible.
+
+**Environment note:** `redis_queue` health shows `degraded` (transient in-memory
+fallback) whenever the `sonic-redis` container is not running; start it with
+`docker compose up -d redis` (no host root needed). `daytona_cloud: degraded` is
+expected — the local Docker workstation is the configured provider. `llm_router:
+degraded` is an honest self-report ("credentials configured; remote
+reachability/comprehension not pre-verified"), not an outage.
+
+Full `services/core` suite: **2664 passed, 40 skipped, 0 failed**; ruff clean;
+dashboard `tsc --noEmit` + `next build` clean. `scripts/novnc_proxy.py` was added
+so an operator on another machine can watch the loopback-only noVNC desktop.
+
+## AVCS stays a tool, not a model (2026-11-01)
+
+Operator directive: *"avcs ko model mat banao usko as tool rahene do"* — AVCS
+must remain an optional read-only reflex tool, never a required model that
+gates GUI actions.
+
+### Removed dead "AVCS as required model" plumbing (`computer_use/agent.py`)
+Three methods existed solely to require a local AVCS checkpoint before a GUI
+action could proceed, and **none had a production caller** — only tests
+referenced them. They were the last vestige of AVCS-as-a-required-model:
+- `_avcs_focus_head_ready()` — capability probe requiring `SONIC_AVCS_FOCUS_CHECKPOINT`.
+- `_avcs_grounder_ready()` — capability probe requiring `SONIC_AVCS_GROUNDING_CHECKPOINT`.
+- `_verify_gui_focus_with_avcs()` — focus verdict from a local AVCS focus head.
+
+The live path never used them: semantic targets resolve through the configured
+vision route (`_resolve_vlm_target`), and text entry verifies focus through
+`_verify_gui_focus_with_vision`. A local AVCS checkpoint remains an *optional*
+precedence only when one is configured and evaluated.
+
+### Cleaned orphaned marker strings
+After removing the AVCS focus-head method, its marker strings had no producer
+left, so they were dropped from the "stop the GUI mission" blocks in
+`agent.py` and `boss.py`:
+- `"no evaluated local focus-verification head and no ready vision route"`
+- `"avcs has no evaluated local focus-verification head"`
+- `"no evaluated local focus head and no vision route is configured"`
+
+The genuinely-reachable markers stay: `"sonic_avcs_grounding_checkpoint is not
+configured"` (from `avcs_perception.py`) and `"local avcs pixel processor is
+unavailable"` (from `agent.py`). Those describe an optional tool that was
+*asked for* and is absent, which is honest; the removed ones implied AVCS was a
+mandatory model.
+
+### Docs + catalog reframed
+- `SKILLS.md`: `semantic_gui_grounding` / `focus_verified_text_entry` now state
+  the vision route is the default with a local AVCS checkpoint as optional
+  precedence; `avcs_visual_perception` is labelled an **optional read-only
+  reflex tool (not a model)**; `learned_visual_cortex` is an optional advisory
+  add-on, never required for GUI actions.
+- `docs/AVCS_OPERATION_MODEL.md`: corrected stale method references and the
+  "two missing models" framing to the vision-route-first reality.
+
+### Tests
+- `test_gui_capability_aware_prompt.py`: removed the grounder-readiness probe
+  tests; the prompt is now asserted grounder-agnostic.
+- `test_phase8_visual_computer_use.py`: the three removed-method probes replaced
+  with one test asserting text entry does **not** depend on a local focus head.
+- `test_windows_host_desktop.py`: retargeted the removed agent method to the
+  still-live perception-level contract (`AVCSPerception.focus_verifier_configured`
+  / `focus_verifier_ready` / `verify_focus_rgb_bytes` fail-closed) and the
+  `_validated_focus_metadata` provenance rejection.
+
+Full `services/core` suite: **2629 passed, 40 skipped, 0 failed**; ruff clean on
+every changed file. No live GUI task was run this pass (no workstation/creds);
+this removes dead AVCS-model plumbing and aligns docs/catalog, it does not add
+new capability.
+
+## GUI semantic grounding actually wired (2026-11-01)
+
+Follow-up to the AVCS-as-tool pass. While answering "can SONIC work the GUI?",
+found the semantic-grounding bridge was **dead**: the dispatch site hardcoded
+`grounded = None`, so a described target ("Save button") was always blocked
+even though `_ground_target_with_avcs` (local AVCS checkpoint -> vision route)
+existed and was fully implemented.
+
+### Change (`computer_use/agent.py`)
+The coordinate-action branch now actually calls the grounding tool:
+
+```python
+grounded = None
+try:
+    grounded = await self._ground_target_with_avcs(target_resource)
+except Exception as exc:            # optional tool: any failure -> block
+    grounding_reason = f"grounding unavailable: {exc}"
+if grounded is None:
+    ... BLOCKED (fail closed, no blind click)
+```
+
+- `_ground_target_with_avcs` prefers an evaluated local AVCS checkpoint when
+  configured and otherwise asks the configured vision route ("where is X?").
+  AVCS stays an **optional tool**; SONIC still owns the decision and dispatch.
+- Any grounding failure degrades to an explicit BLOCKED (exit 126) rather than
+  propagating and crashing the action. No pixel is ever guessed.
+
+### Tests (the reason this was invisible before)
+- `test_closed_loop_visual_delta_and_judge.py`: the autouse fixture stubbed
+  `_ground_target_with_avcs` to return a **tuple** `(240,180)` while the real
+  method returns a **dict** `{"x","y","engine"}`. The fixture was stale and had
+  never run (grounding was dead), so wiring it up surfaced a `TypeError`. Fixed
+  the fixture to the real contract.
+- `test_valid_typing_payload_remains_blocked_without_local_focus_verification`:
+  used a live auto-built router (a real ~15 s network call) and asserted
+  `gui_action.await_count == 0`, which was only true while grounding was dead.
+  Now stubs a deterministic offline vision route returning `focused=false` and
+  asserts no `TYPE` action is dispatched. Intent preserved, test made offline.
+- `test_agent_quality_improvements.py` / `test_desktop_navigation_and_action_loop.py`:
+  the two "unresolved semantic target blocks" tests asserted the old exact
+  reason string; updated to the new honest reason
+  (`no screenshot-grounded pixel point` + `grounding unavailable`). Their real
+  intent (fail closed, no blind click at (0,0)) is unchanged.
+- Added `test_semantic_target_is_grounded_and_dispatched`: with the grounding
+  tool stubbed to answer, a described target resolves to (640,360) and a real
+  `GUIActionType.CLICK` is dispatched at that point (status UNVERIFIED when the
+  mock screen does not change — honest).
+
+### Verified
+Full `services/core` suite: **2630 passed, 40 skipped, 0 failed**; ruff clean.
+Honest scope: this wires the bridge and proves it via the real dispatch path
+with a stubbed grounder. It does not add a grounder model; a live semantic GUI
+task still needs a configured vision route (or a local AVCS checkpoint) and was
+not run in this environment (no Docker / credentials here).

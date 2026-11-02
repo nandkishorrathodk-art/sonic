@@ -282,17 +282,19 @@ def test_vision_routes_configure_distinct_multimodal_fallbacks():
         env_vars={
             "GROQ_API_KEY": "groq-test-key",
             "OPENROUTER_API_KEY": "openrouter-test-key",
+            "NVIDIA_API_KEY": "nvidia-test-key",
         },
     )
 
-    assert router.routing_rules["vision"]["provider"] == "openrouter"
-    assert router.routing_rules["vision"]["fallback"] == [
-        "nvidia/meta/llama-3.2-11b-vision-instruct",
-    ]
-    assert router.routing_rules["computer_use"]["provider"] == "openrouter"
-    assert router.routing_rules["computer_use"]["fallback"] == [
-        "nvidia/meta/llama-3.2-11b-vision-instruct",
-    ]
+    # The vision and computer_use routes use the NVIDIA vision model that is
+    # actually available on the account (the 11B id 404s there).
+    assert router.routing_rules["vision"]["provider"] == "nvidia"
+    assert router.routing_rules["vision"]["model"] == "meta/llama-3.2-90b-vision-instruct"
+    assert router.routing_rules["computer_use"]["provider"] == "nvidia"
+    assert (
+        router.routing_rules["computer_use"]["model"]
+        == "meta/llama-3.2-90b-vision-instruct"
+    )
     vision_provider, vision_model = router._resolve_provider(
         task_type="vision",
         require_images=True,
@@ -300,15 +302,16 @@ def test_vision_routes_configure_distinct_multimodal_fallbacks():
     computer_use_provider, computer_use_model = router._resolve_provider(
         task_type="computer_use"
     )
-    assert vision_provider.name == "openrouter"
-    assert vision_model == "openai/gpt-4o"
-    assert computer_use_provider.name == "openrouter"
-    assert computer_use_model == "openai/gpt-4o"
+    assert vision_provider.name == "nvidia"
+    assert vision_model == "meta/llama-3.2-90b-vision-instruct"
+    assert computer_use_provider.name == "nvidia"
+    assert computer_use_model == "meta/llama-3.2-90b-vision-instruct"
     assert "vision" not in router.providers["groq"].model_capabilities[
         "qwen/qwen3.8-27b"
     ]
     assert "vision" in vision_provider.model_capabilities[vision_model]
     nvidia = router.providers["nvidia"]
+    assert "vision" in nvidia.model_capabilities["meta/llama-3.2-90b-vision-instruct"]
     assert "vision" in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
     assert "tool_use" not in nvidia.model_capabilities["meta/llama-3.2-11b-vision-instruct"]
     assert "tool_use" in nvidia.model_capabilities["nvidia/nemotron-3-super-120b-a12b"]
@@ -366,6 +369,68 @@ async def test_image_computer_use_request_keeps_computer_use_route(monkeypatch):
     assert routed_provider is computer_provider
     assert routed_request.task_type == "computer_use"
     assert routed_request.messages[0].images[0].base64 == "frame-bytes"
+
+
+@pytest.mark.asyncio
+async def test_image_request_never_falls_back_to_text_only_model(monkeypatch):
+    """An image-bearing request must skip text-only fallback models.
+
+    Regression: a vision primary that 404s used to fall back to a text-only
+    model, which answered 400 ("multimodal processing is not enabled") and
+    masked the real vision failure.
+    """
+    router = ModelRouter()
+    vision_provider = CustomLLMProvider(
+        name="vprov",
+        base_url="https://v.invalid/v1",
+        api_key="k",
+        default_model="vision-model",
+        capabilities=["vision"],
+        model_capabilities={"vision-model": ["vision"], "text-model": ["reasoning"]},
+    )
+    router.add_provider(vision_provider)
+    router.routing_rules["computer_use"] = {
+        "provider": "vprov",
+        "model": "vision-model",
+        "fallback": ["vprov/text-model"],
+    }
+    router.routing_rules.pop("vision", None)
+    router.fallback_chain = []
+
+    seen_models: list[str] = []
+
+    async def fake_complete(provider, request, spent):
+        seen_models.append(request.model)
+        raise RuntimeError("vision model unavailable")
+
+    monkeypatch.setattr(router, "_budgeted_complete", fake_complete)
+    request = LLMRequest(
+        messages=[Message(
+            role=MessageRole.USER,
+            content="Inspect the desktop.",
+            images=[ImageContent(base64="frame", media_type="image/png")],
+        )],
+        task_type="computer_use",
+        model="vision-model",
+    )
+
+    with pytest.raises(RuntimeError):
+        await router.complete(request)
+
+    assert "text-model" not in seen_models, (
+        f"image request was re-sent to a text-only model: {seen_models}"
+    )
+
+
+def test_request_has_images_detects_message_images():
+    with_image = LLMRequest(messages=[Message(
+        role=MessageRole.USER,
+        content="x",
+        images=[ImageContent(base64="aGk=")],
+    )])
+    without = LLMRequest(messages=[Message(role=MessageRole.USER, content="x")])
+    assert ModelRouter._request_has_images(with_image) is True
+    assert ModelRouter._request_has_images(without) is False
 
 
 @pytest.mark.asyncio

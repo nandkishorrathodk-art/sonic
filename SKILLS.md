@@ -38,7 +38,7 @@ never fabricates a skill.
       "category": "workstation",
       "status": "available",
       "actions": ["GUI_MOVE", "GUI_CLICK", "GUI_DOUBLE_CLICK", "GUI_RIGHT_CLICK", "GUI_DRAG", "GUI_SCROLL", "GUI_KEYPRESS", "GUI_HOTKEY", "GUI_WAIT"],
-      "summary": "Pointer and keyboard control with smooth cursor interpolation. Explicit pixel-coordinate targets dispatch; semantic targets require the grounder.",
+      "summary": "Pointer and keyboard control with smooth cursor interpolation. Explicit pixel-coordinate targets dispatch directly; semantic targets are resolved through the configured vision route.",
       "evidence": "sonic/computer_use/agent.py, sonic/computer_use/sonic_cursor.py"
     },
     {
@@ -46,32 +46,32 @@ never fabricates a skill.
       "category": "perception",
       "status": "conditional",
       "actions": ["GUI_CLICK", "GUI_TYPE"],
-      "summary": "Resolve a natural-language UI target ('the Save button') to screen pixels. Blocked unless an evaluated local AVCS grounding checkpoint is configured.",
-      "evidence": "sonic/computer_use/avcs_perception.py, packages/avcs/avcs/grounding.py",
-      "requires": "SONIC_AVCS_GROUNDING_CHECKPOINT"
+      "summary": "Resolve a natural-language UI target ('the Save button') to screen pixels. Uses the configured vision route; when it cannot return explicit coordinates the action is blocked rather than guessed. An optional local AVCS grounder checkpoint takes precedence if one is configured.",
+      "evidence": "sonic/computer_use/agent.py, sonic/computer_use/grounding.py",
+      "requires": "an image-capable vision route (or SONIC_AVCS_GROUNDING_CHECKPOINT)"
     },
     {
       "name": "focus_verified_text_entry",
       "category": "perception",
       "status": "conditional",
       "actions": ["GUI_TYPE", "BROWSER_TYPE"],
-      "summary": "Type text only after an evaluated local focus-verification head confirms the target field is focused. Blocked otherwise.",
-      "evidence": "packages/avcs/avcs/focus_verifier.py, sonic/computer_use/avcs_perception.py",
-      "requires": "SONIC_AVCS_FOCUS_CHECKPOINT"
+      "summary": "Type text only after a visible focus cue is confirmed on a fresh frame via the configured vision route. Blocked otherwise. An optional local AVCS focus head is used instead when a checkpoint is configured.",
+      "evidence": "sonic/computer_use/agent.py, sonic/computer_use/grounding.py",
+      "requires": "an image-capable vision route (or SONIC_AVCS_FOCUS_CHECKPOINT)"
     },
     {
       "name": "avcs_visual_perception",
       "category": "perception",
       "status": "available",
-      "actions": ["GUI_SCREENSHOT", "BROWSER_SCREENSHOT"],
-      "summary": "Local pixel reflex: frame identity, dimensions, scene fingerprint, change/motion/regions. Advisory only — it does not identify text, controls or task success.",
+      "actions": ["AVCS_OBSERVE", "GUI_SCREENSHOT", "BROWSER_SCREENSHOT"],
+      "summary": "AVCS is an optional read-only reflex tool (not a model): local pixel frame identity, dimensions, scene fingerprint, change/motion/regions. Advisory only — it does not identify text, controls or task success.",
       "evidence": "sonic/computer_use/avcs_perception.py, packages/avcs/avcs/reflex.py"
     },
     {
       "name": "learned_visual_cortex",
       "category": "perception",
       "status": "conditional",
-      "summary": "Optional trained cortex producing scene category and affordance hotspots. Off until a checkpoint is configured.",
+      "summary": "Optional AVCS reflex add-on: a trained cortex producing scene category and affordance hotspots as advisory pixel metadata. Off until a checkpoint is configured; never required for GUI actions.",
       "evidence": "sonic/computer_use/avcs_perception.py, packages/avcs/forge/vision/cortex",
       "requires": "SONIC_AVCS_CORTEX_CHECKPOINT"
     },

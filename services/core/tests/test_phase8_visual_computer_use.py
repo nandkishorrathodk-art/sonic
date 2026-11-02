@@ -839,6 +839,46 @@ class TestGUIActionDispatch:
         assert payload == {}
         assert "conflicting screen coordinates" in reason
 
+    def test_gui_payload_integer_coordinates_without_declaration_are_screen_pixels(self):
+        """A payload with integer x/y but no coordinate_space must not be blocked.
+
+        Regression: the model commonly emits
+        ``PAYLOAD: {"x": 17, "y": 16, "postcondition": {...}}`` with an
+        explicit integer point and a semantic TARGET. Requiring a redundant
+        ``coordinate_space`` declaration blocked a valid click and stopped the
+        worker with a gui-contract-violation.
+        """
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+
+        action, target, payload, reason = agent._parse_gui_action_response(
+            (
+                'ACTION: GUI_CLICK\nTARGET: File System\n'
+                'PAYLOAD: {"x": 17, "y": 16, '
+                '"postcondition": {"screen_changed": true}}\nEXPECTED: Opens'
+            ),
+            "",
+        )
+
+        assert action == ComputerActionType.GUI_CLICK, reason
+        assert payload["x"] == 17 and payload["y"] == 16
+        assert payload["coordinate_space"] == "screen_pixels"
+
+    def test_gui_payload_explicit_non_pixel_declaration_still_blocks(self):
+        """An explicit non-pixel coordinate_space must still fail closed."""
+        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
+
+        action, target, payload, reason = agent._parse_gui_action_response(
+            (
+                'ACTION: GUI_CLICK\nTARGET: File System\n'
+                'PAYLOAD: {"x": 500, "y": 500, '
+                '"coordinate_space": "normalized_1000"}\nEXPECTED: Opens'
+            ),
+            "",
+        )
+
+        assert action == ActionExecutionStatus.BLOCKED
+        assert "coordinate_space=screen_pixels" in reason
+
     def test_gui_keypress_requires_explicit_key(self):
         agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
         action, target, payload, reason = agent._parse_gui_action_response(
@@ -2300,51 +2340,11 @@ class TestFocusHeadCapabilityGate:
         assert provider.gui_action.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_focus_head_ready_probe_is_false_without_checkpoint(self, monkeypatch):
-        monkeypatch.delenv("SONIC_AVCS_FOCUS_CHECKPOINT", raising=False)
-        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
-        assert agent._avcs_focus_head_ready() is False
-
-    @pytest.mark.asyncio
-    async def test_focus_head_ready_probe_is_false_when_checkpoint_missing(self, monkeypatch):
-        monkeypatch.setenv("SONIC_AVCS_FOCUS_CHECKPOINT", "/nonexistent/focus.pt")
-        agent = ComputerUseAgent(computer_provider=_mock_provider(), execution_plane="gui")
-        # A configured-but-unloadable checkpoint is NOT readiness.
-        assert agent._avcs_focus_head_ready() is False
-
-    @pytest.mark.asyncio
-    async def test_focus_head_ready_probe_uses_perception_contract(self):
+    async def test_gui_type_does_not_depend_on_a_local_focus_head(self):
+        """AVCS is an optional reflex tool: text entry must not require a local
+        AVCS focus-verification head. The focus check goes to the vision route."""
         provider = _mock_provider()
         agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
-
-        class _ReadyPerception:
-            def ensure_focus_verifier_ready(self) -> bool:
-                return True
-
-        agent._avcs_perception = _ReadyPerception()
-        assert agent._avcs_focus_head_ready() is True
-
-    @pytest.mark.asyncio
-    async def test_gui_type_proceeds_past_early_gate_when_focus_head_ready(self):
-        """With a ready head, the early block must not fire (dispatch continues)."""
-        provider = _mock_provider()
-        agent = ComputerUseAgent(computer_provider=provider, execution_plane="gui")
-
-        class _ReadyPerception:
-            """Real perception with a forced-ready focus head."""
-
-            def __init__(self):
-                from sonic.computer_use.avcs_perception import AVCSPerception
-
-                self._inner = AVCSPerception()
-
-            def __getattr__(self, name):
-                return getattr(self._inner, name)
-
-            def ensure_focus_verifier_ready(self) -> bool:
-                return True
-
-        agent._avcs_perception = _ReadyPerception()
         await agent.observe("ws-1")
         trace = await agent.execute_action(
             "ws-1",
@@ -2353,6 +2353,7 @@ class TestFocusHeadCapabilityGate:
             {"x": 320, "y": 240, "text": "query"},
             "Type into the field",
         )
-        # The generic "no focus-verification head" block must not be the reason.
+        # The legacy "no focus-verification head" block must not exist.
         assert "no evaluated local focus-verification head" not in trace.actual_observation.lower()
+        assert "no evaluated local focus head" not in trace.actual_observation.lower()
 

@@ -98,6 +98,11 @@ providers:
         cost_per_1k_input: 0.0005
         cost_per_1k_output: 0.001
         capabilities: [reasoning, coding, planning, tool_use, verification, architecture]
+      - id: meta/llama-3.2-90b-vision-instruct
+        speed_tier: standard
+        cost_per_1k_input: 0.0008
+        cost_per_1k_output: 0.0016
+        capabilities: [vision, computer_use, multimodal]
       - id: meta/llama-3.2-11b-vision-instruct
         speed_tier: fast
         cost_per_1k_input: 0.0003
@@ -214,17 +219,15 @@ routing_rules:
 
   vision:
     description: 'Multimodal vision, desktop screenshot parsing, visual UI grounding'
-    provider: openrouter
-    model: openai/gpt-4o
-    fallback:
-      - nvidia/meta/llama-3.2-11b-vision-instruct
+    provider: nvidia
+    model: meta/llama-3.2-90b-vision-instruct
+    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
 
   computer_use:
     description: 'Autonomous computer vision and desktop interaction'
-    provider: openrouter
-    model: openai/gpt-4o
-    fallback:
-      - nvidia/meta/llama-3.2-11b-vision-instruct
+    provider: nvidia
+    model: meta/llama-3.2-90b-vision-instruct
+    fallback: [nvidia/meta/llama-3.2-11b-vision-instruct]
 
 
 # ---- Global Fallback Chain ----
