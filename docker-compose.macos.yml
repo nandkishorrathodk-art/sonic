@@ -1,0 +1,54 @@
+# ==========================================================
+# SONIC — Opt-in macOS Workstation (Docker-OSX / QEMU + KVM)
+# ==========================================================
+# This is an OVERLAY, not part of the default stack. It runs macOS inside a
+# QEMU VM packaged as a container, giving SONIC a macOS desktop body instead
+# of the Linux XFCE workstation.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.macos.yml up -d macos-workstation
+#
+# Requirements (the VM will NOT boot without them):
+#   • /dev/kvm  — hardware virtualisation on the host
+#   • ~16 GB RAM and a 20+ GB disk image for the guest
+#   • an x86-64 host (Docker-OSX does not emulate on ARM)
+#
+# Then point SONIC at it:
+#   SONIC_WORKSTATION_PROVIDER=macos_docker_osx
+#
+# Desktop control uses VNC (RFB) and execution uses SSH; the guest has no X11,
+# so xdotool/wmctrl do not apply. See docs/MACOS_WORKSTATION.md.
+#
+# FIRST BOOT installs macOS: connect a VNC viewer to 127.0.0.1:5901, complete
+# the installer, then enable Remote Login (SSH) in System Settings. The disk
+# image is kept in the `macos_image` volume so the install survives restarts.
+
+services:
+  macos-workstation:
+    image: sickcodes/docker-osx:latest
+    container_name: sonic-macos-desktop
+    # QEMU needs the KVM device for near-native speed.
+    devices:
+      - /dev/kvm:/dev/kvm
+    ports:
+      # Local-only: raw VNC/SSH must never be published to the LAN.
+      - "127.0.0.1:5901:5999"    # QEMU VNC  (-vnc 0.0.0.0:99 -> 5900+99)
+      - "127.0.0.1:50922:10022"  # guest SSH (Remote Login)
+    environment:
+      # Headless: no X11 on the host, drive the framebuffer over VNC.
+      # `password=on` requires setting the password once via the QEMU monitor;
+      # leave it off and rely on the 127.0.0.1 bind for local-only access.
+      EXTRA: "-display none -vnc 0.0.0.0:99"
+      NOPICKER: "true"
+      WIDTH: "1920"
+      HEIGHT: "1080"
+      RAM: "8192"
+      CPU_STRING: "4"
+    volumes:
+      - macos_image:/image
+    networks:
+      - sonic-workstation-net
+    restart: unless-stopped
+
+volumes:
+  macos_image:
+    driver: local

@@ -130,7 +130,7 @@ SUBSYSTEM_OWNERSHIP: tuple[SubsystemOwnership, ...] = (
     SubsystemOwnership("core_tests", Department.EVALUATION_RELIABILITY, Team.VERIFICATION_BENCHMARKS, ("services/core/tests",), "Backend contract, regression and acceptance tests."),
     SubsystemOwnership("cli_tests", Department.EVALUATION_RELIABILITY, Team.VERIFICATION_BENCHMARKS, ("apps/cli/tests",), "CLI contract and regression tests."),
     SubsystemOwnership("workstation_image", Department.COMPUTER_INTERACTION, Team.DESKTOP_CONTROL, ("docker",), "Workstation image and desktop runtime packaging."),
-    SubsystemOwnership("compose", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, ("docker-compose.yml", "docker-compose.prod.yml"), "Root development and production service composition."),
+    SubsystemOwnership("compose", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, ("docker-compose.yml", "docker-compose.prod.yml", "docker-compose.macos.yml"), "Root development and production service composition."),
     SubsystemOwnership("deployment", Department.PLATFORM_SYSTEMS, Team.SYSTEMS_RUNTIME, ("infra", "scripts", ".github/workflows"), "Deployment and CI runtime configuration."),
     SubsystemOwnership("runtime_configs", Department.PLATFORM_SYSTEMS, Team.DATA_INFRASTRUCTURE, ("configs",), "Shared runtime and model configuration."),
     SubsystemOwnership("engineering_docs", Department.PLATFORM_SYSTEMS, Team.API_SERVICES, ("docs",), "Architecture, setup, operations and engineering documentation."),

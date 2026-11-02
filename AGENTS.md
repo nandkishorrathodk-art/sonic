@@ -5647,6 +5647,58 @@ the new paths.
 Both closed with an explanatory comment (nothing to preserve). Result: **0 open
 PRs**, `main` green.
 
+## macOS workstation provider — Docker-OSX (2026-11-01)
+
+SONIC can now drive a **macOS** desktop body in addition to the Linux XFCE
+workstation, via [Docker-OSX](https://github.com/sickcodes/docker-osx) (macOS
+inside a QEMU VM packaged as a Docker container). Opt-in only:
+`SONIC_WORKSTATION_PROVIDER=macos_docker_osx`.
+
+### Why it is a different kind of body
+- **No X11 inside the guest**, so `xdotool`/`scrot`/`wmctrl` do not apply.
+  GUI is driven over **VNC (RFB)**; terminal/files/git over **SSH**.
+- Requires **`/dev/kvm`**. Without hardware virtualisation the VM cannot boot,
+  so `create()`/`get_or_create_home()` **fail closed** with an explicit error
+  rather than reporting a desktop that does not exist.
+
+### New modules
+- `services/core/sonic/computer/rfb.py` — a self-contained RFB 3.8 client
+  (stdlib + numpy, **no new hard dependency**). Supports Raw framebuffer
+  reads, pointer/keyboard injection, security types None (1) and VNC Auth (2),
+  and a pure-Python **DES** for VNC auth (verified against the FIPS vector
+  `133457799BBCDFF1`/`0123456789ABCDEF` -> `85E813540F0AB405`). Apple ARD
+  (type 33) is rejected with a clear message.
+- `services/core/sonic/computer/macos_docker_osx.py` — `MacOSDockerComputerProvider`
+  (subclass of `DockerComputerProvider`, same pattern as
+  `WindowsHostAVCSComputerProvider`). Screenshots feed the **same AVCS
+  perception loop** as the Linux body, so the agent/routes are unchanged.
+
+### Wiring
+- `get_computer()` accepts `SONIC_WORKSTATION_PROVIDER=macos_docker_osx`.
+- `docker-compose.macos.yml` — opt-in overlay (`sickcodes/docker-osx:latest`,
+  `--device /dev/kvm`, VNC `127.0.0.1:5901`, SSH `127.0.0.1:50922`, image volume).
+- `docs/MACOS_WORKSTATION.md` — requirements, env vars, first-boot install,
+  capability table.
+
+### Honest capability boundary
+- **Works via RFB:** MOVE/CLICK/DOUBLE_CLICK/RIGHT_CLICK/DRAG/SCROLL
+  (vertical+horizontal)/TYPE/KEYPRESS/HOTKEY (`command+c`), screenshots.
+- **Works via SSH:** terminal, file r/w/list, git, processes, app list,
+  `open -a` launch, AppleScript quit, Homebrew install/uninstall, `launchctl`.
+- **Fails closed:** `WINDOW_TILE` (no VNC equivalent) and window-manager
+  actions that only `wmctrl` could express; `tile_workstation` returns `False`.
+
+### Verification
+- `tests/test_macos_docker_osx_provider.py` (33 tests): DES FIPS vector, keysym
+  mapping, a full RFB handshake + framebuffer round-trip + pointer/keyboard
+  events + VNC auth against an **in-process fake VNC server**, provider GUI/SSH
+  surfaces, all fail-closed paths, and provider selection. Two real framing bugs
+  in the RFB client were found and fixed by these tests (a 3-byte oversize
+  `SetPixelFormat`, and a missing FramebufferUpdate rectangle-count header).
+- **No live macOS VM was booted** (this host has no `/dev/kvm`). The protocol
+  and provider logic are verified; real end-to-end macOS task completion is NOT
+  claimed and must be measured on a KVM-capable host.
+- Broad computer/workstation regression: 500 passed, 21 skipped; ruff clean.
 ## Live GUI run: three real defects fixed + CI green (2026-11-01)
 
 Ran the real `ComputerUseAgent` / `BossAgent` against the live
